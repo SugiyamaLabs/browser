@@ -1,0 +1,6 @@
+# The Chromium tree never enters git; it lives in $BROWSER_WORK (default ~/browser-work).
+/build/
+/src/
+out/
+*.dmg
+.DS_Store
