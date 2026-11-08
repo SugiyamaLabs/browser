@@ -13,8 +13,8 @@ git -C "$UC_DIR" submodule update --init --recursive --quiet
 
 main="$UC_DIR/ungoogled-chromium"
 rm -rf "$SRC_DIR"
-# -d reuses archives already in the download cache
-"$UC_DIR/retrieve_and_unpack_resource.py" -d -g "$arch"
+# -g clones Chromium with the mac PGO profile (the tarball path, -d, only ships the Linux profile)
+"$UC_DIR/retrieve_and_unpack_resource.py" -g "$arch"
 python3 "$main/utils/prune_binaries.py" "$SRC_DIR" "$main/pruning.list"
 python3 "$main/utils/patches.py" apply "$SRC_DIR" "$main/patches" "$UC_DIR/patches"
 if [ -f "$CHROMIUM_DIR/patches/series" ]; then   # our patches, applied last

@@ -9,7 +9,9 @@ mkdir -p "$OUT_DIR"
 {
   cat "$main/flags.gn" "$UC_DIR/flags.macos.gn" "$CHROMIUM_DIR/args.gn"
   [ "$arch" = arm64 ] && echo 'target_cpu = "arm64"' || echo 'target_cpu = "x64"'
+  echo 'mac_sdk_path = "//out/Default/sdk/selected_macos_sdk"'   # Chromium wants the SDK inside the build dir
 } > "$OUT_DIR/args.gn"
+mkdir -p "$OUT_DIR/sdk" && ln -sfn "$MAC_SDK" "$OUT_DIR/sdk/selected_macos_sdk"
 
 cd "$SRC_DIR"
 [ -x out/Default/gn ] || ./tools/gn/bootstrap/bootstrap.py -o out/Default/gn --skip-generate-buildfiles
