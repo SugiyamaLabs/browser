@@ -1,0 +1,8 @@
+# Dev mode (build.sh dev): appended after the official args; later assignments win in GN.
+# Fast links for day-to-day work. Never use this build to measure memory or ship.
+is_official_build = false
+use_thin_lto = false
+chrome_pgo_phase = 0
+is_component_build = true
+symbol_level = 0
+blink_symbol_level = 0
