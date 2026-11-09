@@ -60,7 +60,7 @@ Cada release mede o conjunto no runner local. O release não sai se passar de 50
 ## Como rodar
 
 ```sh
-tools/measure.py brave --login      # uma vez por navegador: abre as 20 abas no perfil de medição para você entrar nas contas
+tools/measure.py brave --login      # uma vez por navegador: abre as 20 abas no perfil de medição; entre nas contas e feche com ⌘Q
 tools/measure.py brave              # 3 rodadas de 5 min; imprime a linha para docs/medicoes.md
 ```
 

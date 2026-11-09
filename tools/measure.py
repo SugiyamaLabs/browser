@@ -2,7 +2,7 @@
 """Measures a Chromium-based browser with the fixed tab set (docs/performance.md).
 
 Usage:
-  tools/measure.py BROWSER --login          open the tab set in the bench profile so you can sign in once
+  tools/measure.py BROWSER --login          open the tab set in the bench profile; sign in, then quit the browser
   tools/measure.py BROWSER [--runs 3]       measure; prints a docs/medicoes.md row
 
 BROWSER is brave, chrome, ungoogled, dev, or a path to the browser executable.
@@ -151,9 +151,8 @@ def main():
     urls = tabs(a.tabs)
 
     if a.login:
-        proc = launch(exe, profile, urls)
-        input(f"Sign in to every tab in {name}, then press Enter here to close it... ")
-        quit_browser(proc)
+        print(f"Sign in to every tab in {name}, then quit it (Cmd+Q).", file=sys.stderr)
+        launch(exe, profile, urls).wait()
         return
 
     runs = []
