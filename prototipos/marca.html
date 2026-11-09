@@ -53,7 +53,7 @@ h1 { font-size: 28px; font-weight: 600; letter-spacing: -.018em; margin: 0 0 6px
 <body>
 <div class="wrap">
   <h1>Marca do navegador</h1>
-  <p class="lead">Da família do Agens, mas não a mesma: a mordida e a luz quente continuam (é o que liga os dois produtos); muda a forma de dentro, que diz "navegador". A marca do Agens fica só no Agens.</p>
+  <p class="lead">Marca própria do navegador. A bola e o quadrado mordido são do app Agens e não aparecem aqui; o que liga os dois produtos é só a luz quente nas cores.</p>
   <p class="rules">Cada conceito em escuro e claro: ícone do app no macOS e no Windows, a aba (16 px), uma cor só e a assinatura. Clique em "Escolher" no que você quer.</p>
   <div id="concepts"></div>
   <div class="choice" id="choice">Nenhum escolhido ainda.</div>
@@ -63,23 +63,27 @@ h1 { font-size: 28px; font-weight: 600; letter-spacing: -.018em; margin: 0 0 6px
 let uid = 0;
 const LIGHT = ["#FFFDF7", "#FFE9C7", "#FFC98A", "#F7A95C"];
 // Peças da família: o bloco com a mordida no canto de cima à esquerda e a luz dentro da mordida (mesma geometria do mark.svg do Agens, viewBox 21..149).
+// Sem a bola e sem a mordida (são do app Agens). O que liga ao Agens é só a luz quente nas cores.
 function svg(concept, { size = 96, block = "#F2F0EC", mono = null } = {}) {
-  const id = "m" + (++uid), light = mono || `url(#${id}l)`, fg = mono || block;
-  // recortes de cada conceito, desenhados em preto dentro da máscara (funcionam em qualquer fundo)
-  const cuts = {
-    janela: `<rect x="84" y="77" width="72" height="8" rx="4" fill="#000"/>`,
-    horizonte: `<path d="M60 150 A 50 50 0 0 1 150 104" fill="none" stroke="#000" stroke-width="8"/>`,
-    moldura: "", orbita: "",
-  };
-  const defs = `<defs><radialGradient id="${id}l" cx=".42" cy=".38" r=".62"><stop offset="0" stop-color="${LIGHT[0]}"/><stop offset=".45" stop-color="${LIGHT[1]}"/><stop offset=".85" stop-color="${LIGHT[2]}"/><stop offset="1" stop-color="${LIGHT[3]}"/></radialGradient>
-    <mask id="${id}c" maskUnits="userSpaceOnUse" x="0" y="0" width="200" height="200"><rect x="0" y="0" width="200" height="200" fill="#fff"/><circle cx="52" cy="52" r="34" fill="#000"/>${cuts[concept]}</mask></defs>`;
+  const id = "m" + (++uid), warm = mono || `url(#${id}w)`, fg = mono || block;
+  const defs = `<defs><linearGradient id="${id}w" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${LIGHT[0]}"/><stop offset=".4" stop-color="${LIGHT[1]}"/><stop offset=".75" stop-color="${LIGHT[2]}"/><stop offset="1" stop-color="${LIGHT[3]}"/></linearGradient></defs>`;
   const bodies = {
-    janela: `<rect x="52" y="52" width="92" height="92" rx="24" fill="${fg}" mask="url(#${id}c)"/>`,
-    horizonte: `<rect x="52" y="52" width="92" height="92" rx="24" fill="${fg}" mask="url(#${id}c)"/>`,
-    moldura: `<rect x="60" y="60" width="76" height="76" rx="19" fill="none" stroke="${fg}" stroke-width="16" mask="url(#${id}c)"/>`,
-    orbita: `<g mask="url(#${id}c)"><rect x="64" y="64" width="72" height="72" rx="19" fill="${fg}"/><ellipse cx="96" cy="96" rx="68" ry="28" transform="rotate(-35 96 96)" fill="none" stroke="${fg}" stroke-width="6"/></g>`,
+    // 1. Arco: o arco de um palco (onde os atos acontecem); a luz enche a boca de cena.
+    arco: `<path d="M40 136 V84 a56 56 0 0 1 112 0 V136" fill="none" stroke="${fg}" stroke-width="14" stroke-linecap="round"/>
+           <path d="M60 136 V88 a36 36 0 0 1 72 0 V136 Z" fill="${warm}"/>`,
+    // 2. Aba: a forma de uma aba de navegador, com a luz na aba da frente.
+    aba: `<path d="M30 128 H162" stroke="${fg}" stroke-width="12" stroke-linecap="round"/>
+          <path d="M50 128 L62 72 Q65 60 77 60 H115 Q127 60 130 72 L142 128 Z" fill="${warm}"/>`,
+    // 3. Pilha: três atos, um atrás do outro; o da frente aceso.
+    pilha: `<rect x="70" y="40" width="70" height="70" rx="18" fill="none" stroke="${fg}" stroke-width="9" opacity=".45"/>
+            <rect x="56" y="54" width="70" height="70" rx="18" fill="none" stroke="${fg}" stroke-width="9" opacity=".7"/>
+            <rect x="42" y="68" width="70" height="70" rx="18" fill="${warm}"/>`,
+    // 4. Janela de luz: um quadro com a barra no alto; a luz entra pela metade de baixo.
+    janela: `<rect x="40" y="44" width="112" height="104" rx="26" fill="none" stroke="${fg}" stroke-width="12"/>
+             <path d="M46 70 H146" stroke="${fg}" stroke-width="10"/>
+             <path d="M52 118 Q96 84 140 118 V128 a14 14 0 0 1 -14 14 H66 a14 14 0 0 1 -14 -14 Z" fill="${warm}"/>`,
   };
-  return `<svg viewBox="21 21 128 128" width="${size}" height="${size}" aria-hidden="true">${defs}${bodies[concept]}<circle cx="52" cy="52" r="26" fill="${light}"/></svg>`;
+  return `<svg viewBox="16 16 160 160" width="${size}" height="${size}" aria-hidden="true">${defs}${bodies[concept]}</svg>`;
 }
 // Ícone do app: macOS (squircle com o chão) e Windows (sem placa, a forma solta sobre um quadrado arredondado leve).
 function appIcon(concept, theme, os, size = 88) {
@@ -89,10 +93,10 @@ function appIcon(concept, theme, os, size = 88) {
   return `<div style="width:${size}px;height:${size}px;border-radius:${size * .12}px;background:${plate};display:grid;place-items:center;border:1px solid ${dark ? "#2A2A30" : "#E0E0E5"}">${svg(concept, { size: size * .72, block })}</div>`;
 }
 const CONCEPTS = [
-  ["moldura", "Moldura", "O bloco do Agens vira um contorno: uma janela por onde você olha. A luz continua cheia na mordida. A mais diferente do Agens e a que melhor lê em 16 px."],
-  ["janela", "Janela", "O bloco cheio com um fio de abas cortando o alto: um navegador visto de longe. Mais perto do Agens."],
-  ["horizonte", "Horizonte", "Um arco de globo nasce dentro do bloco: o mundo aparecendo. Lembra o ícone \"Navegador\" (globo) da família."],
-  ["orbita", "Órbita", "Um anel passa pela mordida e envolve o bloco: navegar é sair e voltar. O mais vivo; anima bem (a luz percorre o anel)."],
+  ["arco", "Arco", "O arco de um palco, onde os atos acontecem. A luz quente enche a boca de cena. Conversa direto com o nome \"atos\"."],
+  ["aba", "Aba", "Uma aba de navegador sobre a linha da barra. Diz \"navegador\" na hora, inclusive em 16 px."],
+  ["pilha", "Pilha", "Três atos, um atrás do outro; o da frente aceso. Fala de trocar de ato e de abas que dormem."],
+  ["janela", "Janela de luz", "Um quadro de janela com a barra no alto e a luz entrando por baixo. O mais calmo."],
 ];
 let picked = null;
 try { picked = localStorage.getItem("marca-navegador"); } catch (e) {}
