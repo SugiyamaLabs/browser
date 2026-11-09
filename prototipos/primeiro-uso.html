@@ -38,7 +38,7 @@ body { background: var(--surface), var(--bg); color: var(--ink); font: 14px/1.5 
 button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
 input { font: inherit; color: inherit; }
 :focus-visible { outline: 2px solid var(--light-2); outline-offset: 2px; border-radius: calc(8px * var(--round)); }
-.icon { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.icon { width: 18px; height: 18px; flex: none; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 
 /* a janela do onboarding: uma folha centrada, camadas e fios */
@@ -159,10 +159,11 @@ label.f { display: grid; gap: 6px; font-size: 12.5px; color: var(--mute); }
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
-  <symbol id="i-x" viewBox="0 0 16 16"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"/></symbol>
-  <symbol id="i-plus" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></symbol>
-  <symbol id="i-check" viewBox="0 0 16 16"><path d="m3.5 8.5 3 3 6-7"/></symbol>
-  <symbol id="i-back" viewBox="0 0 16 16"><path d="M10 3 5 8l5 5"/></symbol>
+  <!-- Ícones da família do Agens: grade de 20, traço 1,6, pontas redondas. -->
+  <symbol id="i-x" viewBox="0 0 20 20"><path d="M5.5 5.5L14.5 14.5 M14.5 5.5L5.5 14.5"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 20 20"><path d="M10 4.5V15.5 M4.5 10H15.5"/></symbol>
+  <symbol id="i-check" viewBox="0 0 20 20"><path d="M4.5 10.5L8.2 14.2L15.5 6"/></symbol>
+  <symbol id="i-back" viewBox="0 0 20 20"><path d="M12.5 4.5L7 10L12.5 15.5"/></symbol>
 </svg>
 <template id="markTpl">
   <svg class="mark" viewBox="21 21 128 128" width="SIZE" height="SIZE" aria-hidden="true">
@@ -194,7 +195,7 @@ const st = {
 const $ = s => document.querySelector(s), esc = s => s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const mark = n => $("#markTpl").innerHTML.replaceAll("SIZE", n);
 const letter = name => (name.trim().split(/\s+/).pop()[0] || "?").toUpperCase();  // "Cliente A" → A, "Pessoal" → P
-const okIc = '<span class="ok"><svg viewBox="0 0 16 16" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="m3.5 8.5 3 3 6-7"/></svg></span>';
+const okIc = '<span class="ok"><svg viewBox="0 0 20 20" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 10.5L8.2 14.2L15.5 6"/></svg></span>';
 
 const STEPS = [
   { next: "Começar", body: () => `<div class="hero opening">${mark(96)}<div class="wordmark">agens</div>
