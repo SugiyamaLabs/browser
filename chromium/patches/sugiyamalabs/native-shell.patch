@@ -540,10 +540,10 @@ index 0000000000..19131df5a0
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..d41bdc3fe2
+index 0000000000..e2844353e8
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,851 @@
+@@ -0,0 +1,882 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -631,14 +631,45 @@ index 0000000000..d41bdc3fe2
 +static NSString* Monogram(NSString* name) {
 +  return name.length ? [name substringToIndex:1].uppercaseString : @"?";
 +}
-+static NSTextField* AtoTile(CGFloat size) {  // prototype .logo
-+  NSTextField* tile = [NSTextField labelWithString:@""];
-+  tile.wantsLayer = YES;
-+  tile.layer.cornerRadius = size <= 16 ? 4 : 5;
-+  tile.alignment = NSTextAlignmentCenter;
-+  tile.font = [NSFont systemFontOfSize:size * 0.58 weight:NSFontWeightBold];
-+  tile.textColor = Hex(0x0B0B0D);
-+  return tile;
++// Rounded tile with the ato's letter, centered both ways (prototype .logo).
++@interface AgensAtoTile : NSView
++@property(nonatomic, copy) NSString* stringValue;
++- (instancetype)initWithSize:(CGFloat)size;
++@end
++@implementation AgensAtoTile {
++  NSTextField* _letter;
++}
++- (instancetype)initWithSize:(CGFloat)size {
++  if ((self = [super initWithFrame:NSMakeRect(0, 0, size, size)])) {
++    self.wantsLayer = YES;
++    self.layer.cornerRadius = size <= 16 ? 4 : 5;
++    _letter = [NSTextField labelWithString:@""];
++    _letter.alignment = NSTextAlignmentCenter;
++    _letter.font = [NSFont systemFontOfSize:size * 0.58 weight:NSFontWeightBold];
++    _letter.textColor = Hex(0x0B0B0D);
++    [self addSubview:_letter];
++  }
++  return self;
++}
++- (NSString*)stringValue {
++  return _letter.stringValue;
++}
++- (void)setStringValue:(NSString*)value {
++  _letter.stringValue = value;
++  self.needsLayout = YES;
++}
++- (void)layout {
++  [super layout];
++  // Center the capital letter itself, not the line box (which sits high in a small tile).
++  // Not flipped: the baseline is -descender above the label's bottom.
++  NSFont* font = _letter.font;
++  CGFloat h = _letter.intrinsicContentSize.height;
++  CGFloat y = NSHeight(self.bounds) / 2 - (font.capHeight / 2 - font.descender);
++  _letter.frame = NSMakeRect(0, y, NSWidth(self.bounds), h);
++}
++@end
++static AgensAtoTile* AtoTile(CGFloat size) {
++  return [[AgensAtoTile alloc] initWithSize:size];
 +}
 +
 +// ---------------------------------------------------------------------------------------------
@@ -888,7 +919,7 @@ index 0000000000..d41bdc3fe2
 +- (void)updateWith:(const AgensAto&)ato index:(int)index;
 +@end
 +@implementation AgensAtoButton {
-+  NSTextField* _tile;
++  AgensAtoTile* _tile;
 +  NSView* _dot;
 +}
 +- (instancetype)initWithFrame:(NSRect)frame {
@@ -1034,7 +1065,7 @@ index 0000000000..d41bdc3fe2
 +  NSView* _suggest;  // the dropdown under the address (prototype .suggest)
 +  NSMutableArray<AgensSuggestionRow*>* _suggestionRows;
 +  int _selected;  // -1: what was typed
-+  NSTextField* _atoTile;  // the current ato, at the top of the column
++  AgensAtoTile* _atoTile;  // the current ato, at the top of the column
 +  NSTextField* _atoName;
 +  NSView* _separator;
 +  AgensHoverView* _newTab;
