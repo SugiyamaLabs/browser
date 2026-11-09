@@ -119,7 +119,27 @@ input, select, textarea { font: inherit; color: inherit; }
 .stab[aria-selected="true"] { background: var(--raise); color: var(--ink); }
 .side-list { display: flex; flex-direction: column; gap: 1px; overflow: auto; flex: 1; }
 .side-sep { height: 1px; background: var(--line); margin: 6px 8px; }
-.side-new { width: 100%; color: var(--dim); }
+.side-new { width: 100%; color: var(--dim); flex: none; }
+.space-body { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 1px; }
+.space-body.from-r { animation: fromR .3s var(--ease); } .space-body.from-l { animation: fromL .3s var(--ease); }
+@keyframes fromR { from { opacity: 0; transform: translateX(24px); } } @keyframes fromL { from { opacity: 0; transform: translateX(-24px); } }
+.space-title { display: flex; align-items: center; gap: 9px; padding: 6px 8px 8px; font-size: 13px; font-weight: 600; color: var(--ink); min-width: 0; }
+.space-title .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.space-title .avatar { width: 18px; height: 18px; font-size: 10px; }
+/* Spaces: a fileira de times no pé da lateral, como no Arc */
+.spaces { display: flex; align-items: center; justify-content: center; gap: 2px; padding: 8px 0 6px; border-top: 1px solid var(--line); flex: none; }
+.space { width: 30px; height: 28px; border-radius: calc(8px * var(--round)); display: grid; place-items: center; }
+.space:hover { background: var(--hover); }
+.space[aria-selected="true"] { background: var(--raise); }
+.space { position: relative; }
+.space[aria-selected="true"]::after { content: ""; position: absolute; bottom: -5px; left: 50%; width: 4px; height: 4px; margin-left: -2px; border-radius: 50%; background: var(--light-3); }
+.space .logo { width: 16px; height: 16px; font-size: 9.5px; border-radius: 4px; transition: transform .32s var(--spring); }
+.space[aria-selected="true"] .logo { transform: scale(1.12); }
+.space.asleep .logo { opacity: .4; }
+.space.add { color: var(--dim); } .space.add:hover { color: var(--ink); }
+.layout-side .profiles { display: none; }
+.collapsed .spaces { flex-direction: column; border-top: 0; }
+.collapsed .space-title .name { display: none; } .collapsed .space-title { justify-content: center; padding: 6px 0; }
 .collapsed .sidebar .title, .collapsed .sidebar .name, .collapsed .sidebar .chev, .collapsed .pinned, .collapsed .side-sep, .collapsed .side-h, .collapsed .stab .x, .collapsed .stab .meta { display: none; }
 .collapsed .stab, .collapsed .side-profile { justify-content: center; padding: 0; }
 
@@ -314,12 +334,14 @@ select.sel { height: 30px; padding: 0 10px; border-radius: calc(8px * var(--roun
     <div class="loadbar" aria-hidden="true"></div>
     <div class="body">
       <nav class="sidebar" aria-label="Abas na lateral">
-        <button class="side-profile" aria-label="Trocar de perfil" aria-haspopup="menu" data-act="profiles"><span class="avatar" id="sideAvatar"></span><span class="name" id="sideName"></span><svg class="icon chev"><use href="#i-chev"/></svg></button>
-        <div class="pinned" id="pinned" role="tablist" aria-label="Abas fixadas"></div>
-        <div class="side-h">Abas</div>
-        <div class="side-list" id="sideList" role="tablist" aria-label="Abas" aria-orientation="vertical"></div>
-        <div class="side-sep"></div>
-        <button class="stab side-new" data-act="newtab"><svg class="icon"><use href="#i-plus"/></svg><span class="title">Nova aba</span></button>
+        <div class="space-body" id="spaceBody">
+          <div class="space-title"><span class="avatar" id="sideAvatar"></span><span class="name" id="sideName"></span></div>
+          <div class="pinned" id="pinned" role="tablist" aria-label="Abas fixadas"></div>
+          <div class="side-sep"></div>
+          <button class="stab side-new" data-act="newtab"><svg class="icon"><use href="#i-plus"/></svg><span class="title">Nova aba</span></button>
+          <div class="side-list" id="sideList" role="tablist" aria-label="Abas" aria-orientation="vertical"></div>
+        </div>
+        <div class="spaces" id="spaces" role="tablist" aria-label="Times"></div>
       </nav>
       <main class="content" id="content" tabindex="-1"></main>
     </div>
@@ -346,7 +368,8 @@ select.sel { height: 30px; padding: 0 10px; border-radius: calc(8px * var(--roun
     <ul>
       <li>Menu <b>⋯</b>: favoritos, histórico e configurações. Estrela na barra: favoritar a aba.</li>
       <li>Passe o mouse numa aba: cartão com a memória dela.</li>
-      <li>Abas cinza com a lua: dormindo (#24). Clique para acordar.</li>
+      <li>Abas cinza: dormindo (#24). Clique para acordar.</li>
+      <li>Abas na lateral: os times ficam no pé, como os Spaces do Arc. Cada time tem as próprias abas.</li>
       <li><kbd>⌘L</kbd> barra · <kbd>⌘T</kbd> nova aba · <kbd>⌘⇧S</kbd> lateral · <kbd>⌘1–9</kbd> aba · <kbd>⌃⇥</kbd> próxima · <kbd>⌘⇧1–5</kbd> time · <kbd>⌘D</kbd> favoritar · <kbd>⌘⇧B</kbd> barra de favoritos · <kbd>⌘Y</kbd> histórico · <kbd>⌘,</kbd> configurações</li>
     </ul>
     <div class="mem"><span>Memória (simulada)</span><b id="memTotal">—</b></div>
@@ -400,6 +423,27 @@ const HISTORY = [
 ];
 const prefs = { bmbar: true, dense: false, sleepAfter: "5", sleepOn: true, search: "DuckDuckGo", restore: true };
 let settingsSection = "aparencia", historyQuery = "";
+// Spaces: cada time tem as próprias abas e a aba ativa
+const SPACE_TABS = {
+  1: [
+    { t: "Checkout · staging", u: "staging.cliente-a.test/checkout", l: "A", c: "#3F9CFF", kind: "article", pinned: true, mem: 180 },
+    { t: "PR #482 · Checkout novo", u: "github.com/cliente-a/loja/pull/482", l: "GH", c: C[2], kind: "article", mem: 150 },
+    { t: "Painel de pedidos", u: "admin.cliente-a.test/pedidos", l: "A", c: "#3F9CFF", kind: "article", mem: 210 },
+    { t: "Documentação da API", u: "docs.cliente-a.test/api", l: "D", c: C[7], kind: "article", sleeping: true, mem: 0, was: 120 },
+  ],
+  2: [
+    { t: "Loja B · produção", u: "loja.cliente-b.test", l: "B", c: "#FF7E98", kind: "article", pinned: true, sleeping: true, mem: 0, was: 200 },
+    { t: "Relatório semanal", u: "relatorios.cliente-b.test/semana", l: "B", c: "#FF7E98", kind: "article", sleeping: true, mem: 0, was: 160 },
+  ],
+  3: [
+    { t: "Moodboard · campanha", u: "board.estudio.test/campanha", l: "E", c: "#CF6FEA", kind: "article", sleeping: true, mem: 0, was: 240 },
+  ],
+  4: [
+    { t: "Projeto X · roadmap", u: "projetox.test/roadmap", l: "X", c: "#2BC7C0", kind: "article", sleeping: true, mem: 0, was: 140 },
+    { t: "Projeto X · issues", u: "github.com/projeto-x/app/issues", l: "GH", c: C[2], kind: "article", sleeping: true, mem: 0, was: 130 },
+  ],
+};
+const SPACE_ACTIVE = { 1: 0, 2: 0, 3: 0, 4: 0 };
 let active = 1, profile = 0, state = "normal";
 const $ = s => document.querySelector(s), win = $("#win"), root = document.documentElement;
 const esc = s => s.replace(/[&<>"]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
@@ -419,7 +463,9 @@ function render() {
   $("#sideList").innerHTML = tabs.map((tab, i) => tab.pinned ? "" : tabHTML(tab, i, "stab")).join("");
   const p = PROFILES[profile];
   root.style.setProperty("--profile", p.color);
-  $("#sideAvatar").textContent = p.letter; $("#sideName").textContent = p.name;
+  $("#sideAvatar").textContent = p.letter; $("#sideAvatar").style.background = p.color; $("#sideName").textContent = p.name;
+  $("#spaces").innerHTML = PROFILES.map((q, i) => `<button class="space${q.asleep && i !== profile ? " asleep" : ""}" role="tab" aria-selected="${i === profile}" data-p="${i}" title="${esc(q.name)}${q.asleep && i !== profile ? " · dormindo" : ""}" aria-label="${esc(q.name)}"><span class="logo" style="background:${q.color}">${q.letter}</span></button>`).join("")
+    + `<button class="space add" aria-label="Novo time"><svg class="icon"><use href="#i-plus"/></svg></button>`;
   $("#profiles").innerHTML = PROFILES.map((q, i) => `<button data-p="${i}" aria-pressed="${i === profile}" class="${q.asleep && i !== profile ? "asleep" : ""}" title="${esc(q.name)}${q.asleep && i !== profile ? " · dormindo" : ""}" aria-label="${esc(q.name)}"><span class="logo" style="background:${q.color}">${q.letter}</span><span class="lbl">${esc(q.name)}</span></button>`).join("");
   const tab = tabs[active];
   $("#omniInput").value = tab ? tab.u : "";
@@ -620,7 +666,16 @@ function openProfiles(anchor) {
   m.style.top = r.bottom + 6 + "px"; m.style.left = Math.min(r.left, innerWidth - 270) + "px";
   m.classList.add("open"); m.querySelector(".mi").focus();
 }
-function setProfile(i) { if (PROFILES[i].asleep) PROFILES[i].asleep = false; profile = i; $("#menu").classList.remove("open"); render(); }
+function setProfile(i) {
+  if (i === profile || !PROFILES[i]) return;
+  SPACE_TABS[profile] = tabs; SPACE_ACTIVE[profile] = active;  // guarda o espaço que sai
+  const dir = i > profile ? "from-r" : "from-l";
+  if (PROFILES[i].asleep) PROFILES[i].asleep = false;           // o time acorda
+  profile = i; tabs = SPACE_TABS[i] || []; active = tabs.length ? (SPACE_ACTIVE[i] ?? 0) : null;
+  if (tabs[active]?.sleeping) { tabs[active].sleeping = false; tabs[active].mem = tabs[active].was; }
+  $("#menu").classList.remove("open"); render();
+  const body = $("#spaceBody"); body.classList.remove("from-r", "from-l"); void body.offsetWidth; body.classList.add(dir);
+}
 
 // Painel do protótipo
 function syncSeg(group, v) { document.querySelectorAll(`[data-group="${group}"] button`).forEach(b => b.setAttribute("aria-pressed", b.dataset.v === v)); }
@@ -673,7 +728,7 @@ document.addEventListener("keydown", e => {
   else if (e.metaKey && e.altKey && k === "b") { openInternal("bookmarks"); e.preventDefault(); }
   else if (e.metaKey && e.shiftKey && k === "b") { prefs.bmbar = !prefs.bmbar; render(); e.preventDefault(); }
   else if (e.metaKey && e.shiftKey && k === "s") { const side = !win.classList.contains("layout-side"); syncSeg("layout", side ? "side" : "top"); set.layout(side ? "side" : "top"); e.preventDefault(); }
-  else if (e.metaKey && e.shiftKey && k === "p") { openProfiles($("#win.layout-side") ? $(".side-profile") : $("#profiles")); e.preventDefault(); }
+  else if (e.metaKey && e.shiftKey && k === "p") { openProfiles($("#win.layout-side") ? $("#spaces") : $("#profiles")); e.preventDefault(); }
   else if (e.metaKey && e.shiftKey && /^[1-5]$/.test(e.key)) { setProfile(+e.key - 1); e.preventDefault(); }
   else if (e.metaKey && /^[1-9]$/.test(e.key)) { select(e.key === "9" ? tabs.length - 1 : +e.key - 1); e.preventDefault(); }
   else if (e.ctrlKey && e.key === "Tab") { select(((active ?? -1) + (e.shiftKey ? -1 : 1) + tabs.length) % tabs.length); e.preventDefault(); }
