@@ -2,7 +2,7 @@
 
 Três cartões inclinados (os atos) varrendo como um carro na reta; o da frente aceso. Vetorizado à mão a partir do conceito `r3-01` (cunha), gerado com o codex em 09/11/2026. Não usa a bola nem o quadrado mordido, que são do app Agens.
 
-Tudo sai de uma geometria só: `python3 design/logo/gerar.py` reescreve os SVGs. Os vãos entre os cartões são recortes de verdade (máscara), então a marca funciona em qualquer fundo.
+Tudo sai de uma geometria só: `python3 design/logo/gerar.py` reescreve os SVGs (precisa do `shapely`: `pip install shapely`). Os vãos são calculados como geometria de verdade (cada cartão menos os da frente, engordados pelo vão), então todo arquivo é só forma preenchida: sem máscara nem contorno, igual em qualquer fundo e com borda suave em qualquer tamanho. As pontas em cunha têm um arredondamento de 9 (na grade de 1024) para não virarem um pixel serrilhado.
 
 | Arquivo | Uso |
 |---|---|
