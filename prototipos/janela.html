@@ -157,7 +157,8 @@ input, select, textarea { font: inherit; color: inherit; }
 .fav { width: 16px; height: 16px; border-radius: 4px; flex: none; display: grid; place-items: center; font: 700 8px/1 var(--ui); color: #fff; position: relative; }
 .sleeping .fav { filter: grayscale(1); opacity: .4; }
 .fav-ic { color: var(--mute); } .fav-ic .icon { width: 16px; height: 16px; }
-.snav button .icon, .menu .mi .icon { width: 18px; height: 18px; color: var(--dim); } .snav button[aria-current="page"] .icon { color: var(--ink); }
+.snav button .icon { width: 17px; height: 17px; color: currentColor; }
+.menu .mi .icon { width: 17px; height: 17px; color: var(--dim); } .snav button[aria-current="page"] .icon { color: var(--ink); }
 .sleeping .title { color: var(--dim); }
 .zz { display: none; }
 .stab.sleeping .meta::before { content: "dormindo"; font-size: 11.5px; color: var(--dim); }
@@ -249,11 +250,11 @@ input, select, textarea { font: inherit; color: inherit; }
 .folder .icon { color: var(--dim); }
 .note { color: var(--dim); font-size: 12.5px; }
 
-.settings { display: grid; grid-template-columns: 220px 1fr; height: 100%; }
+.settings { display: grid; grid-template-columns: 252px 1fr; height: 100%; }
 .opt .lbl + .mono { margin-left: auto; }
 .snav { padding: 28px 10px; border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: 1px; overflow: auto; }
 .snav h1 { font-size: 15px; font-weight: 600; margin: 0 8px 14px; }
-.snav button { display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: calc(8px * var(--round)); text-align: left; color: var(--mute); font-size: 13.5px; }
+.snav button { display: flex; align-items: center; gap: 10px; padding: 7px 10px; min-height: 36px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-radius: calc(8px * var(--round)); text-align: left; color: var(--mute); font-size: 13.5px; }
 .snav button:hover { background: var(--hover); color: var(--ink); }
 .snav button[aria-current="page"] { background: var(--raise); color: var(--ink); }
 .spane { padding: 28px max(36px, calc((100% - 680px) / 2)) 48px; overflow: auto; }  /* coluna legível de 680 px, centrada no espaço que sobra (como Chrome e Edge) */
@@ -430,17 +431,21 @@ select.sel { height: 30px; padding: 0 10px; border-radius: calc(8px * var(--roun
   <symbol id="i-star" viewBox="0 0 20 20"><path d="M10 3.6l1.9 4 4.3.5-3.2 2.9.9 4.3L10 13.1l-3.9 2.2.9-4.3-3.2-2.9 4.3-.5z"/></symbol>
   <symbol id="i-folder" viewBox="0 0 20 20"><path d="M3 6.5a2 2 0 0 1 2-2h3l2 2h5a2 2 0 0 1 2 2v5.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
   <symbol id="i-clock" viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.5"/><path d="M10 6.5V10l2.5 1.5"/></symbol>
-  <symbol id="i-gear" viewBox="0 0 20 20"><circle cx="10" cy="10" r="2.4"/><path d="M10 3.2v1.9M10 14.9v1.9M3.2 10h1.9M14.9 10h1.9M5.2 5.2l1.35 1.35M13.45 13.45l1.35 1.35M5.2 14.8l1.35-1.35M13.45 6.55l1.35-1.35"/></symbol>
   <symbol id="i-check" viewBox="0 0 20 20"><path d="M4.5 10.5L8.2 14.2L15.5 6"/></symbol>
-  <symbol id="i-layers" viewBox="0 0 20 20"><path d="M7 4.5h7.5a1.5 1.5 0 0 1 1.4 2L13.5 13 M4.6 8h7.9a1.5 1.5 0 0 1 1.4 2l-1.6 4.4a1.5 1.5 0 0 1-1.4 1H3.8a1 1 0 0 1-.9-1.4l1.7-4.6"/></symbol>
-  <symbol id="i-shield" viewBox="0 0 20 20"><path d="M10 3.2l5.5 2v4.3c0 3.6-2.4 6-5.5 7.3-3.1-1.3-5.5-3.7-5.5-7.3V5.2z M7.6 10l1.7 1.7 3.2-3.4"/></symbol>
-  <symbol id="i-key" viewBox="0 0 20 20"><circle cx="7" cy="12.5" r="3"/><path d="M9.2 10.4l6.3-6.3 M13.2 6.4l1.8 1.8 M11.5 8.1l1.4 1.4"/></symbol>
   <symbol id="i-down" viewBox="0 0 20 20"><path d="M10 4v8.5M6.5 9l3.5 3.5L13.5 9M4.5 15.5h11"/></symbol>
-  <symbol id="i-globe" viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.5"/><path d="M3.5 10h13M10 3.5c2 2 2.8 4.2 2.8 6.5S12 14.5 10 16.5C8 14.5 7.2 12.3 7.2 10S8 5.5 10 3.5"/></symbol>
-  <symbol id="i-eye" viewBox="0 0 20 20"><path d="M2.8 10s2.6-5 7.2-5 7.2 5 7.2 5-2.6 5-7.2 5-7.2-5-7.2-5z"/><circle cx="10" cy="10" r="2.3"/></symbol>
-  <symbol id="i-puzzle" viewBox="0 0 20 20"><path d="M5 6.5h2.6a1.9 1.9 0 1 1 3.8 0H14a1 1 0 0 1 1 1v2.4a1.9 1.9 0 1 1 0 3.8V16a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7.5a1 1 0 0 1 1-1z"/></symbol>
-  <symbol id="i-info" viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.5"/><path d="M10 9.2v4 M10 6.6v.1"/></symbol>
   <symbol id="i-window" viewBox="0 0 20 20"><rect x="3" y="4" width="14" height="12" rx="3"/><path d="M3 8h14"/></symbol>
+  <!-- Ajustes: os do Agens (apps/ajustes.js, ADJI) e, onde não há, desenhados no mesmo estilo -->
+  <symbol id="a-atos" viewBox="0 0 20 20"><rect x="3" y="4" width="6" height="6" rx="2"/><rect x="11" y="4" width="6" height="6" rx="2"/><rect x="3" y="12" width="6" height="4.5" rx="2"/><rect x="11" y="12" width="6" height="4.5" rx="2"/></symbol>
+  <symbol id="a-aparencia" viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.5"/><path d="M10 3.5a6.5 6.5 0 0 0 0 13z" fill="currentColor"/></symbol>
+  <symbol id="a-permissoes" viewBox="0 0 20 20"><path d="M10 3l6 2.5v4.2c0 3.4-2.5 5.9-6 7.3-3.5-1.4-6-3.9-6-7.3V5.5z"/><path d="M7.6 10.2l1.7 1.7 3.2-3.4"/></symbol>
+  <symbol id="a-bloqueador" viewBox="0 0 20 20"><path d="M10 3l6 2.5v4.2c0 3.4-2.5 5.9-6 7.3-3.5-1.4-6-3.9-6-7.3V5.5z"/><path d="M7.5 7.8l5 5"/></symbol>
+  <symbol id="a-geral" viewBox="0 0 20 20"><circle cx="10" cy="10" r="2.6"/><path d="M10 3v2M10 15v2M3 10h2M15 10h2M5 5l1.4 1.4M13.6 13.6L15 15M5 15l1.4-1.4M13.6 6.4L15 5"/></symbol>
+  <symbol id="a-idiomas" viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.5"/><path d="M3.5 10h13M10 3.5c2 2 2.8 4.2 2.8 6.5s-.8 4.5-2.8 6.5c-2-2-2.8-4.2-2.8-6.5s.8-4.5 2.8-6.5z"/></symbol>
+  <symbol id="a-sobre" viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.5"/><path d="M10 9v4.5M10 6.5h.01"/></symbol>
+  <symbol id="a-inicio" viewBox="0 0 20 20"><rect x="3" y="4.5" width="14" height="11" rx="3"/><path d="M8.6 7.8l3.4 2.2-3.4 2.2z"/></symbol>
+  <symbol id="a-senhas" viewBox="0 0 20 20"><rect x="3" y="6.5" width="14" height="7" rx="2.5"/><path d="M6.5 10h.01M9 10h.01M11.5 10h.01M14 10h.01"/></symbol>
+  <symbol id="a-extensoes" viewBox="0 0 20 20"><rect x="3.5" y="3.5" width="13" height="13" rx="3.5"/><path d="M10 7v6M7 10h6"/></symbol>
+  <symbol id="a-acessibilidade" viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.5"/><path d="M10 6.8h.01M7.2 8.6h5.6M10 8.6v2.4l-1.8 3M10 11l1.8 3"/></symbol>
 </svg>
 
 <div class="stage">
@@ -595,7 +600,7 @@ const SPACE_ACTIVE = { 1: 0, 2: 0, 3: 0, 4: 0 };
 let active = 1, profile = 0, state = "normal";
 const $ = s => document.querySelector(s), win = $("#win"), root = document.documentElement;
 const esc = s => s.replace(/[&<>"]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
-const INTERNAL_ICON = { settings: "i-gear", history: "i-clock", bookmarks: "i-star" };
+const INTERNAL_ICON = { settings: "a-geral", history: "i-clock", bookmarks: "i-star" };
 const fav = tab => tab.kind === "internal"
   ? `<span class="fav fav-ic" aria-hidden="true"><svg class="icon"><use href="#${INTERNAL_ICON[tab.page]}"/></svg></span>`
   : `<span class="fav" style="background:${tab.c}" aria-hidden="true">${tab.l}<span class="zz"></span></span>`;
@@ -825,13 +830,13 @@ const INTERNAL = {
         <div class="opt"><span class="lbl">Avisos de código aberto<small>As licenças dos projetos que o Agens usa por dentro.</small></span><button class="btn sm">Ver</button></div>
         <div class="opt"><span class="lbl">Memória agora<small>${$("#memTotal").textContent} com ${tabs.length} abas</small></span></div></div>`,
     }[settingsSection];
-    const SI = { inicio: "i-play", aparencia: "i-window", abas: "i-moon", atos: "i-layers", busca: "i-search", privacidade: "i-lock", bloqueador: "i-shield", permissoes: "i-check", senhas: "i-key", downloads: "i-down", idiomas: "i-globe", acessibilidade: "i-eye", extensoes: "i-puzzle", sistema: "i-gear", sobre: "i-info" };
+    const SI = { inicio: "a-inicio", aparencia: "a-aparencia", abas: "i-moon", atos: "a-atos", busca: "i-search", privacidade: "i-lock", bloqueador: "a-bloqueador", permissoes: "a-permissoes", senhas: "a-senhas", downloads: "i-down", idiomas: "a-idiomas", acessibilidade: "a-acessibilidade", extensoes: "a-extensoes", sistema: "a-geral", sobre: "a-sobre" };
     return `<div class="settings"><nav class="snav" aria-label="Seções"><h1>Configurações</h1>${Object.entries(S).map(([k, n]) => `<button data-section="${k}" aria-current="${settingsSection === k ? "page" : "false"}"><svg class="icon"><use href="#${SI[k]}"/></svg>${n}</button>`).join("")}</nav><div class="spane">${pane}</div></div>`;
   },
 };
 function openMainMenu(anchor) {
   const m = $("#menu");
-  m.innerHTML = [["newtab", "Nova aba", "⌘T", "i-plus"], ["bookmarks", "Favoritos", "⌘⌥B", "i-star"], ["history", "Histórico", "⌘Y", "i-clock"], ["settings", "Configurações", "⌘,", "i-gear"]].map(([a, n, k, ic]) => `<button class="mi" role="menuitem" data-menu="${a}"><svg class="icon"><use href="#${ic}"/></svg>${n}<span class="k">${k}</span></button>`).join("")
+  m.innerHTML = [["newtab", "Nova aba", "⌘T", "i-plus"], ["bookmarks", "Favoritos", "⌘⌥B", "i-star"], ["history", "Histórico", "⌘Y", "i-clock"], ["settings", "Configurações", "⌘,", "a-geral"]].map(([a, n, k, ic]) => `<button class="mi" role="menuitem" data-menu="${a}"><svg class="icon"><use href="#${ic}"/></svg>${n}<span class="k">${k}</span></button>`).join("")
     + `<hr><button class="mi" role="menuitemcheckbox" aria-checked="${prefs.bmbar}" data-menu="bmbar"><svg class="icon"><use href="#i-folder"/></svg>${prefs.bmbar ? "Ocultar" : "Mostrar"} barra de favoritos<span class="k">⌘⇧B</span></button>`;
   const r = anchor.getBoundingClientRect();
   m.style.top = r.bottom + 6 + "px"; m.style.left = Math.max(8, r.right - 260) + "px";
