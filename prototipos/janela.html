@@ -1,0 +1,1059 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Navegador · protótipo da janela</title>
+<style>
+/* ===== Tokens: Grafite do Agens (Agens-Prototipos/DESIGN.md), um para um ===== */
+:root {
+  --bg:#0B0B0D; --side:#111114; --raise:#16161A; --sunk:#0F0F12; --line:#24242A; --line-strong:#3A3A42;
+  --ink:#F2F2F4; --mute:#9A9AA4; --dim:#8A8A94; --hi:#F4F4F6; --warn:#F2C14E;
+  --hover:#18181C; --hover-2:#1B1B20; --float:#1A1A1F; --raise-2:#26262D; --line-hover:#4A4A54; --on-hi:#0B0B0D;
+  --light-1:#FFFDF7; --light-2:#FFE9C7; --light-3:#FFC98A; --light-4:#F7A95C;
+  --surface: radial-gradient(1200px 520px at 50% -120px, rgba(255,255,255,.055), transparent 70%);
+  --ui: -apple-system, "SF Pro Text", BlinkMacSystemFont, system-ui, sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+  --ease: cubic-bezier(.16,1,.3,1); --spring: cubic-bezier(.34,1.56,.64,1);
+  --round: 1; --pill: 0;
+  --profile: #7F9BC7;            /* cor do ato: só no rosto (monograma) */
+}
+/* Brasa: o segundo tema do Agens */
+:root[data-theme="brasa"] {
+  --bg:#110D0A; --side:#16110D; --raise:#1E1712; --sunk:#130E0B; --hover:#211913; --hover-2:#241B15; --float:#241B15;
+  --line:#2C221B; --line-strong:#47372A; --line-hover:#5A4636; --raise-2:#2A2018;
+  --ink:#F8F0E7; --mute:#B6A899; --dim:#A09182; --hi:#FFF3E4; --on-hi:#160F0A;
+  --surface: radial-gradient(1100px 560px at 50% -140px, rgba(255,201,138,.11), transparent 70%), radial-gradient(700px 500px at 0% 110%, rgba(247,169,92,.06), transparent 70%);
+  --round: 1.45; --pill: 1;
+}
+/* Vidro: o vidro do sistema na moldura (Liquid Glass no macOS 26, Mica e Acrylic no Windows 11).
+   A página continua sólida. Com "reduzir transparência", volta a ser o Grafite. */
+:root[data-theme="vidro"] {
+  --glass: rgba(28,28,34,.42); --glass-2: rgba(255,255,255,.07); --glass-3: rgba(255,255,255,.12);
+  --glass-edge: inset 0 1px 0 rgba(255,255,255,.14), inset 0 0 0 1px rgba(255,255,255,.06);
+  --line: rgba(255,255,255,.09); --line-strong: rgba(255,255,255,.16); --line-hover: rgba(255,255,255,.24);
+  --hover: rgba(255,255,255,.06); --hover-2: rgba(255,255,255,.08); --raise: rgba(255,255,255,.1); --raise-2: rgba(255,255,255,.14);
+  --float: rgba(30,30,36,.62); --sunk: rgba(0,0,0,.22);
+  --round: 1.3; --pill: 1;
+}
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+
+* { box-sizing: border-box; scrollbar-width: none; }
+::-webkit-scrollbar { display: none; }
+[hidden] { display: none !important; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--surface), var(--bg); color: var(--ink); font: 14px/1.5 var(--ui); -webkit-font-smoothing: antialiased; caret-color: var(--light-3); transition: background .45s var(--ease), color .45s var(--ease); }
+::selection { background: rgba(255,201,138,.28); color: var(--ink); }
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+input, select, textarea { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--light-2); outline-offset: 2px; border-radius: calc(8px * var(--round)); }
+.icon { width: 18px; height: 18px; flex: none; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }  /* família do Agens: 20 de grade, traço 1,6 */
+.mono, kbd { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+/* ===== Palco ===== */
+.stage { min-height: 100%; display: grid; grid-template-columns: 1fr 280px; gap: 24px; padding: 24px; }
+@media (max-width: 1100px) { .stage { grid-template-columns: 1fr; } }
+
+/* ===== Janela: camadas e fios, sem sombra ===== */
+.window { height: min(800px, calc(100vh - 48px)); min-height: 560px; border-radius: calc(12px * var(--round)); overflow: hidden; display: flex; flex-direction: column; background: var(--side); border: 1px solid var(--line); transition: background .45s var(--ease), border-color .45s var(--ease), border-radius .45s var(--spring); }
+.window.fullscreen { border-radius: 0; }
+.lights { display: flex; gap: 8px; padding: 0 12px 0 16px; flex: none; }
+.lights i { width: 12px; height: 12px; border-radius: 50%; display: block; background: #2A2A30; }
+.window.fullscreen .lights { display: none; }
+
+/* abas em cima: pílulas como no Navegador do Agens */
+.tabstrip { height: 46px; display: flex; align-items: center; gap: 4px; padding: 6px 14px 0 0; flex: none; min-width: 0; }
+.tabs-top { display: flex; align-items: center; gap: 4px; min-width: 0; flex: 1; overflow: hidden; }
+.ttab { position: relative; height: 32px; min-width: 44px; max-width: 220px; flex: 0 1 220px; display: flex; align-items: center; gap: 8px; padding: 0 6px 0 10px; border: 1px solid transparent; border-radius: max(calc(9px * var(--round)), calc(var(--pill) * 999px)); color: var(--mute); font-size: 12.5px; transition: background .16s var(--ease), color .16s var(--ease), border-color .16s var(--ease); }
+.ttab:hover { background: var(--hover); color: var(--ink); }
+.ttab[aria-selected="true"] { background: var(--raise); border-color: var(--line); color: var(--ink); }
+.title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+.x { width: 20px; height: 20px; border-radius: calc(6px * var(--round)); display: grid; place-items: center; color: var(--dim); opacity: 0; flex: none; transition: opacity .16s var(--ease); }
+.ttab:hover .x, .ttab[aria-selected="true"] .x, .stab:hover .x, .stab[aria-selected="true"] .x { opacity: 1; }
+.x:hover { background: var(--raise-2); color: var(--ink); }
+.newtab-btn { width: 28px; height: 28px; border-radius: calc(8px * var(--round)); display: grid; place-items: center; color: var(--dim); flex: none; }
+.newtab-btn:hover { background: var(--raise); color: var(--ink); }
+
+/* barra: endereço num poço com borda */
+.toolbar { display: flex; align-items: center; gap: 2px; padding: 8px 14px 10px; flex: none; min-width: 0; }
+.layout-side .toolbar { padding-top: 10px; }
+.tbtn { width: 28px; height: 28px; border-radius: calc(8px * var(--round)); display: grid; place-items: center; color: var(--dim); flex: none; }
+.tbtn:hover { background: var(--raise); color: var(--ink); }
+.tbtn[disabled] { opacity: .35; cursor: default; background: none; }
+.omni { position: relative; flex: 1; min-width: 0; margin: 0 8px; }
+.omni-field { height: 34px; display: flex; align-items: center; gap: 7px; padding: 0 6px 0 12px; border-radius: calc(10px * var(--round)); background: var(--sunk); border: 1px solid var(--line); font-size: 13px; color: var(--dim); transition: border-color .16s var(--ease); }
+.omni-field:hover { border-color: var(--line-strong); }
+.omni-field:focus-within { border-color: var(--line-strong); }
+.omni-field input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--ink); }
+.suggest { position: absolute; z-index: 15; left: 0; right: 0; top: 40px; padding: 5px; border-radius: calc(12px * var(--round)); background: var(--float); border: 1px solid var(--line-strong); display: none; }
+.omni.open .suggest { display: block; animation: rise .2s var(--ease); }
+@keyframes rise { from { opacity: 0; transform: translateY(-4px); } }
+.sug { display: grid; grid-template-columns: 18px minmax(0,1fr) auto; gap: 10px; align-items: center; padding: 7px 10px; border-radius: calc(8px * var(--round)); color: var(--ink); font-size: 13.5px; }
+.sug .icon { color: var(--dim); }
+.sug[aria-selected="true"], .sug:hover { background: var(--raise-2); }
+.sug small { color: var(--dim); font-size: 12px; }
+
+/* seletor de ato: ladrilhos de monograma (a cor do ato mora no rosto) */
+.profiles { display: flex; gap: 2px; padding: 2px; margin-left: 4px; border: 1px solid var(--line); border-radius: max(calc(9px * var(--round)), calc(var(--pill) * 999px)); flex: none; }
+.profiles button { display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 6px; border-radius: max(calc(7px * var(--round)), calc(var(--pill) * 999px)); color: var(--mute); font-size: 12.5px; }
+.profiles button:hover { color: var(--ink); }
+.profiles button[aria-pressed="true"] { background: var(--raise); color: var(--ink); padding-right: 9px; }
+.profiles button[aria-pressed="false"] .lbl { display: none; }
+.profiles button.asleep .logo { opacity: .45; }
+.logo { width: 18px; height: 18px; border-radius: calc(5px * var(--round)); display: inline-grid; place-items: center; font: 700 10.5px/1 var(--ui); color: #0B0B0D; flex: none; background: var(--profile); }
+.profiles .logo { width: 16px; height: 16px; font-size: 9.5px; border-radius: 4px; }
+.avatar { width: 20px; height: 20px; border-radius: calc(5px * var(--round)); display: grid; place-items: center; color: #0B0B0D; font: 700 11px/1 var(--ui); background: var(--profile); flex: none; }
+
+.loadbar { height: 2px; position: relative; overflow: hidden; flex: none; margin: 0 14px; }
+.loading .loadbar::after { content: ""; position: absolute; inset: 0; width: 35%; border-radius: 2px; background: linear-gradient(90deg, transparent, var(--light-3), transparent); animation: load 1.1s var(--ease) infinite; }
+@keyframes load { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
+
+.body { flex: 1; display: flex; min-height: 0; padding: 0 14px 14px; gap: 10px; }
+
+/* ===== Lateral ===== */
+.sidebar { width: 236px; flex: none; display: none; flex-direction: column; gap: 2px; transition: width .32s var(--ease); min-width: 0; }
+.layout-side .sidebar { display: flex; }
+.layout-side .tabstrip { display: none; }
+.layout-top .toolbar .lights { display: none; }
+.layout-side.collapsed .sidebar { width: 40px; }
+.side-profile { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: calc(8px * var(--round)); color: var(--ink); font-weight: 600; font-size: 13px; text-align: left; }
+.side-profile:hover { background: var(--hover); }
+.side-profile .chev { margin-left: auto; color: var(--dim); }
+.side-h { margin: 12px 8px 4px; font-size: 12px; color: var(--dim); }
+.pinned { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin: 4px 0 6px; }
+.pin { height: 36px; border-radius: calc(9px * var(--round)); border: 1px solid var(--line); display: grid; place-items: center; }
+.pin:hover { background: var(--hover); }
+.pin[aria-selected="true"] { background: var(--raise); }
+.stab { height: 32px; display: flex; align-items: center; gap: 10px; padding: 0 6px 0 8px; border-radius: calc(8px * var(--round)); color: var(--mute); font-size: 13px; text-align: left; }
+.stab:hover { background: var(--hover); color: var(--ink); }
+.stab[aria-selected="true"] { background: var(--raise); color: var(--ink); }
+.side-list { display: flex; flex-direction: column; gap: 1px; overflow: auto; flex: 1; }
+.side-sep { height: 1px; background: var(--line); margin: 6px 8px; }
+.side-new { width: 100%; color: var(--dim); flex: none; }
+.space-body { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 1px; }
+.space-body.from-r { animation: fromR .3s var(--ease); } .space-body.from-l { animation: fromL .3s var(--ease); }
+@keyframes fromR { from { opacity: 0; transform: translateX(24px); } } @keyframes fromL { from { opacity: 0; transform: translateX(-24px); } }
+.space-title { display: flex; align-items: center; gap: 9px; padding: 6px 8px 8px; font-size: 13px; font-weight: 600; color: var(--ink); min-width: 0; }
+.space-title .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.space-title .avatar { width: 18px; height: 18px; font-size: 10px; }
+/* Atos: a fileira no pé da lateral */
+.spaces { display: flex; align-items: center; justify-content: center; gap: 2px; padding: 8px 0 6px; border-top: 1px solid var(--line); flex: none; }
+.space { width: 30px; height: 28px; border-radius: calc(8px * var(--round)); display: grid; place-items: center; }
+.space:hover { background: var(--hover); }
+.space[aria-selected="true"] { background: var(--raise); }
+.space { position: relative; }
+.space[aria-selected="true"]::after { content: ""; position: absolute; bottom: -5px; left: 50%; width: 4px; height: 4px; margin-left: -2px; border-radius: 50%; background: var(--light-3); }
+.space .logo { width: 16px; height: 16px; font-size: 9.5px; border-radius: 4px; transition: transform .32s var(--spring); }
+.space[aria-selected="true"] .logo { transform: scale(1.12); }
+.space.asleep .logo { opacity: .4; }
+.space.add { color: var(--dim); } .space.add:hover { color: var(--ink); }
+.layout-side .profiles { display: none; }
+.collapsed .spaces { flex-direction: column; border-top: 0; }
+.collapsed .space-title .name { display: none; } .collapsed .space-title { justify-content: center; padding: 6px 0; }
+.collapsed .sidebar .title, .collapsed .sidebar .name, .collapsed .sidebar .chev, .collapsed .pinned, .collapsed .side-sep, .collapsed .side-h, .collapsed .stab .x, .collapsed .stab .meta { display: none; }
+.collapsed .stab, .collapsed .side-profile { justify-content: center; padding: 0; }
+
+/* ===== Favicon e estados ===== */
+.fav { width: 16px; height: 16px; border-radius: 4px; flex: none; display: grid; place-items: center; font: 700 8px/1 var(--ui); color: #fff; position: relative; }
+.sleeping .fav { filter: grayscale(1); opacity: .4; }
+.sleeping .title { color: var(--dim); }
+.zz { display: none; }
+.stab.sleeping .meta::before { content: "dormindo"; font-size: 11.5px; color: var(--dim); }
+.meta { display: flex; gap: 6px; align-items: center; flex: none; }
+.live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--light-3); }
+.badge-live { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--mute); }
+.badge-live::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--light-3); }
+.spin { width: 12px; height: 12px; border-radius: 50%; border: 1.6px solid var(--line-strong); border-top-color: var(--light-3); animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.hovercard { position: fixed; z-index: 30; width: 250px; padding: 12px 14px; border-radius: calc(12px * var(--round)); background: var(--float); border: 1px solid var(--line-strong); pointer-events: none; opacity: 0; transform: translateY(4px); transition: opacity .16s var(--ease), transform .16s var(--ease); }
+.hovercard.show { opacity: 1; transform: none; }
+.hovercard .h-title { font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hovercard .h-url { color: var(--dim); font-size: 12px; margin-bottom: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hovercard .h-mem { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--mute); padding-top: 10px; border-top: 1px solid var(--line); }
+.hovercard .h-mem b { font-family: var(--mono); font-weight: 400; color: var(--ink); font-size: 12px; }
+.hovercard .h-state { font-size: 12px; color: var(--dim); margin-top: 4px; }
+
+/* ===== A página: uma folha com borda ===== */
+.content { flex: 1; min-width: 0; background: var(--bg); border: 1px solid var(--line); border-radius: calc(12px * var(--round)); overflow: auto; position: relative; transition: background .45s var(--ease), border-color .45s var(--ease); }
+.page { max-width: 760px; margin: 0 auto; padding: 44px 24px; }
+.sk { background: var(--raise); border-radius: calc(5px * var(--round)); height: 11px; margin: 11px 0; }
+.player { aspect-ratio: 16/9; border-radius: calc(12px * var(--round)); background: #050506; border: 1px solid var(--line); display: grid; place-items: center; position: relative; overflow: hidden; }
+.player::before { content: ""; position: absolute; inset: 0; background: radial-gradient(90% 70% at 30% 25%, rgba(255,201,138,.12), transparent 70%); }
+.player > * { position: relative; }
+.player .badge-live { position: absolute; top: 12px; left: 14px; color: var(--ink); }
+.play { width: 52px; height: 52px; border-radius: 50%; border: 1px solid var(--line-strong); display: grid; place-items: center; color: var(--ink); }
+.h-display { font-size: 28px; font-weight: 600; line-height: 1.22; letter-spacing: -.018em; margin: 0 0 12px; }
+.ntp { height: 100%; display: grid; place-items: center; }
+.ntp-inner { width: min(560px, 90%); text-align: center; }
+.ntp .mark { width: 64px; height: 64px; margin: 0 auto 18px; display: block; animation: breath 4.6s ease-in-out infinite; }
+@keyframes breath { 50% { transform: scale(.94); } }
+.ntp h1 { font-size: 22px; font-weight: 600; margin: 0 0 22px; }
+.ntp .omni-field { height: 48px; border-radius: calc(14px * var(--round)); font-size: 16px; padding: 0 18px; }
+.ntp .omni-field kbd { font-size: 11.5px; color: var(--dim); }
+.shortcuts { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-top: 24px; }
+.sc { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 10px; border-radius: calc(9px * var(--round)); color: var(--mute); font-size: 12px; }
+.sc:hover { background: var(--hover); color: var(--ink); }
+.sc .fav { width: 36px; height: 36px; border-radius: calc(10px * var(--round)); font-size: 13px; }
+.ntp .quiet { color: var(--dim); font-size: 12.5px; margin-top: 24px; }
+.error { height: 100%; display: grid; place-items: center; text-align: center; color: var(--mute); }
+.error h2 { color: var(--ink); font-size: 22px; font-weight: 600; margin: 14px 0 6px; }
+.error code { font-family: var(--mono); font-size: 12px; color: var(--dim); }
+.btn { display: inline-flex; align-items: center; gap: 8px; padding: 9px 16px; border: 1px solid var(--line-strong); border-radius: max(calc(10px * var(--round)), calc(var(--pill) * 999px)); font-size: 14px; color: var(--ink); white-space: nowrap; }
+.btn:hover { border-color: var(--line-hover); background: var(--hover-2); }
+.btn.pri { background: var(--hi); border-color: var(--hi); color: var(--on-hi); font-weight: 600; }
+.btn.pri:hover { background: #fff; }
+.btn.sm { padding: 5px 12px; font-size: 13px; }
+
+/* ===== Menu do Agens ===== */
+.menu { position: fixed; z-index: 40; min-width: 240px; max-width: 340px; padding: 5px; border-radius: calc(12px * var(--round)); background: var(--float); border: 1px solid var(--line-strong); display: none; }
+.menu.open { display: block; animation: rise .2s var(--ease); }
+.menu .mh { padding: 8px 10px 3px; font-size: 11.5px; color: var(--dim); }
+.menu .mi { width: 100%; display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: calc(7px * var(--round)); text-align: left; color: var(--mute); font-size: 13px; }
+.menu .mi:hover, .menu .mi:focus-visible { background: var(--raise); color: var(--ink); outline: 0; }
+.menu .mi .k { margin-left: auto; font-family: var(--mono); font-size: 11.5px; color: var(--dim); }
+.menu .mi .st { margin-left: auto; color: var(--dim); font-size: 12px; }
+.menu .mi[aria-checked="true"]::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--light-3); margin-left: 8px; }
+.menu hr { border: 0; border-top: 1px solid var(--line); margin: 5px 4px; }
+
+/* ===== Favoritos ===== */
+.star { width: 26px; height: 26px; border-radius: calc(7px * var(--round)); display: grid; place-items: center; color: var(--dim); flex: none; }
+.star:hover { background: var(--raise); color: var(--ink); }
+.star.on { color: var(--light-3); }
+.star.on .icon { fill: currentColor; }
+.bmbar { display: flex; align-items: center; gap: 2px; padding: 0 14px 8px; flex: none; overflow: hidden; margin-top: -2px; }
+.bm { height: 26px; display: flex; align-items: center; gap: 7px; padding: 0 9px; border-radius: calc(7px * var(--round)); color: var(--mute); font-size: 12.5px; white-space: nowrap; }
+.bm:hover { background: var(--hover); color: var(--ink); }
+.bm .fav { width: 14px; height: 14px; font-size: 7.5px; border-radius: 3px; }
+.bm .icon { width: 14px; height: 14px; color: var(--dim); }
+
+/* ===== Páginas internas ===== */
+.ip { max-width: 820px; margin: 0 auto; padding: 36px 28px 48px; }
+.ip-head { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+.ip-head h1 { font-size: 22px; font-weight: 600; margin: 0; flex: 1; }
+.search { height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-radius: calc(10px * var(--round)); background: var(--sunk); border: 1px solid var(--line); color: var(--dim); width: 280px; font-size: 13px; }
+.search:focus-within { border-color: var(--line-strong); }
+.search input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--ink); }
+.day { font-size: 12.5px; font-weight: 600; color: var(--mute); margin: 22px 0 6px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+.row { display: flex; align-items: center; gap: 12px; padding: 7px 10px; border-radius: calc(8px * var(--round)); color: var(--ink); font-size: 13.5px; }
+.row:hover { background: var(--hover); }
+.row .time { width: 44px; color: var(--dim); font-family: var(--mono); font-size: 12px; }
+.row .t { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row .d { color: var(--dim); font-size: 12px; }
+.row .rm { opacity: 0; } .row:hover .rm { opacity: 1; }
+.empty { color: var(--dim); padding: 24px 0; text-align: center; }
+.folder { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13px; color: var(--mute); margin: 22px 0 6px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+.folder .icon { color: var(--dim); }
+.note { color: var(--dim); font-size: 12.5px; }
+
+.settings { display: grid; grid-template-columns: 220px 1fr; height: 100%; }
+.opt .lbl + .mono { margin-left: auto; }
+.snav { padding: 28px 10px; border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: 1px; overflow: auto; }
+.snav h1 { font-size: 15px; font-weight: 600; margin: 0 8px 14px; }
+.snav button { display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: calc(8px * var(--round)); text-align: left; color: var(--mute); font-size: 13.5px; }
+.snav button:hover { background: var(--hover); color: var(--ink); }
+.snav button[aria-current="page"] { background: var(--raise); color: var(--ink); }
+.spane { padding: 28px max(36px, calc((100% - 680px) / 2)) 48px; overflow: auto; }  /* coluna legível de 680 px, centrada no espaço que sobra (como Chrome e Edge) */
+.spane h2 { font-size: 22px; font-weight: 600; margin: 0 0 18px; }
+.group { border: 1px solid var(--line); border-radius: calc(12px * var(--round)); margin-bottom: 18px; }
+.opt { display: flex; align-items: center; gap: 18px; padding: 12px 16px; border-top: 1px solid var(--line); min-height: 54px; font-size: 13.5px; }
+.opt:first-child { border-top: 0; }
+.opt .lbl { flex: 1; min-width: 0; }
+.opt .lbl small { display: block; color: var(--dim); font-size: 12.5px; margin-top: 1px; }
+.seg2 { display: flex; border: 1px solid var(--line); border-radius: max(calc(9px * var(--round)), calc(var(--pill) * 999px)); padding: 2px; gap: 2px; flex: none; }
+.seg2 button { display: flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: max(calc(7px * var(--round)), calc(var(--pill) * 999px)); color: var(--mute); font-size: 12.5px; }
+.seg2 button:hover { color: var(--ink); }
+.seg2 button[aria-pressed="true"] { background: var(--raise); color: var(--ink); }
+.switch { width: 36px; height: 22px; border-radius: 11px; background: var(--raise-2); border: 1px solid var(--line-strong); position: relative; flex: none; transition: background .2s var(--ease); }
+.switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--mute); transition: transform .32s var(--spring), background .2s var(--ease); }
+.switch[aria-checked="true"] { background: var(--hi); border-color: var(--hi); }
+.switch[aria-checked="true"]::after { transform: translateX(14px); background: var(--on-hi); }
+select.sel { height: 30px; padding: 0 10px; border-radius: calc(8px * var(--round)); border: 1px solid var(--line-strong); background: var(--sunk); color: var(--ink); }
+.swatches { display: flex; gap: 6px; }
+.sw { width: 20px; height: 20px; border-radius: calc(5px * var(--round)); }
+.sw[aria-pressed="true"] { outline: 2px solid var(--light-2); outline-offset: 2px; }
+.lead { color: var(--mute); font-size: 13px; margin: -6px 0 18px; }
+
+/* ===== Modo claro: os mesmos papéis, invertidos. A luz quente vira o pêssego mais forte para ter contraste ===== */
+:root[data-mode="light"]:not([data-theme="brasa"]) {
+  --bg:#FAFAFB; --side:#F1F1F4; --raise:#FFFFFF; --sunk:#E9E9ED; --line:#E0E0E5; --line-strong:#CFCFD6; --line-hover:#B9B9C2;
+  --ink:#16161A; --mute:#5C5C66; --dim:#71717B; --hi:#16161A; --on-hi:#FFFFFF;
+  --hover:#E8E8EC; --hover-2:#E4E4E9; --float:#FFFFFF; --raise-2:#E2E2E7;
+  --light-2:#F7A95C; --light-3:#E8893A;
+  --surface: radial-gradient(1200px 520px at 50% -120px, rgba(255,201,138,.18), transparent 70%);
+}
+:root[data-mode="light"] .lights i { background: #D4D4DA; }
+:root[data-mode="light"] .logo, :root[data-mode="light"] .avatar { color: #0B0B0D; }
+:root[data-mode="light"] .player { background: #111114; }
+:root[data-mode="light"] .player .badge-live, :root[data-mode="light"] .play { color: #F2F2F4; }
+:root[data-mode="light"] .ntp .mark rect { fill: #16161A; }
+:root[data-mode="light"] .switch[aria-checked="true"]::after { background: #fff; }
+:root[data-mode="light"] ::selection { background: rgba(232,137,58,.25); }
+:root[data-mode="light"][data-theme="vidro"] {
+  --glass: rgba(250,250,252,.55); --glass-2: rgba(255,255,255,.55); --glass-3: rgba(255,255,255,.85);
+  --glass-edge: inset 0 1px 0 rgba(255,255,255,.9), inset 0 0 0 1px rgba(0,0,0,.06);
+  --line: rgba(0,0,0,.08); --line-strong: rgba(0,0,0,.14); --hover: rgba(0,0,0,.05); --raise: rgba(255,255,255,.7); --raise-2: rgba(255,255,255,.9);
+  --float: rgba(255,255,255,.72); --sunk: rgba(255,255,255,.45);
+}
+:root[data-mode="light"][data-theme="vidro"] body { background: radial-gradient(900px 600px at 15% 10%, #a9c4ef, transparent 60%), radial-gradient(800px 700px at 85% 30%, #f0b6d2, transparent 60%), radial-gradient(900px 600px at 50% 100%, #f6d3a0, transparent 60%), #eef0f6; }
+:root[data-mode="light"][data-theme="custom"] {
+  --bg: color-mix(in srgb, var(--c-tint) 5%, #FAFAFB); --side: color-mix(in srgb, var(--c-tint) 9%, #F1F1F4);
+  --raise: color-mix(in srgb, var(--c-tint) 3%, #FFFFFF); --sunk: color-mix(in srgb, var(--c-tint) 10%, #E9E9ED);
+  --hover: color-mix(in srgb, var(--c-tint) 12%, #E8E8EC); --hover-2: color-mix(in srgb, var(--c-tint) 14%, #E4E4E9);
+  --float: color-mix(in srgb, var(--c-tint) 4%, #FFFFFF); --raise-2: color-mix(in srgb, var(--c-tint) 14%, #E2E2E7);
+  --line: color-mix(in srgb, var(--c-tint) 18%, #E0E0E5); --line-strong: color-mix(in srgb, var(--c-tint) 24%, #CFCFD6);
+  --light-3: color-mix(in srgb, var(--c-accent) 75%, #000); --light-2: var(--c-accent);
+}
+:root[data-mode="light"][data-theme="custom"] .content.ntp-bg { background: linear-gradient(rgba(255,255,255,calc(var(--c-dim) + .3)), rgba(255,255,255,calc(var(--c-dim) + .3))), var(--c-image, none) center / cover, var(--bg); }
+:root[data-mode="light"][data-theme="custom"] body { background: linear-gradient(rgba(255,255,255,var(--c-dim)), rgba(255,255,255,var(--c-dim))), var(--c-image, none) center / cover fixed, var(--bg); }
+
+/* ===== Personalizado: a pessoa escolhe imagem, cores, vidro e arredondamento ===== */
+:root[data-theme="custom"] {
+  --c-tint: #7F9BC7; --c-accent: #FFC98A; --c-dim: .45; --c-blur: 0px; --c-opaque: 45%; --c-round: 1;
+  --bg: color-mix(in srgb, var(--c-tint) 10%, #0B0B0D); --side: color-mix(in srgb, var(--c-tint) 12%, #111114);
+  --raise: color-mix(in srgb, var(--c-tint) 16%, #16161A); --sunk: color-mix(in srgb, var(--c-tint) 8%, #0F0F12);
+  --hover: color-mix(in srgb, var(--c-tint) 14%, #18181C); --hover-2: color-mix(in srgb, var(--c-tint) 16%, #1B1B20);
+  --float: color-mix(in srgb, var(--c-tint) 16%, #1A1A1F); --raise-2: color-mix(in srgb, var(--c-tint) 20%, #26262D);
+  --line: color-mix(in srgb, var(--c-tint) 22%, #24242A); --line-strong: color-mix(in srgb, var(--c-tint) 28%, #3A3A42);
+  --light-3: var(--c-accent); --light-2: color-mix(in srgb, var(--c-accent) 55%, #fff); --light-4: color-mix(in srgb, var(--c-accent) 80%, #000);
+  --round: var(--c-round); --pill: 0;
+}
+[data-theme="custom"] body { background: linear-gradient(rgba(0,0,0,var(--c-dim)), rgba(0,0,0,var(--c-dim))), var(--c-image, none) center / cover fixed, var(--bg); }
+[data-theme="custom"] .content.ntp-bg { background: linear-gradient(rgba(0,0,0,calc(var(--c-dim) + .1)), rgba(0,0,0,calc(var(--c-dim) + .1))), var(--c-image, none) center / cover, var(--bg); }
+/* Transparência e desfoque são independentes e mexem só no FUNDO da moldura:
+   textos, ícones, botões e a página continuam 100% opacos. Desfoque 0 = fundo nítido, sem vidro. */
+[data-theme="custom"] .window { background: color-mix(in srgb, var(--side) var(--c-opaque), transparent); backdrop-filter: blur(var(--c-blur)); -webkit-backdrop-filter: blur(var(--c-blur)); }
+[data-theme="custom"] .menu, [data-theme="custom"] .hovercard, [data-theme="custom"] .suggest, [data-theme="custom"] .sheet { background: color-mix(in srgb, var(--float) max(var(--c-opaque), 70%), transparent); backdrop-filter: blur(var(--c-blur)); -webkit-backdrop-filter: blur(var(--c-blur)); }
+[data-theme="custom"] .omni-field, [data-theme="custom"] .search { background: color-mix(in srgb, var(--sunk) max(var(--c-opaque), 60%), transparent); }
+@media (prefers-reduced-transparency: reduce) { [data-theme="custom"] .window, [data-theme="custom"] .menu, [data-theme="custom"] .sheet { background: var(--side); backdrop-filter: none; } }
+.wallpapers { display: flex; gap: 8px; flex-wrap: wrap; }
+.wp { width: 64px; height: 40px; border-radius: calc(8px * var(--round)); border: 1px solid var(--line); background-size: cover; background-position: center; display: grid; place-items: center; color: var(--dim); font-size: 11.5px; }
+.wp[aria-pressed="true"] { outline: 2px solid var(--light-2); outline-offset: 2px; }
+.range { display: flex; align-items: center; gap: 10px; width: 220px; }
+.range input { flex: 1; accent-color: var(--light-3); }
+.range output { font: 12px var(--mono); color: var(--mute); width: 38px; text-align: right; }
+
+/* ===== Vidro ===== */
+[data-theme="vidro"] body { background: radial-gradient(900px 600px at 15% 10%, #3a5a8c, transparent 60%), radial-gradient(800px 700px at 85% 30%, #8c4a6e, transparent 60%), radial-gradient(900px 600px at 50% 100%, #c08a4a, transparent 60%), #1a1b24; }
+[data-theme="vidro"] .window { background: var(--glass); border-color: rgba(255,255,255,.12); backdrop-filter: blur(40px) saturate(180%); -webkit-backdrop-filter: blur(40px) saturate(180%); box-shadow: var(--glass-edge), 0 30px 80px rgba(0,0,0,.35); }
+[data-theme="vidro"] .content { background: var(--bg); box-shadow: 0 1px 0 rgba(255,255,255,.04); }
+[data-theme="vidro"] .omni-field, [data-theme="vidro"] .profiles, [data-theme="vidro"] .search { background: var(--glass-2); border-color: transparent; box-shadow: var(--glass-edge); }
+[data-theme="vidro"] .ttab[aria-selected="true"], [data-theme="vidro"] .stab[aria-selected="true"], [data-theme="vidro"] .space[aria-selected="true"], [data-theme="vidro"] .pin[aria-selected="true"] { background: var(--glass-3); box-shadow: var(--glass-edge); border-color: transparent; }
+[data-theme="vidro"] .pin { border-color: transparent; background: var(--glass-2); }
+[data-theme="vidro"] .menu, [data-theme="vidro"] .hovercard, [data-theme="vidro"] .suggest, [data-theme="vidro"] .sheet, [data-theme="vidro"] .panel { background: var(--float); backdrop-filter: blur(30px) saturate(180%); -webkit-backdrop-filter: blur(30px) saturate(180%); border-color: rgba(255,255,255,.12); box-shadow: var(--glass-edge); }
+[data-theme="vidro"] .scrim { background: rgba(5,5,10,.35); }
+[data-theme="vidro"] .lights i { background: rgba(255,255,255,.18); }
+/* Windows 11: Mica na janela (o fundo da área de trabalho bem borrado e quase opaco) e Acrylic nos menus */
+.os-win[data-theme="vidro"] .window, [data-theme="vidro"] .os-win .window { background: rgba(32,32,36,.78); backdrop-filter: blur(80px) saturate(120%); -webkit-backdrop-filter: blur(80px) saturate(120%); box-shadow: inset 0 0 0 1px rgba(255,255,255,.06), 0 20px 50px rgba(0,0,0,.4); }
+@media (prefers-reduced-transparency: reduce) {
+  [data-theme="vidro"] .window, [data-theme="vidro"] .menu, [data-theme="vidro"] .hovercard, [data-theme="vidro"] .suggest, [data-theme="vidro"] .sheet, [data-theme="vidro"] .panel { background: #111114; backdrop-filter: none; -webkit-backdrop-filter: none; }
+}
+
+/* ===== Windows: mesma marca, controles e fonte do Windows 11 ===== */
+.caption { display: none; margin-left: 6px; align-self: stretch; }
+.caption button { width: 46px; height: 100%; display: grid; place-items: center; color: var(--mute); }
+.caption button:hover { background: var(--hover); color: var(--ink); }
+.caption button.close:hover { background: #C42B1C; color: #fff; }  /* o vermelho do sistema: único vermelho, e é do Windows */
+.os-win { --ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; --mono: "Cascadia Mono", Consolas, monospace; }
+.os-win .window { border-radius: 8px; }
+.os-win .lights { display: none !important; }
+.os-win .caption { display: flex; }
+.os-win .tabstrip { padding-left: 10px; padding-right: 0; padding-top: 0; height: 40px; }
+.os-win .tabstrip .newtab-btn { margin-right: auto; }
+.os-win .layout-side .toolbar { padding-right: 0; padding-top: 0; }
+.os-win .layout-side .toolbar .caption { height: 40px; }
+.os-win .layout-top .toolbar .caption { display: none; }
+
+/* ===== Folha: criar e configurar um ato ===== */
+.scrim { position: fixed; inset: 0; z-index: 50; background: rgba(5,5,7,.6); display: none; place-items: center; }
+.scrim.open { display: grid; animation: fade .2s var(--ease); }
+@keyframes fade { from { opacity: 0; } }
+.sheet { width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow: auto; background: var(--side); border: 1px solid var(--line-strong); border-radius: calc(16px * var(--round)); animation: sheetIn .32s var(--spring); }
+@keyframes sheetIn { from { opacity: 0; transform: translateY(12px) scale(.98); } }
+.sheet-h { display: flex; align-items: center; gap: 14px; padding: 20px 22px 16px; border-bottom: 1px solid var(--line); }
+.sheet-h h2 { margin: 0; font-size: 15px; font-weight: 600; flex: 1; }
+.sheet-b { padding: 18px 22px; display: grid; gap: 18px; }
+.sheet-f { display: flex; gap: 10px; padding: 14px 22px; border-top: 1px solid var(--line); }
+.sheet-f .grow { flex: 1; }
+.logo.big { width: 48px; height: 48px; font-size: 21px; border-radius: calc(12px * var(--round)); }
+.fld { display: grid; gap: 6px; font-size: 12.5px; color: var(--mute); }
+.field { height: 36px; padding: 0 12px; border-radius: calc(10px * var(--round)); background: var(--sunk); border: 1px solid var(--line); color: var(--ink); outline: 0; width: 100%; font-size: 14px; }
+.field:focus { border-color: var(--line-strong); }
+.palette { display: grid; grid-template-columns: repeat(12, 1fr); gap: 6px; }
+.palette .sw { width: auto; aspect-ratio: 1; height: auto; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px; min-height: 36px; border-radius: calc(10px * var(--round)); background: var(--sunk); border: 1px solid var(--line); }
+.chips .chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px 2px 9px; border: 1px solid var(--line-strong); border-radius: max(calc(7px * var(--round)), calc(var(--pill) * 999px)); font: 12px var(--mono); color: var(--ink); }
+.chips .chip button { width: 18px; height: 18px; display: grid; place-items: center; color: var(--dim); border-radius: 5px; }
+.chips input { flex: 1; min-width: 140px; border: 0; outline: 0; background: transparent; color: var(--ink); font-size: 13px; padding: 2px 4px; }
+
+/* ===== Densidade compacta ===== */
+.dense .tabstrip { height: 40px; } .dense .ttab { height: 28px; }
+.dense .toolbar { padding-top: 6px; padding-bottom: 8px; } .dense .omni-field { height: 30px; }
+.dense .stab { height: 28px; }
+
+/* ===== Painel do protótipo ===== */
+.panel { align-self: start; position: sticky; top: 24px; padding: 16px; border-radius: calc(12px * var(--round)); background: var(--side); border: 1px solid var(--line); font-size: 12.5px; }
+.panel h2 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+.panel p { color: var(--mute); margin: 0 0 14px; }
+.panel fieldset { border: 0; padding: 0; margin: 0 0 12px; }
+.panel legend { color: var(--dim); font-size: 12px; margin-bottom: 6px; }
+.seg { display: flex; border: 1px solid var(--line); border-radius: max(calc(9px * var(--round)), calc(var(--pill) * 999px)); padding: 2px; gap: 2px; }
+.seg button { flex: 1; padding: 3px 8px; border-radius: max(calc(7px * var(--round)), calc(var(--pill) * 999px)); color: var(--mute); font-size: 12.5px; }
+.seg button[aria-pressed="true"] { background: var(--raise); color: var(--ink); }
+.panel kbd { font-size: 11.5px; padding: 0 5px; border-radius: calc(5px * var(--round)); border: 1px solid var(--line); color: var(--mute); }
+.panel ul { margin: 0; padding-left: 16px; color: var(--mute); }
+.panel li { margin: 3px 0; }
+.mem { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; align-items: baseline; color: var(--mute); }
+.mem b { font-family: var(--mono); font-size: 18px; font-weight: 400; color: var(--ink); }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <!-- Ícones da família do Agens (Agens-Prototipos/assets/icons e apps/*.js): grade de 20, traço 1,6, pontas e juntas redondas.
+       Estrela, engrenagem e "sem rede" foram desenhados aqui na mesma gramática. -->
+  <symbol id="i-back" viewBox="0 0 20 20"><path d="M12.5 4.5L7 10L12.5 15.5"/></symbol>
+  <symbol id="i-fwd" viewBox="0 0 20 20"><path d="M7.5 4.5L13 10L7.5 15.5"/></symbol>
+  <symbol id="i-reload" viewBox="0 0 20 20"><path d="M15.5 10A5.5 5.5 0 1 1 13.9 6.1 M14.2 2.8V6.4H10.6"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 20 20"><path d="M5.5 5.5L14.5 14.5 M14.5 5.5L5.5 14.5"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 20 20"><path d="M10 4.5V15.5 M4.5 10H15.5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 20 20"><path d="M5.5 5.5L14.5 14.5 M14.5 5.5L5.5 14.5"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 20 20"><rect x="4.5" y="9" width="11" height="8" rx="2.5"/><path d="M7 9V6.5a3 3 0 0 1 6 0V9"/></symbol>
+  <symbol id="i-search" viewBox="0 0 20 20"><path d="M13.5 8.8A4.8 4.8 0 1 1 3.9 8.8A4.8 4.8 0 1 1 13.5 8.8Z M12.3 12.3L16.3 16.3"/></symbol>
+  <symbol id="i-side" viewBox="0 0 20 20"><rect x="3" y="4" width="14" height="12" rx="3"/><path d="M8 4v12"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 20 20"><path d="M4.5 10H4.6 M10 10H10.1 M15.5 10H15.6" stroke-width="2.6"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 20 20"><path d="M6 8l4 4 4-4"/></symbol>
+  <symbol id="i-play" viewBox="0 0 20 20"><path d="M7 4.8V15.2L15.4 10Z" fill="currentColor"/></symbol>
+  <symbol id="i-wifi" viewBox="0 0 20 20"><path d="M3 8.2a10 10 0 0 1 14 0 M5.6 11a6.3 6.3 0 0 1 8.8 0 M8.3 13.8a2.4 2.4 0 0 1 3.4 0 M10 16.4h.01 M3.5 3.5l13 13"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 20 20"><path d="M15.5 12.5A6.5 6.5 0 0 1 7.5 4.5a6.5 6.5 0 1 0 8 8z"/></symbol>
+  <symbol id="i-star" viewBox="0 0 20 20"><path d="M10 3.6l1.9 4 4.3.5-3.2 2.9.9 4.3L10 13.1l-3.9 2.2.9-4.3-3.2-2.9 4.3-.5z"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 20 20"><path d="M3 6.5a2 2 0 0 1 2-2h3l2 2h5a2 2 0 0 1 2 2v5.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.5"/><path d="M10 6.5V10l2.5 1.5"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 20 20"><circle cx="10" cy="10" r="2.4"/><path d="M10 3.2v1.9M10 14.9v1.9M3.2 10h1.9M14.9 10h1.9M5.2 5.2l1.35 1.35M13.45 13.45l1.35 1.35M5.2 14.8l1.35-1.35M13.45 6.55l1.35-1.35"/></symbol>
+  <symbol id="i-check" viewBox="0 0 20 20"><path d="M4.5 10.5L8.2 14.2L15.5 6"/></symbol>
+</svg>
+
+<div class="stage">
+  <div class="window layout-top" id="win" aria-label="Janela do navegador">
+    <div class="tabstrip">
+      <div class="lights" aria-hidden="true"><i></i><i></i><i></i></div>
+      <div class="tabs-top" role="tablist" aria-label="Abas" id="tabsTop"></div>
+      <button class="newtab-btn" aria-label="Nova aba (⌘T)" data-act="newtab"><svg class="icon"><use href="#i-plus"/></svg></button>
+      <div class="caption" aria-hidden="true"><button tabindex="-1"><svg class="icon" viewBox="0 0 16 16" style="width:10px;height:10px"><path d="M1 8h14"/></svg></button><button tabindex="-1"><svg class="icon" viewBox="0 0 16 16" style="width:10px;height:10px"><rect x="1.5" y="1.5" width="13" height="13" rx="1.5"/></svg></button><button class="close" tabindex="-1"><svg class="icon" viewBox="0 0 16 16" style="width:10px;height:10px"><path d="m2 2 12 12M14 2 2 14"/></svg></button></div>
+    </div>
+    <div class="toolbar">
+      <div class="lights" aria-hidden="true"><i></i><i></i><i></i></div>
+      <button class="tbtn" aria-label="Mostrar ou recolher a lateral" data-act="toggle-side" id="sideBtn" hidden><svg class="icon"><use href="#i-side"/></svg></button>
+      <button class="tbtn" aria-label="Voltar"><svg class="icon"><use href="#i-back"/></svg></button>
+      <button class="tbtn" aria-label="Avançar" disabled><svg class="icon"><use href="#i-fwd"/></svg></button>
+      <button class="tbtn" aria-label="Recarregar" data-act="reload" id="reloadBtn"><svg class="icon"><use href="#i-reload"/></svg></button>
+      <div class="omni" id="omni">
+        <label class="omni-field">
+          <svg class="icon lock" id="omniIcon"><use href="#i-lock"/></svg>
+          <input id="omniInput" aria-label="Endereço e busca (⌘L)" autocomplete="off" spellcheck="false">
+          <button class="star" id="star" aria-label="Adicionar aos favoritos (⌘D)" aria-pressed="false" data-act="star"><svg class="icon"><use href="#i-star"/></svg></button>
+        </label>
+        <div class="suggest" role="listbox" aria-label="Sugestões" id="suggest"></div>
+      </div>
+      <div class="profiles" id="profiles" role="group" aria-label="Ato"></div>
+      <button class="tbtn" aria-label="Menu" aria-haspopup="menu" data-act="mainmenu"><svg class="icon"><use href="#i-menu"/></svg></button>
+      <div class="caption" aria-hidden="true"><button tabindex="-1"><svg class="icon" viewBox="0 0 16 16" style="width:10px;height:10px"><path d="M1 8h14"/></svg></button><button tabindex="-1"><svg class="icon" viewBox="0 0 16 16" style="width:10px;height:10px"><rect x="1.5" y="1.5" width="13" height="13" rx="1.5"/></svg></button><button class="close" tabindex="-1"><svg class="icon" viewBox="0 0 16 16" style="width:10px;height:10px"><path d="m2 2 12 12M14 2 2 14"/></svg></button></div>
+    </div>
+    <nav class="bmbar" id="bmbar" aria-label="Barra de favoritos"></nav>
+    <div class="loadbar" aria-hidden="true"></div>
+    <div class="body">
+      <nav class="sidebar" aria-label="Abas na lateral">
+        <div class="space-body" id="spaceBody">
+          <div class="space-title"><span class="avatar" id="sideAvatar"></span><span class="name" id="sideName"></span></div>
+          <div class="pinned" id="pinned" role="tablist" aria-label="Abas fixadas"></div>
+          <div class="side-sep"></div>
+          <button class="stab side-new" data-act="newtab"><svg class="icon"><use href="#i-plus"/></svg><span class="title">Nova aba</span></button>
+          <div class="side-list" id="sideList" role="tablist" aria-label="Abas" aria-orientation="vertical"></div>
+        </div>
+        <div class="spaces" id="spaces" role="tablist" aria-label="Atos"></div>
+      </nav>
+      <main class="content" id="content" tabindex="-1"></main>
+    </div>
+  </div>
+
+  <aside class="panel" aria-label="Controles do protótipo">
+    <h2>Protótipo da janela</h2>
+    <p>Issue #17. O navegador é o Agens: na marca do Agens (Grafite e Brasa, Agens-Prototipos/DESIGN.md). Clique nas abas, nos atos e na barra de endereço.</p>
+    <fieldset><legend>Abas</legend>
+      <div class="seg" data-group="layout"><button data-v="top" aria-pressed="true">Em cima</button><button data-v="side">Na lateral</button></div>
+    </fieldset>
+    <fieldset><legend>Lateral</legend>
+      <div class="seg" data-group="collapse"><button data-v="open" aria-pressed="true">Aberta</button><button data-v="collapsed">Recolhida</button></div>
+    </fieldset>
+    <fieldset><legend>Sistema</legend>
+      <div class="seg" data-group="os"><button data-v="mac" aria-pressed="true">macOS</button><button data-v="win">Windows</button></div>
+    </fieldset>
+    <fieldset><legend>Tema</legend>
+      <div class="seg" data-group="theme"><button data-v="grafite" aria-pressed="true">Grafite</button><button data-v="vidro">Vidro</button><button data-v="brasa">Brasa</button><button data-v="custom">Seu</button></div>
+    </fieldset>
+    <fieldset><legend>Modo</legend>
+      <div class="seg" data-group="mode"><button data-v="dark" aria-pressed="true">Escuro</button><button data-v="light">Claro</button><button data-v="system">Sistema</button></div>
+    </fieldset>
+    <fieldset><legend>Página</legend>
+      <div class="seg" data-group="state"><button data-v="normal" aria-pressed="true">Normal</button><button data-v="loading">Carregando</button><button data-v="error">Sem rede</button></div>
+    </fieldset>
+    <fieldset><legend>Janela</legend>
+      <div class="seg" data-group="screen"><button data-v="window" aria-pressed="true">Janela</button><button data-v="full">Tela cheia</button></div>
+    </fieldset>
+    <ul>
+      <li>Menu <b>⋯</b>: favoritos, histórico e configurações. Estrela na barra: favoritar a aba.</li>
+      <li>Passe o mouse numa aba: cartão com a memória dela.</li>
+      <li>Abas cinza: dormindo (#24). Clique para acordar.</li>
+      <li>Abas na lateral: os atos ficam no pé. Cada ato tem as próprias abas, logins e cookies. O <b>+</b> cria um ato.</li>
+      <li>Primeira instalação: <a href="primeiro-uso.html" style="color:var(--light-2)">primeiro-uso.html</a></li>
+      <li><kbd>⌘L</kbd> barra · <kbd>⌘T</kbd> nova aba · <kbd>⌘⇧S</kbd> lateral · <kbd>⌘1–9</kbd> aba · <kbd>⌃⇥</kbd> próxima · <kbd>⌘⇧1–5</kbd> ato · <kbd>⌘D</kbd> favoritar · <kbd>⌘⇧B</kbd> barra de favoritos · <kbd>⌘Y</kbd> histórico · <kbd>⌘,</kbd> configurações</li>
+    </ul>
+    <div class="mem"><span>Memória (simulada)</span><b id="memTotal">—</b></div>
+  </aside>
+</div>
+
+<div class="hovercard" id="hover" role="tooltip"></div>
+<div class="menu" id="menu" role="menu" aria-label="Atos"></div>
+<div class="scrim" id="scrim"><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle" id="sheet"></div></div>
+
+<script>
+// atos: a cor do ato mora só no rosto (monograma), nunca na janela
+const PROFILES = [
+  { id: "pessoal", name: "Pessoal", color: "#FF9D5C", letter: "P" },
+  { id: "a", name: "Cliente A", color: "#3F9CFF", letter: "A", sites: ["cliente-a.test", "github.com/cliente-a"] },
+  { id: "b", name: "Cliente B", color: "#FF7E98", letter: "B", asleep: true },
+  { id: "e", name: "Estúdio", color: "#CF6FEA", letter: "E", asleep: true },
+  { id: "x", name: "Projeto X", color: "#2BC7C0", letter: "X", asleep: true },
+];
+const C = ["#9146ff", "#ff0033", "#24292f", "#0ea5e9", "#f97316", "#16a34a", "#e11d48", "#6366f1"];
+let tabs = [
+  { t: "gaules - Twitch", u: "twitch.tv/gaules", l: "G", c: C[0], kind: "live", live: true, pinned: true, mem: 410 },
+  { t: "Lofi Girl - lofi hip hop radio", u: "youtube.com/watch?v=jfKfPfyJRdk", l: "Y", c: C[1], kind: "live", live: true, mem: 360 },
+  { t: "Pull requests · nodejs/node", u: "github.com/nodejs/node/pulls", l: "GH", c: C[2], kind: "article", pinned: true, mem: 140 },
+  { t: "JavaScript | MDN", u: "developer.mozilla.org/docs/Web/JavaScript", l: "M", c: C[3], kind: "article", mem: 110 },
+  { t: "Just Chatting - Twitch", u: "twitch.tv/directory/category/just-chatting", l: "T", c: C[0], kind: "article", sleeping: true, mem: 0, was: 230 },
+  { t: "UOL - O melhor conteúdo", u: "uol.com.br", l: "U", c: C[4], kind: "article", sleeping: true, mem: 0, was: 260 },
+  { t: "Google Maps", u: "google.com/maps", l: "Ma", c: C[5], kind: "article", sleeping: true, mem: 0, was: 190 },
+  { t: "counter strike - YouTube", u: "youtube.com/results?search_query=counter+strike", l: "Y", c: C[1], kind: "article", sleeping: true, mem: 0, was: 210 },
+  { t: "alanzoka - Twitch", u: "twitch.tv/alanzoka", l: "A", c: C[0], kind: "live", live: true, sleeping: true, mem: 0, was: 380 },
+];
+let bookmarks = [
+  { t: "gaules", u: "twitch.tv/gaules", l: "G", c: C[0], f: "Lives" },
+  { t: "alanzoka", u: "twitch.tv/alanzoka", l: "A", c: C[0], f: "Lives" },
+  { t: "Lofi Girl", u: "youtube.com/watch?v=jfKfPfyJRdk", l: "Y", c: C[1], f: "Lives" },
+  { t: "nodejs/node", u: "github.com/nodejs/node/pulls", l: "GH", c: C[2] },
+  { t: "MDN", u: "developer.mozilla.org/docs/Web/JavaScript", l: "M", c: C[3] },
+  { t: "Agens", u: "github.com/SugiyamaLabs/agens", l: "GH", c: C[2], f: "Trabalho" },
+  { t: "Board do navegador", u: "github.com/orgs/SugiyamaLabs/projects/3", l: "GH", c: C[2], f: "Trabalho" },
+];
+const HISTORY = [
+  ["Hoje", "21:42", "Lofi Girl - lofi hip hop radio", "youtube.com", "Y", C[1]],
+  ["Hoje", "21:30", "gaules - Twitch", "twitch.tv", "G", C[0]],
+  ["Hoje", "20:58", "Pull requests · nodejs/node", "github.com", "GH", C[2]],
+  ["Hoje", "20:41", "JavaScript | MDN", "developer.mozilla.org", "M", C[3]],
+  ["Hoje", "19:12", "UOL - O melhor conteúdo", "uol.com.br", "U", C[4]],
+  ["Hoje", "18:05", "Google Maps", "google.com/maps", "Ma", C[5]],
+  ["Ontem", "23:10", "alanzoka - Twitch", "twitch.tv", "A", C[0]],
+  ["Ontem", "22:47", "counter strike - YouTube", "youtube.com", "Y", C[1]],
+  ["Ontem", "16:20", "Just Chatting - Twitch", "twitch.tv", "T", C[0]],
+  ["Sábado, 7 de novembro", "14:03", "SugiyamaLabs/agens", "github.com", "GH", C[2]],
+];
+const prefs = { bmbar: true, dense: false, sleepAfter: "5", sleepOn: true, search: "DuckDuckGo", restore: true, adblock: true, adlevel: "forte", annoy: true,
+  shareCookies: false, startup: "continuar", lang: "Português (Brasil)", zoom: "100%", font: "Médio", minFont: "Nenhum", cookies: "Bloquear", dns: "Quad9 (criptografado)" };
+let settingsSection = "aparencia", historyQuery = "";
+// Atos: cada ato tem as próprias abas e a aba ativa
+const SPACE_TABS = {
+  1: [
+    { t: "Checkout · staging", u: "staging.cliente-a.test/checkout", l: "A", c: "#3F9CFF", kind: "article", pinned: true, mem: 180 },
+    { t: "PR #482 · Checkout novo", u: "github.com/cliente-a/loja/pull/482", l: "GH", c: C[2], kind: "article", mem: 150 },
+    { t: "Painel de pedidos", u: "admin.cliente-a.test/pedidos", l: "A", c: "#3F9CFF", kind: "article", mem: 210 },
+    { t: "Documentação da API", u: "docs.cliente-a.test/api", l: "D", c: C[7], kind: "article", sleeping: true, mem: 0, was: 120 },
+  ],
+  2: [
+    { t: "Loja B · produção", u: "loja.cliente-b.test", l: "B", c: "#FF7E98", kind: "article", pinned: true, sleeping: true, mem: 0, was: 200 },
+    { t: "Relatório semanal", u: "relatorios.cliente-b.test/semana", l: "B", c: "#FF7E98", kind: "article", sleeping: true, mem: 0, was: 160 },
+  ],
+  3: [
+    { t: "Moodboard · campanha", u: "board.estudio.test/campanha", l: "E", c: "#CF6FEA", kind: "article", sleeping: true, mem: 0, was: 240 },
+  ],
+  4: [
+    { t: "Projeto X · roadmap", u: "projetox.test/roadmap", l: "X", c: "#2BC7C0", kind: "article", sleeping: true, mem: 0, was: 140 },
+    { t: "Projeto X · issues", u: "github.com/projeto-x/app/issues", l: "GH", c: C[2], kind: "article", sleeping: true, mem: 0, was: 130 },
+  ],
+};
+const SPACE_ACTIVE = { 1: 0, 2: 0, 3: 0, 4: 0 };
+let active = 1, profile = 0, state = "normal";
+const $ = s => document.querySelector(s), win = $("#win"), root = document.documentElement;
+const esc = s => s.replace(/[&<>"]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
+const fav = tab => `<span class="fav" style="background:${tab.c}" aria-hidden="true">${tab.l}<span class="zz"></span></span>`;
+
+function tabHTML(tab, i, cls) {
+  const meta = tab.live && !tab.sleeping ? (cls === "ttab" ? '<span class="live-dot" title="Ao vivo"></span>' : '<span class="badge-live">ao vivo</span>') : (state === "loading" && i === active ? '<span class="spin"></span>' : "");
+  const label = `${tab.t}${tab.sleeping ? ", dormindo" : ""}`;
+  return `<div class="${cls}${tab.sleeping ? " sleeping" : ""}" role="tab" tabindex="${i === active ? 0 : -1}" aria-selected="${i === active}" aria-label="${esc(label)}" data-i="${i}">
+    ${fav(tab)}<span class="title">${esc(tab.t)}</span><span class="meta">${meta}</span>
+    <button class="x" aria-label="Fechar aba ${esc(tab.t)}" data-close="${i}" tabindex="-1"><svg class="icon" style="width:12px;height:12px"><use href="#i-x"/></svg></button></div>`;
+}
+
+function render() {
+  $("#tabsTop").innerHTML = tabs.map((tab, i) => tabHTML(tab, i, "ttab")).join("");
+  $("#pinned").innerHTML = tabs.map((tab, i) => tab.pinned ? `<div class="pin${tab.sleeping ? " sleeping" : ""}" role="tab" tabindex="-1" aria-selected="${i === active}" aria-label="${esc(tab.t)}" data-i="${i}">${fav(tab)}</div>` : "").join("");
+  $("#sideList").innerHTML = tabs.map((tab, i) => tab.pinned ? "" : tabHTML(tab, i, "stab")).join("");
+  const p = PROFILES[profile];
+  root.style.setProperty("--profile", p.color);
+  $("#sideAvatar").textContent = p.letter; $("#sideAvatar").style.background = p.color; $("#sideName").textContent = p.name;
+  $("#spaces").innerHTML = PROFILES.map((q, i) => `<button class="space${q.asleep && i !== profile ? " asleep" : ""}" role="tab" aria-selected="${i === profile}" data-p="${i}" title="${esc(q.name)}${q.asleep && i !== profile ? " · dormindo" : ""}" aria-label="${esc(q.name)}"><span class="logo" style="background:${q.color}">${q.letter}</span></button>`).join("")
+    + `<button class="space add" aria-label="Novo ato"><svg class="icon"><use href="#i-plus"/></svg></button>`;
+  $("#profiles").innerHTML = PROFILES.map((q, i) => `<button data-p="${i}" aria-pressed="${i === profile}" class="${q.asleep && i !== profile ? "asleep" : ""}" title="${esc(q.name)}${q.asleep && i !== profile ? " · dormindo" : ""}" aria-label="${esc(q.name)}"><span class="logo" style="background:${q.color}">${q.letter}</span><span class="lbl">${esc(q.name)}</span></button>`).join("");
+  const tab = tabs[active];
+  $("#omniInput").value = tab ? tab.u : "";
+  const starred = !!tab && tab.kind !== "internal" && bookmarks.some(b => b.u === tab.u);
+  $("#star").hidden = !tab || tab.kind === "internal";
+  $("#star").classList.toggle("on", starred); $("#star").setAttribute("aria-pressed", starred);
+  $("#star").setAttribute("aria-label", starred ? "Remover dos favoritos (⌘D)" : "Adicionar aos favoritos (⌘D)");
+  $("#bmbar").hidden = !prefs.bmbar; win.classList.toggle("dense", prefs.dense);
+  renderBmBar();
+  $("#omniIcon").innerHTML = `<use href="#${!tab ? "i-search" : tab.kind === "internal" ? "i-gear" : "i-lock"}"/>`;
+  win.classList.toggle("loading", state === "loading");
+  $("#reloadBtn").innerHTML = `<svg class="icon"><use href="#${state === "loading" ? "i-stop" : "i-reload"}"/></svg>`;
+  renderContent();
+  const total = 70 + 73 + 44 + tabs.reduce((s, t) => s + (t.sleeping ? 0 : t.mem), 0);
+  $("#memTotal").textContent = `${total.toLocaleString("pt-BR")} MB`;
+}
+
+function renderContent() {
+  const tab = tabs[active], c = $("#content");
+  c.classList.toggle("ntp-bg", !tab);
+  if (tab && tab.kind === "internal") { c.innerHTML = INTERNAL[tab.page](); return; }
+  if (!tab) {
+    c.innerHTML = `<div class="ntp"><div class="ntp-inner">
+      <svg class="mark" viewBox="21 21 128 128" aria-hidden="true"><defs><radialGradient id="ml" cx=".42" cy=".38" r=".62"><stop offset="0" stop-color="#FFFDF7"/><stop offset=".45" stop-color="#FFE9C7"/><stop offset=".85" stop-color="#FFC98A"/><stop offset="1" stop-color="#F7A95C"/></radialGradient><mask id="mc"><rect width="200" height="200" fill="#fff"/><circle cx="52" cy="52" r="34" fill="#000"/></mask></defs><rect x="52" y="52" width="92" height="92" rx="24" fill="#F2F0EC" mask="url(#mc)"/><circle cx="52" cy="52" r="26" fill="url(#ml)"/></svg>
+      <h1>Boa tarde</h1>
+      <label class="omni-field"><svg class="icon"><use href="#i-search"/></svg><input aria-label="Buscar, digitar endereço ou um comando" placeholder="Buscar, endereço ou comando"><kbd>⌘L</kbd></label>
+      <div class="shortcuts">${["Twitch|T|" + C[0], "YouTube|Y|" + C[1], "GitHub|GH|" + C[2], "MDN|M|" + C[3], "UOL|U|" + C[4]].map(s => { const [n, l, col] = s.split("|"); return `<button class="sc"><span class="fav" style="background:${col}">${l}</span>${n}</button>`; }).join("")}</div>
+      <p class="quiet">Sem notícias, sem anúncios e sem nada falando com servidor de fora.</p></div></div>`;
+    return;
+  }
+  if (state === "error") {
+    c.innerHTML = `<div class="error"><div><svg class="icon" style="width:40px;height:40px;stroke-width:1.4;color:var(--dim)"><use href="#i-wifi"/></svg>
+      <h2>Sem conexão com a internet</h2><div>Confira o Wi-Fi ou o cabo e tente de novo.</div><div><code>ERR_INTERNET_DISCONNECTED</code></div>
+      <button class="btn pri" data-act="retry" style="margin-top:18px">Tentar de novo</button></div></div>`;
+    return;
+  }
+  if (tab.kind === "live") {
+    c.innerHTML = `<div class="page"><div class="player"><span class="badge-live">ao vivo</span><span class="play"><svg class="icon" style="width:22px;height:22px"><use href="#i-play"/></svg></span></div>
+      <h2 style="margin:18px 0 2px;font-size:22px;font-weight:600">${esc(tab.t)}</h2><div style="color:var(--dim);font-size:13px">${esc(tab.u)}</div>
+      <div class="sk" style="width:90%;margin-top:18px"></div><div class="sk" style="width:70%"></div></div>`;
+  } else {
+    c.innerHTML = `<div class="page"><h1 class="h-display">${esc(tab.t)}</h1>
+      ${[100, 96, 88, 92, 60, 0, 100, 94, 97, 70].map(w => w ? `<div class="sk" style="width:${w}%"></div>` : "<br>").join("")}</div>`;
+  }
+}
+
+function select(i) {
+  if (i < 0 || i >= tabs.length) return;
+  active = i;
+  const tab = tabs[i];
+  if (tab.sleeping) { // acordar: recarrega com o estado salvo
+    tab.sleeping = false; tab.mem = tab.was; state = "loading"; render();
+    setTimeout(() => { state = "normal"; syncSeg("state", "normal"); render(); }, 900);
+    return;
+  }
+  render();
+}
+function renderBmBar() {
+  const loose = bookmarks.filter(b => !b.f), folders = [...new Set(bookmarks.filter(b => b.f).map(b => b.f))];
+  $("#bmbar").innerHTML = folders.map(f => `<button class="bm bm-folder" data-folder="${esc(f)}" aria-haspopup="menu"><svg class="icon"><use href="#i-folder"/></svg>${esc(f)}</button>`).join("")
+    + loose.map(b => `<button class="bm" data-open="${esc(b.u)}">${fav(b)}${esc(b.t)}</button>`).join("");
+}
+function openUrl(u) {
+  const i = tabs.findIndex(t => t.u === u);
+  if (i >= 0) return select(i);
+  const b = bookmarks.find(x => x.u === u) || {};
+  tabs.push({ t: b.t || u, u, l: b.l || "•", c: b.c || C[7], kind: u.includes("twitch") || u.includes("watch") ? "live" : "article", live: u.includes("twitch.tv/") && !u.includes("directory"), mem: 180 });
+  select(tabs.length - 1);
+}
+const INTERNAL_URL = { history: "agens://historico", bookmarks: "agens://favoritos", settings: "agens://configuracoes" };
+const INTERNAL_TITLE = { history: "Histórico", bookmarks: "Favoritos", settings: "Configurações" };
+function openInternal(page) {
+  const i = tabs.findIndex(t => t.page === page);
+  if (i >= 0) return select(i);
+  tabs.push({ t: INTERNAL_TITLE[page], u: INTERNAL_URL[page], l: page === "settings" ? "C" : page === "history" ? "H" : "F", c: "#3A3A42", kind: "internal", page, mem: 40 });
+  select(tabs.length - 1);
+}
+function toggleStar() {
+  const tab = tabs[active]; if (!tab || tab.kind === "internal") return;
+  const i = bookmarks.findIndex(b => b.u === tab.u);
+  if (i >= 0) bookmarks.splice(i, 1); else bookmarks.push({ t: tab.t.split(" - ")[0], u: tab.u, l: tab.l, c: tab.c });
+  render();
+}
+const segHTML = (key, opts, cur) => `<div class="seg2" role="group">${opts.map(([v, n]) => `<button data-pref="${key}" data-v="${v}" aria-pressed="${cur === v}">${n}</button>`).join("")}</div>`;
+const sw = (key, on, label) => `<button class="switch" role="switch" aria-checked="${on}" aria-label="${label}" data-toggle="${key}"></button>`;
+const INTERNAL = {
+  history() {
+    const q = historyQuery.toLowerCase(), rows = HISTORY.filter(h => !q || h[2].toLowerCase().includes(q) || h[3].includes(q));
+    let day = "", out = "";
+    for (const h of rows) {
+      if (h[0] !== day) { day = h[0]; out += `<div class="day">${esc(day)}</div>`; }
+      out += `<div class="row"><span class="time">${h[1]}</span><span class="fav" style="background:${h[5]}">${h[4]}</span><span class="t">${esc(h[2])}</span><span class="d">${esc(h[3])}</span><button class="tbtn rm" aria-label="Remover do histórico"><svg class="icon"><use href="#i-x"/></svg></button></div>`;
+    }
+    return `<div class="ip"><div class="ip-head"><h1>Histórico</h1>
+      <label class="search"><svg class="icon"><use href="#i-search"/></svg><input id="histQ" aria-label="Buscar no histórico" placeholder="Buscar no histórico" value="${esc(historyQuery)}"></label>
+      <button class="btn sm" data-act="clearhist">Apagar histórico…</button></div>
+      ${out || '<div class="empty">Nada encontrado.</div>'}
+      <p class="note" style="margin-top:24px">O histórico fica só neste Mac, por ato. Nada vai para servidor nenhum.</p></div>`;
+  },
+  bookmarks() {
+    const groups = {}; for (const b of bookmarks) (groups[b.f || "Barra de favoritos"] ||= []).push(b);
+    return `<div class="ip"><div class="ip-head"><h1>Favoritos</h1>
+      <label class="search"><svg class="icon"><use href="#i-search"/></svg><input aria-label="Buscar nos favoritos" placeholder="Buscar nos favoritos"></label>
+      <button class="btn sm">Nova pasta</button></div>
+      ${Object.entries(groups).map(([f, list]) => `<div class="folder"><svg class="icon"><use href="#i-folder"/></svg>${esc(f)}</div>`
+        + list.map(b => `<div class="row" data-open="${esc(b.u)}">${fav(b)}<span class="t">${esc(b.t)}</span><span class="d">${esc(b.u)}</span><button class="tbtn rm" aria-label="Remover ${esc(b.t)}" data-unbm="${esc(b.u)}"><svg class="icon"><use href="#i-x"/></svg></button></div>`).join("")).join("")}
+      <p class="note" style="margin-top:24px">Arraste para reordenar ou mover entre pastas. Importar do Brave, Chrome ou Safari: Configurações › Atos.</p></div>`;
+  },
+  settings() {
+    const S = { inicio: "Ao abrir", aparencia: "Aparência", abas: "Abas que dormem", atos: "Atos", busca: "Busca", privacidade: "Privacidade e segurança", bloqueador: "Bloqueador", permissoes: "Permissões dos sites", senhas: "Senhas e preenchimento", downloads: "Downloads", idiomas: "Idiomas", acessibilidade: "Acessibilidade e página", extensoes: "Extensões", sistema: "Sistema", sobre: "Sobre" };
+    const sel = (key, opts, label) => `<select class="sel" data-sel="${key}" aria-label="${label}">${opts.map(o => `<option ${prefs[key] === o ? "selected" : ""}>${o}</option>`).join("")}</select>`;
+    const tog = (key, label) => sw(key, prefs[key] !== false, label);
+    const layout = win.classList.contains("layout-side") ? "side" : "top";
+    const theme = $('[data-group="theme"] [aria-pressed="true"]').dataset.v;
+    const pane = {
+      aparencia: `<h2>Aparência</h2><div class="group">
+        <div class="opt"><span class="lbl">Posição das abas<small>Troca na hora, sem reiniciar. Atalho ⌘⇧S.</small></span>${segHTML("layout", [["top", "Em cima"], ["side", "Na lateral"]], layout)}</div>
+        <div class="opt"><span class="lbl">Modo<small>${$('[data-group="theme"] [aria-pressed="true"]').dataset.v === "brasa" ? "A Brasa só existe escura." : "Vale para Grafite, Vidro e Personalizado."}</small></span>${segHTML("mode", [["dark", "Escuro"], ["light", "Claro"], ["system", "Sistema"]], prefs.mode || "dark")}</div>
+        <div class="opt"><span class="lbl">Tema<small>Grafite, Vidro e Brasa são os do Agens. Personalizado é o seu.</small></span>${segHTML("theme", [["grafite", "Grafite"], ["vidro", "Vidro"], ["brasa", "Brasa"], ["custom", "Personalizado"]], theme)}</div>
+        ${theme === "custom" ? customHTML() : ""}
+        <div class="opt"><span class="lbl">Densidade<small>Compacta deixa a barra e as abas mais baixas.</small></span>${segHTML("dense", [["0", "Normal"], ["1", "Compacta"]], prefs.dense ? "1" : "0")}</div>
+        <div class="opt"><span class="lbl">Barra de favoritos<small>Atalho ⌘⇧B.</small></span>${sw("bmbar", prefs.bmbar, "Mostrar barra de favoritos")}</div>
+        <div class="opt"><span class="lbl">Cor do ato<small>Aparece só no rosto do ato: o monograma e o seletor.</small></span><div class="swatches">${["#FF7E98", "#FF9D5C", "#CF6FEA", "#9F86FF", "#3F9CFF", "#2BC7C0", "#7F9BC7"].map(col => `<button class="sw" style="background:${col}" aria-label="Cor ${col}" aria-pressed="${PROFILES[profile].color === col}" data-color="${col}"></button>`).join("")}</div></div>
+      </div>`,
+      abas: `<h2>Abas que dormem</h2><div class="group">
+        <div class="opt"><span class="lbl">Pôr abas para dormir<small>A aba escondida fecha o processo e guarda o estado. Ao voltar, recarrega.</small></span>${sw("sleepOn", prefs.sleepOn, "Pôr abas para dormir")}</div>
+        <div class="opt"><span class="lbl">Dormir depois de</span><select class="sel" data-sel="sleepAfter" aria-label="Dormir depois de">${["1", "2", "5", "15", "30", "60"].map(m => `<option value="${m}" ${prefs.sleepAfter === m ? "selected" : ""}>${m} min escondida</option>`).join("")}</select></div>
+      </div><p class="note">Nunca dormem: aba tocando som, usando câmera ou microfone, com formulário preenchido, enviando arquivo, fixada ou em Picture-in-Picture.</p>
+      <div class="group"><div class="opt"><span class="lbl">Sites que nunca dormem<small>twitch.tv/gaules</small></span><button class="btn sm">Adicionar…</button></div></div>`,
+      bloqueador: `<h2>Bloqueador</h2><p class="lead">Nativo, dentro do Agens: não é extensão e não gasta memória por aba.</p><div class="group">
+        <div class="opt"><span class="lbl">Bloquear anúncios e rastreadores<small>Hoje: <span class="mono">1.284</span> bloqueados · <span class="mono">~38 MB</span> de memória e <span class="mono">96 MB</span> de dados poupados.</small></span>${sw("adblock", prefs.adblock, "Bloquear anúncios e rastreadores")}</div>
+        <div class="opt"><span class="lbl">Nível<small>Forte vem ligado. Se um site quebrar, libere só ele.</small></span>${segHTML("adlevel", [["padrao", "Padrão"], ["forte", "Forte"]], prefs.adlevel)}</div>
+        <div class="opt"><span class="lbl">Avisos de cookies e pop-ups de "fique por dentro"</span>${sw("annoy", prefs.annoy, "Esconder avisos de cookies")}</div>
+        <div class="opt"><span class="lbl">Listas<small>EasyList, EasyPrivacy e as do uBlock Origin. Vêm junto com cada atualização do Agens: o bloqueador não baixa nada sozinho.</small></span></div>
+      </div><div class="group"><div class="opt"><span class="lbl">Sites liberados<small>twitch.tv/gaules (apoiar o canal)</small></span><button class="btn sm">Adicionar…</button></div></div>`,
+      inicio: `<h2>Ao abrir</h2><div class="group">
+        <div class="opt"><span class="lbl">Quando o Agens abrir</span>${segHTML("startup", [["continuar", "Continuar de onde parei"], ["nova", "Nova aba"], ["paginas", "Páginas escolhidas"]], prefs.startup)}</div>
+        <div class="opt"><span class="lbl">Navegador padrão<small>Links de outros apps abrem no Agens, no ato certo.</small></span><button class="btn sm pri" style="background:var(--hi);color:var(--on-hi);border-color:var(--hi)">Tornar padrão</button></div>
+        <div class="opt"><span class="lbl">Avisar antes de sair com várias abas<small>⌘Q pede confirmação.</small></span>${tog("warnQuit", "Avisar antes de sair")}</div>
+      </div>`,
+      permissoes: `<h2>Permissões dos sites</h2><p class="lead">O padrão vale para todos os sites; cada site pode ter a sua exceção.</p><div class="group">
+        ${[["Câmera", "Perguntar"], ["Microfone", "Perguntar"], ["Localização", "Bloquear"], ["Notificações", "Bloquear"], ["Pop-ups e redirecionamentos", "Bloquear"], ["Som", "Permitir"], ["Reprodução automática com som", "Bloquear"], ["Área de transferência", "Perguntar"], ["Downloads automáticos", "Perguntar"], ["JavaScript", "Permitir"], ["Conteúdo protegido (DRM)", "Permitir"]].map(([n, v]) => `<div class="opt"><span class="lbl">${n}</span><select class="sel" aria-label="${n}"><option ${v === "Perguntar" ? "selected" : ""}>Perguntar</option><option ${v === "Permitir" ? "selected" : ""}>Permitir</option><option ${v === "Bloquear" ? "selected" : ""}>Bloquear</option></select></div>`).join("")}
+      </div><div class="group"><div class="opt"><span class="lbl">Exceções por site<small>meet.google.com · câmera e microfone permitidos</small></span><button class="btn sm">Ver todas</button></div></div>`,
+      senhas: `<h2>Senhas e preenchimento</h2><div class="group">
+        <div class="opt"><span class="lbl">Oferecer para salvar senhas<small>Guardadas no Keychain do Mac, por ato.</small></span>${tog("savePw", "Oferecer para salvar senhas")}</div>
+        <div class="opt"><span class="lbl">Entrar sozinho<small>Usa a senha salva sem perguntar quando há só uma.</small></span>${tog("autoSignin", "Entrar sozinho")}</div>
+        <div class="opt"><span class="lbl">Senhas salvas</span><span class="mono" style="color:var(--mute)">42</span><button class="btn sm">Gerenciar</button></div>
+        <div class="opt"><span class="lbl">Chaves de acesso (passkeys)<small>Do Keychain do iCloud e do 1Password.</small></span><button class="btn sm">Gerenciar</button></div>
+      </div><div class="group">
+        <div class="opt"><span class="lbl">Endereços</span>${tog("addr", "Preencher endereços")}</div>
+        <div class="opt"><span class="lbl">Cartões<small>O código de segurança nunca é salvo.</small></span>${tog("cards", "Preencher cartões")}</div>
+        <div class="opt"><span class="lbl">Usar o 1Password quando a extensão estiver no ato<small>O preenchimento do Agens sai do caminho.</small></span>${tog("op", "Preferir 1Password")}</div>
+      </div>`,
+      downloads: `<h2>Downloads</h2><div class="group">
+        <div class="opt"><span class="lbl">Salvar em<small class="mono">~/Downloads</small></span><button class="btn sm">Mudar…</button></div>
+        <div class="opt"><span class="lbl">Perguntar onde salvar cada arquivo</span>${sw("askDl", prefs.askDl === true, "Perguntar onde salvar")}</div>
+        <div class="opt"><span class="lbl">Abrir arquivos seguros depois de baixar<small>PDF, imagens e textos.</small></span>${sw("openSafe", prefs.openSafe === true, "Abrir arquivos seguros")}</div>
+        <div class="opt"><span class="lbl">Uma pasta por ato<small class="mono">~/Downloads/Cliente A</small></span>${sw("dlPerProfile", prefs.dlPerProfile === true, "Uma pasta por ato")}</div>
+      </div>`,
+      idiomas: `<h2>Idiomas</h2><div class="group">
+        <div class="opt"><span class="lbl">Idioma do Agens</span>${sel("lang", ["Português (Brasil)", "English", "Español"], "Idioma do Agens")}</div>
+        <div class="opt"><span class="lbl">Idiomas preferidos dos sites<small>Português (Brasil), English</small></span><button class="btn sm">Editar</button></div>
+        <div class="opt"><span class="lbl">Correção ortográfica<small>Do macOS, no próprio Mac. Nada é enviado.</small></span>${tog("spell", "Correção ortográfica")}</div>
+        <div class="opt"><span class="lbl">Tradução de páginas<small>Não existe: traduzir mandaria a página para um servidor de fora.</small></span><span style="color:var(--mute)">Desligada</span></div>
+      </div>`,
+      acessibilidade: `<h2>Acessibilidade e página</h2><div class="group">
+        <div class="opt"><span class="lbl">Zoom padrão das páginas</span>${sel("zoom", ["90%", "100%", "110%", "125%", "150%"], "Zoom padrão")}</div>
+        <div class="opt"><span class="lbl">Tamanho da fonte</span>${sel("font", ["Pequeno", "Médio", "Grande", "Muito grande"], "Tamanho da fonte")}</div>
+        <div class="opt"><span class="lbl">Tamanho mínimo da fonte</span>${sel("minFont", ["Nenhum", "9 pt", "12 pt", "14 pt"], "Tamanho mínimo da fonte")}</div>
+        <div class="opt"><span class="lbl">Tab percorre links e botões<small>Além dos campos.</small></span>${tog("tabLinks", "Tab percorre links")}</div>
+        <div class="opt"><span class="lbl">Legendas automáticas<small>Geradas no próprio Mac, para áudio e vídeo.</small></span>${sw("captions", prefs.captions === true, "Legendas automáticas")}</div>
+        <div class="opt"><span class="lbl">Reduzir movimento e transparência<small>Segue os ajustes do macOS.</small></span><span style="color:var(--mute)">Do sistema</span></div>
+      </div>`,
+      extensoes: `<h2>Extensões</h2><p class="lead">Da Chrome Web Store, por ato. Os bots não usam extensões.</p><div class="group">
+        <div class="opt"><span class="logo" style="background:#3F9CFF">1P</span><span class="lbl">1Password<small>Só no ato Cliente A</small></span>${sw("x1p", true, "1Password")}</div>
+        <div class="opt"><span class="lbl">Instalar da Chrome Web Store</span><button class="btn sm">Abrir loja</button></div>
+        <div class="opt"><span class="lbl">Modo de desenvolvedor<small>Carregar extensão sem empacotar.</small></span>${sw("devmode", prefs.devmode === true, "Modo de desenvolvedor")}</div>
+      </div>`,
+      sistema: `<h2>Sistema</h2><div class="group">
+        <div class="opt"><span class="lbl">Aceleração por hardware</span>${tog("gpu", "Aceleração por hardware")}</div>
+        <div class="opt"><span class="lbl">Continuar rodando depois de fechar as janelas<small>Para o Agens e as pontes receberem a sessão.</small></span>${tog("bg", "Continuar rodando")}</div>
+        <div class="opt"><span class="lbl">Configurações de proxy<small>Usa as do macOS.</small></span><button class="btn sm">Abrir</button></div>
+        <div class="opt"><span class="lbl">Restaurar as configurações originais</span><button class="btn sm">Restaurar…</button></div>
+      </div>`,
+      atos: `<h2>Atos</h2><div class="group">${PROFILES.map((p, i) => `<div class="opt"><span class="logo" style="background:${p.color}">${p.letter}</span><span class="lbl">${esc(p.name)}<small>${i === profile ? "Em uso" : p.asleep ? "Dormindo · 0 MB" : "Aberto"}${p.sites?.length ? " · " + p.sites.map(esc).join(", ") : ""}</small></span><button class="btn sm" data-edit="${i}">Configurar</button></div>`).join("")}
+        <div class="opt"><span class="lbl">Novo ato<small>Abas, logins, cookies e extensões só dele.</small></span><button class="btn sm" data-newteam>Criar…</button></div></div>
+        <div class="group"><div class="opt"><span class="lbl">Compartilhar cookies entre os atos?<small>${prefs.shareCookies ? "Ligado: entrar num site em um ato vale para todos os atos." : "Desligado: cada ato tem os próprios logins. Recomendado."}</small></span>${sw("shareCookies", prefs.shareCookies === true, "Compartilhar cookies entre os atos")}</div></div>
+        <div class="group"><div class="opt"><span class="lbl">Atos fora de uso dormem<small>Só o ato em uso fica carregado.</small></span>${sw("x", true, "Atos fora de uso dormem")}</div>
+        <div class="opt"><span class="lbl">Importar favoritos e senhas<small>Do Brave, Chrome ou Safari, para o ato em uso.</small></span><button class="btn sm">Importar…</button></div></div>`,
+      busca: `<h2>Busca</h2><div class="group"><div class="opt"><span class="lbl">Buscador da barra de endereço</span><select class="sel" data-sel="search" aria-label="Buscador">${["DuckDuckGo", "Google", "Bing", "Brave Search", "Kagi"].map(o => `<option ${prefs.search === o ? "selected" : ""}>${o}</option>`).join("")}</select></div>
+        <div class="opt"><span class="lbl">Sugestões enquanto digita<small>Vêm do histórico e dos favoritos deste Mac. Não pergunta nada ao buscador.</small></span>${sw("x2", true, "Sugestões locais")}</div></div>`,
+      privacidade: `<h2>Privacidade e segurança</h2><p class="lead">Tudo no máximo desde a primeira vez que o Agens abre. Você só afrouxa o que quiser, site por site.</p><div class="group">
+        <div class="opt"><span class="lbl">Telemetria<small>Não existe. O navegador parado faz zero conexões (medido, docs/sem-telemetria.md).</small></span><span style="color:var(--mute)">Desligada sempre</span></div>
+        <div class="opt"><span class="lbl">Cookies de terceiros</span>${sel("cookies", ["Bloquear", "Bloquear na janela anônima", "Permitir"], "Cookies de terceiros")}</div>
+        <div class="opt"><span class="lbl">Sempre usar conexão segura (HTTPS)<small>Avisa antes de abrir um site sem HTTPS.</small></span>${tog("https", "Sempre HTTPS")}</div>
+        <div class="opt"><span class="lbl">DNS seguro<small>Criptografado por padrão, para o provedor de internet não ver os sites que você abre.</small></span>${sel("dns", ["Quad9 (criptografado)", "Cloudflare (criptografado)", "NextDNS (criptografado)", "Do sistema (sem criptografia)"], "DNS seguro")}</div>
+        <div class="opt"><span class="lbl">Pedir aos sites para não rastrear<small>Global Privacy Control.</small></span>${tog("gpc", "Global Privacy Control")}</div>
+        <div class="opt"><span class="lbl">Proteção contra impressão digital<small>Os sites não conseguem te reconhecer pelo jeito do seu Mac (fontes, tela, placa de vídeo).</small></span>${tog("fp", "Proteção contra impressão digital")}</div>
+        <div class="opt"><span class="lbl">Tirar rastreadores dos links<small>Remove utm_, fbclid, gclid e parecidos ao abrir um link.</small></span>${tog("strip", "Tirar rastreadores dos links")}</div>
+        <div class="opt"><span class="lbl">Não revelar o IP local em chamadas de vídeo<small>WebRTC só pela rota padrão.</small></span>${tog("webrtc", "Proteger IP no WebRTC")}</div>
+        <div class="opt"><span class="lbl">Enviar só o domínio de onde você veio<small>Os sites não veem a página exata que te mandou para lá.</small></span>${tog("referrer", "Referenciador mínimo")}</div>
+        <div class="opt"><span class="lbl">Navegação segura<small>Listas de sites perigosos que vêm com cada atualização, verificadas no próprio Mac.</small></span>${tog("safe", "Navegação segura local")}</div>
+        <div class="opt"><span class="lbl">Ao fechar, apagar<small>Histórico, cookies e cache, por ato. Desligado: apagar cookies tira você de todos os logins.</small></span><button class="btn sm">Escolher…</button></div>
+        <div class="opt"><span class="lbl">Apagar dados de navegação</span><button class="btn sm" data-act="clearhist">Apagar…</button></div></div>`,
+      sobre: `<h2>Sobre</h2><div class="group"><div class="opt"><span class="logo" style="background:var(--hi);width:28px;height:28px;border-radius:calc(8px * var(--round))"><svg viewBox="21 21 128 128" width="22" height="22" aria-hidden="true"><defs><mask id="am"><rect width="200" height="200" fill="#fff"/><circle cx="52" cy="52" r="34" fill="#000"/></mask></defs><rect x="52" y="52" width="92" height="92" rx="24" fill="#0B0B0D" mask="url(#am)"/><circle cx="52" cy="52" r="26" fill="#F7A95C"/></svg></span><span class="lbl">Agens<small>Versão <span class="mono">1.0.0 (156)</span> · SugiyamaLabs</small></span><span style="color:var(--mute)">Atualizado</span></div>
+        <div class="opt"><span class="lbl">Avisos de código aberto<small>As licenças dos projetos que o Agens usa por dentro.</small></span><button class="btn sm">Ver</button></div>
+        <div class="opt"><span class="lbl">Memória agora<small>${$("#memTotal").textContent} com ${tabs.length} abas</small></span></div></div>`,
+    }[settingsSection];
+    return `<div class="settings"><nav class="snav" aria-label="Seções"><h1>Configurações</h1>${Object.entries(S).map(([k, n]) => `<button data-section="${k}" aria-current="${settingsSection === k ? "page" : "false"}">${n}</button>`).join("")}</nav><div class="spane">${pane}</div></div>`;
+  },
+};
+function openMainMenu(anchor) {
+  const m = $("#menu");
+  m.innerHTML = [["newtab", "Nova aba", "⌘T"], ["bookmarks", "Favoritos", "⌘⌥B"], ["history", "Histórico", "⌘Y"], ["settings", "Configurações", "⌘,"]].map(([a, n, k]) => `<button class="mi" role="menuitem" data-menu="${a}">${n}<span class="k">${k}</span></button>`).join("")
+    + `<hr><button class="mi" role="menuitemcheckbox" aria-checked="${prefs.bmbar}" data-menu="bmbar">${prefs.bmbar ? "Ocultar" : "Mostrar"} barra de favoritos<span class="k">⌘⇧B</span></button>`;
+  const r = anchor.getBoundingClientRect();
+  m.style.top = r.bottom + 6 + "px"; m.style.left = Math.max(8, r.right - 260) + "px";
+  m.classList.add("open"); m.querySelector(".mi").focus();
+}
+function folderMenu(anchor, f) {
+  const m = $("#menu");
+  m.innerHTML = bookmarks.filter(b => b.f === f).map(b => `<button class="mi" role="menuitem" data-open="${esc(b.u)}">${fav(b)}${esc(b.t)}</button>`).join("");
+  const r = anchor.getBoundingClientRect(); m.style.top = r.bottom + 4 + "px"; m.style.left = r.left + "px"; m.classList.add("open");
+}
+function applyPref(key, v) {
+  if (key === "layout" || key === "theme" || key === "mode") { syncSeg(key, v); set[key](v); }
+  if (key === "dense") prefs.dense = v === "1";
+  if (key === "adlevel") prefs.adlevel = v;
+  if (key === "startup") prefs.startup = v;
+
+  render();
+}
+// ===== Folha do ato: criar ou editar um ato =====
+const TEAM_PALETTE = ["#FF7E98", "#FF9D5C", "#E3876F", "#F46DB8", "#CF6FEA", "#A97AB8", "#9F86FF", "#6E86FF", "#3F9CFF", "#3CC0F0", "#2BC7C0", "#7F9BC7"];
+let draft = null;
+const teamLetter = n => (n.trim().split(/\s+/).pop()[0] || "?").toUpperCase();
+function openTeamSheet(i) {
+  const editing = Number.isInteger(i), p = editing ? PROFILES[i] : null;
+  const free = TEAM_PALETTE.find(c => !PROFILES.some(q => q.color === c)) || TEAM_PALETTE[11];
+  draft = editing ? { i, name: p.name, color: p.color, sites: [...(p.sites || [])], copy: "vazio", dl: !!p.dl, sleep: p.sleep !== false }
+                  : { i: null, name: "", color: free, sites: [], copy: "vazio", dl: true, sleep: true };
+  renderSheet(); $("#scrim").classList.add("open"); setTimeout(() => $("#teamName").focus(), 30);
+}
+function renderSheet() {
+  const d = draft, editing = d.i !== null;
+  $("#sheet").innerHTML = `<div class="sheet-h"><span class="logo big" style="background:${d.color}" id="teamPrev">${d.name ? teamLetter(d.name) : "?"}</span><h2 id="sheetTitle">${editing ? "Configurar " + esc(d.name) : "Novo ato"}</h2><button class="tbtn" aria-label="Fechar" data-sheet="close"><svg class="icon"><use href="#i-x"/></svg></button></div>
+    <div class="sheet-b">
+      <label class="fld">Nome<input class="field" id="teamName" placeholder="Cliente A" value="${esc(d.name)}" autocomplete="off"></label>
+      <div class="fld">Cor (aparece só no rosto do ato)<div class="palette">${TEAM_PALETTE.map(c => `<button class="sw" style="background:${c}" aria-label="Cor ${c}" aria-pressed="${d.color === c}" data-tcolor="${c}"></button>`).join("")}</div></div>
+      <div class="fld">Links destes sites abrem neste ato<div class="chips" id="chips">${d.sites.map((s, k) => `<span class="chip">${esc(s)}<button aria-label="Tirar ${esc(s)}" data-rmsite="${k}"><svg class="icon" style="width:11px;height:11px"><use href="#i-x"/></svg></button></span>`).join("")}<input id="siteIn" placeholder="${d.sites.length ? "" : "cliente-a.test, github.com/cliente-a…"}" aria-label="Adicionar site"></div></div>
+      ${editing ? "" : `<div class="fld">Começar com${segHTML("tcopy", [["vazio", "Vazio"], ["favoritos", "Favoritos do Pessoal"], ["tudo", "Favoritos e extensões"]], d.copy)}</div>`}
+      <div class="group" style="margin:0">
+        <div class="opt"><span class="lbl">${prefs.shareCookies ? "Logins compartilhados com os outros atos" : "Cookies e logins só deste ato"}<small>${prefs.shareCookies ? "O compartilhamento está ligado em Configurações › Atos." : "Extensões e histórico também. Compartilhar fica em Configurações › Atos."}</small></span><span style="color:var(--mute)">${prefs.shareCookies ? "Compartilhado" : "Separado"}</span></div>
+        <div class="opt"><span class="lbl">Dormir quando fora de uso<small>Libera a memória do ato inteiro até você voltar.</small></span><button class="switch" role="switch" aria-checked="${d.sleep}" aria-label="Dormir quando fora de uso" data-tsw="sleep"></button></div>
+        <div class="opt"><span class="lbl">Pasta de downloads própria<small class="mono">~/Downloads/${esc(d.name || "Novo ato")}</small></span><button class="switch" role="switch" aria-checked="${d.dl}" aria-label="Pasta de downloads própria" data-tsw="dl"></button></div>
+      </div>
+    </div>
+    <div class="sheet-f">${editing && d.i !== 0 ? `<button class="btn sm" data-sheet="delete">Apagar ato…</button>` : ""}<span class="grow"></span><button class="btn sm" data-sheet="close">Cancelar</button><button class="btn sm pri" data-sheet="save" ${d.name.trim() ? "" : "disabled style=\"opacity:.45\""}>${editing ? "Salvar" : "Criar ato"}</button></div>`;
+}
+function closeSheet() { $("#scrim").classList.remove("open"); draft = null; }
+function saveTeam() {
+  const d = draft; if (!d.name.trim()) return;
+  const data = { name: d.name.trim(), color: d.color, letter: teamLetter(d.name), sites: d.sites, dl: d.dl, sleep: d.sleep };
+  if (d.i !== null) { Object.assign(PROFILES[d.i], data); closeSheet(); return render(); }
+  PROFILES.push({ id: "t" + PROFILES.length, ...data });
+  const i = PROFILES.length - 1;
+  SPACE_TABS[i] = d.copy === "vazio" ? [] : []; SPACE_ACTIVE[i] = null;
+  closeSheet(); setProfile(i);
+}
+function addSite(v) { v = v.trim().replace(/^https?:\/\//, "").replace(/\/$/, ""); if (v && !draft.sites.includes(v)) draft.sites.push(v); renderSheet(); $("#siteIn").focus(); }
+
+// ===== Tema personalizado =====
+const WALLPAPERS = {
+  nenhuma: "none",
+  aurora: "linear-gradient(135deg, #1d3557 0%, #3a5a8c 35%, #8c4a6e 70%, #c08a4a 100%)",
+  oceano: "linear-gradient(160deg, #0f2027 0%, #203a43 45%, #2c5364 100%)",
+  por_do_sol: "linear-gradient(170deg, #2b1055 0%, #7597de 55%, #f6b28a 100%)",
+  floresta: "linear-gradient(150deg, #0b1f14 0%, #1e4d3a 50%, #6b8f71 100%)",
+};
+const CUSTOM_DEFAULT = { wall: "aurora", img: null, dim: 35, tint: "#7F9BC7", accent: "#FFC98A", round: 100, alpha: 55, blur: 0 };
+let custom = { ...CUSTOM_DEFAULT };
+try { Object.assign(custom, JSON.parse(localStorage.getItem("agens-tema-seu") || "{}")); custom.img = null; } catch (e) {}
+function applyCustom() {
+  const st = root.style;
+  st.setProperty("--c-image", custom.img ? `url("${custom.img}")` : WALLPAPERS[custom.wall] || "none");
+  st.setProperty("--c-dim", custom.dim / 100); st.setProperty("--c-tint", custom.tint); st.setProperty("--c-accent", custom.accent);
+  st.setProperty("--c-round", custom.round / 100); st.setProperty("--c-blur", custom.blur + "px");
+  st.setProperty("--c-opaque", (100 - custom.alpha) + "%");
+  try { const { img, ...keep } = custom; localStorage.setItem("agens-tema-seu", JSON.stringify(keep)); } catch (e) {}
+}
+const rng = (key, min, max, unit, label) => `<div class="range"><input type="range" min="${min}" max="${max}" value="${custom[key]}" data-custom="${key}" aria-label="${label}"><output>${custom[key]}${unit}</output></div>`;
+function customHTML() {
+  return `<div class="opt"><span class="lbl">Transparência<small>Só o fundo da janela. Textos, botões e a página continuam opacos.</small></span>${rng("alpha", 0, 90, "%", "Transparência")}</div>
+    <div class="opt"><span class="lbl">Desfoque do fundo<small>0 = sem desfoque: o fundo aparece nítido. Mais alto vira vidro.</small></span>${rng("blur", 0, 80, "px", "Desfoque do fundo")}</div>
+    <div class="opt" style="flex-wrap:wrap"><span class="lbl" style="flex-basis:100%">Imagem de fundo<small>Atrás da janela e na nova aba.</small></span><div class="wallpapers">
+      ${Object.entries(WALLPAPERS).map(([k, v]) => `<button class="wp" style="background:${v === "none" ? "var(--sunk)" : v}" aria-pressed="${!custom.img && custom.wall === k}" data-wall="${k}" aria-label="${k}">${k === "nenhuma" ? "nenhuma" : ""}</button>`).join("")}
+      <label class="wp" style="cursor:pointer;${custom.img ? `background-image:url('${custom.img}');` : ""}" aria-pressed="${!!custom.img}" title="Escolher imagem do Mac">${custom.img ? "" : "sua…"}<input type="file" accept="image/*" id="wallFile" hidden></label></div></div>
+    <div class="opt"><span class="lbl">Escurecer a imagem</span>${rng("dim", 0, 80, "%", "Escurecer a imagem")}</div>
+    <div class="opt"><span class="lbl">Cor da janela<small>Tinge os grafites.</small></span><div class="swatches">${["#7F9BC7", "#6E86FF", "#2BC7C0", "#CF6FEA", "#FF7E98", "#E3876F", "#8A8A94"].map(c => `<button class="sw" style="background:${c}" aria-pressed="${custom.tint === c}" data-ctint="${c}" aria-label="Cor ${c}"></button>`).join("")}<input type="color" value="${custom.tint}" data-cpick="tint" aria-label="Outra cor da janela" style="width:22px;height:22px;border:0;padding:0;background:none"></div></div>
+    <div class="opt"><span class="lbl">Cor de destaque<small>Foco, ao vivo, estrela, ato ativo.</small></span><div class="swatches">${["#FFC98A", "#FFE9C7", "#9F86FF", "#3CC0F0", "#2BC7C0", "#F46DB8", "#F4F4F6"].map(c => `<button class="sw" style="background:${c}" aria-pressed="${custom.accent === c}" data-caccent="${c}" aria-label="Destaque ${c}"></button>`).join("")}<input type="color" value="${custom.accent}" data-cpick="accent" aria-label="Outra cor de destaque" style="width:22px;height:22px;border:0;padding:0;background:none"></div></div>
+    <div class="opt"><span class="lbl">Arredondamento</span>${rng("round", 50, 160, "%", "Arredondamento")}</div>
+    <div class="opt"><span class="lbl">Voltar ao padrão do Personalizado</span><button class="btn sm" data-act="customreset">Restaurar</button></div>`;
+}
+
+function closeTab(i) { tabs.splice(i, 1); if (active >= tabs.length) active = tabs.length - 1; if (active < 0) active = null; render(); }
+function newTab() { active = null; render(); $("#content input")?.focus(); }
+
+// Cartão da aba com memória (#24)
+const hover = $("#hover"); let hoverTimer;
+document.addEventListener("mouseover", e => {
+  const el = e.target.closest("[data-i]"); clearTimeout(hoverTimer);
+  if (!el) { hover.classList.remove("show"); return; }
+  hoverTimer = setTimeout(() => {
+    const tab = tabs[+el.dataset.i], r = el.getBoundingClientRect();
+    hover.innerHTML = `<div class="h-title">${esc(tab.t)}</div><div class="h-url">${esc(tab.u)}</div>
+      <div class="h-mem"><span>Memória</span><b>${tab.sleeping ? "0 MB" : tab.mem + " MB"}</b></div>
+      <div class="h-state">${tab.sleeping ? `Dormindo · liberou ${tab.was} MB · acorda ao clicar` : tab.live ? "Ao vivo · não dorme enquanto toca som" : "Dorme depois de 5 min escondida"}</div>`;
+    const top = win.classList.contains("layout-side") ? r.top : r.bottom + 6;
+    const left = win.classList.contains("layout-side") ? r.right + 8 : Math.min(r.left, innerWidth - 256);
+    hover.style.top = top + "px"; hover.style.left = left + "px"; hover.classList.add("show");
+  }, 450);
+});
+
+// Barra de endereço com sugestões
+const omni = $("#omni"), input = $("#omniInput");
+input.addEventListener("focus", () => { input.select(); showSuggest(); });
+input.addEventListener("input", showSuggest);
+input.addEventListener("blur", () => setTimeout(() => omni.classList.remove("open"), 120));
+function showSuggest() {
+  const q = input.value.toLowerCase();
+  const hits = tabs.map((t, i) => [t, i]).filter(([t]) => !q || t.t.toLowerCase().includes(q) || t.u.includes(q)).slice(0, 4);
+  $("#suggest").innerHTML = [`<div class="sug" role="option" aria-selected="true"><svg class="icon"><use href="#i-search"/></svg>${esc(input.value || "Buscar")}<small>Buscar</small></div>`]
+    .concat(hits.map(([t, i]) => `<div class="sug" role="option" data-i="${i}">${fav(t)}${esc(t.t)}<small>Ir para a aba</small></div>`)).join("");
+  omni.classList.add("open");
+}
+$("#suggest").addEventListener("mousedown", e => { const s = e.target.closest("[data-i]"); if (s) select(+s.dataset.i); });
+
+// Atos
+function openProfiles(anchor) {
+  const m = $("#menu");
+  m.innerHTML = PROFILES.map((p, i) => `<button class="mi" role="menuitemradio" aria-checked="${i === profile}" data-p="${i}"><span class="logo" style="background:${p.color}">${p.letter}</span>${p.name}<span class="${p.asleep && i !== profile ? "st" : "k"}">${p.asleep && i !== profile ? "dormindo" : "⌘⇧" + (i + 1)}</span></button>`).join("")
+    + `<hr><button class="mi" role="menuitem"><svg class="icon"><use href="#i-plus"/></svg>Novo ato</button>`;
+  const r = anchor.getBoundingClientRect();
+  m.style.top = r.bottom + 6 + "px"; m.style.left = Math.min(r.left, innerWidth - 270) + "px";
+  m.classList.add("open"); m.querySelector(".mi").focus();
+}
+function setProfile(i) {
+  if (i === profile || !PROFILES[i]) return;
+  SPACE_TABS[profile] = tabs; SPACE_ACTIVE[profile] = active;  // guarda o espaço que sai
+  const dir = i > profile ? "from-r" : "from-l";
+  if (PROFILES[i].asleep) PROFILES[i].asleep = false;           // o ato acorda
+  profile = i; tabs = SPACE_TABS[i] || []; active = tabs.length ? (SPACE_ACTIVE[i] ?? 0) : null;
+  if (tabs[active]?.sleeping) { tabs[active].sleeping = false; tabs[active].mem = tabs[active].was; }
+  $("#menu").classList.remove("open"); render();
+  const body = $("#spaceBody"); body.classList.remove("from-r", "from-l"); void body.offsetWidth; body.classList.add(dir);
+}
+
+// Painel do protótipo
+function syncSeg(group, v) { document.querySelectorAll(`[data-group="${group}"] button`).forEach(b => b.setAttribute("aria-pressed", b.dataset.v === v)); }
+const set = {
+  layout: v => { win.classList.toggle("layout-side", v === "side"); win.classList.toggle("layout-top", v === "top"); $("#sideBtn").hidden = v !== "side"; },
+  collapse: v => win.classList.toggle("collapsed", v === "collapsed"),
+  theme: v => { if (["brasa", "vidro", "custom"].includes(v)) root.dataset.theme = v; else delete root.dataset.theme; if (v === "custom") applyCustom(); },
+  state: v => { state = v; render(); },
+  screen: v => win.classList.toggle("fullscreen", v === "full"),
+  mode: v => { prefs.mode = v; const light = v === "light" || (v === "system" && matchMedia("(prefers-color-scheme: light)").matches); if (light) root.dataset.mode = "light"; else delete root.dataset.mode; },
+  os: v => { document.body.classList.toggle("os-win", v === "win"); document.querySelectorAll("kbd").forEach(k => { k.dataset.mac ??= k.textContent; k.textContent = v === "win" ? k.dataset.mac.replace(/⌘⇧/g, "Ctrl+Shift+").replace(/⌘⌥/g, "Ctrl+Alt+").replace(/⌘/g, "Ctrl+").replace(/⌃⇥/g, "Ctrl+Tab").replace(/⌥/g, "Alt+") : k.dataset.mac; }); },
+};
+document.querySelectorAll(".seg").forEach(seg => seg.addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return; syncSeg(seg.dataset.group, b.dataset.v); set[seg.dataset.group](b.dataset.v);
+}));
+
+// Cliques e teclado
+document.addEventListener("click", e => {
+  if (draft) {
+    const sh = e.target.closest("[data-sheet]")?.dataset.sheet;
+    if (sh === "close" || e.target.id === "scrim") return closeSheet();
+    if (sh === "save") return saveTeam();
+    if (sh === "delete") { const i = draft.i; PROFILES.splice(i, 1); delete SPACE_TABS[i]; closeSheet(); profile = -1; return setProfile(0); }
+    const c = e.target.closest("[data-tcolor]"); if (c) { draft.color = c.dataset.tcolor; return renderSheet(); }
+    const rs = e.target.closest("[data-rmsite]"); if (rs) { draft.sites.splice(+rs.dataset.rmsite, 1); return renderSheet(); }
+    const ts = e.target.closest("[data-tsw]"); if (ts) { draft[ts.dataset.tsw] = !draft[ts.dataset.tsw]; return renderSheet(); }
+    const tc = e.target.closest('[data-pref="tcopy"]'); if (tc) { draft.copy = tc.dataset.v; return renderSheet(); }
+    return;
+  }
+  if (e.target.closest(".space.add") || e.target.closest("[data-newteam]")) return openTeamSheet();
+  const ed = e.target.closest("[data-edit]"); if (ed) return openTeamSheet(+ed.dataset.edit);
+  const close = e.target.closest("[data-close]"); if (close) { e.stopPropagation(); closeTab(+close.dataset.close); return; }
+  const p = e.target.closest("[data-p]"); if (p) { setProfile(+p.dataset.p); return; }
+  const act = e.target.closest("[data-act]")?.dataset.act;
+  if (act === "newtab") return newTab();
+  if (act === "star") { e.preventDefault(); return toggleStar(); }
+  if (act === "mainmenu") return openMainMenu(e.target.closest("[data-act]"));
+  if (act === "clearhist") { HISTORY.length = 0; return render(); }
+  const mi = e.target.closest("[data-menu]")?.dataset.menu;
+  if (mi) { $("#menu").classList.remove("open"); if (mi === "newtab") return newTab(); if (mi === "bmbar") { prefs.bmbar = !prefs.bmbar; return render(); } return openInternal(mi); }
+  const fo = e.target.closest("[data-folder]"); if (fo) return folderMenu(fo, fo.dataset.folder);
+  const ub = e.target.closest("[data-unbm]"); if (ub) { e.stopPropagation(); bookmarks = bookmarks.filter(b => b.u !== ub.dataset.unbm); return render(); }
+  const op = e.target.closest("[data-open]"); if (op) { $("#menu").classList.remove("open"); return openUrl(op.dataset.open); }
+  const sec = e.target.closest("[data-section]"); if (sec) { settingsSection = sec.dataset.section; return render(); }
+  const pr = e.target.closest("[data-pref]"); if (pr) return applyPref(pr.dataset.pref, pr.dataset.v);
+  const tg = e.target.closest("[data-toggle]"); if (tg) { const k = tg.dataset.toggle; prefs[k] = tg.getAttribute("aria-checked") !== "true"; return render(); }
+  const wl = e.target.closest("[data-wall]"); if (wl) { custom.wall = wl.dataset.wall; custom.img = null; applyCustom(); return render(); }
+  const ct = e.target.closest("[data-ctint]"); if (ct) { custom.tint = ct.dataset.ctint; applyCustom(); return render(); }
+  const ca = e.target.closest("[data-caccent]"); if (ca) { custom.accent = ca.dataset.caccent; applyCustom(); return render(); }
+  if (e.target.closest('[data-act="customreset"]')) { custom = { ...CUSTOM_DEFAULT }; applyCustom(); return render(); }
+  const col = e.target.closest("[data-color]"); if (col) { PROFILES[profile].color = col.dataset.color; return render(); }
+  if (act === "profiles") return openProfiles(e.target.closest("[data-act]"));
+  if (act === "toggle-side") { const c = !win.classList.contains("collapsed"); syncSeg("collapse", c ? "collapsed" : "open"); return set.collapse(c ? "collapsed" : "open"); }
+  if (act === "reload") { state = state === "loading" ? "normal" : "loading"; syncSeg("state", state); render(); return; }
+  if (act === "retry") { state = "normal"; syncSeg("state", "normal"); return render(); }
+  const t = e.target.closest("[data-i]"); if (t && !e.target.closest(".suggest")) select(+t.dataset.i);
+  if (!e.target.closest(".menu")) $("#menu").classList.remove("open");
+});
+document.addEventListener("keydown", e => {
+  if (draft) {
+    if (e.key === "Escape") return closeSheet();
+    if (e.target.id === "siteIn" && (e.key === "Enter" || e.key === ",")) { e.preventDefault(); return addSite(e.target.value); }
+    if (e.key === "Enter" && e.target.id === "teamName") { e.preventDefault(); return saveTeam(); }
+    return;
+  }
+  if (e.key === "Escape") { $("#menu").classList.remove("open"); input.blur(); }
+  if (document.activeElement?.getAttribute("role") === "tab" && (e.key === "Enter" || e.key === " ")) { select(+document.activeElement.dataset.i); e.preventDefault(); }
+  if (!e.metaKey && !e.ctrlKey) return;
+  const k = e.key.toLowerCase();
+  if (e.metaKey && k === "l") { input.focus(); e.preventDefault(); }
+  else if (e.metaKey && k === "t") { newTab(); e.preventDefault(); }
+  else if (e.metaKey && k === "d") { toggleStar(); e.preventDefault(); }
+  else if (e.metaKey && k === "y") { openInternal("history"); e.preventDefault(); }
+  else if (e.metaKey && e.key === ",") { openInternal("settings"); e.preventDefault(); }
+  else if (e.metaKey && e.altKey && k === "b") { openInternal("bookmarks"); e.preventDefault(); }
+  else if (e.metaKey && e.shiftKey && k === "b") { prefs.bmbar = !prefs.bmbar; render(); e.preventDefault(); }
+  else if (e.metaKey && e.shiftKey && k === "s") { const side = !win.classList.contains("layout-side"); syncSeg("layout", side ? "side" : "top"); set.layout(side ? "side" : "top"); e.preventDefault(); }
+  else if (e.metaKey && e.shiftKey && k === "p") { openProfiles($("#win.layout-side") ? $("#spaces") : $("#profiles")); e.preventDefault(); }
+  else if (e.metaKey && e.shiftKey && /^[1-5]$/.test(e.key)) { setProfile(+e.key - 1); e.preventDefault(); }
+  else if (e.metaKey && /^[1-9]$/.test(e.key)) { select(e.key === "9" ? tabs.length - 1 : +e.key - 1); e.preventDefault(); }
+  else if (e.ctrlKey && e.key === "Tab") { select(((active ?? -1) + (e.shiftKey ? -1 : 1) + tabs.length) % tabs.length); e.preventDefault(); }
+});
+
+document.addEventListener("input", e => {
+  const ck = e.target.dataset?.custom; if (ck) { custom[ck] = +e.target.value; e.target.nextElementSibling.textContent = e.target.value + (ck === "blur" ? "px" : "%"); return applyCustom(); }
+  const cp = e.target.dataset?.cpick; if (cp) { custom[cp] = e.target.value; return applyCustom(); }
+  if (draft && e.target.id === "teamName") { draft.name = e.target.value; $("#teamPrev").textContent = draft.name ? teamLetter(draft.name) : "?"; const b = $('[data-sheet="save"]'); b.disabled = !draft.name.trim(); b.style.opacity = b.disabled ? .45 : 1; return; }
+  if (e.target.id === "histQ") { historyQuery = e.target.value; const pos = e.target.selectionStart; render(); const q = $("#histQ"); q.focus(); q.setSelectionRange(pos, pos); }
+});
+document.addEventListener("change", e => {
+  if (e.target.id === "wallFile" && e.target.files[0]) { custom.img = URL.createObjectURL(e.target.files[0]); applyCustom(); return render(); } const k = e.target.dataset.sel; if (k) { prefs[k] = e.target.value; render(); } });
+
+set.theme("grafite");
+matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => { if (prefs.mode === "system") set.mode("system"); });
+render();
+</script>
+</body>
+</html>

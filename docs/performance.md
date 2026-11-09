@@ -30,7 +30,7 @@ Tudo por cima do Chromium, em patches pequenos e em camadas, para o rebase mensa
 |---|---|---|
 | Enxugar | o que ainda roda em segundo plano depois do ungoogled: serviços, timers, component updater, rede ociosa | P4 |
 | Abas que dormem | congelar depois de X s em segundo plano; descartar depois de Y min com estado salvo; exceções: áudio, upload, formulário com texto, aba fixada a pedido | P5 |
-| Perfis que dormem | só o perfil em uso carregado; os outros descarregam inteiros | P6 |
+| Atos que dormem | só o ato em uso carregado; os outros descarregam inteiros | #9 |
 | Processos | teto de processos de página e quando juntar sites; sites com login continuam isolados | P7 |
 | V8 | teto de heap por página, GC mais cedo, modo bateria | P8 |
 | UI nativa | a camada SwiftUI/WinUI não pode comer o que economizamos no Chromium | P3 |
