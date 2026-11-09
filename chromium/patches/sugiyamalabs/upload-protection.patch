@@ -1,0 +1,325 @@
+--- a/chrome/browser/performance_manager/policies/cannot_discard_reason.cc
++++ b/chrome/browser/performance_manager/policies/cannot_discard_reason.cc
+@@ -71,6 +71,8 @@
+       return "Tab is currently shared with Gemini";
+     case CannotDiscardReason::kWebApp:
+       return "Tab is a web application";
++    case CannotDiscardReason::kUploading:
++      return "Tab is uploading data";
+   }
+   NOTREACHED();
+ }
+--- a/chrome/browser/performance_manager/policies/cannot_discard_reason.h
++++ b/chrome/browser/performance_manager/policies/cannot_discard_reason.h
+@@ -41,8 +41,9 @@
+   kUserEdits = 27,
+   kGlicShared = 28,
+   kWebApp = 29,
++  kUploading = 30,  // SugiyamaLabs (#37)
+ 
+-  kMaxValue = kWebApp,
++  kMaxValue = kUploading,
+ };
+ // LINT.ThenChange(//tools/metrics/histograms/enums.xml:CannotDiscardReason)
+ 
+--- a/chrome/browser/performance_manager/policies/discard_eligibility_policy.cc
++++ b/chrome/browser/performance_manager/policies/discard_eligibility_policy.cc
+@@ -23,6 +23,7 @@
+ #include "components/tabs/public/tab_interface.h"
+ #include "components/url_matcher/url_matcher.h"
+ #include "components/url_matcher/url_util.h"
++#include "components/performance_manager/public/graph/graph_operations.h"
+ #include "content/public/browser/web_contents.h"
+ 
+ #if BUILDFLAG(IS_ANDROID)
+@@ -454,6 +455,28 @@
+                                  CanDiscardResult::kProtected);
+   }
+ 
++  // SugiyamaLabs (#37): never discard a tab in the middle of an upload, from
++  // script (fetch/XHR with a body) or from a form POST navigation.
++  bool uploading = false;
++  for (const FrameNode* frame : GraphOperations::GetFrameNodes(page_node)) {
++    if (frame->IsUploading()) {
++      uploading = true;
++      break;
++    }
++  }
++  if (!uploading) {
++    // A form POST is sent while the navigation waits for its response.
++    // Renderer-initiated navigations have no pending entry, so ask the
++    // WebContents directly.
++    if (content::WebContents* contents = page_node->GetWebContents().get()) {
++      uploading = contents->IsWaitingForResponse();
++    }
++  }
++  if (uploading) {
++    add_reason_and_update_result(CannotDiscardReason::kUploading,
++                                 CanDiscardResult::kProtected);
++  }
++
+   // Record metrics regarding the discard decision.
+   // If |cannot_discard_reasons| is null, the caller isn't interested in the
+   // specific reasons, so pass an empty vector to the metrics helper.
+--- a/chrome/browser/performance_manager/policies/memory_saver_mode_policy.cc
++++ b/chrome/browser/performance_manager/policies/memory_saver_mode_policy.cc
+@@ -194,11 +194,19 @@
+     StartDiscardTimerIfEnabled(
+         tab_handle, requested_time_before_discard - elapsed_not_suspended);
+   } else {
+-    GetOwningGraph()
+-        ->GetRegisteredObjectAs<PageDiscardingHelper>()
+-        ->ImmediatelyDiscardMultiplePages(
+-            {tab_handle->page_node()},
+-            DiscardEligibilityPolicy::DiscardReason::PROACTIVE);
++    const bool discarded =
++        GetOwningGraph()
++            ->GetRegisteredObjectAs<PageDiscardingHelper>()
++            ->ImmediatelyDiscardMultiplePages(
++                {tab_handle->page_node()},
++                DiscardEligibilityPolicy::DiscardReason::PROACTIVE);
++    // SugiyamaLabs (#37): a tab protected right now (upload, audio, camera...)
++    // gets another chance later instead of staying awake until it is shown
++    // and hidden again.
++    if (!discarded && base::FeatureList::IsEnabled(kSleepingTabs) &&
++        !tab_handle->page_node()->IsVisible()) {
++      StartDiscardTimerIfEnabled(tab_handle, requested_time_before_discard);
++    }
+   }
+ }
+ 
+--- a/components/performance_manager/graph/frame_node_impl.cc
++++ b/components/performance_manager/graph/frame_node_impl.cc
+@@ -167,6 +167,16 @@
+ void FrameNodeImpl::OnStoppedUsingWebRTC() {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+   document_.uses_web_rtc.SetAndMaybeNotify(this, false);
++}
++
++void FrameNodeImpl::OnStartedUploading() {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  document_.is_uploading = true;
++}
++
++void FrameNodeImpl::OnStoppedUploading() {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  document_.is_uploading = false;
+ }
+ 
+ void FrameNodeImpl::OnNonPersistentNotificationCreated() {
+@@ -283,6 +293,11 @@
+   return is_holding_blocking_indexeddb_lock_.value();
+ }
+ 
++bool FrameNodeImpl::IsUploading() const {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  return document_.is_uploading;
++}
++
+ bool FrameNodeImpl::UsesWebRTC() const {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+   return document_.uses_web_rtc.value();
+@@ -1008,6 +1023,7 @@
+   had_form_interaction.SetAndMaybeNotify(frame_node, false);
+   had_user_edits.SetAndMaybeNotify(frame_node, false);
+   uses_web_rtc.SetAndMaybeNotify(frame_node, false);
++  is_uploading = false;
+   has_freezing_origin_trial_opt_out.SetAndMaybeNotify(frame_node, false);
+ }
+ // LINT.ThenChange()
+--- a/components/performance_manager/graph/frame_node_impl.h
++++ b/components/performance_manager/graph/frame_node_impl.h
+@@ -88,6 +88,8 @@
+   void SetHadUserEdits() override;
+   void OnStartedUsingWebRTC() override;
+   void OnStoppedUsingWebRTC() override;
++  void OnStartedUploading() override;
++  void OnStoppedUploading() override;
+   void OnNonPersistentNotificationCreated() override;
+   void OnFirstContentfulPaint(
+       base::TimeDelta time_since_navigation_start) override;
+@@ -115,6 +117,7 @@
+   bool IsHoldingWebLock() const override;
+   bool IsHoldingBlockingIndexedDBLock() const override;
+   bool UsesWebRTC() const override;
++  bool IsUploading() const override;
+   bool HadUserActivation() const override;
+   bool HadFormInteraction() const override;
+   bool HadUserEdits() const override;
+@@ -272,6 +275,9 @@
+         &FrameNodeObserver::OnFrameUsesWebRTCChanged>
+         uses_web_rtc{false};
+ 
++    // SugiyamaLabs (#37): the document has an in-flight request with a body.
++    bool is_uploading = false;
++
+     // Whether the document is opted-out from freezing via origin trial.
+     ObservedProperty::NotifiesOnlyOnChanges<
+         bool,
+--- a/components/performance_manager/public/graph/frame_node.h
++++ b/components/performance_manager/public/graph/frame_node.h
+@@ -223,6 +223,9 @@
+   // Returns true if this frame currently uses WebRTC.
+   virtual bool UsesWebRTC() const = 0;
+ 
++  // SugiyamaLabs (#37): the document has an in-flight request with a body.
++  virtual bool IsUploading() const = 0;
++
+   // Returns the child workers of this frame. These are either dedicated workers
+   // or shared workers created by this frame, or a service worker that handles
+   // this frame's network requests.
+--- a/components/performance_manager/public/mojom/coordination_unit.mojom
++++ b/components/performance_manager/public/mojom/coordination_unit.mojom
+@@ -45,6 +45,11 @@
+   // Called when the document stops using WebRTC.
+   OnStoppedUsingWebRTC();
+ 
++  // SugiyamaLabs (#37): the document started its first in-flight request with
++  // a body (an upload), and finished its last one.
++  OnStartedUploading();
++  OnStoppedUploading();
++
+   // Called whenever the frame associated with this document is tagged or
+   // untagged as an ad, providing the new status.
+   SetIsAdFrame(bool is_ad_frame);
+--- a/third_party/blink/renderer/core/loader/frame_fetch_context.cc
++++ b/third_party/blink/renderer/core/loader/frame_fetch_context.cc
+@@ -29,6 +29,8 @@
+  */
+ 
+ #include "third_party/blink/renderer/core/loader/frame_fetch_context.h"
++
++#include "third_party/blink/renderer/platform/instrumentation/resource_coordinator/document_resource_coordinator.h"
+ 
+ namespace {
+ BASE_FEATURE(kFastMemoryCacheWithDevTools, base::FEATURE_ENABLED_BY_DEFAULT);
+@@ -460,6 +462,24 @@
+ 
+ // TODO(crbug.com/422626353): Consider consolidating the initiator info
+ // calculation for resource timing and dev tools.
++void FrameFetchContext::DidStartUploading() {
++  if (GetResourceFetcherProperties().IsDetached()) {
++    return;
++  }
++  if (auto* coordinator = document_->GetResourceCoordinator()) {
++    coordinator->OnStartedUploading();
++  }
++}
++
++void FrameFetchContext::DidStopUploading() {
++  if (GetResourceFetcherProperties().IsDetached()) {
++    return;
++  }
++  if (auto* coordinator = document_->GetResourceCoordinator()) {
++    coordinator->OnStoppedUploading();
++  }
++}
++
+ void FrameFetchContext::FillInitiatorInfo(FetchInitiatorInfo& initiator_info) {
+   CHECK(RuntimeEnabledFeatures::ResourceTimingInitiatorEnabled());
+   // A module script reaches one of three branches below depending on how it is
+--- a/third_party/blink/renderer/core/loader/frame_fetch_context.h
++++ b/third_party/blink/renderer/core/loader/frame_fetch_context.h
+@@ -93,6 +93,8 @@
+                       ResourceType) override;
+ 
+   void FillInitiatorInfo(FetchInitiatorInfo& initiator_info) override;
++  void DidStartUploading() override;
++  void DidStopUploading() override;
+ 
+   void AddResourceTiming(mojom::blink::ResourceTimingInfoPtr,
+                          const AtomicString& initiator_type) override;
+--- a/third_party/blink/renderer/platform/instrumentation/resource_coordinator/document_resource_coordinator.cc
++++ b/third_party/blink/renderer/platform/instrumentation/resource_coordinator/document_resource_coordinator.cc
+@@ -86,6 +86,14 @@
+   }
+ }
+ 
++void DocumentResourceCoordinator::OnStartedUploading() {
++  service_->OnStartedUploading();
++}
++
++void DocumentResourceCoordinator::OnStoppedUploading() {
++  service_->OnStoppedUploading();
++}
++
+ void DocumentResourceCoordinator::OnFirstContentfulPaint(
+     base::TimeDelta time_since_navigation_start) {
+   service_->OnFirstContentfulPaint(time_since_navigation_start);
+--- a/third_party/blink/renderer/platform/instrumentation/resource_coordinator/document_resource_coordinator.h
++++ b/third_party/blink/renderer/platform/instrumentation/resource_coordinator/document_resource_coordinator.h
+@@ -42,6 +42,8 @@
+   void SetHadUserEdits();
+   void OnStartedUsingWebRTC();
+   void OnStoppedUsingWebRTC();
++  void OnStartedUploading();
++  void OnStoppedUploading();
+   void OnFirstContentfulPaint(base::TimeDelta time_since_navigation_start);
+   void OnWebMemoryMeasurementRequested(
+       WebMemoryMeasurementMode mode,
+--- a/third_party/blink/renderer/platform/loader/fetch/fetch_context.h
++++ b/third_party/blink/renderer/platform/loader/fetch/fetch_context.h
+@@ -114,6 +114,11 @@
+ 
+   virtual void FillInitiatorInfo(FetchInitiatorInfo& initiator_info) {}
+ 
++  // SugiyamaLabs (#37): the fetcher has its first in-flight request with a
++  // body, and no longer has any. Lets the embedder keep an uploading tab alive.
++  virtual void DidStartUploading() {}
++  virtual void DidStopUploading() {}
++
+   virtual void AddResourceTiming(mojom::blink::ResourceTimingInfoPtr,
+                                  const AtomicString& initiator_type);
+   virtual bool AllowImage() const { return false; }
+--- a/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
++++ b/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
+@@ -2817,9 +2817,16 @@
+       inflight_keepalive_bytes_ += size;
+     }
+ 
++    const bool has_body = !request_body.IsEmpty();
+     loader = MakeGarbageCollected<ResourceLoader>(
+         this, scheduler_, resource, context_lifecycle_notifier_,
+         std::move(request_body), size);
++    if (has_body) {
++      upload_loaders_.insert(loader);
++      if (upload_loaders_.size() == 1u) {
++        context_->DidStartUploading();
++      }
++    }
+     // Preload requests should not block the load event. IsLinkPreload()
+     // actually continues to return true for Resources matched from the preload
+     // cache that must block the load event, but that is OK because this method
+@@ -2921,6 +2928,13 @@
+ void ResourceFetcher::RemoveResourceLoader(ResourceLoader* loader) {
+   DCHECK(loader);
+ 
++  if (upload_loaders_.Contains(loader)) {
++    upload_loaders_.erase(loader);
++    if (upload_loaders_.empty()) {
++      context_->DidStopUploading();
++    }
++  }
++
+   if (loaders_.Contains(loader)) {
+     loaders_.erase(loader);
+   } else if (non_blocking_loaders_.Contains(loader)) {
+@@ -3501,6 +3515,7 @@
+   visitor->Trace(resource_timing_report_timer_);
+   visitor->Trace(loaders_);
+   visitor->Trace(non_blocking_loaders_);
++  visitor->Trace(upload_loaders_);
+   visitor->Trace(cached_resources_map_);
+   visitor->Trace(emulated_load_started_for_inspector_resources_map_);
+   visitor->Trace(not_loaded_image_resources_);
+--- a/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.h
++++ b/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.h
+@@ -719,6 +719,8 @@
+ 
+   HeapHashSet<Member<ResourceLoader>> loaders_;
+   HeapHashSet<Member<ResourceLoader>> non_blocking_loaders_;
++  // SugiyamaLabs (#37): in-flight loaders whose request has a body.
++  HeapHashSet<Member<ResourceLoader>> upload_loaders_;
+ 
+   HashMap<KURL, EarlyHintsPreloadEntry> unused_early_hints_preloaded_resources_;
+ 
