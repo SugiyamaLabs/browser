@@ -253,7 +253,7 @@ input, select, textarea { font: inherit; color: inherit; }
 .snav button { display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: calc(8px * var(--round)); text-align: left; color: var(--mute); font-size: 13.5px; }
 .snav button:hover { background: var(--hover); color: var(--ink); }
 .snav button[aria-current="page"] { background: var(--raise); color: var(--ink); }
-.spane { padding: 28px 36px 48px; overflow: auto; max-width: 720px; }
+.spane { padding: 28px max(36px, calc((100% - 680px) / 2)) 48px; overflow: auto; }  /* coluna legível de 680 px, centrada no espaço que sobra (como Chrome e Edge) */
 .spane h2 { font-size: 22px; font-weight: 600; margin: 0 0 18px; }
 .group { border: 1px solid var(--line); border-radius: calc(12px * var(--round)); margin-bottom: 18px; }
 .opt { display: flex; align-items: center; gap: 18px; padding: 12px 16px; border-top: 1px solid var(--line); min-height: 54px; font-size: 13.5px; }
