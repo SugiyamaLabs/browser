@@ -6,6 +6,7 @@ Método em [performance.md](performance.md#método-de-medição). Cada linha é 
 |---|---|---|---|---|---|---|---|---|---|
 | 09/11/2026 | Apple M5 Pro, 64 GB | Brave 1.98.63 (Chromium 156) | 3.866 MB | 193 MB | 28 | — / 0,60 s | — | — | 100% |
 | 09/11/2026 | Apple M5 Pro, 64 GB | nosso: ungoogled 156.0.8078.79, build oficial, sem patches nossos | 3.817 MB | 191 MB | 33 | — / 0,46 s | — | — | **99%** |
+| 09/11/2026 | Apple M5 Pro, 64 GB | nosso: ungoogled 156.0.8078.79 oficial + abas que dormem (#8), medido aos 10 min | **291 MB** | 15 MB | 7 | — / 0,45 s | — | — | **8%** |
 
 ## Notas da medição de 09/11/2026
 
@@ -15,3 +16,4 @@ Método em [performance.md](performance.md#método-de-medição). Cada linha é 
 - O Brave bloqueia anúncios por padrão, e o nosso ainda não. Mesmo assim, os dois ficam praticamente iguais.
 - Speedometer 3 e bateria ainda não foram medidos.
 - Quebra por tipo de processo do nosso build (1 rodada, `tools/measure.py` imprime `by process kind`): abas 3.178 MB, GPU 257 MB, navegador 152 MB, rede 53 MB, captura de vídeo 27 MB, armazenamento 24 MB, áudio 23 MB. As metas por área estão em [performance.md](performance.md#onde-está-a-memória-hoje-09112026-1-rodada-de-3674-mb-o-nosso-build-oficial).
+- **Abas que dormem (#8), 09/11/2026:** 3 rodadas de 10 min, 290,9 / 290,7 / 289,9 MB. Aos 10 min, as 19 abas escondidas estão descartadas e só a aba visível (MDN, a última aberta) tem processo. Por tipo: abas 108 MB, GPU 73 MB, navegador 70 MB, rede 24 MB, armazenamento 20 MB. O número mostra o navegador depois de 10 min de uso com uma aba à vista. Se a aba à vista for uma live, ou se a pessoa trocar de aba o tempo todo, a memória sobe: cada aba acordada volta ao custo normal (~190 MB em média).
