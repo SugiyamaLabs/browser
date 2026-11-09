@@ -25,11 +25,11 @@ Tudo por cima do Chromium, em patches pequenos e em camadas, para o rebase mensa
 
 - **Máquina:** o mesmo Mac Apple silicon (e depois o mesmo Windows), na tomada, sem outros apps abertos. Anotar modelo, RAM e versão do sistema.
 - **Navegadores:** Brave (referência da meta), Chrome estável, ungoogled puro e o nosso, cada um na versão anotada.
-- **Perfil:** limpo, logado nas contas do conjunto, sem extensões (exceto na rodada "com 1Password", depois do M4).
-- **Rodadas:** 3 por navegador, vale a mediana.
-- **Conjunto fixo de 20 abas** (a lista exata, com URLs, mora no banco de medição da issue P1):
+- **Perfil:** perfil de medição separado, sem login e sem extensões (exceto na rodada "com 1Password", depois do M4).
+- **Rodadas:** 3 por navegador, vale a mediana. Os navegadores são medidos um depois do outro, no mesmo dia, porque as lives mudam.
+- **Conjunto fixo de 20 abas**, o uso real do Willian (09/11/2026): quase tudo Twitch e YouTube, sem login. A lista exata está em [`tools/tabs.txt`](../tools/tabs.txt):
 
-  Gmail, Google Calendar, Google Docs, Google Sheets, Slack, Figma, GitHub (PR grande), YouTube (vídeo tocando), Notion, Microsoft Teams, Outlook web, WhatsApp Web, Google Chat, ClickUp, Linear, um banco, um site de notícia pesado, Twitch, Google Maps, MDN.
+  8 de Twitch (início, diretório, categorias e 4 canais), 8 de YouTube (início, live 24 h, vídeo 4K longo, vídeo, Shorts, busca, canal, explorar), GitHub, UOL, Google Maps e MDN.
 
 - **Métricas:**
 
@@ -60,7 +60,7 @@ Cada release mede o conjunto no runner local. O release não sai se passar de 50
 ## Como rodar
 
 ```sh
-tools/measure.py brave --login      # uma vez por navegador: abre as 20 abas no perfil de medição; entre nas contas e feche com ⌘Q
+tools/measure.py brave --login      # uma vez por navegador: só se algum dia o conjunto tiver aba com login: abre as abas no perfil de medição; entre e feche com ⌘Q
 tools/measure.py brave              # 3 rodadas de 5 min; imprime a linha para docs/medicoes.md
 ```
 
