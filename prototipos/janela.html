@@ -16,7 +16,7 @@
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
   --ease: cubic-bezier(.16,1,.3,1); --spring: cubic-bezier(.34,1.56,.64,1);
   --round: 1; --pill: 0;
-  --profile: #7F9BC7;            /* cor do time: só no rosto (monograma) */
+  --profile: #7F9BC7;            /* cor do ato: só no rosto (monograma) */
 }
 /* Brasa: o segundo tema do Agens */
 :root[data-theme="brasa"] {
@@ -93,7 +93,7 @@ input, select, textarea { font: inherit; color: inherit; }
 .sug[aria-selected="true"], .sug:hover { background: var(--raise-2); }
 .sug small { color: var(--dim); font-size: 12px; }
 
-/* seletor de time: ladrilhos de monograma (a cor do time mora no rosto) */
+/* seletor de ato: ladrilhos de monograma (a cor do ato mora no rosto) */
 .profiles { display: flex; gap: 2px; padding: 2px; margin-left: 4px; border: 1px solid var(--line); border-radius: max(calc(9px * var(--round)), calc(var(--pill) * 999px)); flex: none; }
 .profiles button { display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 6px; border-radius: max(calc(7px * var(--round)), calc(var(--pill) * 999px)); color: var(--mute); font-size: 12.5px; }
 .profiles button:hover { color: var(--ink); }
@@ -136,7 +136,7 @@ input, select, textarea { font: inherit; color: inherit; }
 .space-title { display: flex; align-items: center; gap: 9px; padding: 6px 8px 8px; font-size: 13px; font-weight: 600; color: var(--ink); min-width: 0; }
 .space-title .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .space-title .avatar { width: 18px; height: 18px; font-size: 10px; }
-/* Spaces: a fileira de times no pé da lateral, como no Arc */
+/* Atos: a fileira no pé da lateral */
 .spaces { display: flex; align-items: center; justify-content: center; gap: 2px; padding: 8px 0 6px; border-top: 1px solid var(--line); flex: none; }
 .space { width: 30px; height: 28px; border-radius: calc(8px * var(--round)); display: grid; place-items: center; }
 .space:hover { background: var(--hover); }
@@ -364,7 +364,7 @@ select.sel { height: 30px; padding: 0 10px; border-radius: calc(8px * var(--roun
 .os-win .layout-side .toolbar .caption { height: 40px; }
 .os-win .layout-top .toolbar .caption { display: none; }
 
-/* ===== Folha: criar e configurar um time (space) ===== */
+/* ===== Folha: criar e configurar um ato ===== */
 .scrim { position: fixed; inset: 0; z-index: 50; background: rgba(5,5,7,.6); display: none; place-items: center; }
 .scrim.open { display: grid; animation: fade .2s var(--ease); }
 @keyframes fade { from { opacity: 0; } }
@@ -451,7 +451,7 @@ select.sel { height: 30px; padding: 0 10px; border-radius: calc(8px * var(--roun
         </label>
         <div class="suggest" role="listbox" aria-label="Sugestões" id="suggest"></div>
       </div>
-      <div class="profiles" id="profiles" role="group" aria-label="Perfil do time"></div>
+      <div class="profiles" id="profiles" role="group" aria-label="Ato"></div>
       <button class="tbtn" aria-label="Menu" aria-haspopup="menu" data-act="mainmenu"><svg class="icon"><use href="#i-menu"/></svg></button>
       <div class="caption" aria-hidden="true"><button tabindex="-1"><svg class="icon" viewBox="0 0 16 16" style="width:10px;height:10px"><path d="M1 8h14"/></svg></button><button tabindex="-1"><svg class="icon" viewBox="0 0 16 16" style="width:10px;height:10px"><rect x="1.5" y="1.5" width="13" height="13" rx="1.5"/></svg></button><button class="close" tabindex="-1"><svg class="icon" viewBox="0 0 16 16" style="width:10px;height:10px"><path d="m2 2 12 12M14 2 2 14"/></svg></button></div>
     </div>
@@ -466,7 +466,7 @@ select.sel { height: 30px; padding: 0 10px; border-radius: calc(8px * var(--roun
           <button class="stab side-new" data-act="newtab"><svg class="icon"><use href="#i-plus"/></svg><span class="title">Nova aba</span></button>
           <div class="side-list" id="sideList" role="tablist" aria-label="Abas" aria-orientation="vertical"></div>
         </div>
-        <div class="spaces" id="spaces" role="tablist" aria-label="Times"></div>
+        <div class="spaces" id="spaces" role="tablist" aria-label="Atos"></div>
       </nav>
       <main class="content" id="content" tabindex="-1"></main>
     </div>
@@ -474,7 +474,7 @@ select.sel { height: 30px; padding: 0 10px; border-radius: calc(8px * var(--roun
 
   <aside class="panel" aria-label="Controles do protótipo">
     <h2>Protótipo da janela</h2>
-    <p>Issue #17. O navegador é o Agens: na marca do Agens (Grafite e Brasa, Agens-Prototipos/DESIGN.md). Clique nas abas, nos times e na barra de endereço.</p>
+    <p>Issue #17. O navegador é o Agens: na marca do Agens (Grafite e Brasa, Agens-Prototipos/DESIGN.md). Clique nas abas, nos atos e na barra de endereço.</p>
     <fieldset><legend>Abas</legend>
       <div class="seg" data-group="layout"><button data-v="top" aria-pressed="true">Em cima</button><button data-v="side">Na lateral</button></div>
     </fieldset>
@@ -500,20 +500,20 @@ select.sel { height: 30px; padding: 0 10px; border-radius: calc(8px * var(--roun
       <li>Menu <b>⋯</b>: favoritos, histórico e configurações. Estrela na barra: favoritar a aba.</li>
       <li>Passe o mouse numa aba: cartão com a memória dela.</li>
       <li>Abas cinza: dormindo (#24). Clique para acordar.</li>
-      <li>Abas na lateral: os times ficam no pé, como os Spaces do Arc. Cada time tem as próprias abas. O <b>+</b> cria um time.</li>
+      <li>Abas na lateral: os atos ficam no pé. Cada ato tem as próprias abas, logins e cookies. O <b>+</b> cria um ato.</li>
       <li>Primeira instalação: <a href="primeiro-uso.html" style="color:var(--light-2)">primeiro-uso.html</a></li>
-      <li><kbd>⌘L</kbd> barra · <kbd>⌘T</kbd> nova aba · <kbd>⌘⇧S</kbd> lateral · <kbd>⌘1–9</kbd> aba · <kbd>⌃⇥</kbd> próxima · <kbd>⌘⇧1–5</kbd> time · <kbd>⌘D</kbd> favoritar · <kbd>⌘⇧B</kbd> barra de favoritos · <kbd>⌘Y</kbd> histórico · <kbd>⌘,</kbd> configurações</li>
+      <li><kbd>⌘L</kbd> barra · <kbd>⌘T</kbd> nova aba · <kbd>⌘⇧S</kbd> lateral · <kbd>⌘1–9</kbd> aba · <kbd>⌃⇥</kbd> próxima · <kbd>⌘⇧1–5</kbd> ato · <kbd>⌘D</kbd> favoritar · <kbd>⌘⇧B</kbd> barra de favoritos · <kbd>⌘Y</kbd> histórico · <kbd>⌘,</kbd> configurações</li>
     </ul>
     <div class="mem"><span>Memória (simulada)</span><b id="memTotal">—</b></div>
   </aside>
 </div>
 
 <div class="hovercard" id="hover" role="tooltip"></div>
-<div class="menu" id="menu" role="menu" aria-label="Perfis"></div>
+<div class="menu" id="menu" role="menu" aria-label="Atos"></div>
 <div class="scrim" id="scrim"><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle" id="sheet"></div></div>
 
 <script>
-// times: a cor do time mora só no rosto (monograma), nunca na janela
+// atos: a cor do ato mora só no rosto (monograma), nunca na janela
 const PROFILES = [
   { id: "pessoal", name: "Pessoal", color: "#FF9D5C", letter: "P" },
   { id: "a", name: "Cliente A", color: "#3F9CFF", letter: "A", sites: ["cliente-a.test", "github.com/cliente-a"] },
@@ -555,9 +555,9 @@ const HISTORY = [
   ["Sábado, 7 de novembro", "14:03", "SugiyamaLabs/agens", "github.com", "GH", C[2]],
 ];
 const prefs = { bmbar: true, dense: false, sleepAfter: "5", sleepOn: true, search: "DuckDuckGo", restore: true, adblock: true, adlevel: "forte", annoy: true,
-  startup: "continuar", lang: "Português (Brasil)", zoom: "100%", font: "Médio", minFont: "Nenhum", cookies: "Bloquear", dns: "Quad9 (criptografado)" };
+  shareCookies: false, startup: "continuar", lang: "Português (Brasil)", zoom: "100%", font: "Médio", minFont: "Nenhum", cookies: "Bloquear", dns: "Quad9 (criptografado)" };
 let settingsSection = "aparencia", historyQuery = "";
-// Spaces: cada time tem as próprias abas e a aba ativa
+// Atos: cada ato tem as próprias abas e a aba ativa
 const SPACE_TABS = {
   1: [
     { t: "Checkout · staging", u: "staging.cliente-a.test/checkout", l: "A", c: "#3F9CFF", kind: "article", pinned: true, mem: 180 },
@@ -599,7 +599,7 @@ function render() {
   root.style.setProperty("--profile", p.color);
   $("#sideAvatar").textContent = p.letter; $("#sideAvatar").style.background = p.color; $("#sideName").textContent = p.name;
   $("#spaces").innerHTML = PROFILES.map((q, i) => `<button class="space${q.asleep && i !== profile ? " asleep" : ""}" role="tab" aria-selected="${i === profile}" data-p="${i}" title="${esc(q.name)}${q.asleep && i !== profile ? " · dormindo" : ""}" aria-label="${esc(q.name)}"><span class="logo" style="background:${q.color}">${q.letter}</span></button>`).join("")
-    + `<button class="space add" aria-label="Novo time"><svg class="icon"><use href="#i-plus"/></svg></button>`;
+    + `<button class="space add" aria-label="Novo ato"><svg class="icon"><use href="#i-plus"/></svg></button>`;
   $("#profiles").innerHTML = PROFILES.map((q, i) => `<button data-p="${i}" aria-pressed="${i === profile}" class="${q.asleep && i !== profile ? "asleep" : ""}" title="${esc(q.name)}${q.asleep && i !== profile ? " · dormindo" : ""}" aria-label="${esc(q.name)}"><span class="logo" style="background:${q.color}">${q.letter}</span><span class="lbl">${esc(q.name)}</span></button>`).join("");
   const tab = tabs[active];
   $("#omniInput").value = tab ? tab.u : "";
@@ -697,7 +697,7 @@ const INTERNAL = {
       <label class="search"><svg class="icon"><use href="#i-search"/></svg><input id="histQ" aria-label="Buscar no histórico" placeholder="Buscar no histórico" value="${esc(historyQuery)}"></label>
       <button class="btn sm" data-act="clearhist">Apagar histórico…</button></div>
       ${out || '<div class="empty">Nada encontrado.</div>'}
-      <p class="note" style="margin-top:24px">O histórico fica só neste Mac, por perfil. Nada vai para servidor nenhum.</p></div>`;
+      <p class="note" style="margin-top:24px">O histórico fica só neste Mac, por ato. Nada vai para servidor nenhum.</p></div>`;
   },
   bookmarks() {
     const groups = {}; for (const b of bookmarks) (groups[b.f || "Barra de favoritos"] ||= []).push(b);
@@ -706,10 +706,10 @@ const INTERNAL = {
       <button class="btn sm">Nova pasta</button></div>
       ${Object.entries(groups).map(([f, list]) => `<div class="folder"><svg class="icon"><use href="#i-folder"/></svg>${esc(f)}</div>`
         + list.map(b => `<div class="row" data-open="${esc(b.u)}">${fav(b)}<span class="t">${esc(b.t)}</span><span class="d">${esc(b.u)}</span><button class="tbtn rm" aria-label="Remover ${esc(b.t)}" data-unbm="${esc(b.u)}"><svg class="icon"><use href="#i-x"/></svg></button></div>`).join("")).join("")}
-      <p class="note" style="margin-top:24px">Arraste para reordenar ou mover entre pastas. Importar do Brave, Chrome ou Safari: Configurações › Perfis.</p></div>`;
+      <p class="note" style="margin-top:24px">Arraste para reordenar ou mover entre pastas. Importar do Brave, Chrome ou Safari: Configurações › Atos.</p></div>`;
   },
   settings() {
-    const S = { inicio: "Ao abrir", aparencia: "Aparência", abas: "Abas que dormem", perfis: "Perfis", busca: "Busca", privacidade: "Privacidade e segurança", bloqueador: "Bloqueador", permissoes: "Permissões dos sites", senhas: "Senhas e preenchimento", downloads: "Downloads", idiomas: "Idiomas", acessibilidade: "Acessibilidade e página", extensoes: "Extensões", sistema: "Sistema", sobre: "Sobre" };
+    const S = { inicio: "Ao abrir", aparencia: "Aparência", abas: "Abas que dormem", atos: "Atos", busca: "Busca", privacidade: "Privacidade e segurança", bloqueador: "Bloqueador", permissoes: "Permissões dos sites", senhas: "Senhas e preenchimento", downloads: "Downloads", idiomas: "Idiomas", acessibilidade: "Acessibilidade e página", extensoes: "Extensões", sistema: "Sistema", sobre: "Sobre" };
     const sel = (key, opts, label) => `<select class="sel" data-sel="${key}" aria-label="${label}">${opts.map(o => `<option ${prefs[key] === o ? "selected" : ""}>${o}</option>`).join("")}</select>`;
     const tog = (key, label) => sw(key, prefs[key] !== false, label);
     const layout = win.classList.contains("layout-side") ? "side" : "top";
@@ -722,7 +722,7 @@ const INTERNAL = {
         ${theme === "custom" ? customHTML() : ""}
         <div class="opt"><span class="lbl">Densidade<small>Compacta deixa a barra e as abas mais baixas.</small></span>${segHTML("dense", [["0", "Normal"], ["1", "Compacta"]], prefs.dense ? "1" : "0")}</div>
         <div class="opt"><span class="lbl">Barra de favoritos<small>Atalho ⌘⇧B.</small></span>${sw("bmbar", prefs.bmbar, "Mostrar barra de favoritos")}</div>
-        <div class="opt"><span class="lbl">Cor do time<small>Aparece só no rosto do time: o monograma e o seletor.</small></span><div class="swatches">${["#FF7E98", "#FF9D5C", "#CF6FEA", "#9F86FF", "#3F9CFF", "#2BC7C0", "#7F9BC7"].map(col => `<button class="sw" style="background:${col}" aria-label="Cor ${col}" aria-pressed="${PROFILES[profile].color === col}" data-color="${col}"></button>`).join("")}</div></div>
+        <div class="opt"><span class="lbl">Cor do ato<small>Aparece só no rosto do ato: o monograma e o seletor.</small></span><div class="swatches">${["#FF7E98", "#FF9D5C", "#CF6FEA", "#9F86FF", "#3F9CFF", "#2BC7C0", "#7F9BC7"].map(col => `<button class="sw" style="background:${col}" aria-label="Cor ${col}" aria-pressed="${PROFILES[profile].color === col}" data-color="${col}"></button>`).join("")}</div></div>
       </div>`,
       abas: `<h2>Abas que dormem</h2><div class="group">
         <div class="opt"><span class="lbl">Pôr abas para dormir<small>A aba escondida fecha o processo e guarda o estado. Ao voltar, recarrega.</small></span>${sw("sleepOn", prefs.sleepOn, "Pôr abas para dormir")}</div>
@@ -737,27 +737,27 @@ const INTERNAL = {
       </div><div class="group"><div class="opt"><span class="lbl">Sites liberados<small>twitch.tv/gaules (apoiar o canal)</small></span><button class="btn sm">Adicionar…</button></div></div>`,
       inicio: `<h2>Ao abrir</h2><div class="group">
         <div class="opt"><span class="lbl">Quando o Agens abrir</span>${segHTML("startup", [["continuar", "Continuar de onde parei"], ["nova", "Nova aba"], ["paginas", "Páginas escolhidas"]], prefs.startup)}</div>
-        <div class="opt"><span class="lbl">Navegador padrão<small>Links de outros apps abrem no Agens, no perfil do time certo.</small></span><button class="btn sm pri" style="background:var(--hi);color:var(--on-hi);border-color:var(--hi)">Tornar padrão</button></div>
+        <div class="opt"><span class="lbl">Navegador padrão<small>Links de outros apps abrem no Agens, no ato certo.</small></span><button class="btn sm pri" style="background:var(--hi);color:var(--on-hi);border-color:var(--hi)">Tornar padrão</button></div>
         <div class="opt"><span class="lbl">Avisar antes de sair com várias abas<small>⌘Q pede confirmação.</small></span>${tog("warnQuit", "Avisar antes de sair")}</div>
       </div>`,
       permissoes: `<h2>Permissões dos sites</h2><p class="lead">O padrão vale para todos os sites; cada site pode ter a sua exceção.</p><div class="group">
         ${[["Câmera", "Perguntar"], ["Microfone", "Perguntar"], ["Localização", "Bloquear"], ["Notificações", "Bloquear"], ["Pop-ups e redirecionamentos", "Bloquear"], ["Som", "Permitir"], ["Reprodução automática com som", "Bloquear"], ["Área de transferência", "Perguntar"], ["Downloads automáticos", "Perguntar"], ["JavaScript", "Permitir"], ["Conteúdo protegido (DRM)", "Permitir"]].map(([n, v]) => `<div class="opt"><span class="lbl">${n}</span><select class="sel" aria-label="${n}"><option ${v === "Perguntar" ? "selected" : ""}>Perguntar</option><option ${v === "Permitir" ? "selected" : ""}>Permitir</option><option ${v === "Bloquear" ? "selected" : ""}>Bloquear</option></select></div>`).join("")}
       </div><div class="group"><div class="opt"><span class="lbl">Exceções por site<small>meet.google.com · câmera e microfone permitidos</small></span><button class="btn sm">Ver todas</button></div></div>`,
       senhas: `<h2>Senhas e preenchimento</h2><div class="group">
-        <div class="opt"><span class="lbl">Oferecer para salvar senhas<small>Guardadas no Keychain do Mac, por perfil.</small></span>${tog("savePw", "Oferecer para salvar senhas")}</div>
+        <div class="opt"><span class="lbl">Oferecer para salvar senhas<small>Guardadas no Keychain do Mac, por ato.</small></span>${tog("savePw", "Oferecer para salvar senhas")}</div>
         <div class="opt"><span class="lbl">Entrar sozinho<small>Usa a senha salva sem perguntar quando há só uma.</small></span>${tog("autoSignin", "Entrar sozinho")}</div>
         <div class="opt"><span class="lbl">Senhas salvas</span><span class="mono" style="color:var(--mute)">42</span><button class="btn sm">Gerenciar</button></div>
         <div class="opt"><span class="lbl">Chaves de acesso (passkeys)<small>Do Keychain do iCloud e do 1Password.</small></span><button class="btn sm">Gerenciar</button></div>
       </div><div class="group">
         <div class="opt"><span class="lbl">Endereços</span>${tog("addr", "Preencher endereços")}</div>
         <div class="opt"><span class="lbl">Cartões<small>O código de segurança nunca é salvo.</small></span>${tog("cards", "Preencher cartões")}</div>
-        <div class="opt"><span class="lbl">Usar o 1Password quando a extensão estiver no perfil<small>O preenchimento do Agens sai do caminho.</small></span>${tog("op", "Preferir 1Password")}</div>
+        <div class="opt"><span class="lbl">Usar o 1Password quando a extensão estiver no ato<small>O preenchimento do Agens sai do caminho.</small></span>${tog("op", "Preferir 1Password")}</div>
       </div>`,
       downloads: `<h2>Downloads</h2><div class="group">
         <div class="opt"><span class="lbl">Salvar em<small class="mono">~/Downloads</small></span><button class="btn sm">Mudar…</button></div>
         <div class="opt"><span class="lbl">Perguntar onde salvar cada arquivo</span>${sw("askDl", prefs.askDl === true, "Perguntar onde salvar")}</div>
         <div class="opt"><span class="lbl">Abrir arquivos seguros depois de baixar<small>PDF, imagens e textos.</small></span>${sw("openSafe", prefs.openSafe === true, "Abrir arquivos seguros")}</div>
-        <div class="opt"><span class="lbl">Uma pasta por perfil<small class="mono">~/Downloads/Cliente A</small></span>${sw("dlPerProfile", prefs.dlPerProfile === true, "Uma pasta por perfil")}</div>
+        <div class="opt"><span class="lbl">Uma pasta por ato<small class="mono">~/Downloads/Cliente A</small></span>${sw("dlPerProfile", prefs.dlPerProfile === true, "Uma pasta por ato")}</div>
       </div>`,
       idiomas: `<h2>Idiomas</h2><div class="group">
         <div class="opt"><span class="lbl">Idioma do Agens</span>${sel("lang", ["Português (Brasil)", "English", "Español"], "Idioma do Agens")}</div>
@@ -773,8 +773,8 @@ const INTERNAL = {
         <div class="opt"><span class="lbl">Legendas automáticas<small>Geradas no próprio Mac, para áudio e vídeo.</small></span>${sw("captions", prefs.captions === true, "Legendas automáticas")}</div>
         <div class="opt"><span class="lbl">Reduzir movimento e transparência<small>Segue os ajustes do macOS.</small></span><span style="color:var(--mute)">Do sistema</span></div>
       </div>`,
-      extensoes: `<h2>Extensões</h2><p class="lead">Da Chrome Web Store, por perfil. Os bots não usam extensões.</p><div class="group">
-        <div class="opt"><span class="logo" style="background:#3F9CFF">1P</span><span class="lbl">1Password<small>Só no perfil Cliente A</small></span>${sw("x1p", true, "1Password")}</div>
+      extensoes: `<h2>Extensões</h2><p class="lead">Da Chrome Web Store, por ato. Os bots não usam extensões.</p><div class="group">
+        <div class="opt"><span class="logo" style="background:#3F9CFF">1P</span><span class="lbl">1Password<small>Só no ato Cliente A</small></span>${sw("x1p", true, "1Password")}</div>
         <div class="opt"><span class="lbl">Instalar da Chrome Web Store</span><button class="btn sm">Abrir loja</button></div>
         <div class="opt"><span class="lbl">Modo de desenvolvedor<small>Carregar extensão sem empacotar.</small></span>${sw("devmode", prefs.devmode === true, "Modo de desenvolvedor")}</div>
       </div>`,
@@ -784,10 +784,11 @@ const INTERNAL = {
         <div class="opt"><span class="lbl">Configurações de proxy<small>Usa as do macOS.</small></span><button class="btn sm">Abrir</button></div>
         <div class="opt"><span class="lbl">Restaurar as configurações originais</span><button class="btn sm">Restaurar…</button></div>
       </div>`,
-      perfis: `<h2>Perfis</h2><div class="group">${PROFILES.map((p, i) => `<div class="opt"><span class="logo" style="background:${p.color}">${p.letter}</span><span class="lbl">${esc(p.name)}<small>${i === profile ? "Em uso" : p.asleep ? "Dormindo · 0 MB" : "Aberto"}${p.sites?.length ? " · " + p.sites.map(esc).join(", ") : ""}</small></span><button class="btn sm" data-edit="${i}">Configurar</button></div>`).join("")}
-        <div class="opt"><span class="lbl">Novo time<small>Um espaço com abas, logins e extensões só dele.</small></span><button class="btn sm" data-newteam>Criar…</button></div></div>
-        <div class="group"><div class="opt"><span class="lbl">Perfis fora de uso dormem<small>Só o perfil em uso fica carregado.</small></span>${sw("x", true, "Perfis fora de uso dormem")}</div>
-        <div class="opt"><span class="lbl">Importar favoritos e senhas<small>Do Brave, Chrome ou Safari, para o perfil em uso.</small></span><button class="btn sm">Importar…</button></div></div>`,
+      atos: `<h2>Atos</h2><div class="group">${PROFILES.map((p, i) => `<div class="opt"><span class="logo" style="background:${p.color}">${p.letter}</span><span class="lbl">${esc(p.name)}<small>${i === profile ? "Em uso" : p.asleep ? "Dormindo · 0 MB" : "Aberto"}${p.sites?.length ? " · " + p.sites.map(esc).join(", ") : ""}</small></span><button class="btn sm" data-edit="${i}">Configurar</button></div>`).join("")}
+        <div class="opt"><span class="lbl">Novo ato<small>Abas, logins, cookies e extensões só dele.</small></span><button class="btn sm" data-newteam>Criar…</button></div></div>
+        <div class="group"><div class="opt"><span class="lbl">Compartilhar cookies entre os atos?<small>${prefs.shareCookies ? "Ligado: entrar num site em um ato vale para todos os atos." : "Desligado: cada ato tem os próprios logins. Recomendado."}</small></span>${sw("shareCookies", prefs.shareCookies === true, "Compartilhar cookies entre os atos")}</div></div>
+        <div class="group"><div class="opt"><span class="lbl">Atos fora de uso dormem<small>Só o ato em uso fica carregado.</small></span>${sw("x", true, "Atos fora de uso dormem")}</div>
+        <div class="opt"><span class="lbl">Importar favoritos e senhas<small>Do Brave, Chrome ou Safari, para o ato em uso.</small></span><button class="btn sm">Importar…</button></div></div>`,
       busca: `<h2>Busca</h2><div class="group"><div class="opt"><span class="lbl">Buscador da barra de endereço</span><select class="sel" data-sel="search" aria-label="Buscador">${["DuckDuckGo", "Google", "Bing", "Brave Search", "Kagi"].map(o => `<option ${prefs.search === o ? "selected" : ""}>${o}</option>`).join("")}</select></div>
         <div class="opt"><span class="lbl">Sugestões enquanto digita<small>Vêm do histórico e dos favoritos deste Mac. Não pergunta nada ao buscador.</small></span>${sw("x2", true, "Sugestões locais")}</div></div>`,
       privacidade: `<h2>Privacidade e segurança</h2><p class="lead">Tudo no máximo desde a primeira vez que o Agens abre. Você só afrouxa o que quiser, site por site.</p><div class="group">
@@ -801,7 +802,7 @@ const INTERNAL = {
         <div class="opt"><span class="lbl">Não revelar o IP local em chamadas de vídeo<small>WebRTC só pela rota padrão.</small></span>${tog("webrtc", "Proteger IP no WebRTC")}</div>
         <div class="opt"><span class="lbl">Enviar só o domínio de onde você veio<small>Os sites não veem a página exata que te mandou para lá.</small></span>${tog("referrer", "Referenciador mínimo")}</div>
         <div class="opt"><span class="lbl">Navegação segura<small>Listas de sites perigosos que vêm com cada atualização, verificadas no próprio Mac.</small></span>${tog("safe", "Navegação segura local")}</div>
-        <div class="opt"><span class="lbl">Ao fechar, apagar<small>Histórico, cookies e cache, por perfil. Desligado: apagar cookies tira você de todos os logins.</small></span><button class="btn sm">Escolher…</button></div>
+        <div class="opt"><span class="lbl">Ao fechar, apagar<small>Histórico, cookies e cache, por ato. Desligado: apagar cookies tira você de todos os logins.</small></span><button class="btn sm">Escolher…</button></div>
         <div class="opt"><span class="lbl">Apagar dados de navegação</span><button class="btn sm" data-act="clearhist">Apagar…</button></div></div>`,
       sobre: `<h2>Sobre</h2><div class="group"><div class="opt"><span class="logo" style="background:var(--hi);width:28px;height:28px;border-radius:calc(8px * var(--round))"><svg viewBox="21 21 128 128" width="22" height="22" aria-hidden="true"><defs><mask id="am"><rect width="200" height="200" fill="#fff"/><circle cx="52" cy="52" r="34" fill="#000"/></mask></defs><rect x="52" y="52" width="92" height="92" rx="24" fill="#0B0B0D" mask="url(#am)"/><circle cx="52" cy="52" r="26" fill="#F7A95C"/></svg></span><span class="lbl">Agens<small>Versão <span class="mono">1.0.0 (156)</span> · SugiyamaLabs</small></span><span style="color:var(--mute)">Atualizado</span></div>
         <div class="opt"><span class="lbl">Avisos de código aberto<small>As licenças dos projetos que o Agens usa por dentro.</small></span><button class="btn sm">Ver</button></div>
@@ -831,7 +832,7 @@ function applyPref(key, v) {
 
   render();
 }
-// ===== Folha do time: criar ou editar um space =====
+// ===== Folha do ato: criar ou editar um ato =====
 const TEAM_PALETTE = ["#FF7E98", "#FF9D5C", "#E3876F", "#F46DB8", "#CF6FEA", "#A97AB8", "#9F86FF", "#6E86FF", "#3F9CFF", "#3CC0F0", "#2BC7C0", "#7F9BC7"];
 let draft = null;
 const teamLetter = n => (n.trim().split(/\s+/).pop()[0] || "?").toUpperCase();
@@ -844,19 +845,19 @@ function openTeamSheet(i) {
 }
 function renderSheet() {
   const d = draft, editing = d.i !== null;
-  $("#sheet").innerHTML = `<div class="sheet-h"><span class="logo big" style="background:${d.color}" id="teamPrev">${d.name ? teamLetter(d.name) : "?"}</span><h2 id="sheetTitle">${editing ? "Configurar " + esc(d.name) : "Novo time"}</h2><button class="tbtn" aria-label="Fechar" data-sheet="close"><svg class="icon"><use href="#i-x"/></svg></button></div>
+  $("#sheet").innerHTML = `<div class="sheet-h"><span class="logo big" style="background:${d.color}" id="teamPrev">${d.name ? teamLetter(d.name) : "?"}</span><h2 id="sheetTitle">${editing ? "Configurar " + esc(d.name) : "Novo ato"}</h2><button class="tbtn" aria-label="Fechar" data-sheet="close"><svg class="icon"><use href="#i-x"/></svg></button></div>
     <div class="sheet-b">
       <label class="fld">Nome<input class="field" id="teamName" placeholder="Cliente A" value="${esc(d.name)}" autocomplete="off"></label>
-      <div class="fld">Cor (aparece só no rosto do time)<div class="palette">${TEAM_PALETTE.map(c => `<button class="sw" style="background:${c}" aria-label="Cor ${c}" aria-pressed="${d.color === c}" data-tcolor="${c}"></button>`).join("")}</div></div>
-      <div class="fld">Links destes sites abrem neste time<div class="chips" id="chips">${d.sites.map((s, k) => `<span class="chip">${esc(s)}<button aria-label="Tirar ${esc(s)}" data-rmsite="${k}"><svg class="icon" style="width:11px;height:11px"><use href="#i-x"/></svg></button></span>`).join("")}<input id="siteIn" placeholder="${d.sites.length ? "" : "cliente-a.test, github.com/cliente-a…"}" aria-label="Adicionar site"></div></div>
+      <div class="fld">Cor (aparece só no rosto do ato)<div class="palette">${TEAM_PALETTE.map(c => `<button class="sw" style="background:${c}" aria-label="Cor ${c}" aria-pressed="${d.color === c}" data-tcolor="${c}"></button>`).join("")}</div></div>
+      <div class="fld">Links destes sites abrem neste ato<div class="chips" id="chips">${d.sites.map((s, k) => `<span class="chip">${esc(s)}<button aria-label="Tirar ${esc(s)}" data-rmsite="${k}"><svg class="icon" style="width:11px;height:11px"><use href="#i-x"/></svg></button></span>`).join("")}<input id="siteIn" placeholder="${d.sites.length ? "" : "cliente-a.test, github.com/cliente-a…"}" aria-label="Adicionar site"></div></div>
       ${editing ? "" : `<div class="fld">Começar com${segHTML("tcopy", [["vazio", "Vazio"], ["favoritos", "Favoritos do Pessoal"], ["tudo", "Favoritos e extensões"]], d.copy)}</div>`}
       <div class="group" style="margin:0">
-        <div class="opt"><span class="lbl">Cookies, logins, extensões e histórico só deste time<small>Sempre separado. É o que faz um time ser um time.</small></span><span style="color:var(--mute)">Sempre</span></div>
-        <div class="opt"><span class="lbl">Dormir quando fora de uso<small>Libera a memória do time inteiro até você voltar.</small></span><button class="switch" role="switch" aria-checked="${d.sleep}" aria-label="Dormir quando fora de uso" data-tsw="sleep"></button></div>
-        <div class="opt"><span class="lbl">Pasta de downloads própria<small class="mono">~/Downloads/${esc(d.name || "Novo time")}</small></span><button class="switch" role="switch" aria-checked="${d.dl}" aria-label="Pasta de downloads própria" data-tsw="dl"></button></div>
+        <div class="opt"><span class="lbl">${prefs.shareCookies ? "Logins compartilhados com os outros atos" : "Cookies e logins só deste ato"}<small>${prefs.shareCookies ? "O compartilhamento está ligado em Configurações › Atos." : "Extensões e histórico também. Compartilhar fica em Configurações › Atos."}</small></span><span style="color:var(--mute)">${prefs.shareCookies ? "Compartilhado" : "Separado"}</span></div>
+        <div class="opt"><span class="lbl">Dormir quando fora de uso<small>Libera a memória do ato inteiro até você voltar.</small></span><button class="switch" role="switch" aria-checked="${d.sleep}" aria-label="Dormir quando fora de uso" data-tsw="sleep"></button></div>
+        <div class="opt"><span class="lbl">Pasta de downloads própria<small class="mono">~/Downloads/${esc(d.name || "Novo ato")}</small></span><button class="switch" role="switch" aria-checked="${d.dl}" aria-label="Pasta de downloads própria" data-tsw="dl"></button></div>
       </div>
     </div>
-    <div class="sheet-f">${editing && d.i !== 0 ? `<button class="btn sm" data-sheet="delete">Apagar time…</button>` : ""}<span class="grow"></span><button class="btn sm" data-sheet="close">Cancelar</button><button class="btn sm pri" data-sheet="save" ${d.name.trim() ? "" : "disabled style=\"opacity:.45\""}>${editing ? "Salvar" : "Criar time"}</button></div>`;
+    <div class="sheet-f">${editing && d.i !== 0 ? `<button class="btn sm" data-sheet="delete">Apagar ato…</button>` : ""}<span class="grow"></span><button class="btn sm" data-sheet="close">Cancelar</button><button class="btn sm pri" data-sheet="save" ${d.name.trim() ? "" : "disabled style=\"opacity:.45\""}>${editing ? "Salvar" : "Criar ato"}</button></div>`;
 }
 function closeSheet() { $("#scrim").classList.remove("open"); draft = null; }
 function saveTeam() {
@@ -898,7 +899,7 @@ function customHTML() {
       <label class="wp" style="cursor:pointer;${custom.img ? `background-image:url('${custom.img}');` : ""}" aria-pressed="${!!custom.img}" title="Escolher imagem do Mac">${custom.img ? "" : "sua…"}<input type="file" accept="image/*" id="wallFile" hidden></label></div></div>
     <div class="opt"><span class="lbl">Escurecer a imagem</span>${rng("dim", 0, 80, "%", "Escurecer a imagem")}</div>
     <div class="opt"><span class="lbl">Cor da janela<small>Tinge os grafites.</small></span><div class="swatches">${["#7F9BC7", "#6E86FF", "#2BC7C0", "#CF6FEA", "#FF7E98", "#E3876F", "#8A8A94"].map(c => `<button class="sw" style="background:${c}" aria-pressed="${custom.tint === c}" data-ctint="${c}" aria-label="Cor ${c}"></button>`).join("")}<input type="color" value="${custom.tint}" data-cpick="tint" aria-label="Outra cor da janela" style="width:22px;height:22px;border:0;padding:0;background:none"></div></div>
-    <div class="opt"><span class="lbl">Cor de destaque<small>Foco, ao vivo, estrela, time ativo.</small></span><div class="swatches">${["#FFC98A", "#FFE9C7", "#9F86FF", "#3CC0F0", "#2BC7C0", "#F46DB8", "#F4F4F6"].map(c => `<button class="sw" style="background:${c}" aria-pressed="${custom.accent === c}" data-caccent="${c}" aria-label="Destaque ${c}"></button>`).join("")}<input type="color" value="${custom.accent}" data-cpick="accent" aria-label="Outra cor de destaque" style="width:22px;height:22px;border:0;padding:0;background:none"></div></div>
+    <div class="opt"><span class="lbl">Cor de destaque<small>Foco, ao vivo, estrela, ato ativo.</small></span><div class="swatches">${["#FFC98A", "#FFE9C7", "#9F86FF", "#3CC0F0", "#2BC7C0", "#F46DB8", "#F4F4F6"].map(c => `<button class="sw" style="background:${c}" aria-pressed="${custom.accent === c}" data-caccent="${c}" aria-label="Destaque ${c}"></button>`).join("")}<input type="color" value="${custom.accent}" data-cpick="accent" aria-label="Outra cor de destaque" style="width:22px;height:22px;border:0;padding:0;background:none"></div></div>
     <div class="opt"><span class="lbl">Arredondamento</span>${rng("round", 50, 160, "%", "Arredondamento")}</div>
     <div class="opt"><span class="lbl">Voltar ao padrão do Personalizado</span><button class="btn sm" data-act="customreset">Restaurar</button></div>`;
 }
@@ -936,11 +937,11 @@ function showSuggest() {
 }
 $("#suggest").addEventListener("mousedown", e => { const s = e.target.closest("[data-i]"); if (s) select(+s.dataset.i); });
 
-// Perfis
+// Atos
 function openProfiles(anchor) {
   const m = $("#menu");
   m.innerHTML = PROFILES.map((p, i) => `<button class="mi" role="menuitemradio" aria-checked="${i === profile}" data-p="${i}"><span class="logo" style="background:${p.color}">${p.letter}</span>${p.name}<span class="${p.asleep && i !== profile ? "st" : "k"}">${p.asleep && i !== profile ? "dormindo" : "⌘⇧" + (i + 1)}</span></button>`).join("")
-    + `<hr><button class="mi" role="menuitem"><svg class="icon"><use href="#i-plus"/></svg>Novo perfil</button>`;
+    + `<hr><button class="mi" role="menuitem"><svg class="icon"><use href="#i-plus"/></svg>Novo ato</button>`;
   const r = anchor.getBoundingClientRect();
   m.style.top = r.bottom + 6 + "px"; m.style.left = Math.min(r.left, innerWidth - 270) + "px";
   m.classList.add("open"); m.querySelector(".mi").focus();
@@ -949,7 +950,7 @@ function setProfile(i) {
   if (i === profile || !PROFILES[i]) return;
   SPACE_TABS[profile] = tabs; SPACE_ACTIVE[profile] = active;  // guarda o espaço que sai
   const dir = i > profile ? "from-r" : "from-l";
-  if (PROFILES[i].asleep) PROFILES[i].asleep = false;           // o time acorda
+  if (PROFILES[i].asleep) PROFILES[i].asleep = false;           // o ato acorda
   profile = i; tabs = SPACE_TABS[i] || []; active = tabs.length ? (SPACE_ACTIVE[i] ?? 0) : null;
   if (tabs[active]?.sleeping) { tabs[active].sleeping = false; tabs[active].mem = tabs[active].was; }
   $("#menu").classList.remove("open"); render();

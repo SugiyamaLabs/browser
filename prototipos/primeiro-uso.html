@@ -98,7 +98,7 @@ h1 { font-size: 28px; font-weight: 600; line-height: 1.22; letter-spacing: -.018
 .chip[aria-pressed="true"]::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--light-3); }
 .note { color: var(--dim); font-size: 12.5px; margin-top: 18px; }
 
-/* times (spaces) */
+/* atos */
 .teams { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
 .team-list { display: grid; gap: 6px; align-content: start; }
 .team-row { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border: 1px solid var(--line); border-radius: calc(10px * var(--round)); }
@@ -117,6 +117,12 @@ label.f { display: grid; gap: 6px; font-size: 12.5px; color: var(--mute); }
 .sw { aspect-ratio: 1; border-radius: calc(6px * var(--round)); }
 .sw[aria-pressed="true"] { outline: 2px solid var(--light-2); outline-offset: 2px; }
 .sep { color: var(--dim); font-size: 12.5px; line-height: 1.6; }
+.share { display: flex; align-items: center; gap: 14px; margin-top: 18px; padding: 12px 14px; border: 1px solid var(--line); border-radius: calc(12px * var(--round)); text-align: left; width: 100%; }
+.share .t { flex: 1; } .share .t b { display: block; font-weight: 500; } .share .t small { color: var(--dim); font-size: 12.5px; }
+.switch { width: 36px; height: 22px; border-radius: 11px; background: var(--raise-2); border: 1px solid var(--line-strong); position: relative; flex: none; transition: background .2s var(--ease); }
+.switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--mute); transition: transform .32s var(--spring), background .2s var(--ease); }
+.share[aria-checked="true"] .switch { background: var(--hi); border-color: var(--hi); }
+.share[aria-checked="true"] .switch::after { transform: translateX(14px); background: var(--on-hi); }
 
 /* visual */
 .looks { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -173,7 +179,7 @@ label.f { display: grid; gap: 6px; font-size: 12.5px; color: var(--mute); }
   <div class="ob-foot"><span class="hint"><kbd>↵</kbd> continuar · <kbd>esc</kbd> voltar</span><button class="btn ghost" id="back">Voltar</button><button class="btn pri" id="next">Começar</button></div>
 </div>
 
-<aside class="panel"><b>Protótipo da primeira instalação</b>Da abertura do app até a primeira janela. Os times criados aqui são os spaces da lateral.
+<aside class="panel"><b>Protótipo da primeira instalação</b>Da abertura do app até a primeira janela. Os atos criados aqui aparecem no pé da lateral.
   <div class="seg" id="theme"><button aria-pressed="true" data-v="grafite">Grafite</button><button aria-pressed="false" data-v="brasa">Brasa</button><button aria-pressed="false" data-v="vidro">Vidro</button></div>
   <div style="margin-top:8px"><button class="btn ghost" id="restart" style="padding:4px 8px;font-size:12.5px">Recomeçar</button></div>
 </aside>
@@ -183,7 +189,7 @@ const PALETTE = { coral: "#FF7E98", tangerina: "#FF9D5C", terracota: "#E3876F", 
 const st = {
   step: 0, from: "Brave", what: { Favoritos: true, Senhas: true, Histórico: true, "Abas abertas": false },
   teams: [{ name: "Pessoal", color: PALETTE.tangerina }],
-  draft: { name: "", color: PALETTE.azul }, layout: "side", theme: "grafite", def: null,
+  draft: { name: "", color: PALETTE.azul }, layout: "side", theme: "grafite", def: null, share: false,
 };
 const $ = s => document.querySelector(s), esc = s => s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const mark = n => $("#markTpl").innerHTML.replaceAll("SIZE", n);
@@ -193,7 +199,7 @@ const okIc = '<span class="ok"><svg viewBox="0 0 16 16" fill="none" stroke-linec
 const STEPS = [
   { next: "Começar", body: () => `<div class="hero opening">${mark(96)}<div class="wordmark">agens</div>
       <h1 id="obTitle">O navegador leve, bonito e que não conta nada a ninguém.</h1>
-      <p class="lead">Abas que dormem, times separados e privacidade no máximo desde agora.</p>
+      <p class="lead">Abas que dormem, atos separados e privacidade no máximo desde agora.</p>
       <div class="facts"><span><i class="dot"></i>~300 MB com 20 abas</span><span><i class="dot"></i>zero telemetria</span><span><i class="dot"></i>bloqueador nativo</span></div></div>` },
   { next: "Importar", alt: "Começar do zero", body: () => `<h1 id="obTitle">Trazer o que você já tem?</h1>
       <p class="lead">Achamos estes navegadores no seu Mac. A importação acontece aqui, sem passar por servidor nenhum.</p>
@@ -203,23 +209,24 @@ const STEPS = [
       <p class="note">Senhas vão para o Keychain do Mac. Dá para importar de novo depois, em Configurações › Perfis.</p>` },
   { next: "Continuar", body: () => {
       const d = st.draft, l = d.name ? letter(d.name) : "?";
-      return `<h1 id="obTitle">Seus times</h1>
-      <p class="lead">Cada time é um espaço com abas, logins, cookies e extensões só dele, como os Spaces do Arc. Times fora de uso dormem e não gastam memória.</p>
+      return `<h1 id="obTitle">Seus atos</h1>
+      <p class="lead">Cada ato tem abas, logins, cookies e extensões só dele: um para cada frente da sua vida. Atos fora de uso dormem e não gastam memória.</p>
       <div class="teams">
         <div class="team-list">${st.teams.map((t, i) => `<div class="team-row"><span class="logo" style="background:${t.color}">${letter(t.name)}</span><span class="t">${esc(t.name)}<small>${i === 0 ? "O seu, com o que veio do " + st.from : "Novo, vazio"}</small></span>${i ? `<button class="x" aria-label="Tirar ${esc(t.name)}" data-rm="${i}"><svg class="icon"><use href="#i-x"/></svg></button>` : ""}</div>`).join("")}
-          <p class="sep">Exemplos: Cliente A, Cliente B, Estúdio, Projeto X. Dá para criar e mudar depois, no <b>+</b> da lateral.</p></div>
+          <p class="sep">Exemplos: Cliente A, Cliente B, Estúdio, Projeto X. Dá para criar e mudar depois, no <b>+</b> da lateral.</p>
+          <button class="share" role="switch" aria-checked="${st.share}" data-share><span class="t"><b>Compartilhar cookies entre os atos?</b><small>${st.share ? "Ligado: entrar num site em um ato vale para todos." : "Desligado: cada ato tem os próprios logins. Recomendado."}</small></span><span class="switch"></span></button></div>
         <div class="form">
           <div class="row"><span class="logo big ${d.pop ? "pop" : ""}" style="background:${d.color}" id="prev">${l}</span>
-            <label class="f" style="flex:1">Nome do time<input class="field" id="tname" placeholder="Cliente A" value="${esc(d.name)}" autocomplete="off"></label></div>
-          <div><div style="font-size:12.5px;color:var(--mute);margin-bottom:6px">Cor (aparece só no rosto do time)</div>
+            <label class="f" style="flex:1">Nome do ato<input class="field" id="tname" placeholder="Cliente A" value="${esc(d.name)}" autocomplete="off"></label></div>
+          <div><div style="font-size:12.5px;color:var(--mute);margin-bottom:6px">Cor (aparece só no rosto do ato)</div>
             <div class="palette">${Object.entries(PALETTE).map(([k, c]) => `<button class="sw" style="background:${c}" aria-label="${k}" aria-pressed="${d.color === c}" data-color="${c}"></button>`).join("")}</div></div>
-          <button class="btn" id="addTeam" ${d.name.trim() ? "" : "disabled style=\"opacity:.45;cursor:default\""}><svg class="icon"><use href="#i-plus"/></svg>Criar time</button>
+          <button class="btn" id="addTeam" ${d.name.trim() ? "" : "disabled style=\"opacity:.45;cursor:default\""}><svg class="icon"><use href="#i-plus"/></svg>Criar ato</button>
         </div>
       </div>`; } },
   { next: "Continuar", body: () => `<h1 id="obTitle">Do seu jeito</h1>
       <p class="lead">Muda a qualquer hora, sem reiniciar: <kbd>⌘⇧S</kbd> troca as abas de lugar.</p>
       <div class="looks">
-        <button class="look" aria-pressed="${st.layout === "side"}" data-layout="side"><div class="mini side"><span class="sb"><i></i><i></i><i></i><i></i><i style="margin-top:auto"></i></span><i></i><i class="pg"></i></div><b>Abas na lateral</b><small>Com os times no pé, como os Spaces.</small></button>
+        <button class="look" aria-pressed="${st.layout === "side"}" data-layout="side"><div class="mini side"><span class="sb"><i></i><i></i><i></i><i></i><i style="margin-top:auto"></i></span><i></i><i class="pg"></i></div><b>Abas na lateral</b><small>Com os atos no pé.</small></button>
         <button class="look" aria-pressed="${st.layout === "top"}" data-layout="top"><div class="mini top"><span class="tabs"><i></i><i></i><i></i></span><i></i><i class="pg"></i></div><b>Abas em cima</b><small>O jeito clássico.</small></button>
       </div>
       <div class="label">Tema</div>
@@ -229,12 +236,12 @@ const STEPS = [
       <div class="priv">${[["Bloqueador de anúncios e rastreadores", "Nível forte, sem extensão"], ["Cookies de terceiros bloqueados", ""], ["Proteção contra impressão digital", "Os sites não te reconhecem pelo seu Mac"], ["DNS criptografado", "A operadora não vê os sites que você abre"], ["Sempre HTTPS", ""], ["Links sem rastreadores", "utm, fbclid e parecidos saem do link"], ["Busca no DuckDuckGo", "Troque em Configurações › Busca"], ["Senhas no Keychain do Mac", ""]].map(([t, d]) => `<div>${okIc}<span>${t}${d ? `<small>${d}</small>` : ""}</span></div>`).join("")}</div>
       <div class="zero"><b>0</b><span>conexões com o Agens parado. Sem telemetria, sem sync, sem conta. Medido a cada versão.</span></div>` },
   { next: "Tornar padrão", alt: "Agora não", body: () => `<h1 id="obTitle">Abrir os links no Agens?</h1>
-      <p class="lead">Links do Slack, do e-mail e de outros apps abrem aqui, no time certo: links de <span class="mono">cliente-a.test</span> abrem no Cliente A.</p>
-      <div class="choices">${st.teams.map(t => `<div class="choice" style="cursor:default"><span class="logo" style="background:${t.color}">${letter(t.name)}</span><span class="t"><b>${esc(t.name)}</b><small>${t.name === "Pessoal" ? "Tudo o que não for de outro time" : "Sites que você indicar"}</small></span></div>`).join("")}</div>
+      <p class="lead">Links do Slack, do e-mail e de outros apps abrem aqui, no ato certo: links de <span class="mono">cliente-a.test</span> abrem no Cliente A.</p>
+      <div class="choices">${st.teams.map(t => `<div class="choice" style="cursor:default"><span class="logo" style="background:${t.color}">${letter(t.name)}</span><span class="t"><b>${esc(t.name)}</b><small>${t.name === "Pessoal" ? "Tudo o que não for de outro ato" : "Sites que você indicar"}</small></span></div>`).join("")}</div>
       <p class="note">O macOS pergunta uma vez. Dá para mudar em Configurações › Ao abrir.</p>` },
   { next: "Abrir o Agens", body: () => `<div class="hero"><div class="breath">${mark(72)}</div>
       <h1 id="obTitle">Pronto.</h1>
-      <p class="lead">${st.teams.length} ${st.teams.length === 1 ? "time" : "times"}, abas ${st.layout === "side" ? "na lateral" : "em cima"}, tema ${{ brasa: "Brasa", vidro: "Vidro" }[st.theme] || "Grafite"}${st.def ? ", navegador padrão" : ""}. ${st.what.Favoritos ? "Os favoritos do " + st.from + " já estão na barra." : ""}</p>
+      <p class="lead">${st.teams.length} ${st.teams.length === 1 ? "ato" : "atos"}, abas ${st.layout === "side" ? "na lateral" : "em cima"}, tema ${{ brasa: "Brasa", vidro: "Vidro" }[st.theme] || "Grafite"}${st.def ? ", navegador padrão" : ""}. ${st.what.Favoritos ? "Os favoritos do " + st.from + " já estão na barra." : ""}</p>
       <div class="what" style="justify-content:center;margin-top:22px">${st.teams.map(t => `<span class="chip"><span class="logo" style="width:16px;height:16px;font-size:9px;border-radius:4px;background:${t.color}">${letter(t.name)}</span>${esc(t.name)}</span>`).join("")}</div></div>` },
 ];
 
@@ -268,6 +275,7 @@ document.addEventListener("click", e => {
   const c = t.closest("[data-color]"); if (c) { st.draft.color = c.dataset.color; st.draft.pop = true; return render(); }
   const rm = t.closest("[data-rm]"); if (rm) { st.teams.splice(+rm.dataset.rm, 1); return render(); }
   if (t.closest("#addTeam")) return addTeam();
+  if (t.closest("[data-share]")) { st.share = !st.share; return render(); }
   const l = t.closest("[data-layout]"); if (l) { st.layout = l.dataset.layout; return render(); }
   const th = t.closest("#themeIn [data-v], #theme [data-v]"); if (th) { setTheme(th.dataset.v); if (st.step === 3) render(); }
 });
