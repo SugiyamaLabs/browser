@@ -6,7 +6,9 @@
 
 **Usar no máximo 50% da RAM do Brave**, na mesma máquina e com as mesmas 20 abas, sem piorar o Speedometer 3. (Willian, 07/11/2026)
 
-As metas por área (por aba, por processo, perfil dormindo, UI nativa) saem da primeira medição (issue P2) e somam até essa.
+**Em número (09/11/2026):** o Brave usa 3.866 MB com as 20 abas, então a meta é **no máximo 1.933 MB**. Hoje o nosso usa 3.817 MB (99% do Brave): faltam **~1.880 MB** (−49%).
+
+As metas por área (por aba, por processo, perfil dormindo, UI nativa) saem da quebra por tipo de processo (renderer, GPU, rede, navegador), que é o próximo passo da #5.
 
 ## Alavancas
 
