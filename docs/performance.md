@@ -56,3 +56,16 @@ Números provisórios até a issue P3 medir:
 ## Regressão
 
 Cada release mede o conjunto no runner local. O release não sai se passar de 50% da RAM do Brave ou piorar mais de N% sobre o release anterior (N fixado na issue P9).
+
+## Como rodar
+
+```sh
+tools/measure.py brave --login      # uma vez por navegador: abre as 20 abas no perfil de medição para você entrar nas contas
+tools/measure.py brave              # 3 rodadas de 5 min; imprime a linha para docs/medicoes.md
+```
+
+- `BROWSER`: `brave`, `chrome`, `ungoogled` (build oficial), `dev` (build dev, nunca para medir) ou o caminho do executável.
+- Os perfis de medição ficam em `~/browser-work/bench-profiles/<navegador>`, separados do perfil do dia a dia. Os JSON de cada rodada ficam em `~/browser-work/measurements/`.
+- As abas estão em [`tools/tabs.txt`](../tools/tabs.txt). Trocou a lista, anote em `medicoes.md`.
+- O script mede o tempo do lançamento até o `load` de uma página local (com o perfil já existente), a memória total (`total footprint` do `footprint`, que conta a memória compartilhada uma vez), a memória por aba e o nº de processos. Speedometer 3 e bateria ainda são feitos à mão.
+- Meça com o Mac parado: sem build rodando e na tomada.

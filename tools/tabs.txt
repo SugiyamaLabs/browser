@@ -1,0 +1,22 @@
+# The fixed tab set for docs/performance.md. One URL per line; change it only with a note in docs/medicoes.md.
+# Swap the generic entry points (docs, sheets, bank) for real pages of your accounts after the first --login.
+https://mail.google.com/mail/u/0/
+https://calendar.google.com/calendar/u/0/r
+https://docs.google.com/document/u/0/
+https://docs.google.com/spreadsheets/u/0/
+https://app.slack.com/client
+https://www.figma.com/files
+https://github.com/nodejs/node/pulls
+https://www.youtube.com/watch?v=aqz-KE-bpKQ
+https://www.notion.so
+https://teams.microsoft.com
+https://outlook.office.com/mail/
+https://web.whatsapp.com
+https://chat.google.com
+https://app.clickup.com
+https://linear.app
+https://www.itau.com.br   # bank: swap for your bank's signed-in page
+https://www.uol.com.br    # heavy news site
+https://www.twitch.tv
+https://www.google.com/maps
+https://developer.mozilla.org/en-US/docs/Web/JavaScript
