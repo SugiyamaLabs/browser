@@ -24,7 +24,7 @@ Tudo por cima do Chromium, em patches pequenos e em camadas, para o rebase mensa
 ## Método de medição
 
 - **Máquina:** o mesmo Mac Apple silicon (e depois o mesmo Windows), na tomada, sem outros apps abertos. Anotar modelo, RAM e versão do sistema.
-- **Navegadores:** Brave (referência da meta), Chrome estável, ungoogled puro e o nosso, cada um na versão anotada.
+- **Navegadores:** Brave (a referência da meta) e o nosso (build oficial), cada um na versão anotada. Chrome fica de fora por decisão do Willian (09/11/2026).
 - **Perfil:** perfil de medição separado, sem login e sem extensões (exceto na rodada "com 1Password", depois do M4).
 - **Rodadas:** 3 por navegador, vale a mediana. Os navegadores são medidos um depois do outro, no mesmo dia, porque as lives mudam.
 - **Conjunto fixo de 20 abas**, o uso real do Willian (09/11/2026): quase tudo Twitch e YouTube, sem login. A lista exata está em [`tools/tabs.txt`](../tools/tabs.txt):
