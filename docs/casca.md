@@ -32,7 +32,7 @@ janela do Chromium            WebUIBrowserWindow (Webium), sem a página HTML
 ## Comportamentos
 
 - **Buscador:** texto que não é endereço vai para o buscador padrão. Cada ato começa com o **DuckDuckGo**, mas só enquanto ninguém escolheu um buscador: depois da primeira escolha (a nossa ou a da pessoa em Configurações › Buscador), ela vale e não é mais trocada.
-- **Lateral aberta ou recolhida:** o botão na barra e **⌘B** alternam entre a coluna aberta (236 pt) e a faixa de ícones (40 pt). A escolha fica salva. No Windows o atalho será **Ctrl+B**, junto com a casca WinUI (ainda não existe). Na faixa, o ⌘B do navegador vem antes do da página: em editores, o negrito é ⌘B, então fica a decisão de manter ou trocar.
+- **Lateral aberta ou recolhida:** o botão na barra e **⌘S** (como no Arc) alternam entre a coluna aberta (236 pt) e a faixa de ícones (40 pt). A escolha fica salva. O ⌘S deixa de ser "Salvar página como", que continua no menu Arquivo. No Windows o atalho será **Ctrl+S**, junto com a casca WinUI (ainda não existe).
 
 ![Lateral recolhida](casca-recolhida.png)
 

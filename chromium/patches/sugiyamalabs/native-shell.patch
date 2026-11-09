@@ -610,10 +610,10 @@ index 0000000000..e2ca8990c9
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..2b0b05832d
+index 0000000000..ae0925936a
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,962 @@
+@@ -0,0 +1,963 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -1215,9 +1215,10 @@ index 0000000000..2b0b05832d
 +
 +    _addAto = [[AgensToolButton alloc] initWithSymbol:@"plus" label:@"Novo ato"];
 +    _addAto.onPress = ^{ [weak run:agens_window_new_ato]; };
-+    // Collapse/expand the column: the button and ⌘B (Ctrl+B on Windows).
++    // Collapse/expand the column: the button and ⌘S, as in Arc (Ctrl+S on Windows). It takes
++    // ⌘S from "Salvar página como", which stays in the Arquivo menu.
 +    _collapsed = [NSUserDefaults.standardUserDefaults boolForKey:kCollapsedKey];
-+    _toggle = [[AgensToolButton alloc] initWithSymbol:@"sidebar.left" label:@"Recolher ou abrir a lateral (⌘B)"];
++    _toggle = [[AgensToolButton alloc] initWithSymbol:@"sidebar.left" label:@"Recolher ou abrir a lateral (⌘S)"];
 +    _toggle.onPress = ^{ [weak toggleSidebar]; };
 +    _keyMonitor = [NSEvent
 +        addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
@@ -1227,7 +1228,7 @@ index 0000000000..2b0b05832d
 +                                           NSEventModifierFlagDeviceIndependentFlagsMask;
 +                                       if (strong && event.window == strong.window &&
 +                                           mods == NSEventModifierFlagCommand &&
-+                                           [event.charactersIgnoringModifiers isEqualToString:@"b"]) {
++                                           [event.charactersIgnoringModifiers isEqualToString:@"s"]) {
 +                                         [strong toggleSidebar];
 +                                         return nil;
 +                                       }
