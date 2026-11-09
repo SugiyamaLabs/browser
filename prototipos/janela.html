@@ -349,7 +349,7 @@ select.sel { height: 30px; padding: 0 10px; border-radius: calc(8px * var(--roun
 
   <aside class="panel" aria-label="Controles do protótipo">
     <h2>Protótipo da janela</h2>
-    <p>Issue #17. Na marca do Agens (Grafite e Brasa, Agens-Prototipos/DESIGN.md). Clique nas abas, nos times e na barra de endereço.</p>
+    <p>Issue #17. O navegador é o Agens: na marca do Agens (Grafite e Brasa, Agens-Prototipos/DESIGN.md). Clique nas abas, nos times e na barra de endereço.</p>
     <fieldset><legend>Abas</legend>
       <div class="seg" data-group="layout"><button data-v="top" aria-pressed="true">Em cima</button><button data-v="side">Na lateral</button></div>
     </fieldset>
@@ -421,7 +421,7 @@ const HISTORY = [
   ["Ontem", "16:20", "Just Chatting - Twitch", "twitch.tv", "T", C[0]],
   ["Sábado, 7 de novembro", "14:03", "SugiyamaLabs/agens", "github.com", "GH", C[2]],
 ];
-const prefs = { bmbar: true, dense: false, sleepAfter: "5", sleepOn: true, search: "DuckDuckGo", restore: true };
+const prefs = { bmbar: true, dense: false, sleepAfter: "5", sleepOn: true, search: "DuckDuckGo", restore: true, adblock: true, adlevel: "padrao", annoy: true };
 let settingsSection = "aparencia", historyQuery = "";
 // Spaces: cada time tem as próprias abas e a aba ativa
 const SPACE_TABS = {
@@ -534,7 +534,7 @@ function openUrl(u) {
   tabs.push({ t: b.t || u, u, l: b.l || "•", c: b.c || C[7], kind: u.includes("twitch") || u.includes("watch") ? "live" : "article", live: u.includes("twitch.tv/") && !u.includes("directory"), mem: 180 });
   select(tabs.length - 1);
 }
-const INTERNAL_URL = { history: "navegador://historico", bookmarks: "navegador://favoritos", settings: "navegador://configuracoes" };
+const INTERNAL_URL = { history: "agens://historico", bookmarks: "agens://favoritos", settings: "agens://configuracoes" };
 const INTERNAL_TITLE = { history: "Histórico", bookmarks: "Favoritos", settings: "Configurações" };
 function openInternal(page) {
   const i = tabs.findIndex(t => t.page === page);
@@ -574,7 +574,7 @@ const INTERNAL = {
       <p class="note" style="margin-top:24px">Arraste para reordenar ou mover entre pastas. Importar do Brave, Chrome ou Safari: Configurações › Perfis.</p></div>`;
   },
   settings() {
-    const S = { aparencia: "Aparência", abas: "Abas que dormem", perfis: "Perfis", busca: "Busca", privacidade: "Privacidade", sobre: "Sobre" };
+    const S = { aparencia: "Aparência", abas: "Abas que dormem", bloqueador: "Bloqueador", perfis: "Perfis", busca: "Busca", privacidade: "Privacidade", sobre: "Sobre" };
     const layout = win.classList.contains("layout-side") ? "side" : "top";
     const theme = $('[data-group="theme"] [aria-pressed="true"]').dataset.v;
     const pane = {
@@ -590,6 +590,12 @@ const INTERNAL = {
         <div class="opt"><span class="lbl">Dormir depois de</span><select class="sel" data-sel="sleepAfter" aria-label="Dormir depois de">${["1", "2", "5", "15", "30", "60"].map(m => `<option value="${m}" ${prefs.sleepAfter === m ? "selected" : ""}>${m} min escondida</option>`).join("")}</select></div>
       </div><p class="note">Nunca dormem: aba tocando som, usando câmera ou microfone, com formulário preenchido, enviando arquivo, fixada ou em Picture-in-Picture.</p>
       <div class="group"><div class="opt"><span class="lbl">Sites que nunca dormem<small>twitch.tv/gaules</small></span><button class="btn sm">Adicionar…</button></div></div>`,
+      bloqueador: `<h2>Bloqueador</h2><p class="lead">Nativo, dentro do Agens: não é extensão e não gasta memória por aba.</p><div class="group">
+        <div class="opt"><span class="lbl">Bloquear anúncios e rastreadores<small>Hoje: <span class="mono">1.284</span> bloqueados · <span class="mono">~38 MB</span> de memória e <span class="mono">96 MB</span> de dados poupados.</small></span>${sw("adblock", prefs.adblock, "Bloquear anúncios e rastreadores")}</div>
+        <div class="opt"><span class="lbl">Nível<small>Padrão quebra quase nenhum site.</small></span>${segHTML("adlevel", [["padrao", "Padrão"], ["forte", "Forte"]], prefs.adlevel)}</div>
+        <div class="opt"><span class="lbl">Avisos de cookies e pop-ups de "fique por dentro"</span>${sw("annoy", prefs.annoy, "Esconder avisos de cookies")}</div>
+        <div class="opt"><span class="lbl">Listas<small>EasyList, EasyPrivacy e as do uBlock Origin. Vêm junto com cada atualização do Agens: o bloqueador não baixa nada sozinho.</small></span></div>
+      </div><div class="group"><div class="opt"><span class="lbl">Sites liberados<small>twitch.tv/gaules (apoiar o canal)</small></span><button class="btn sm">Adicionar…</button></div></div>`,
       perfis: `<h2>Perfis</h2><div class="group">${PROFILES.map((p, i) => `<div class="opt"><span class="logo" style="background:${p.color}">${p.letter}</span><span class="lbl">${esc(p.name)}<small>${i === profile ? "Em uso" : p.asleep ? "Dormindo · 0 MB" : "Aberto"} · cookies, logins, extensões e histórico separados</small></span><button class="btn sm">Editar</button></div>`).join("")}</div>
         <div class="group"><div class="opt"><span class="lbl">Perfis fora de uso dormem<small>Só o perfil em uso fica carregado.</small></span>${sw("x", true, "Perfis fora de uso dormem")}</div>
         <div class="opt"><span class="lbl">Importar favoritos e senhas<small>Do Brave, Chrome ou Safari, para o perfil em uso.</small></span><button class="btn sm">Importar…</button></div></div>`,
@@ -600,7 +606,8 @@ const INTERNAL = {
         <div class="opt"><span class="lbl">Bloquear cookies de terceiros</span>${sw("x3", true, "Bloquear cookies de terceiros")}</div>
         <div class="opt"><span class="lbl">Ao fechar, apagar<small>Histórico, cookies e cache, por perfil.</small></span><button class="btn sm">Escolher…</button></div>
         <div class="opt"><span class="lbl">Apagar dados de navegação</span><button class="btn sm" data-act="clearhist">Apagar…</button></div></div>`,
-      sobre: `<h2>Sobre</h2><div class="group"><div class="opt"><span class="lbl">Navegador (nome provisório)<small>Chromium 156.0.8078.79 · base ungoogled-chromium · SugiyamaLabs</small></span><span style="color:var(--mute)">Atualizado</span></div>
+      sobre: `<h2>Sobre</h2><div class="group"><div class="opt"><span class="logo" style="background:var(--hi);width:28px;height:28px;border-radius:calc(8px * var(--round))"><svg viewBox="21 21 128 128" width="22" height="22" aria-hidden="true"><defs><mask id="am"><rect width="200" height="200" fill="#fff"/><circle cx="52" cy="52" r="34" fill="#000"/></mask></defs><rect x="52" y="52" width="92" height="92" rx="24" fill="#0B0B0D" mask="url(#am)"/><circle cx="52" cy="52" r="26" fill="#F7A95C"/></svg></span><span class="lbl">Agens<small>Versão <span class="mono">1.0.0 (156)</span> · SugiyamaLabs</small></span><span style="color:var(--mute)">Atualizado</span></div>
+        <div class="opt"><span class="lbl">Avisos de código aberto<small>As licenças dos projetos que o Agens usa por dentro.</small></span><button class="btn sm">Ver</button></div>
         <div class="opt"><span class="lbl">Memória agora<small>${$("#memTotal").textContent} com ${tabs.length} abas</small></span></div></div>`,
     }[settingsSection];
     return `<div class="settings"><nav class="snav" aria-label="Seções"><h1>Configurações</h1>${Object.entries(S).map(([k, n]) => `<button data-section="${k}" aria-current="${settingsSection === k ? "page" : "false"}">${n}</button>`).join("")}</nav><div class="spane">${pane}</div></div>`;
@@ -622,6 +629,7 @@ function folderMenu(anchor, f) {
 function applyPref(key, v) {
   if (key === "layout" || key === "theme") { syncSeg(key, v); set[key](v); }
   if (key === "dense") prefs.dense = v === "1";
+  if (key === "adlevel") prefs.adlevel = v;
   render();
 }
 function closeTab(i) { tabs.splice(i, 1); if (active >= tabs.length) active = tabs.length - 1; if (active < 0) active = null; render(); }
