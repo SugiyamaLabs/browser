@@ -1,12 +1,12 @@
 # Visual
 
-Marca própria com cara de app nativo. A página é o produto; a interface do navegador sai do caminho.
+**Segue a marca do Agens** (decisão do Willian, 09/11/2026): o sistema de design é o `DESIGN.md` do Agens-Prototipos, com os temas Grafite (padrão) e Brasa, e a moldura do app Navegador que já existe no protótipo do Agens. A página é o produto, e a interface do navegador sai do caminho.
 
 ## Princípios
 
 1. **A página manda.** Barra mínima, nenhum banner, nenhuma promo, nenhum aviso que não seja da pessoa.
-2. **Nativo primeiro.** No Mac: toolbar unificada, traffic lights, tela cheia, menus e atalhos do sistema. No Windows: Mica, Fluent e o que o WinUI já dá. A marca aparece no ícone, na cor de acento, nas páginas internas (nova aba, ajustes, erro) e nos perfis.
-3. **Sistema decide o tema.** Claro/escuro e acento seguem o sistema (com opção de forçar). A cor do perfil tinge a janela.
+2. **A marca do Agens.** Camadas de grafite e fios de 1 px, sem sombra; sem vermelho e sem verde; luz quente só no que está nas suas mãos (foco, cursor, escolhido); âmbar só para "precisa de você"; menus, seletores e alertas sempre do Agens, nunca os do sistema. No Mac continuam a janela, a tela cheia e os atalhos do sistema.
+3. **Temas do Agens.** Grafite é o padrão e Brasa o segundo, os mesmos do Agens. Perfis são times, e a cor do time mora só no rosto (o monograma), nunca na janela.
 4. **Abas em cima ou na barra lateral.** A pessoa escolhe e troca a qualquer hora, sem reiniciar (ajustes e atalho). A lateral recolhe para ícones e mostra o perfil no topo.
 5. **Perfis à vista.** Cor, ícone e nome por perfil; seletor sempre à mão (na barra, com abas em cima; no topo da lateral, com abas na lateral); atalho para trocar. Trocar é instantâneo; perfil dormindo acorda sem tela de espera longa.
 6. **Movimento curto.** Animações de até 200 ms, e nenhuma com Reduzir movimento ligado.
@@ -35,7 +35,7 @@ A escolha final das referências é a issue V1.
 
 ## Tokens
 
-Cor, tipografia, espaço e raio num formato único que gera SwiftUI e WinUI, partindo dos tokens base do `SugiyamaLabs/design-system`. Fonte do sistema (SF no Mac, Segoe no Windows). Issue V3.
+Os tokens do Grafite e da Brasa, um para um (cor, `--round`, `--pill`, movimento, luz). No Mac, o pacote `AgensDesign` do Agens (`packages/design/apple`) já tem o Grafite em Swift; o navegador usa o mesmo. Fonte do sistema (SF), mono só para dados. Issue #16.
 
 ## Protótipo
 
