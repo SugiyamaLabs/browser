@@ -236,8 +236,9 @@ input, select, textarea { font: inherit; color: inherit; }
 .folder .icon { color: var(--dim); }
 .note { color: var(--dim); font-size: 12.5px; }
 
-.settings { display: grid; grid-template-columns: 210px 1fr; height: 100%; }
-.snav { padding: 28px 10px; border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: 1px; }
+.settings { display: grid; grid-template-columns: 220px 1fr; height: 100%; }
+.opt .lbl + .mono { margin-left: auto; }
+.snav { padding: 28px 10px; border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: 1px; overflow: auto; }
 .snav h1 { font-size: 15px; font-weight: 600; margin: 0 8px 14px; }
 .snav button { display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: calc(8px * var(--round)); text-align: left; color: var(--mute); font-size: 13.5px; }
 .snav button:hover { background: var(--hover); color: var(--ink); }
@@ -421,7 +422,8 @@ const HISTORY = [
   ["Ontem", "16:20", "Just Chatting - Twitch", "twitch.tv", "T", C[0]],
   ["Sábado, 7 de novembro", "14:03", "SugiyamaLabs/agens", "github.com", "GH", C[2]],
 ];
-const prefs = { bmbar: true, dense: false, sleepAfter: "5", sleepOn: true, search: "DuckDuckGo", restore: true, adblock: true, adlevel: "padrao", annoy: true };
+const prefs = { bmbar: true, dense: false, sleepAfter: "5", sleepOn: true, search: "DuckDuckGo", restore: true, adblock: true, adlevel: "padrao", annoy: true,
+  startup: "continuar", lang: "Português (Brasil)", zoom: "100%", font: "Médio", minFont: "Nenhum", cookies: "Bloquear", dns: "Do sistema" };
 let settingsSection = "aparencia", historyQuery = "";
 // Spaces: cada time tem as próprias abas e a aba ativa
 const SPACE_TABS = {
@@ -574,7 +576,9 @@ const INTERNAL = {
       <p class="note" style="margin-top:24px">Arraste para reordenar ou mover entre pastas. Importar do Brave, Chrome ou Safari: Configurações › Perfis.</p></div>`;
   },
   settings() {
-    const S = { aparencia: "Aparência", abas: "Abas que dormem", bloqueador: "Bloqueador", perfis: "Perfis", busca: "Busca", privacidade: "Privacidade", sobre: "Sobre" };
+    const S = { inicio: "Ao abrir", aparencia: "Aparência", abas: "Abas que dormem", perfis: "Perfis", busca: "Busca", privacidade: "Privacidade e segurança", bloqueador: "Bloqueador", permissoes: "Permissões dos sites", senhas: "Senhas e preenchimento", downloads: "Downloads", idiomas: "Idiomas", acessibilidade: "Acessibilidade e página", extensoes: "Extensões", sistema: "Sistema", sobre: "Sobre" };
+    const sel = (key, opts, label) => `<select class="sel" data-sel="${key}" aria-label="${label}">${opts.map(o => `<option ${prefs[key] === o ? "selected" : ""}>${o}</option>`).join("")}</select>`;
+    const tog = (key, label) => sw(key, prefs[key] !== false, label);
     const layout = win.classList.contains("layout-side") ? "side" : "top";
     const theme = $('[data-group="theme"] [aria-pressed="true"]').dataset.v;
     const pane = {
@@ -596,6 +600,55 @@ const INTERNAL = {
         <div class="opt"><span class="lbl">Avisos de cookies e pop-ups de "fique por dentro"</span>${sw("annoy", prefs.annoy, "Esconder avisos de cookies")}</div>
         <div class="opt"><span class="lbl">Listas<small>EasyList, EasyPrivacy e as do uBlock Origin. Vêm junto com cada atualização do Agens: o bloqueador não baixa nada sozinho.</small></span></div>
       </div><div class="group"><div class="opt"><span class="lbl">Sites liberados<small>twitch.tv/gaules (apoiar o canal)</small></span><button class="btn sm">Adicionar…</button></div></div>`,
+      inicio: `<h2>Ao abrir</h2><div class="group">
+        <div class="opt"><span class="lbl">Quando o Agens abrir</span>${segHTML("startup", [["continuar", "Continuar de onde parei"], ["nova", "Nova aba"], ["paginas", "Páginas escolhidas"]], prefs.startup)}</div>
+        <div class="opt"><span class="lbl">Navegador padrão<small>Links de outros apps abrem no Agens, no perfil do time certo.</small></span><button class="btn sm pri" style="background:var(--hi);color:var(--on-hi);border-color:var(--hi)">Tornar padrão</button></div>
+        <div class="opt"><span class="lbl">Avisar antes de sair com várias abas<small>⌘Q pede confirmação.</small></span>${tog("warnQuit", "Avisar antes de sair")}</div>
+      </div>`,
+      permissoes: `<h2>Permissões dos sites</h2><p class="lead">O padrão vale para todos os sites; cada site pode ter a sua exceção.</p><div class="group">
+        ${[["Câmera", "Perguntar"], ["Microfone", "Perguntar"], ["Localização", "Perguntar"], ["Notificações", "Perguntar"], ["Pop-ups e redirecionamentos", "Bloquear"], ["Som", "Permitir"], ["Reprodução automática com som", "Bloquear"], ["Área de transferência", "Perguntar"], ["Downloads automáticos", "Perguntar"], ["JavaScript", "Permitir"], ["Conteúdo protegido (DRM)", "Permitir"]].map(([n, v]) => `<div class="opt"><span class="lbl">${n}</span><select class="sel" aria-label="${n}"><option ${v === "Perguntar" ? "selected" : ""}>Perguntar</option><option ${v === "Permitir" ? "selected" : ""}>Permitir</option><option ${v === "Bloquear" ? "selected" : ""}>Bloquear</option></select></div>`).join("")}
+      </div><div class="group"><div class="opt"><span class="lbl">Exceções por site<small>meet.google.com · câmera e microfone permitidos</small></span><button class="btn sm">Ver todas</button></div></div>`,
+      senhas: `<h2>Senhas e preenchimento</h2><div class="group">
+        <div class="opt"><span class="lbl">Oferecer para salvar senhas<small>Guardadas no Keychain do Mac, por perfil.</small></span>${tog("savePw", "Oferecer para salvar senhas")}</div>
+        <div class="opt"><span class="lbl">Entrar sozinho<small>Usa a senha salva sem perguntar quando há só uma.</small></span>${tog("autoSignin", "Entrar sozinho")}</div>
+        <div class="opt"><span class="lbl">Senhas salvas</span><span class="mono" style="color:var(--mute)">42</span><button class="btn sm">Gerenciar</button></div>
+        <div class="opt"><span class="lbl">Chaves de acesso (passkeys)<small>Do Keychain do iCloud e do 1Password.</small></span><button class="btn sm">Gerenciar</button></div>
+      </div><div class="group">
+        <div class="opt"><span class="lbl">Endereços</span>${tog("addr", "Preencher endereços")}</div>
+        <div class="opt"><span class="lbl">Cartões<small>O código de segurança nunca é salvo.</small></span>${tog("cards", "Preencher cartões")}</div>
+        <div class="opt"><span class="lbl">Usar o 1Password quando a extensão estiver no perfil<small>O preenchimento do Agens sai do caminho.</small></span>${tog("op", "Preferir 1Password")}</div>
+      </div>`,
+      downloads: `<h2>Downloads</h2><div class="group">
+        <div class="opt"><span class="lbl">Salvar em<small class="mono">~/Downloads</small></span><button class="btn sm">Mudar…</button></div>
+        <div class="opt"><span class="lbl">Perguntar onde salvar cada arquivo</span>${sw("askDl", prefs.askDl === true, "Perguntar onde salvar")}</div>
+        <div class="opt"><span class="lbl">Abrir arquivos seguros depois de baixar<small>PDF, imagens e textos.</small></span>${sw("openSafe", prefs.openSafe === true, "Abrir arquivos seguros")}</div>
+        <div class="opt"><span class="lbl">Uma pasta por perfil<small class="mono">~/Downloads/Cliente A</small></span>${sw("dlPerProfile", prefs.dlPerProfile === true, "Uma pasta por perfil")}</div>
+      </div>`,
+      idiomas: `<h2>Idiomas</h2><div class="group">
+        <div class="opt"><span class="lbl">Idioma do Agens</span>${sel("lang", ["Português (Brasil)", "English", "Español"], "Idioma do Agens")}</div>
+        <div class="opt"><span class="lbl">Idiomas preferidos dos sites<small>Português (Brasil), English</small></span><button class="btn sm">Editar</button></div>
+        <div class="opt"><span class="lbl">Correção ortográfica<small>Do macOS, no próprio Mac. Nada é enviado.</small></span>${tog("spell", "Correção ortográfica")}</div>
+        <div class="opt"><span class="lbl">Tradução de páginas<small>Não existe: traduzir mandaria a página para um servidor de fora.</small></span><span style="color:var(--mute)">Desligada</span></div>
+      </div>`,
+      acessibilidade: `<h2>Acessibilidade e página</h2><div class="group">
+        <div class="opt"><span class="lbl">Zoom padrão das páginas</span>${sel("zoom", ["90%", "100%", "110%", "125%", "150%"], "Zoom padrão")}</div>
+        <div class="opt"><span class="lbl">Tamanho da fonte</span>${sel("font", ["Pequeno", "Médio", "Grande", "Muito grande"], "Tamanho da fonte")}</div>
+        <div class="opt"><span class="lbl">Tamanho mínimo da fonte</span>${sel("minFont", ["Nenhum", "9 pt", "12 pt", "14 pt"], "Tamanho mínimo da fonte")}</div>
+        <div class="opt"><span class="lbl">Tab percorre links e botões<small>Além dos campos.</small></span>${tog("tabLinks", "Tab percorre links")}</div>
+        <div class="opt"><span class="lbl">Legendas automáticas<small>Geradas no próprio Mac, para áudio e vídeo.</small></span>${sw("captions", prefs.captions === true, "Legendas automáticas")}</div>
+        <div class="opt"><span class="lbl">Reduzir movimento e transparência<small>Segue os ajustes do macOS.</small></span><span style="color:var(--mute)">Do sistema</span></div>
+      </div>`,
+      extensoes: `<h2>Extensões</h2><p class="lead">Da Chrome Web Store, por perfil. Os bots não usam extensões.</p><div class="group">
+        <div class="opt"><span class="logo" style="background:#3F9CFF">1P</span><span class="lbl">1Password<small>Só no perfil Cliente A</small></span>${sw("x1p", true, "1Password")}</div>
+        <div class="opt"><span class="lbl">Instalar da Chrome Web Store</span><button class="btn sm">Abrir loja</button></div>
+        <div class="opt"><span class="lbl">Modo de desenvolvedor<small>Carregar extensão sem empacotar.</small></span>${sw("devmode", prefs.devmode === true, "Modo de desenvolvedor")}</div>
+      </div>`,
+      sistema: `<h2>Sistema</h2><div class="group">
+        <div class="opt"><span class="lbl">Aceleração por hardware</span>${tog("gpu", "Aceleração por hardware")}</div>
+        <div class="opt"><span class="lbl">Continuar rodando depois de fechar as janelas<small>Para o Agens e as pontes receberem a sessão.</small></span>${tog("bg", "Continuar rodando")}</div>
+        <div class="opt"><span class="lbl">Configurações de proxy<small>Usa as do macOS.</small></span><button class="btn sm">Abrir</button></div>
+        <div class="opt"><span class="lbl">Restaurar as configurações originais</span><button class="btn sm">Restaurar…</button></div>
+      </div>`,
       perfis: `<h2>Perfis</h2><div class="group">${PROFILES.map((p, i) => `<div class="opt"><span class="logo" style="background:${p.color}">${p.letter}</span><span class="lbl">${esc(p.name)}<small>${i === profile ? "Em uso" : p.asleep ? "Dormindo · 0 MB" : "Aberto"} · cookies, logins, extensões e histórico separados</small></span><button class="btn sm">Editar</button></div>`).join("")}</div>
         <div class="group"><div class="opt"><span class="lbl">Perfis fora de uso dormem<small>Só o perfil em uso fica carregado.</small></span>${sw("x", true, "Perfis fora de uso dormem")}</div>
         <div class="opt"><span class="lbl">Importar favoritos e senhas<small>Do Brave, Chrome ou Safari, para o perfil em uso.</small></span><button class="btn sm">Importar…</button></div></div>`,
@@ -603,7 +656,11 @@ const INTERNAL = {
         <div class="opt"><span class="lbl">Sugestões enquanto digita<small>Vêm do histórico e dos favoritos deste Mac. Não pergunta nada ao buscador.</small></span>${sw("x2", true, "Sugestões locais")}</div></div>`,
       privacidade: `<h2>Privacidade</h2><div class="group">
         <div class="opt"><span class="lbl">Telemetria<small>Não existe. O navegador parado faz zero conexões (medido, docs/sem-telemetria.md).</small></span><span style="color:var(--mute)">Desligada sempre</span></div>
-        <div class="opt"><span class="lbl">Bloquear cookies de terceiros</span>${sw("x3", true, "Bloquear cookies de terceiros")}</div>
+        <div class="opt"><span class="lbl">Cookies de terceiros</span>${sel("cookies", ["Bloquear", "Bloquear na janela anônima", "Permitir"], "Cookies de terceiros")}</div>
+        <div class="opt"><span class="lbl">Sempre usar conexão segura (HTTPS)<small>Avisa antes de abrir um site sem HTTPS.</small></span>${tog("https", "Sempre HTTPS")}</div>
+        <div class="opt"><span class="lbl">DNS seguro<small>Usa o DNS do sistema; dá para escolher um provedor com DNS over HTTPS.</small></span>${sel("dns", ["Do sistema", "Cloudflare (1.1.1.1)", "Quad9", "NextDNS"], "DNS seguro")}</div>
+        <div class="opt"><span class="lbl">Pedir aos sites para não rastrear</span>${tog("gpc", "Global Privacy Control")}</div>
+        <div class="opt"><span class="lbl">Navegação segura<small>Listas de sites perigosos que vêm com cada atualização, verificadas no próprio Mac.</small></span>${tog("safe", "Navegação segura local")}</div>
         <div class="opt"><span class="lbl">Ao fechar, apagar<small>Histórico, cookies e cache, por perfil.</small></span><button class="btn sm">Escolher…</button></div>
         <div class="opt"><span class="lbl">Apagar dados de navegação</span><button class="btn sm" data-act="clearhist">Apagar…</button></div></div>`,
       sobre: `<h2>Sobre</h2><div class="group"><div class="opt"><span class="logo" style="background:var(--hi);width:28px;height:28px;border-radius:calc(8px * var(--round))"><svg viewBox="21 21 128 128" width="22" height="22" aria-hidden="true"><defs><mask id="am"><rect width="200" height="200" fill="#fff"/><circle cx="52" cy="52" r="34" fill="#000"/></mask></defs><rect x="52" y="52" width="92" height="92" rx="24" fill="#0B0B0D" mask="url(#am)"/><circle cx="52" cy="52" r="26" fill="#F7A95C"/></svg></span><span class="lbl">Agens<small>Versão <span class="mono">1.0.0 (156)</span> · SugiyamaLabs</small></span><span style="color:var(--mute)">Atualizado</span></div>
@@ -630,6 +687,7 @@ function applyPref(key, v) {
   if (key === "layout" || key === "theme") { syncSeg(key, v); set[key](v); }
   if (key === "dense") prefs.dense = v === "1";
   if (key === "adlevel") prefs.adlevel = v;
+  if (key === "startup") prefs.startup = v;
   render();
 }
 function closeTab(i) { tabs.splice(i, 1); if (active >= tabs.length) active = tabs.length - 1; if (active < 0) active = null; render(); }
@@ -714,7 +772,7 @@ document.addEventListener("click", e => {
   const op = e.target.closest("[data-open]"); if (op) { $("#menu").classList.remove("open"); return openUrl(op.dataset.open); }
   const sec = e.target.closest("[data-section]"); if (sec) { settingsSection = sec.dataset.section; return render(); }
   const pr = e.target.closest("[data-pref]"); if (pr) return applyPref(pr.dataset.pref, pr.dataset.v);
-  const tg = e.target.closest("[data-toggle]"); if (tg) { const k = tg.dataset.toggle; if (k in prefs) prefs[k] = !prefs[k]; else tg.setAttribute("aria-checked", tg.getAttribute("aria-checked") !== "true"); return render(); }
+  const tg = e.target.closest("[data-toggle]"); if (tg) { const k = tg.dataset.toggle; prefs[k] = tg.getAttribute("aria-checked") !== "true"; return render(); }
   const col = e.target.closest("[data-color]"); if (col) { PROFILES[profile].color = col.dataset.color; return render(); }
   if (act === "profiles") return openProfiles(e.target.closest("[data-act]"));
   if (act === "toggle-side") { const c = !win.classList.contains("collapsed"); syncSeg("collapse", c ? "collapsed" : "open"); return set.collapse(c ? "collapsed" : "open"); }
