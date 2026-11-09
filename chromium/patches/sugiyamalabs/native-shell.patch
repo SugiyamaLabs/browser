@@ -129,10 +129,10 @@ index 0000000000..152312203b
 +#endif  // CHROME_BROWSER_AGENS_EMBED_NATIVE_SHELL_H_
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
 new file mode 100644
-index 0000000000..73825dd170
+index 0000000000..d195c63385
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
-@@ -0,0 +1,426 @@
+@@ -0,0 +1,438 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Engine side of agens_embed.h on macOS: an AgensWindow over the Browser's tab strip, and the
 +// views::View that fills the Webium window (the UI's sidebar beside the active tab).
@@ -155,7 +155,9 @@ index 0000000000..73825dd170
 +#include "chrome/browser/autocomplete/chrome_autocomplete_scheme_classifier.h"
 +#include "base/functional/bind.h"
 +#include "base/functional/callback_helpers.h"
++#include "base/strings/string_number_conversions.h"
 +#include "base/strings/stringprintf.h"
++#include "chrome/common/chrome_constants.h"
 +#include "chrome/browser/browser_process.h"
 +#include "chrome/browser/profiles/profile.h"
 +#include "chrome/browser/profiles/profile_attributes_entry.h"
@@ -201,10 +203,19 @@ index 0000000000..73825dd170
 +  }
 +
 +  std::vector<ProfileAttributesEntry*> Atos() {
++    // Creation order, so an ato keeps its place and color: Chromium names profile folders
++    // "Default", then "Profile 1", "Profile 2"…
 +    std::vector<ProfileAttributesEntry*> atos;
 +    for (ProfileAttributesEntry* entry : Storage().GetAllProfilesAttributesSortedByLocalProfileNameWithCheck()) {
 +      if (!entry->IsOmitted()) atos.push_back(entry);
 +    }
++    auto order = [](const ProfileAttributesEntry* e) {
++      const std::string name = e->GetPath().BaseName().AsUTF8Unsafe();
++      if (name == chrome::kInitialProfile) return -1;
++      int n = 0;
++      return base::StringToInt(name.substr(name.rfind(' ') + 1), &n) ? n : 1 << 20;
++    };
++    std::stable_sort(atos.begin(), atos.end(), [&](auto* a, auto* b) { return order(a) < order(b); });
 +    return atos;
 +  }
 +
@@ -215,8 +226,9 @@ index 0000000000..73825dd170
 +    std::vector<AgensAto> atos;
 +    const base::FilePath current = browser->GetProfile()->GetOriginalProfile()->GetPath();
 +    for (ProfileAttributesEntry* entry : entries) {
-+      // Chromium's first profile is "Pessoa 1"; ours is the personal ato.
-+      names.push_back(entry->IsUsingDefaultName() && entry->GetPath() == entries.front()->GetPath()
++      // Chromium's first profile has a generated name ("Pessoa 1"); ours is the personal ato.
++      names.push_back(entry->IsUsingDefaultName() &&
++                              entry->GetPath().BaseName().AsUTF8Unsafe() == chrome::kInitialProfile
 +                          ? "Pessoal"
 +                          : base::UTF16ToUTF8(entry->GetLocalProfileName()));
 +    }
@@ -561,7 +573,7 @@ index 0000000000..73825dd170
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..de0c3a9aff
+index 0000000000..71ab65c05a
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
 @@ -0,0 +1,895 @@
@@ -934,43 +946,33 @@ index 0000000000..de0c3a9aff
 +}
 +@end
 +
-+// One ato in the foot row: monogram tile; the current one has a warm dot under it.
++// One ato in the foot row: a 30x28 button (same box as "+") with the monogram tile centered.
++// The chrome draws the warm dot under the current one, outside the box (prototype .space::after).
 +@interface AgensAtoButton : AgensHoverView
 +- (void)updateWith:(const AgensAto&)ato index:(int)index;
 +@end
 +@implementation AgensAtoButton {
 +  AgensAtoTile* _tile;
-+  NSView* _dot;
 +}
 +- (instancetype)initWithFrame:(NSRect)frame {
 +  if ((self = [super initWithFrame:frame])) {
 +    _tile = AtoTile(16);
-+    _dot = [[NSView alloc] init];
-+    _dot.wantsLayer = YES;
-+    _dot.layer.cornerRadius = 2;
 +    [self addSubview:_tile];
-+    [self addSubview:_dot];
 +  }
 +  return self;
 +}
 +- (void)layout {
 +  [super layout];
 +  _tile.frame = NSMakeRect(7, 6, 16, 16);
-+  _dot.frame = NSMakeRect(13, 26, 4, 4);
 +}
 +- (void)updateWith:(const AgensAto&)ato index:(int)index {
 +  NSString* name = @(ato.name);
 +  _tile.stringValue = Monogram(name);
 +  _tile.layer.backgroundColor = AtoColor(index).CGColor;
 +  _tile.alphaValue = ato.asleep && !ato.active ? 0.4 : 1;
-+  _dot.hidden = !ato.active;
 +  self.toolTip = ato.asleep && !ato.active ? [name stringByAppendingString:@" · dormindo"] : name;
 +  self.accessibilityLabel = self.toolTip;
 +  self.selected = ato.active;
-+}
-+- (void)refresh {
-+  [super refresh];
-+  _dot.layer.backgroundColor = CG(kLight3, self);
 +}
 +@end
 +
@@ -1094,6 +1096,7 @@ index 0000000000..de0c3a9aff
 +  NSView* _atosLine;
 +  NSMutableArray<AgensAtoButton*>* _atoButtons;
 +  AgensToolButton* _addAto;
++  NSView* _atoDot;
 +  AgensNewTabView* _ntp;
 +  NSString* _url;
 +  BOOL _loading;
@@ -1159,6 +1162,9 @@ index 0000000000..de0c3a9aff
 +
 +    _addAto = [[AgensToolButton alloc] initWithSymbol:@"plus" label:@"Novo ato"];
 +    _addAto.onPress = ^{ [weak run:agens_window_new_ato]; };
++    _atoDot = [[NSView alloc] init];
++    _atoDot.wantsLayer = YES;
++    _atoDot.layer.cornerRadius = 2;
 +
 +    _ntp = [[AgensNewTabView alloc] init];
 +    _ntp.hidden = YES;
@@ -1167,7 +1173,7 @@ index 0000000000..de0c3a9aff
 +    _ntp.field.delegate = self;
 +
 +    for (NSView* v in @[ _back, _forward, _reload, _omni, _atoTile, _atoName, _separator, _newTab,
-+                         _atosLine, _addAto, _ntp, _suggest ]) {
++                         _atosLine, _addAto, _atoDot, _ntp, _suggest ]) {
 +      [self addSubview:v];
 +    }
 +    [self refreshTheme];
@@ -1185,6 +1191,7 @@ index 0000000000..de0c3a9aff
 +  _suggest.layer.borderColor = CG(kLineStrong, self);
 +  _separator.layer.backgroundColor = CG(kLine, self);
 +  _atosLine.layer.backgroundColor = CG(kLine, self);
++  _atoDot.layer.backgroundColor = CG(kLight3, self);
 +}
 +- (void)viewDidChangeEffectiveAppearance {
 +  [super viewDidChangeEffectiveAppearance];
@@ -1234,8 +1241,13 @@ index 0000000000..de0c3a9aff
 +  CGFloat footY = height - kPad - kAtos;
 +  _atosLine.frame = NSMakeRect(kPad, footY, kSide, 1);
 +  CGFloat x = kPad + (kSide - (_atoButtons.count + 1) * 32) / 2;
++  _atoDot.hidden = YES;
 +  for (AgensAtoButton* b in _atoButtons) {
-+    b.frame = NSMakeRect(x, footY + 8, 30, 34);
++    b.frame = NSMakeRect(x, footY + 8, 30, 28);
++    if (b.selected) {
++      _atoDot.frame = NSMakeRect(x + 13, footY + 8 + 28 + 3, 4, 4);
++      _atoDot.hidden = NO;
++    }
 +    x += 32;
 +  }
 +  _addAto.frame = NSMakeRect(x, footY + 8, 30, 28);
