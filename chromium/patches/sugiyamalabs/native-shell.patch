@@ -1,9 +1,9 @@
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
 new file mode 100644
-index 0000000000..7e2448fcf5
+index 0000000000..81d4772449
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embed.h
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,100 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The boundary between the engine and any interface (the browser's own chrome today, the Agens
 +// app later). Plain C on purpose: no Chromium or C++ types cross it, Swift imports it as is, and
@@ -28,7 +28,15 @@ index 0000000000..7e2448fcf5
 +  int sleeping;  // discarded to save memory; reloads when activated
 +  int can_go_back;
 +  int can_go_forward;
++  int bookmarked;  // the page is in Favoritos
 +} AgensTab;
++
++// Things the window's menu opens (Chromium's own pages for now).
++typedef enum {
++  kAgensBookmarks,
++  kAgensHistory,
++  kAgensSettings,
++} AgensPage;
 +
 +// Top-left origin, in points.
 +typedef struct {
@@ -48,6 +56,9 @@ index 0000000000..7e2448fcf5
 +void agens_window_forward(AgensWindow* window);
 +void agens_window_reload(AgensWindow* window);
 +void agens_window_stop(AgensWindow* window);
++// Adds the active page to Favoritos, or removes it if it's there.
++void agens_window_toggle_bookmark(AgensWindow* window);
++void agens_window_open_page(AgensWindow* window, AgensPage page);
 +// Asks the engine to lay out and repaint again (after the UI changes size or colors, e.g.
 +// light/dark mode).
 +void agens_window_relayout(AgensWindow* window);
@@ -129,10 +140,10 @@ index 0000000000..152312203b
 +#endif  // CHROME_BROWSER_AGENS_EMBED_NATIVE_SHELL_H_
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
 new file mode 100644
-index 0000000000..e2ca8990c9
+index 0000000000..1c26bd7e79
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
-@@ -0,0 +1,475 @@
+@@ -0,0 +1,500 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Engine side of agens_embed.h on macOS: an AgensWindow over the Browser's tab strip, and the
 +// views::View that fills the Webium window (the UI's sidebar beside the active tab).
@@ -158,7 +169,10 @@ index 0000000000..e2ca8990c9
 +#include "base/strings/string_number_conversions.h"
 +#include "base/strings/stringprintf.h"
 +#include "chrome/common/chrome_constants.h"
++#include "chrome/browser/bookmarks/bookmark_model_factory.h"
 +#include "chrome/browser/browser_process.h"
++#include "components/bookmarks/browser/bookmark_model.h"
++#include "components/bookmarks/browser/bookmark_utils.h"
 +#include "chrome/browser/profiles/profile.h"
 +#include "chrome/browser/profiles/profile_attributes_entry.h"
 +#include "chrome/browser/profiles/profile_attributes_storage.h"
@@ -320,6 +334,8 @@ index 0000000000..e2ca8990c9
 +    notify_pending = false;
 +    if (!observer) return;
 +    const int count = model()->count();
++    bookmarks::BookmarkModel* bookmarks =
++        BookmarkModelFactory::GetForBrowserContextIfExists(browser->GetProfile());
 +    std::vector<std::string> titles(count), urls(count);
 +    std::vector<std::vector<uint8_t>> icons(count);
 +    std::vector<AgensTab> tabs(count);
@@ -338,7 +354,8 @@ index 0000000000..e2ca8990c9
 +      tabs[i] = {titles[i].c_str(), urls[i].c_str(), icons[i].empty() ? nullptr : icons[i].data(),
 +                 static_cast<int>(icons[i].size()), i == model()->active_index(),
 +                 contents->IsLoading(), contents->WasDiscarded(),
-+                 contents->GetController().CanGoBack(), contents->GetController().CanGoForward()};
++                 contents->GetController().CanGoBack(), contents->GetController().CanGoForward(),
++                 bookmarks && bookmarks->IsBookmarked(contents->GetVisibleURL())};
 +    }
 +    observer(context, tabs.data(), static_cast<int>(tabs.size()));
 +  }
@@ -492,6 +509,25 @@ index 0000000000..e2ca8990c9
 +void agens_window_relayout(AgensWindow* w) {
 +  if (w->relayout) w->relayout.Run();
 +}
++void agens_window_toggle_bookmark(AgensWindow* w) {
++  content::WebContents* active = w->model()->GetActiveWebContents();
++  bookmarks::BookmarkModel* model = BookmarkModelFactory::GetForBrowserContext(w->browser->GetProfile());
++  if (!active || !model || !model->loaded()) return;
++  const GURL url = active->GetVisibleURL();
++  if (model->IsBookmarked(url)) {
++    bookmarks::RemoveAllBookmarks(model, url, FROM_HERE);
++  } else {
++    bookmarks::AddIfNotBookmarked(model, url, active->GetTitle());
++  }
++  w->Notify();
++}
++void agens_window_open_page(AgensWindow* w, AgensPage page) {
++  switch (page) {
++    case kAgensBookmarks: chrome::ExecuteCommand(w->browser, IDC_SHOW_BOOKMARK_MANAGER); break;
++    case kAgensHistory: chrome::ExecuteCommand(w->browser, IDC_SHOW_HISTORY); break;
++    case kAgensSettings: chrome::ExecuteCommand(w->browser, IDC_OPTIONS); break;
++  }
++}
 +void agens_window_stop(AgensWindow* w) {
 +  chrome::ExecuteCommand(w->browser, IDC_STOP);
 +}
@@ -610,10 +646,10 @@ index 0000000000..e2ca8990c9
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..ae0925936a
+index 0000000000..7f85c565ea
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,963 @@
+@@ -0,0 +1,1121 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -621,6 +657,8 @@ index 0000000000..ae0925936a
 +// the system. Only AppKit and agens_embed.h here, so it can move to the Swift app unchanged.
 +
 +#import <AppKit/AppKit.h>
++
++#include <vector>
 +
 +#include "chrome/browser/agens/embed/agens_embed.h"
 +#include "chrome/browser/agens/ui/logo_svg.h"
@@ -661,7 +699,7 @@ index 0000000000..ae0925936a
 +// Layout (prototype: toolbar, then body with 14 pt padding, 236 pt sidebar, 10 pt gap).
 +static const CGFloat kToolbar = 52, kPad = 14, kSide = 236, kGap = 10, kRow = 32, kAtos = 46;
 +static const CGFloat kRail = 40;        // the collapsed column (prototype .collapsed .sidebar)
-+static const CGFloat kLightsEnd = 78;   // the traffic lights end here
++static const CGFloat kLightsEnd = 86;   // the traffic lights end at 72; prototype leaves 12+2 pt
 +static NSString* const kCollapsedKey = @"AgensSidebarCollapsed";
 +
 +static NSImage* Symbol(NSString* name, CGFloat size = 15) {
@@ -747,6 +785,27 @@ index 0000000000..ae0925936a
 +// ---------------------------------------------------------------------------------------------
 +// Building blocks.
 +
++// A thin scroller: a 4 pt rounded knob in the line color, no track (overlay style, even when the
++// system is set to always show scroll bars).
++@interface AgensScroller : NSScroller
++@end
++@implementation AgensScroller
+++ (BOOL)isCompatibleWithOverlayScrollers {
++  return YES;
++}
+++ (CGFloat)scrollerWidthForControlSize:(NSControlSize)size scrollerStyle:(NSScrollerStyle)style {
++  return 10;
++}
++- (void)drawKnobSlotInRect:(NSRect)rect highlight:(BOOL)highlight {
++}
++- (void)drawKnob {
++  NSRect knob = [self rectForPart:NSScrollerKnob];
++  NSRect bar = NSMakeRect(NSMaxX(knob) - 4 - 2, NSMinY(knob) + 2, 4, NSHeight(knob) - 4);
++  [kLineStrong.color() setFill];
++  [[NSBezierPath bezierPathWithRoundedRect:bar xRadius:2 yRadius:2] fill];
++}
++@end
++
 +// A view whose plain background drags the window, like a title bar.
 +@interface AgensDragView : NSView
 +@end
@@ -795,6 +854,14 @@ index 0000000000..ae0925936a
 +             owner:self
 +          userInfo:nil];
 +  [self addTrackingArea:_tracking];
++  // Rows move under a still pointer when the list scrolls or changes; the enter/exit events for
++  // that never come, so read where the pointer really is.
++  NSPoint p = [self convertPoint:self.window.mouseLocationOutsideOfEventStream fromView:nil];
++  BOOL inside = self.window && !self.hidden && NSPointInRect(p, self.visibleRect);
++  if (inside != _hovered) {
++    _hovered = inside;
++    [self refresh];
++  }
 +}
 +- (void)refresh {
 +  self.layer.backgroundColor =
@@ -835,15 +902,22 @@ index 0000000000..ae0925936a
 +@interface AgensToolButton : AgensHoverView
 +@property(nonatomic) BOOL enabled;
 +- (instancetype)initWithSymbol:(NSString*)symbol label:(NSString*)label;
++- (instancetype)initWithSymbol:(NSString*)symbol label:(NSString*)label size:(CGFloat)size;
 +- (void)setSymbol:(NSString*)symbol;
++- (void)setTint:(const Token&)token;
 +@end
 +@implementation AgensToolButton {
 +  NSImageView* _icon;
++  CGFloat _size;
 +}
 +@synthesize enabled = _enabled;
 +- (instancetype)initWithSymbol:(NSString*)symbol label:(NSString*)label {
++  return [self initWithSymbol:symbol label:label size:15];
++}
++- (instancetype)initWithSymbol:(NSString*)symbol label:(NSString*)label size:(CGFloat)size {
 +  if ((self = [super initWithFrame:NSMakeRect(0, 0, 28, 28)])) {
-+    _icon = [NSImageView imageViewWithImage:Symbol(symbol)];
++    _size = size;
++    _icon = [NSImageView imageViewWithImage:Symbol(symbol, size)];
 +    _icon.contentTintColor = kDim.color();
 +    [self addSubview:_icon];
 +    self.accessibilityLabel = label;
@@ -861,7 +935,10 @@ index 0000000000..ae0925936a
 +  self.alphaValue = enabled ? 1 : 0.35;
 +}
 +- (void)setSymbol:(NSString*)symbol {
-+  _icon.image = Symbol(symbol);
++  _icon.image = Symbol(symbol, _size);
++}
++- (void)setTint:(const Token&)token {
++  _icon.contentTintColor = token.color();
 +}
 +- (void)mouseDown:(NSEvent*)event {
 +  if (_enabled) [super mouseDown:event];
@@ -1142,11 +1219,19 @@ index 0000000000..ae0925936a
 +  NSView* _separator;
 +  AgensHoverView* _newTab;
 +  NSMutableArray<AgensTabRow*>* _rows;
++  NSScrollView* _tabsScroll;  // the tab list scrolls between "Nova aba" and the atos
++  AgensDragView* _tabsDoc;
++  AgensToolButton* _moreAtos;  // "⋯" when the atos don't fit
++  NSMutableArray<NSString*>* _atoNames;
++  int _activeAto;
 +  NSView* _atosLine;
 +  NSMutableArray<AgensAtoButton*>* _atoButtons;
 +  AgensToolButton* _addAto;
 +  NSView* _atoDot;
 +  AgensToolButton* _toggle;
++  AgensToolButton* _star;  // in the address, right side (prototype .star)
++  AgensToolButton* _menu;  // "⋯" after the address
++  BOOL _bookmarked;
 +  NSImageView* _newTabPlus;
 +  NSTextField* _newTabLabel;
 +  BOOL _collapsed;
@@ -1185,8 +1270,14 @@ index 0000000000..ae0925936a
 +    _address.delegate = self;
 +    _address.target = self;
 +    _address.action = @selector(go:);
++    _star = [[AgensToolButton alloc] initWithSymbol:@"star" label:@"Adicionar aos favoritos (⌘D)" size:12];
++    _star.layer.cornerRadius = 7;
++    _star.onPress = ^{ [weak run:agens_window_toggle_bookmark]; };
 +    [_omni addSubview:_omniIcon];
 +    [_omni addSubview:_address];
++    [_omni addSubview:_star];
++    _menu = [[AgensToolButton alloc] initWithSymbol:@"ellipsis" label:@"Menu"];
++    _menu.onPress = ^{ [weak showMenu]; };
 +
 +    _suggest = [[NSView alloc] init];
 +    _suggest.wantsLayer = YES;
@@ -1213,6 +1304,19 @@ index 0000000000..ae0925936a
 +    _newTab.accessibilityLabel = @"Nova aba";
 +    _newTab.onPress = ^{ [weak run:agens_window_new_tab]; };
 +
++    _tabsScroll = [[NSScrollView alloc] init];
++    _tabsScroll.drawsBackground = NO;
++    _tabsScroll.contentView.drawsBackground = NO;
++    _tabsScroll.hasVerticalScroller = YES;
++    _tabsScroll.autohidesScrollers = YES;
++    _tabsScroll.verticalScroller = [[AgensScroller alloc] init];
++    _tabsScroll.scrollerStyle = NSScrollerStyleOverlay;
++    _tabsScroll.borderType = NSNoBorder;
++    _tabsDoc = [[AgensDragView alloc] init];
++    _tabsScroll.documentView = _tabsDoc;
++    _atoNames = [NSMutableArray array];
++    _moreAtos = [[AgensToolButton alloc] initWithSymbol:@"ellipsis" label:@"Todos os atos" size:13];
++    _moreAtos.onPress = ^{ [weak showAtosMenu]; };
 +    _addAto = [[AgensToolButton alloc] initWithSymbol:@"plus" label:@"Novo ato"];
 +    _addAto.onPress = ^{ [weak run:agens_window_new_ato]; };
 +    // Collapse/expand the column: the button and ⌘S, as in Arc (Ctrl+S on Windows). It takes
@@ -1244,7 +1348,7 @@ index 0000000000..ae0925936a
 +    _ntp.field.action = @selector(go:);
 +    _ntp.field.delegate = self;
 +
-+    for (NSView* v in @[ _toggle, _back, _forward, _reload, _omni, _atoTile, _atoName, _separator, _newTab,
++    for (NSView* v in @[ _toggle, _back, _forward, _reload, _omni, _menu, _tabsScroll, _moreAtos, _atoTile, _atoName, _separator, _newTab,
 +                         _atosLine, _addAto, _atoDot, _ntp, _suggest ]) {
 +      [self addSubview:v];
 +    }
@@ -1294,9 +1398,11 @@ index 0000000000..ae0925936a
 +  _forward.frame = NSMakeRect(navX + 60, 12, 28, 28);
 +  _reload.frame = NSMakeRect(navX + 90, 12, 28, 28);
 +  CGFloat omniX = _collapsed ? navX + 126 : columnEnd + kGap;
-+  _omni.frame = NSMakeRect(omniX, 9, width - omniX - kPad, 34);
++  _menu.frame = NSMakeRect(width - kPad - 28, 12, 28, 28);
++  _omni.frame = NSMakeRect(omniX, 9, NSMinX(_menu.frame) - 4 - omniX, 34);
 +  _omniIcon.frame = NSMakeRect(12, 10, 14, 14);
-+  _address.frame = NSMakeRect(33, 8, NSWidth(_omni.frame) - 33 - 12, 18);
++  _star.frame = NSMakeRect(NSWidth(_omni.frame) - 4 - 26, 4, 26, 26);
++  _address.frame = NSMakeRect(33, 8, NSMinX(_star.frame) - 6 - 33, 18);
 +
 +  // Column: ato title (prototype .space-title), separator, new tab, tabs.
 +  CGFloat y = kToolbar;
@@ -1312,42 +1418,64 @@ index 0000000000..ae0925936a
 +  _newTabLabel.frame = NSMakeRect(34, 7, 150, 18);
 +  _newTabLabel.hidden = _collapsed;
 +  y += kRow + 1;
-+  for (AgensTabRow* row in _rows) {
-+    row.frame = NSMakeRect(kPad, y, side, kRow);
-+    y += kRow + 1;
-+  }
 +
 +  // Atos at the foot with a line above (prototype .spaces): a centered row when open, a column
-+  // when collapsed. The warm dot marks the current ato: under it, or to its left in the column.
++  // when collapsed. Only what fits (6 open, 5 collapsed); past that the last slot is "⋯" with the
++  // full list, and the current ato always stays in view. The warm dot marks the current one:
++  // under it, or to its left in the column.
++  const NSUInteger n = _atoButtons.count, cap = _collapsed ? 5 : 6;
++  const BOOL overflow = n > cap;
++  std::vector<int> shown;
++  for (int i = 0; i < (int)(overflow ? cap - 1 : n); ++i) shown.push_back(i);
++  if (overflow && _activeAto >= (int)shown.size()) shown.back() = _activeAto;
++  NSMutableArray<NSView*>* foot = [NSMutableArray array];
++  for (AgensAtoButton* b in _atoButtons) b.hidden = YES;
++  for (int i : shown) {
++    _atoButtons[i].hidden = NO;
++    [foot addObject:_atoButtons[i]];
++  }
++  _moreAtos.hidden = !overflow;
++  if (overflow) [foot addObject:_moreAtos];
++  [foot addObject:_addAto];
 +  _atoDot.hidden = YES;
-+  const NSUInteger slots = _atoButtons.count + 1;
++  CGFloat footY;
 +  if (!_collapsed) {
-+    CGFloat footY = height - kPad - kAtos;
++    footY = height - kPad - kAtos;
 +    _atosLine.frame = NSMakeRect(kPad, footY, side, 1);
-+    CGFloat x = kPad + (side - slots * 32) / 2;
-+    for (AgensAtoButton* b in _atoButtons) {
-+      b.frame = NSMakeRect(x, footY + 8, 30, 28);
-+      if (b.selected) {
++    CGFloat x = kPad + (side - foot.count * 32) / 2;
++    for (NSView* v in foot) {
++      v.frame = NSMakeRect(x, footY + 8, 30, 28);
++      if ([v isKindOfClass:AgensAtoButton.class] && ((AgensAtoButton*)v).selected) {
 +        _atoDot.frame = NSMakeRect(x + 13, footY + 8 + 28 + 3, 4, 4);
 +        _atoDot.hidden = NO;
 +      }
 +      x += 32;
 +    }
-+    _addAto.frame = NSMakeRect(x, footY + 8, 30, 28);
 +  } else {
-+    CGFloat footY = height - kPad - 8 - slots * 32;
++    footY = height - kPad - 8 - foot.count * 32;
 +    _atosLine.frame = NSMakeRect(kPad + 6, footY, side - 12, 1);
 +    CGFloat x = kPad + (side - 30) / 2, by = footY + 8;
-+    for (AgensAtoButton* b in _atoButtons) {
-+      b.frame = NSMakeRect(x, by, 30, 28);
-+      if (b.selected) {
++    for (NSView* v in foot) {
++      v.frame = NSMakeRect(x, by, 30, 28);
++      if ([v isKindOfClass:AgensAtoButton.class] && ((AgensAtoButton*)v).selected) {
 +        _atoDot.frame = NSMakeRect(x - 5, by + 12, 4, 4);
 +        _atoDot.hidden = NO;
 +      }
 +      by += 32;
 +    }
-+    _addAto.frame = NSMakeRect(x, by, 30, 28);
 +  }
++
++  // The tabs fill what's left and scroll. The collapsed rail is too narrow for a scroller next to
++  // the icons; it still scrolls with the trackpad or wheel.
++  _tabsScroll.hasVerticalScroller = !_collapsed;
++  _tabsScroll.verticalScroller.alphaValue = 1;
++  _tabsScroll.frame = NSMakeRect(kPad, y, side, MAX(0, footY - 6 - y));
++  CGFloat rowY = 0;
++  for (AgensTabRow* row in _rows) {
++    row.frame = NSMakeRect(0, rowY, side, kRow);
++    rowY += kRow + 1;
++  }
++  _tabsDoc.frame = NSMakeRect(0, 0, side, MAX(rowY, NSHeight(_tabsScroll.frame)));
 +
 +  _page = NSMakeRect(columnEnd + kGap, kToolbar, width - (columnEnd + kGap) - kPad,
 +                     height - kToolbar - kPad);
@@ -1373,23 +1501,30 @@ index 0000000000..ae0925936a
 +    __weak AgensTabRow* weakRow = row;
 +    row.onPress = ^{ [weak activate:weakRow.index]; };
 +    row.onClose = ^{ [weak close:weakRow.index]; };
-+    [self addSubview:row positioned:NSWindowBelow relativeTo:_ntp];
++    [_tabsDoc addSubview:row];
 +    [_rows addObject:row];
 +  }
 +  while ((int)_rows.count > count) {
 +    [_rows.lastObject removeFromSuperview];
 +    [_rows removeLastObject];
 +  }
++  int activeTab = -1;
 +  for (int i = 0; i < count; ++i) {
 +    _rows[i].index = i;
 +    [_rows[i] updateWith:tabs[i]];
++    if (tabs[i].active) activeTab = i;
 +    if (!tabs[i].active) continue;
 +    _url = @(tabs[i].url);
 +    _loading = tabs[i].loading;
++    _bookmarked = tabs[i].bookmarked;
 +    _back.enabled = tabs[i].can_go_back;
 +    _forward.enabled = tabs[i].can_go_forward;
 +  }
 +  [_reload setSymbol:_loading ? @"xmark" : @"arrow.clockwise"];
++  [_star setSymbol:_bookmarked ? @"star.fill" : @"star"];
++  [_star setTint:_bookmarked ? kLight3 : kDim];
++  _star.accessibilityLabel = _bookmarked ? @"Tirar dos favoritos" : @"Adicionar aos favoritos";
++  _star.hidden = _url.length == 0;
 +  _reload.accessibilityLabel = _loading ? @"Parar" : @"Recarregar";
 +  BOOL secure = [_url hasPrefix:@"https://"];
 +  _omniIcon.image = Symbol(_url.length == 0 ? @"magnifyingglass" : secure ? @"lock.fill" : @"globe", 12);
@@ -1399,6 +1534,7 @@ index 0000000000..ae0925936a
 +  _ntp.hidden = _url.length > 0;
 +  if (!_ntp.hidden && !wasNTP) _ntp.field.stringValue = @"";
 +  [self relayout];
++  if (activeTab >= 0) [_tabsDoc scrollRectToVisible:_rows[activeTab].frame];
 +}
 +
 +// The address as the prototype shows it: no https:// or www., no lone trailing slash.
@@ -1425,14 +1561,37 @@ index 0000000000..ae0925936a
 +    [_atoButtons.lastObject removeFromSuperview];
 +    [_atoButtons removeLastObject];
 +  }
++  [_atoNames removeAllObjects];
 +  for (int i = 0; i < count; ++i) {
 +    [_atoButtons[i] updateWith:atos[i] index:i];
++    [_atoNames addObject:@(atos[i].name)];
 +    if (!atos[i].active) continue;
++    _activeAto = i;
 +    _atoName.stringValue = @(atos[i].name);
 +    _atoTile.stringValue = Monogram(_atoName.stringValue);
 +    _atoTile.layer.backgroundColor = AtoColor(i).CGColor;
 +  }
 +  [self relayout];
++}
++// Every ato, for when they don't fit in the foot.
++- (void)showAtosMenu {
++  NSMenu* menu = [[NSMenu alloc] initWithTitle:@"Atos"];
++  for (NSUInteger i = 0; i < _atoNames.count; ++i) {
++    NSMenuItem* item = [menu addItemWithTitle:_atoNames[i] action:@selector(atoFromMenu:) keyEquivalent:@""];
++    item.target = self;
++    item.tag = i;
++    item.state = (int)i == _activeAto ? NSControlStateValueOn : NSControlStateValueOff;
++  }
++  [menu addItem:NSMenuItem.separatorItem];
++  NSMenuItem* add = [menu addItemWithTitle:@"Novo ato" action:@selector(newAtoFromMenu:) keyEquivalent:@""];
++  add.target = self;
++  [menu popUpMenuPositioningItem:nil atLocation:NSMakePoint(NSMinX(_moreAtos.frame), NSMinY(_moreAtos.frame) - 4) inView:self];
++}
++- (void)atoFromMenu:(NSMenuItem*)item {
++  [self switchAto:(int)item.tag];
++}
++- (void)newAtoFromMenu:(id)sender {
++  [self run:agens_window_new_ato];
 +}
 +- (void)switchAto:(int)index {
 +  if (_window && !_atoButtons[index].selected) agens_window_switch_ato(_window, index);
@@ -1516,6 +1675,41 @@ index 0000000000..ae0925936a
 +
 +// --- Actions.
 +
++// The window menu (prototype: Nova aba, Favoritos, Histórico, Configurações).
++- (void)showMenu {
++  NSMenu* menu = [[NSMenu alloc] initWithTitle:@"Menu"];
++  struct Item {
++    NSString* title;
++    NSString* symbol;
++    NSString* key;
++    NSEventModifierFlags mods;
++    SEL action;
++  } items[] = {
++      {@"Nova aba", @"plus", @"t", NSEventModifierFlagCommand, @selector(menuNewTab:)},
++      {@"Favoritos", @"star", @"b", NSEventModifierFlagCommand | NSEventModifierFlagOption, @selector(menuBookmarks:)},
++      {@"Histórico", @"clock", @"y", NSEventModifierFlagCommand, @selector(menuHistory:)},
++      {@"Configurações", @"gearshape", @",", NSEventModifierFlagCommand, @selector(menuSettings:)},
++  };
++  for (const Item& it : items) {
++    NSMenuItem* item = [menu addItemWithTitle:it.title action:it.action keyEquivalent:it.key];
++    item.keyEquivalentModifierMask = it.mods;
++    item.target = self;
++    item.image = Symbol(it.symbol, 13);
++  }
++  [menu popUpMenuPositioningItem:nil atLocation:NSMakePoint(NSMaxX(_menu.frame) - 4, NSMaxY(_menu.frame) + 4) inView:self];
++}
++- (void)menuNewTab:(id)sender {
++  [self run:agens_window_new_tab];
++}
++- (void)menuBookmarks:(id)sender {
++  if (_window) agens_window_open_page(_window, kAgensBookmarks);
++}
++- (void)menuHistory:(id)sender {
++  if (_window) agens_window_open_page(_window, kAgensHistory);
++}
++- (void)menuSettings:(id)sender {
++  if (_window) agens_window_open_page(_window, kAgensSettings);
++}
 +- (void)toggleSidebar {
 +  _collapsed = !_collapsed;
 +  [NSUserDefaults.standardUserDefaults setBool:_collapsed forKey:kCollapsedKey];
@@ -1592,6 +1786,29 @@ index 0000000000..9cfa56430c
 +inline constexpr char kAgensMarkLightSvg[] = R"svg(<svg xmlns="http://www.w3.org/2000/svg" viewBox="70 86 840 840" width="512" height="512"><defs><linearGradient id="mlg0" gradientUnits="userSpaceOnUse" x1="432.6" y1="270.8" x2="198.9" y2="622.0"><stop offset="0" stop-color="#F2A75E"/><stop offset="1" stop-color="#E07F2E"/></linearGradient><linearGradient id="mlg1" gradientUnits="userSpaceOnUse" x1="580.6" y1="330.6" x2="298.3" y2="682.0"><stop offset="0" stop-color="#FFD9A8"/><stop offset="1" stop-color="#F2A75E"/></linearGradient><linearGradient id="mlg2" gradientUnits="userSpaceOnUse" x1="728.4" y1="390.5" x2="397.5" y2="742.0"><stop offset="0" stop-color="#FFE9C7"/><stop offset="1" stop-color="#E8893A"/></linearGradient></defs><path d="M370.0 280.0 L366.0 280.2 L365.7 280.3 L362.0 280.6 L361.6 280.6 L358.0 281.1 L357.6 281.2 L354.1 281.8 L353.7 281.8 L350.2 282.6 L349.9 282.7 L346.4 283.5 L346.1 283.6 L342.7 284.6 L342.4 284.7 L339.1 285.8 L338.7 286.0 L335.5 287.2 L335.1 287.3 L332.0 288.7 L331.6 288.9 L328.5 290.4 L328.2 290.5 L325.2 292.2 L324.8 292.3 L321.9 294.1 L321.5 294.3 L318.6 296.2 L318.3 296.4 L315.5 298.4 L315.2 298.6 L312.4 300.8 L312.1 301.0 L309.3 303.3 L309.1 303.5 L306.4 305.9 L306.1 306.2 L303.5 308.7 L303.3 309.0 L300.7 311.7 L300.4 311.9 L297.9 314.8 L297.7 315.0 L295.2 318.0 L295.0 318.2 L292.6 321.4 L292.4 321.6 L290.0 324.9 L290.0 325.1 L86.8 587.0 L86.3 587.7 L85.9 588.4 L85.5 589.2 L85.0 590.6 L84.9 591.0 L84.1 593.2 L84.0 593.6 L83.3 595.7 L83.2 596.2 L82.8 598.1 L82.7 598.7 L82.4 600.4 L82.3 601.0 L82.2 602.5 L82.1 603.2 L82.1 604.5 L82.1 605.3 L82.2 606.4 L82.3 607.3 L82.5 608.2 L82.7 609.2 L82.9 609.9 L83.2 610.9 L83.5 611.5 L83.9 612.5 L84.2 613.0 L84.8 614.0 L85.2 614.4 L85.9 615.3 L86.3 615.7 L87.1 616.4 L87.6 616.9 L88.4 617.5 L89.2 618.0 L90.0 618.4 L90.9 618.9 L91.6 619.3 L92.8 619.7 L93.5 620.0 L94.9 620.4 L95.5 620.6 L97.1 621.0 L97.7 621.1 L99.5 621.4 L100.0 621.5 L102.1 621.7 L102.6 621.8 L104.9 621.9 L105.3 621.9 L107.9 622.0 L108.1 622.0 L153.3 622.0 L347.4 371.8 L349.6 368.7 L349.8 368.4 L350.0 368.2 L350.2 367.9 L352.6 364.8 L352.9 364.5 L353.1 364.3 L353.3 364.0 L355.8 361.0 L356.0 360.7 L356.2 360.4 L356.5 360.2 L359.0 357.3 L359.3 357.0 L359.5 356.8 L359.8 356.5 L362.3 353.8 L362.6 353.5 L362.9 353.3 L363.2 353.0 L365.8 350.4 L366.1 350.1 L366.3 349.9 L366.7 349.6 L369.3 347.2 L369.7 346.9 L369.9 346.7 L370.3 346.4 L373.0 344.1 L373.3 343.8 L373.6 343.6 L374.0 343.3 L376.8 341.2 L377.1 340.9 L377.4 340.7 L377.8 340.4 L380.6 338.4 L381.0 338.2 L381.3 338.0 L381.7 337.7 L384.6 335.8 L385.0 335.6 L385.3 335.4 L385.7 335.2 L388.7 333.4 L389.1 333.2 L389.4 333.0 L389.8 332.8 L392.8 331.1 L393.2 330.9 L393.6 330.8 L394.0 330.6 L397.1 329.1 L397.5 328.9 L397.8 328.7 L398.2 328.5 L401.4 327.2 L401.8 327.0 L402.2 326.8 L402.6 326.7 L405.8 325.4 L406.2 325.3 L406.6 325.1 L407.0 325.0 L410.3 323.9 L410.7 323.7 L411.1 323.6 L411.5 323.5 L414.9 322.5 L415.3 322.4 L415.6 322.3 L416.1 322.2 L419.5 321.3 L419.9 321.2 L420.3 321.1 L420.7 321.0 L424.2 320.3 L424.6 320.2 L425.0 320.2 L425.4 320.1 L429.0 319.5 L429.4 319.4 L429.7 319.4 L430.1 319.3 L433.8 318.8 L434.2 318.8 L434.5 318.7 L434.9 318.7 L438.7 318.3 L439.1 318.3 L439.4 318.3 L439.8 318.3 L443.6 318.0 L443.9 318.0 L444.1 318.0 L444.3 318.0 L533.8 314.9 L548.5 283.6 L548.9 282.8 L549.1 282.0 L549.3 281.1 L549.4 280.2 L549.4 279.3 L549.3 278.5 L549.1 277.6 L548.9 276.8 L548.5 275.9 L548.1 275.2 L547.6 274.4 L547.1 273.7 L546.4 273.1 L545.7 272.6 L545.0 272.1 L544.2 271.7 L543.4 271.3 L542.6 271.1 L541.7 270.9 L540.8 270.8 L539.9 270.8 L370.0 280.0 Z" fill="url(#mlg0)"/><path d="M444.9 340.0 L441.0 340.2 L440.7 340.3 L437.0 340.6 L436.6 340.6 L433.0 341.1 L432.6 341.2 L429.1 341.8 L428.7 341.8 L425.2 342.6 L424.9 342.7 L421.4 343.5 L421.1 343.6 L417.7 344.6 L417.4 344.7 L414.1 345.8 L413.7 346.0 L410.5 347.2 L410.1 347.3 L407.0 348.7 L406.6 348.9 L403.5 350.4 L403.2 350.5 L400.2 352.2 L399.8 352.3 L396.9 354.1 L396.5 354.3 L393.6 356.2 L393.3 356.4 L390.5 358.4 L390.2 358.6 L387.4 360.8 L387.1 361.0 L384.3 363.3 L384.1 363.5 L381.4 365.9 L381.1 366.2 L378.5 368.7 L378.3 369.0 L375.7 371.7 L375.4 371.9 L372.9 374.8 L372.7 375.0 L370.2 378.0 L370.0 378.2 L367.6 381.4 L367.4 381.6 L365.0 384.9 L365.0 385.1 L161.8 647.0 L161.3 647.7 L160.9 648.4 L160.5 649.2 L160.0 650.6 L159.9 651.0 L159.1 653.2 L159.0 653.6 L158.3 655.7 L158.2 656.2 L157.8 658.1 L157.7 658.7 L157.4 660.4 L157.3 661.0 L157.2 662.5 L157.1 663.2 L157.1 664.5 L157.1 665.3 L157.2 666.4 L157.3 667.3 L157.5 668.2 L157.7 669.2 L157.9 669.9 L158.2 670.9 L158.5 671.5 L158.9 672.5 L159.2 673.0 L159.8 674.0 L160.2 674.4 L160.9 675.3 L161.3 675.7 L162.1 676.4 L162.6 676.9 L163.4 677.5 L164.2 678.0 L165.0 678.4 L165.9 678.9 L166.6 679.3 L167.8 679.7 L168.5 680.0 L169.9 680.4 L170.5 680.6 L172.1 681.0 L172.7 681.1 L174.5 681.4 L175.0 681.5 L177.1 681.7 L177.6 681.8 L179.9 681.9 L180.3 681.9 L182.9 682.0 L183.1 682.0 L228.3 682.0 L422.4 431.8 L424.6 428.7 L424.8 428.4 L425.0 428.2 L425.2 427.9 L427.6 424.8 L427.9 424.5 L428.1 424.3 L428.3 424.0 L430.8 421.0 L431.0 420.7 L431.2 420.4 L431.5 420.2 L434.0 417.3 L434.3 417.0 L434.5 416.8 L434.8 416.5 L437.3 413.8 L437.6 413.5 L437.9 413.3 L438.2 413.0 L440.8 410.4 L441.1 410.1 L441.3 409.9 L441.7 409.6 L444.3 407.2 L444.7 406.9 L444.9 406.7 L445.3 406.4 L448.0 404.1 L448.3 403.8 L448.6 403.6 L449.0 403.3 L451.8 401.2 L452.1 400.9 L452.4 400.7 L452.8 400.4 L455.6 398.4 L456.0 398.2 L456.3 398.0 L456.7 397.7 L459.6 395.8 L460.0 395.6 L460.3 395.4 L460.7 395.2 L463.7 393.4 L464.1 393.2 L464.4 393.0 L464.8 392.8 L467.8 391.1 L468.2 390.9 L468.6 390.8 L469.0 390.6 L472.1 389.1 L472.5 388.9 L472.8 388.7 L473.2 388.5 L476.4 387.2 L476.8 387.0 L477.2 386.8 L477.6 386.7 L480.8 385.4 L481.2 385.3 L481.6 385.1 L482.0 385.0 L485.3 383.9 L485.7 383.7 L486.1 383.6 L486.5 383.5 L489.9 382.5 L490.3 382.4 L490.6 382.3 L491.1 382.2 L494.5 381.3 L494.9 381.2 L495.3 381.1 L495.7 381.0 L499.2 380.3 L499.6 380.2 L500.0 380.2 L500.4 380.1 L504.0 379.5 L504.4 379.4 L504.7 379.4 L505.1 379.3 L508.8 378.8 L509.2 378.8 L509.5 378.7 L509.9 378.7 L513.7 378.3 L514.1 378.3 L514.4 378.3 L514.8 378.3 L518.6 378.0 L518.9 378.0 L519.2 378.0 L519.6 378.0 L701.1 373.3 L720.2 344.6 L720.7 343.8 L721.1 343.0 L721.4 342.2 L721.6 341.3 L721.7 340.4 L721.7 339.5 L721.7 338.6 L721.6 337.7 L721.3 336.9 L721.0 336.0 L720.6 335.2 L720.1 334.5 L719.6 333.8 L719.0 333.1 L718.3 332.5 L717.6 332.0 L716.8 331.6 L716.0 331.2 L715.1 330.9 L714.2 330.7 L713.3 330.6 L712.4 330.6 L445.1 340.0 Z" fill="url(#mlg1)"/><path d="M520.1 400.0 L519.9 400.0 L516.0 400.2 L515.7 400.3 L512.0 400.6 L511.6 400.6 L508.0 401.1 L507.6 401.2 L504.1 401.8 L503.7 401.8 L500.2 402.6 L499.9 402.7 L496.4 403.5 L496.1 403.6 L492.7 404.6 L492.4 404.7 L489.1 405.8 L488.7 406.0 L485.5 407.2 L485.1 407.3 L482.0 408.7 L481.6 408.9 L478.5 410.4 L478.2 410.5 L475.2 412.2 L474.8 412.3 L471.9 414.1 L471.5 414.3 L468.6 416.2 L468.3 416.4 L465.5 418.4 L465.2 418.6 L462.4 420.8 L462.1 421.0 L459.3 423.3 L459.1 423.5 L456.4 425.9 L456.1 426.2 L453.5 428.7 L453.3 429.0 L450.7 431.7 L450.4 431.9 L447.9 434.8 L447.7 435.0 L445.2 438.0 L445.0 438.2 L442.6 441.4 L442.4 441.6 L440.0 444.9 L440.0 445.1 L236.8 707.0 L236.3 707.7 L235.9 708.4 L235.5 709.2 L235.0 710.6 L234.9 711.0 L234.1 713.2 L234.0 713.6 L233.3 715.7 L233.2 716.2 L232.8 718.1 L232.7 718.7 L232.4 720.4 L232.3 721.0 L232.2 722.5 L232.1 723.2 L232.1 724.5 L232.1 725.3 L232.2 726.4 L232.3 727.3 L232.5 728.2 L232.7 729.2 L232.9 729.9 L233.2 730.9 L233.5 731.5 L233.9 732.5 L234.2 733.0 L234.8 734.0 L235.2 734.4 L235.9 735.3 L236.3 735.7 L237.1 736.4 L237.6 736.9 L238.4 737.5 L239.2 738.0 L240.0 738.4 L240.9 738.9 L241.6 739.3 L242.8 739.7 L243.5 740.0 L244.9 740.4 L245.5 740.6 L247.1 741.0 L247.7 741.1 L249.5 741.4 L250.0 741.5 L252.1 741.7 L252.6 741.8 L254.9 741.9 L255.3 741.9 L257.9 742.0 L258.1 742.0 L569.9 742.0 L570.1 742.0 L572.4 742.0 L572.6 742.0 L574.8 741.9 L575.0 741.9 L577.2 741.7 L577.4 741.7 L579.5 741.5 L579.8 741.4 L581.8 741.2 L582.1 741.1 L584.1 740.8 L584.4 740.7 L586.3 740.3 L586.6 740.3 L588.5 739.8 L588.8 739.7 L590.7 739.2 L591.0 739.1 L592.8 738.6 L593.1 738.5 L594.8 737.9 L595.1 737.7 L596.8 737.1 L597.2 736.9 L598.8 736.2 L599.1 736.1 L600.8 735.3 L601.1 735.1 L602.7 734.3 L603.0 734.1 L604.5 733.2 L604.8 733.0 L606.3 732.1 L606.6 731.9 L608.1 730.8 L608.4 730.6 L609.8 729.6 L610.1 729.4 L611.5 728.2 L611.8 728.0 L613.2 726.8 L613.4 726.6 L614.8 725.3 L615.0 725.1 L616.4 723.7 L616.6 723.5 L617.9 722.1 L618.1 721.9 L891.7 405.4 L892.2 404.7 L892.7 404.0 L893.1 403.2 L893.4 402.4 L893.6 401.6 L893.8 400.7 L893.9 399.9 L893.9 399.0 L893.8 398.2 L893.6 397.3 L893.3 396.5 L893.0 395.7 L892.6 394.9 L892.1 394.2 L891.6 393.5 L891.0 392.9 L890.3 392.3 L889.6 391.9 L888.8 391.4 L888.0 391.1 L887.2 390.8 L886.4 390.7 L885.5 390.5 L884.6 390.5 Z" fill="url(#mlg2)"/></svg>)svg";
 +
 +#endif  // CHROME_BROWSER_AGENS_UI_LOGO_SVG_H_
+diff --git a/chrome/browser/ui/profiles/profile_picker.cc b/chrome/browser/ui/profiles/profile_picker.cc
+index 886649ae98..3adfa8a130 100644
+--- a/chrome/browser/ui/profiles/profile_picker.cc
++++ b/chrome/browser/ui/profiles/profile_picker.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "chrome/browser/ui/profiles/profile_picker.h"
+ 
++#include "chrome/browser/agens/embed/native_shell.h"
++
+ #include <string>
+ 
+ #include "base/check_deref.h"
+@@ -203,7 +205,8 @@ StartupProfileMode ProfilePicker::GetStartupMode() {
+ 
+   size_t number_of_profiles = profile_manager->GetNumberOfProfiles();
+   // Need to consider 0 profiles as this is what happens in some browser-tests.
+-  if (number_of_profiles <= 1) {
++  // agens: profiles are atos, switched from the window's own column; open the last one used.
++  if (number_of_profiles <= 1 || agens::IsNativeShellEnabled()) {
+     return StartupProfileMode::kBrowserWindow;
+   }
+ 
 diff --git a/chrome/browser/ui/webui_browser/BUILD.gn b/chrome/browser/ui/webui_browser/BUILD.gn
 index db2aba2a32..29893018b0 100644
 --- a/chrome/browser/ui/webui_browser/BUILD.gn

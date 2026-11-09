@@ -36,6 +36,10 @@ janela do Chromium            WebUIBrowserWindow (Webium), sem a página HTML
 
 ![Lateral recolhida](casca-recolhida.png)
 
+- **Sem o seletor de perfis do Chromium:** com mais de um ato, o navegador abre direto no último usado; trocar de ato é pela coluna.
+- **Muitas abas e atos:** a lista de abas rola entre "Nova aba" e o pé, com uma barra fina (some na lateral recolhida). O pé mostra até 6 atos (5 recolhida); além disso, "⋯" abre a lista completa, e o ato atual nunca sai do pé.
+- **Barra:** estrela de favoritar dentro do endereço e menu "⋯" (Nova aba, Favoritos, Histórico, Configurações); por enquanto essas três abrem as páginas do Chromium.
+
 ## Flags
 
 - No nosso build, `Webium` e `AgensNativeShell` vêm **ligadas por padrão**.
