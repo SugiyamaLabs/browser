@@ -1,0 +1,670 @@
+diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
+new file mode 100644
+index 0000000000..3c652f80f5
+--- /dev/null
++++ b/chrome/browser/agens/embed/agens_embed.h
+@@ -0,0 +1,45 @@
++// Copyright 2026 SugiyamaLabs.
++// The boundary between the engine and any interface (the browser's own sidebar today, the Agens
++// app later). Plain C on purpose: no Chromium or C++ types cross it, Swift imports it as is, and
++// what sits under it (today Chromium's Webium window) can change without touching the UI.
++#ifndef CHROME_BROWSER_AGENS_EMBED_AGENS_EMBED_H_
++#define CHROME_BROWSER_AGENS_EMBED_AGENS_EMBED_H_
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++// One browser window. Owned by the engine; valid until the UI's destroy hook runs.
++typedef struct AgensWindow AgensWindow;
++
++typedef struct {
++  const char* title;  // UTF-8, never null
++  const char* url;    // UTF-8, empty for the new tab page
++  int active;
++  int loading;
++} AgensTab;
++
++// Strings and the array are only valid during the call; copy what you keep.
++typedef void (*AgensTabsChanged)(void* context, const AgensTab* tabs, int count);
++
++void agens_window_set_tabs_observer(AgensWindow* window, AgensTabsChanged observer, void* context);
++void agens_window_new_tab(AgensWindow* window);
++void agens_window_activate_tab(AgensWindow* window, int index);
++void agens_window_close_tab(AgensWindow* window, int index);
++// Address or search text, as typed; the engine decides which it is.
++void agens_window_navigate(AgensWindow* window, const char* text);
++void agens_window_back(AgensWindow* window);
++void agens_window_forward(AgensWindow* window);
++void agens_window_reload(AgensWindow* window);
++
++// Implemented by the interface. The sidebar is a platform view (NSView* on macOS), returned
++// retained; the engine places it and calls destroy when the window closes.
++void* agens_ui_create_sidebar(AgensWindow* window);
++void agens_ui_focus_address(void* sidebar);
++void agens_ui_destroy_sidebar(void* sidebar);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EMBED_H_
+diff --git a/chrome/browser/agens/embed/native_shell.h b/chrome/browser/agens/embed/native_shell.h
+new file mode 100644
+index 0000000000..152312203b
+--- /dev/null
++++ b/chrome/browser/agens/embed/native_shell.h
+@@ -0,0 +1,28 @@
++// Copyright 2026 SugiyamaLabs.
++// Glue between Chromium's Webium window (WebUIBrowserWindow, without its HTML page) and the
++// agens_embed.h interface.
++#ifndef CHROME_BROWSER_AGENS_EMBED_NATIVE_SHELL_H_
++#define CHROME_BROWSER_AGENS_EMBED_NATIVE_SHELL_H_
++
++#include <memory>
++
++#include "base/feature_list.h"
++
++class BrowserWindowInterface;
++namespace views {
++class View;
++class Widget;
++}  // namespace views
++
++namespace agens {
++
++// On by default together with Webium. --disable-features=Webium brings back the Views window.
++BASE_DECLARE_FEATURE(kAgensNativeShell);
++bool IsNativeShellEnabled();
++
++std::unique_ptr<views::View> CreateNativeShellView(BrowserWindowInterface* browser);
++void FocusNativeLocationBar(views::Widget* widget);
++
++}  // namespace agens
++
++#endif  // CHROME_BROWSER_AGENS_EMBED_NATIVE_SHELL_H_
+diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
+new file mode 100644
+index 0000000000..0d7ce2261a
+--- /dev/null
++++ b/chrome/browser/agens/embed/native_shell_mac.mm
+@@ -0,0 +1,198 @@
++// Copyright 2026 SugiyamaLabs.
++// Engine side of agens_embed.h on macOS: an AgensWindow over the Browser's tab strip, and the
++// views::View that fills the Webium window (the UI's sidebar beside the active tab).
++
++#include "chrome/browser/agens/embed/native_shell.h"
++
++#import <AppKit/AppKit.h>
++
++#include <string>
++#include <vector>
++
++#include "base/memory/raw_ptr.h"
++#include "base/strings/utf_string_conversions.h"
++#include "chrome/app/chrome_command_ids.h"
++#include "chrome/browser/agens/embed/agens_embed.h"
++#include "chrome/browser/autocomplete/autocomplete_classifier_factory.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/ui/browser_commands.h"
++#include "chrome/browser/ui/browser_element_identifiers.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/browser/ui/tabs/tab_strip_model.h"
++#include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
++#include "components/omnibox/browser/autocomplete_classifier.h"
++#include "components/omnibox/browser/autocomplete_match.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/web_contents.h"
++#include "ui/base/metadata/metadata_header_macros.h"
++#include "ui/base/metadata/metadata_impl_macros.h"
++#include "ui/views/background.h"
++#include "ui/views/controls/webview/webview.h"
++#include "ui/views/view_class_properties.h"
++#include "ui/views/widget/widget.h"
++
++struct AgensWindow : public TabStripModelObserver {
++  explicit AgensWindow(BrowserWindowInterface* browser) : browser(browser) {
++    browser->GetTabStripModel()->AddObserver(this);
++  }
++
++  TabStripModel* model() { return browser->GetTabStripModel(); }
++
++  void Notify() {
++    if (!observer) return;
++    std::vector<std::string> titles, urls;
++    std::vector<AgensTab> tabs;
++    for (int i = 0; i < model()->count(); ++i) {
++      content::WebContents* contents = model()->GetWebContentsAt(i);
++      titles.push_back(base::UTF16ToUTF8(contents->GetTitle()));
++      std::string url = contents->GetVisibleURL().spec();
++      urls.push_back(url.starts_with("chrome://newtab") ? "" : url);
++    }
++    for (int i = 0; i < model()->count(); ++i) {
++      tabs.push_back({titles[i].c_str(), urls[i].c_str(), i == model()->active_index(),
++                      model()->GetWebContentsAt(i)->IsLoading()});
++    }
++    observer(context, tabs.data(), static_cast<int>(tabs.size()));
++  }
++
++  // TabStripModelObserver:
++  void OnTabStripModelChanged(TabStripModel*, const TabStripModelChange&,
++                              const TabStripSelectionChange&) override {
++    Notify();
++  }
++  void OnTabChangedAt(tabs::TabInterface*, TabChangeType) override { Notify(); }
++
++  raw_ptr<BrowserWindowInterface> browser;
++  AgensTabsChanged observer = nullptr;
++  raw_ptr<void> context = nullptr;
++};
++
++extern "C" {
++
++void agens_window_set_tabs_observer(AgensWindow* w, AgensTabsChanged observer, void* context) {
++  w->observer = observer;
++  w->context = context;
++  w->Notify();
++}
++void agens_window_new_tab(AgensWindow* w) {
++  chrome::ExecuteCommand(w->browser, IDC_NEW_TAB);
++}
++void agens_window_activate_tab(AgensWindow* w, int index) {
++  if (w->model()->ContainsIndex(index)) w->model()->ActivateTabAt(index);
++}
++void agens_window_close_tab(AgensWindow* w, int index) {
++  if (w->model()->ContainsIndex(index)) {
++    w->model()->CloseWebContentsAt(
++        index, TabCloseTypes::CLOSE_USER_GESTURE | TabCloseTypes::CLOSE_CREATE_HISTORICAL_TAB);
++  }
++}
++void agens_window_navigate(AgensWindow* w, const char* text) {
++  content::WebContents* active = w->model()->GetActiveWebContents();
++  std::u16string input = base::UTF8ToUTF16(text ? text : "");
++  if (!active || input.empty()) return;
++  AutocompleteMatch match;
++  AutocompleteClassifierFactory::GetForProfile(w->browser->GetProfile())
++      ->Classify(input, false, false, metrics::OmniboxEventProto::OTHER, &match, nullptr);
++  if (!match.destination_url.is_valid()) return;
++  active->GetController().LoadURL(match.destination_url, content::Referrer(),
++                                  ui::PAGE_TRANSITION_TYPED, std::string());
++  active->Focus();
++}
++void agens_window_back(AgensWindow* w) {
++  chrome::ExecuteCommand(w->browser, IDC_BACK);
++}
++void agens_window_forward(AgensWindow* w) {
++  chrome::ExecuteCommand(w->browser, IDC_FORWARD);
++}
++void agens_window_reload(AgensWindow* w) {
++  chrome::ExecuteCommand(w->browser, IDC_RELOAD);
++}
++
++}  // extern "C"
++
++namespace agens {
++
++BASE_FEATURE(kAgensNativeShell, base::FEATURE_ENABLED_BY_DEFAULT);
++
++bool IsNativeShellEnabled() {
++  return base::FeatureList::IsEnabled(kAgensNativeShell);
++}
++
++namespace {
++
++class NativeShellView : public views::View, public TabStripModelObserver {
++  METADATA_HEADER(NativeShellView, views::View)
++
++ public:
++  static constexpr int kSidebarWidth = 248;
++  static constexpr int kViewId = 0x4167;  // lookup from the window (Cmd+L)
++
++  explicit NativeShellView(BrowserWindowInterface* browser)
++      : window_(std::make_unique<AgensWindow>(browser)) {
++    SetID(kViewId);
++    SetBackground(views::CreateSolidBackground(SkColorSetRGB(0x0B, 0x0B, 0x0D)));
++    contents_ = AddChildView(std::make_unique<views::WebView>(browser->GetProfile()));
++    // Webium sizes new tabs from this element (GetContentsBoundsInScreen).
++    contents_->SetProperty(views::kElementIdentifierKey, kContentsContainerViewElementId);
++    browser->GetTabStripModel()->AddObserver(this);
++    sidebar_ = (__bridge_transfer NSView*)agens_ui_create_sidebar(window_.get());
++  }
++  ~NativeShellView() override {
++    agens_ui_destroy_sidebar((__bridge void*)sidebar_);
++    [sidebar_ removeFromSuperview];
++    contents_->SetWebContents(nullptr);
++  }
++
++  void FocusAddress() { agens_ui_focus_address((__bridge void*)sidebar_); }
++
++  // views::View:
++  void AddedToWidget() override {
++    // The views content view is layer-hosting and won't draw AppKit subviews, so the
++    // sidebar is a sibling above it in the window frame (below the traffic lights).
++    NSWindow* window = GetWidget()->GetNativeWindow().GetNativeNSWindow();
++    sidebar_.autoresizingMask = NSViewHeightSizable | NSViewMaxXMargin;
++    [window.contentView.superview addSubview:sidebar_
++                                  positioned:NSWindowAbove
++                                  relativeTo:window.contentView];
++  }
++  void Layout(PassKey) override {
++    if (sidebar_.superview) {
++      NSView* content = GetWidget()->GetNativeWindow().GetNativeNSWindow().contentView;
++      sidebar_.frame = [content convertRect:NSMakeRect(0, 0, kSidebarWidth, NSHeight(content.bounds))
++                                     toView:sidebar_.superview];
++    }
++    // A small inset so the page reads as a card on the window, like the prototype.
++    contents_->SetBounds(kSidebarWidth, 8, width() - kSidebarWidth - 8, height() - 16);
++  }
++
++  // TabStripModelObserver: the page area follows the active tab.
++  void OnTabStripModelChanged(TabStripModel*, const TabStripModelChange&,
++                              const TabStripSelectionChange& selection) override {
++    if (selection.active_tab_changed()) {
++      contents_->SetWebContents(selection.new_contents);
++    }
++  }
++
++ private:
++  std::unique_ptr<AgensWindow> window_;
++  raw_ptr<views::WebView> contents_;
++  NSView* __strong sidebar_;
++};
++
++BEGIN_METADATA(NativeShellView)
++END_METADATA
++
++}  // namespace
++
++std::unique_ptr<views::View> CreateNativeShellView(BrowserWindowInterface* browser) {
++  return std::make_unique<NativeShellView>(browser);
++}
++
++void FocusNativeLocationBar(views::Widget* widget) {
++  if (auto* shell = views::AsViewClass<NativeShellView>(
++          widget->GetRootView()->GetViewByID(NativeShellView::kViewId))) {
++    shell->FocusAddress();
++  }
++}
++
++}  // namespace agens
+diff --git a/chrome/browser/agens/ui/sidebar_mac.mm b/chrome/browser/agens/ui/sidebar_mac.mm
+new file mode 100644
+index 0000000000..fcebfac41a
+--- /dev/null
++++ b/chrome/browser/agens/ui/sidebar_mac.mm
+@@ -0,0 +1,198 @@
++// Copyright 2026 SugiyamaLabs.
++// The browser's sidebar: address field, back/forward/reload, tab list. Only AppKit and
++// agens_embed.h here, so the same code can move to the Swift app / BrowserKit unchanged.
++
++#import <AppKit/AppKit.h>
++
++#include "chrome/browser/agens/embed/agens_embed.h"
++
++// Grafite (dark) tokens from docs/visual.md.
++static NSColor* Hex(unsigned rgb, CGFloat a = 1) {
++  return [NSColor colorWithSRGBRed:((rgb >> 16) & 255) / 255.0
++                             green:((rgb >> 8) & 255) / 255.0
++                              blue:(rgb & 255) / 255.0
++                             alpha:a];
++}
++
++enum { kBack, kForward, kReload, kNewTab };
++
++@interface AgensSidebar : NSVisualEffectView <NSTextFieldDelegate>
++- (instancetype)initWithWindow:(AgensWindow*)window;
++- (void)detach;
++- (void)focusAddress;
++- (void)setTabs:(const AgensTab*)tabs count:(int)count;
++@end
++
++static void TabsChanged(void* context, const AgensTab* tabs, int count) {
++  [(__bridge AgensSidebar*)context setTabs:tabs count:count];
++}
++
++@implementation AgensSidebar {
++  AgensWindow* _window;  // owned by the engine; null after detach
++  NSTextField* _address;
++  NSStackView* _tabs;
++}
++
++- (NSButton*)symbol:(NSString*)name label:(NSString*)label tag:(NSInteger)tag action:(SEL)action {
++  NSButton* b = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:name
++                                                    accessibilityDescription:label]
++                                   target:self
++                                   action:action];
++  b.bordered = NO;
++  b.tag = tag;
++  b.contentTintColor = Hex(0x9A9AA4);
++  b.toolTip = label;
++  return b;
++}
++
++- (instancetype)initWithWindow:(AgensWindow*)window {
++  if ((self = [super initWithFrame:NSZeroRect])) {
++    _window = window;
++    self.material = NSVisualEffectMaterialSidebar;
++    self.blendingMode = NSVisualEffectBlendingModeWithinWindow;
++    self.state = NSVisualEffectStateActive;
++    self.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
++    self.wantsLayer = YES;
++
++    // Back / forward / reload, to the right of the traffic lights.
++    NSStackView* nav = [NSStackView stackViewWithViews:@[
++      [self symbol:@"chevron.left" label:@"Voltar" tag:kBack action:@selector(command:)],
++      [self symbol:@"chevron.right" label:@"Avançar" tag:kForward action:@selector(command:)],
++      [self symbol:@"arrow.clockwise" label:@"Recarregar" tag:kReload action:@selector(command:)],
++    ]];
++    nav.spacing = 14;
++
++    _address = [NSTextField textFieldWithString:@""];
++    _address.placeholderString = @"Buscar ou digitar endereço";
++    _address.bezelStyle = NSTextFieldRoundedBezel;
++    _address.font = [NSFont systemFontOfSize:13];
++    _address.delegate = self;
++    _address.target = self;
++    _address.action = @selector(go:);
++    _address.lineBreakMode = NSLineBreakByTruncatingTail;
++    _address.cell.scrollable = YES;
++    _address.accessibilityLabel = @"Endereço";
++
++    NSButton* newTab = [NSButton buttonWithTitle:@"Nova aba" target:self action:@selector(command:)];
++    newTab.tag = kNewTab;
++    newTab.bordered = NO;
++    newTab.image = [NSImage imageWithSystemSymbolName:@"plus" accessibilityDescription:nil];
++    newTab.imagePosition = NSImageLeading;
++    newTab.contentTintColor = Hex(0x9A9AA4);
++    newTab.alignment = NSTextAlignmentLeft;
++
++    _tabs = [[NSStackView alloc] init];
++    _tabs.orientation = NSUserInterfaceLayoutOrientationVertical;
++    _tabs.alignment = NSLayoutAttributeLeading;
++    _tabs.spacing = 2;
++
++    NSStackView* column = [NSStackView stackViewWithViews:@[ _address, _tabs, newTab ]];
++    column.orientation = NSUserInterfaceLayoutOrientationVertical;
++    column.alignment = NSLayoutAttributeLeading;
++    column.spacing = 10;
++    [column setCustomSpacing:14 afterView:_address];
++
++    for (NSView* v in @[ nav, column ]) {
++      v.translatesAutoresizingMaskIntoConstraints = NO;
++      [self addSubview:v];
++    }
++    [NSLayoutConstraint activateConstraints:@[
++      [nav.topAnchor constraintEqualToAnchor:self.topAnchor constant:12],
++      [nav.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-14],
++      [column.topAnchor constraintEqualToAnchor:self.topAnchor constant:46],
++      [column.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:10],
++      [column.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-10],
++      [_address.widthAnchor constraintEqualToAnchor:column.widthAnchor],
++      [_tabs.widthAnchor constraintEqualToAnchor:column.widthAnchor],
++    ]];
++    agens_window_set_tabs_observer(_window, TabsChanged, (__bridge void*)self);
++  }
++  return self;
++}
++
++// The traffic lights sit on the sidebar, so its background drags the window.
++- (BOOL)mouseDownCanMoveWindow {
++  return YES;
++}
++- (void)mouseDown:(NSEvent*)event {
++  [self.window performWindowDragWithEvent:event];
++}
++
++- (void)detach {
++  if (_window) agens_window_set_tabs_observer(_window, nullptr, nullptr);
++  _window = nullptr;
++}
++
++- (void)focusAddress {
++  [self.window makeFirstResponder:_address];
++}
++
++- (void)setTabs:(const AgensTab*)tabs count:(int)count {
++  for (NSView* v in [_tabs.arrangedSubviews copy]) {
++    [_tabs removeArrangedSubview:v];
++    [v removeFromSuperview];
++  }
++  NSString* activeURL = @"";
++  for (int i = 0; i < count; ++i) {
++    NSString* title = @(tabs[i].title);
++    if (tabs[i].active) activeURL = @(tabs[i].url);
++    NSButton* tab = [NSButton buttonWithTitle:title.length ? title : @"Nova aba"
++                                       target:self
++                                       action:@selector(activate:)];
++    tab.tag = i;
++    tab.bordered = NO;
++    tab.alignment = NSTextAlignmentLeft;
++    tab.lineBreakMode = NSLineBreakByTruncatingTail;
++    tab.contentTintColor = Hex(0xF2F2F4);
++    tab.font = [NSFont systemFontOfSize:13
++                                 weight:tabs[i].active ? NSFontWeightMedium : NSFontWeightRegular];
++    [tab setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
++                                  forOrientation:NSLayoutConstraintOrientationHorizontal];
++    NSButton* close = [self symbol:@"xmark" label:@"Fechar aba" tag:i action:@selector(close:)];
++    NSStackView* row = [NSStackView stackViewWithViews:@[ tab, close ]];
++    row.edgeInsets = NSEdgeInsetsMake(6, 10, 6, 10);
++    row.wantsLayer = YES;
++    row.layer.cornerRadius = 8;
++    row.layer.backgroundColor =
++        tabs[i].active ? Hex(0xFFFFFF, 0.08).CGColor : NSColor.clearColor.CGColor;
++    row.accessibilityRole = NSAccessibilityRowRole;
++    [_tabs addArrangedSubview:row];
++    [row.widthAnchor constraintEqualToAnchor:_tabs.widthAnchor].active = YES;
++  }
++  // Don't overwrite what the person is typing.
++  if (_address.currentEditor == nil) _address.stringValue = activeURL;
++}
++
++- (void)activate:(NSButton*)sender {
++  if (_window) agens_window_activate_tab(_window, (int)sender.tag);
++}
++- (void)close:(NSButton*)sender {
++  if (_window) agens_window_close_tab(_window, (int)sender.tag);
++}
++- (void)command:(NSButton*)sender {
++  if (!_window) return;
++  switch (sender.tag) {
++    case kBack: agens_window_back(_window); break;
++    case kForward: agens_window_forward(_window); break;
++    case kReload: agens_window_reload(_window); break;
++    case kNewTab: agens_window_new_tab(_window); break;
++  }
++}
++- (void)go:(NSTextField*)sender {
++  if (_window) agens_window_navigate(_window, sender.stringValue.UTF8String);
++}
++@end
++
++extern "C" {
++
++void* agens_ui_create_sidebar(AgensWindow* window) {
++  return (__bridge_retained void*)[[AgensSidebar alloc] initWithWindow:window];
++}
++void agens_ui_focus_address(void* sidebar) {
++  [(__bridge AgensSidebar*)sidebar focusAddress];
++}
++void agens_ui_destroy_sidebar(void* sidebar) {
++  [(__bridge AgensSidebar*)sidebar detach];
++}
++
++}  // extern "C"
+diff --git a/chrome/browser/ui/webui_browser/BUILD.gn b/chrome/browser/ui/webui_browser/BUILD.gn
+index db2aba2a32..10da89e4d7 100644
+--- a/chrome/browser/ui/webui_browser/BUILD.gn
++++ b/chrome/browser/ui/webui_browser/BUILD.gn
+@@ -80,7 +80,13 @@ source_set("impl") {
+   ]
+ 
+   if (is_mac) {
+-    sources += [ "webui_browser_window_mac.mm" ]
++    sources += [
++      "//chrome/browser/agens/embed/agens_embed.h",
++      "//chrome/browser/agens/embed/native_shell.h",
++      "//chrome/browser/agens/embed/native_shell_mac.mm",
++      "//chrome/browser/agens/ui/sidebar_mac.mm",
++      "webui_browser_window_mac.mm",
++    ]
+   }
+ 
+   deps = [
+diff --git a/chrome/browser/ui/webui_browser/webui_browser_window.cc b/chrome/browser/ui/webui_browser/webui_browser_window.cc
+index f83d197409..1507c0b06f 100644
+--- a/chrome/browser/ui/webui_browser/webui_browser_window.cc
++++ b/chrome/browser/ui/webui_browser/webui_browser_window.cc
+@@ -40,6 +40,7 @@
+ #include "chrome/browser/ui/web_applications/app_browser_controller.h"
+ #include "chrome/browser/ui/webui/webui_toolbar/webui_toolbar_extensions_container.h"
+ #include "chrome/browser/ui/webui_browser/browser_elements_webui_browser.h"
++#include "chrome/browser/agens/embed/native_shell.h"
+ #include "chrome/browser/ui/webui_browser/webui_browser_client_view.h"
+ #include "chrome/browser/ui/webui_browser/webui_browser_exclusive_access_context.h"
+ #include "chrome/browser/ui/webui_browser/webui_browser_modal_dialog_host.h"
+@@ -176,6 +177,17 @@ WebUIBrowserWindow::WebUIBrowserWindow(BrowserWindowInterface* browser)
+   browser_elements->Init(
+       views::Widget::GetWidgetForNativeWindow(GetNativeWindow()));
+ 
++  modal_dialog_host_ = std::make_unique<WebUIBrowserModalDialogHost>(this);
++  icon_table_ = std::make_unique<webui_toolbar::IconTable>(this);
++  if (agens::IsNativeShellEnabled()) {
++    extensions_container_ = std::make_unique<WebUIToolbarExtensionsContainer>(
++        *browser_, widget_.get(), base::WeakPtr<content::WebContents>(),
++        icon_table_.get(), /*push_icon_table_updates=*/false);
++    scoped_extensions_container_user_data_ =
++        std::make_unique<ui::ScopedUnownedUserData<ExtensionsContainer>>(
++            browser_->GetUnownedUserDataHost(), *extensions_container_);
++    widget_->SetClientContentsView(agens::CreateNativeShellView(browser_));
++  } else {
+   auto web_view = std::make_unique<views::WebView>(browser_->GetProfile());
+ 
+   auto* ui_web_contents = web_view->GetWebContents();
+@@ -185,8 +197,6 @@ WebUIBrowserWindow::WebUIBrowserWindow(BrowserWindowInterface* browser)
+       WebShellWebContentsUserData::Key,
+       std::make_unique<WebShellWebContentsUserData>(this));
+ 
+-  modal_dialog_host_ = std::make_unique<WebUIBrowserModalDialogHost>(this);
+-  icon_table_ = std::make_unique<webui_toolbar::IconTable>(this);
+   extensions_container_ = std::make_unique<WebUIToolbarExtensionsContainer>(
+       *browser_, widget_.get(), ui_web_contents->GetWeakPtr(),
+       icon_table_.get(), /*push_icon_table_updates=*/true);
+@@ -202,6 +212,7 @@ WebUIBrowserWindow::WebUIBrowserWindow(BrowserWindowInterface* browser)
+   // secondary UIs need it to get the correct color mode from their parent
+   // widget.
+   ui_web_contents->SetColorProviderSource(this);
++  }
+ 
+   paint_as_active_subscription_ =
+       widget_->RegisterPaintAsActiveChangedCallback(base::BindRepeating(
+@@ -310,7 +321,9 @@ void WebUIBrowserWindow::Show() {
+   // This must happen after Show() since focusing triggers widget activation,
+   // which calls PaintAsActiveChanged() -> Browser::DidBecomeActive(). The
+   // Browser must be fully constructed by that point.
+-  web_view_->GetWebContents()->SetInitialFocus();
++  if (web_view_) {
++    web_view_->GetWebContents()->SetInitialFocus();
++  }
+ 
+   EnsureActiveTabHasNonZeroSize();
+ }
+@@ -323,7 +336,7 @@ void WebUIBrowserWindow::PaintAsActiveChanged() {
+   } else {
+     BrowserActiveStateManager::From(browser_)->DidBecomeInactive();
+   }
+-  if (webui_browser::mojom::Page* page = GetWebUIBrowserUI()->page()) {
++  if (webui_browser::mojom::Page* page = (GetWebUIBrowserUI() ? GetWebUIBrowserUI()->page() : nullptr)) {
+     page->OnPaintAsActiveChanged(widget_->ShouldPaintAsActive());
+   }
+ }
+@@ -475,6 +488,9 @@ const ui::ColorProvider* WebUIBrowserWindow::GetColorProvider() const {
+ }
+ 
+ float WebUIBrowserWindow::GetScaleFactor() const {
++  if (!web_contents_delegate_->web_contents()) {
++    return widget_->GetCompositor() ? widget_->GetCompositor()->device_scale_factor() : 1.f;
++  }
+   return web_contents_delegate_->web_contents()
+       ->GetWebUI()
+       ->GetDeviceScaleFactor();
+@@ -655,7 +671,7 @@ void WebUIBrowserWindow::ProcessFullscreen(bool fullscreen) {
+   }
+ 
+   // Notify the WebUI about the fullscreen mode.
+-  if (webui_browser::mojom::Page* page = GetWebUIBrowserUI()->page()) {
++  if (webui_browser::mojom::Page* page = (GetWebUIBrowserUI() ? GetWebUIBrowserUI()->page() : nullptr)) {
+     page->OnFullscreenModeChanged(fullscreen, context);
+   }
+ 
+@@ -765,7 +781,9 @@ void WebUIBrowserWindow::UpdateTitleBar() {
+ 
+ void WebUIBrowserWindow::OnBookmarkBarStateChanged(
+     BookmarkBar::AnimateChangeType change_type) {
+-  GetWebUIBrowserUI()->BookmarkBarStateChanged(change_type);
++  if (auto* ui = GetWebUIBrowserUI()) {
++    ui->BookmarkBarStateChanged(change_type);
++  }
+ }
+ 
+ void WebUIBrowserWindow::UpdateLoadingAnimations(bool is_visible) {
+@@ -868,13 +886,17 @@ PinnedToolbarActions* WebUIBrowserWindow::GetPinnedToolbarActions() {
+ }
+ 
+ void WebUIBrowserWindow::SetFocusToLocationBar(bool is_user_initiated) {
+-  if (webui_browser::mojom::Page* page = GetWebUIBrowserUI()->page()) {
++  if (agens::IsNativeShellEnabled()) {
++    agens::FocusNativeLocationBar(widget_.get());
++    return;
++  }
++  if (webui_browser::mojom::Page* page = (GetWebUIBrowserUI() ? GetWebUIBrowserUI()->page() : nullptr)) {
+     page->SetFocusToLocationBar(is_user_initiated);
+   }
+ }
+ 
+ void WebUIBrowserWindow::UpdateReloadStopState(bool is_loading, bool force) {
+-  if (webui_browser::mojom::Page* page = GetWebUIBrowserUI()->page()) {
++  if (webui_browser::mojom::Page* page = (GetWebUIBrowserUI() ? GetWebUIBrowserUI()->page() : nullptr)) {
+     page->SetReloadStopState(is_loading);
+   }
+ }
+@@ -1347,6 +1369,9 @@ bool WebUIBrowserWindow::WidgetDelegate::ShouldDescendIntoChildForEventHandling(
+ }
+ 
+ WebUIBrowserUI* WebUIBrowserWindow::GetWebUIBrowserUI() const {
++  if (!web_contents_delegate_->web_contents()) {
++    return nullptr;  // agens native shell: no WebUI page
++  }
+   return web_contents_delegate_->web_contents()
+       ->GetWebUI()
+       ->GetController()
+@@ -1354,11 +1379,15 @@ WebUIBrowserUI* WebUIBrowserWindow::GetWebUIBrowserUI() const {
+ }
+ 
+ void WebUIBrowserWindow::ShowSidePanel(SidePanelEntryKey side_panel_entry_key) {
+-  GetWebUIBrowserUI()->ShowSidePanel(side_panel_entry_key);
++  if (auto* ui = GetWebUIBrowserUI()) {
++    ui->ShowSidePanel(side_panel_entry_key);
++  }
+ }
+ 
+ void WebUIBrowserWindow::CloseSidePanel() {
+-  GetWebUIBrowserUI()->CloseSidePanel();
++  if (auto* ui = GetWebUIBrowserUI()) {
++    ui->CloseSidePanel();
++  }
+ }
+ 
+ WebUIBrowserSidePanelUI* WebUIBrowserWindow::GetWebUIBrowserSidePanelUI() {
+diff --git a/chrome/common/chrome_features.cc b/chrome/common/chrome_features.cc
+index 42e1a94e45..bc8a3c882b 100644
+--- a/chrome/common/chrome_features.cc
++++ b/chrome/common/chrome_features.cc
+@@ -1938,7 +1938,7 @@ BASE_FEATURE(kWebAppUpgradeToDatabaseVersion6,
+              base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ #if !BUILDFLAG(IS_ANDROID)
+-BASE_FEATURE(kWebium, base::FEATURE_DISABLED_BY_DEFAULT);
++BASE_FEATURE(kWebium, base::FEATURE_ENABLED_BY_DEFAULT);  // agens: our window (native shell)
+ // When enable, the reload button will be replaced with the a WebView, and
+ // chrome://webui-toolbar.top-chrome will be loaded as the content.
+ // crbug.com/444358999
