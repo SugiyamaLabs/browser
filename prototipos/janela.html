@@ -26,6 +26,16 @@
   --surface: radial-gradient(1100px 560px at 50% -140px, rgba(255,201,138,.11), transparent 70%), radial-gradient(700px 500px at 0% 110%, rgba(247,169,92,.06), transparent 70%);
   --round: 1.45; --pill: 1;
 }
+/* Vidro: o vidro do sistema na moldura (Liquid Glass no macOS 26, Mica e Acrylic no Windows 11).
+   A página continua sólida. Com "reduzir transparência", volta a ser o Grafite. */
+:root[data-theme="vidro"] {
+  --glass: rgba(28,28,34,.42); --glass-2: rgba(255,255,255,.07); --glass-3: rgba(255,255,255,.12);
+  --glass-edge: inset 0 1px 0 rgba(255,255,255,.14), inset 0 0 0 1px rgba(255,255,255,.06);
+  --line: rgba(255,255,255,.09); --line-strong: rgba(255,255,255,.16); --line-hover: rgba(255,255,255,.24);
+  --hover: rgba(255,255,255,.06); --hover-2: rgba(255,255,255,.08); --raise: rgba(255,255,255,.1); --raise-2: rgba(255,255,255,.14);
+  --float: rgba(30,30,36,.62); --sunk: rgba(0,0,0,.22);
+  --round: 1.3; --pill: 1;
+}
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 
 * { box-sizing: border-box; scrollbar-width: none; }
@@ -264,6 +274,22 @@ select.sel { height: 30px; padding: 0 10px; border-radius: calc(8px * var(--roun
 .sw[aria-pressed="true"] { outline: 2px solid var(--light-2); outline-offset: 2px; }
 .lead { color: var(--mute); font-size: 13px; margin: -6px 0 18px; }
 
+/* ===== Vidro ===== */
+[data-theme="vidro"] body { background: radial-gradient(900px 600px at 15% 10%, #3a5a8c, transparent 60%), radial-gradient(800px 700px at 85% 30%, #8c4a6e, transparent 60%), radial-gradient(900px 600px at 50% 100%, #c08a4a, transparent 60%), #1a1b24; }
+[data-theme="vidro"] .window { background: var(--glass); border-color: rgba(255,255,255,.12); backdrop-filter: blur(40px) saturate(180%); -webkit-backdrop-filter: blur(40px) saturate(180%); box-shadow: var(--glass-edge), 0 30px 80px rgba(0,0,0,.35); }
+[data-theme="vidro"] .content { background: var(--bg); box-shadow: 0 1px 0 rgba(255,255,255,.04); }
+[data-theme="vidro"] .omni-field, [data-theme="vidro"] .profiles, [data-theme="vidro"] .search { background: var(--glass-2); border-color: transparent; box-shadow: var(--glass-edge); }
+[data-theme="vidro"] .ttab[aria-selected="true"], [data-theme="vidro"] .stab[aria-selected="true"], [data-theme="vidro"] .space[aria-selected="true"], [data-theme="vidro"] .pin[aria-selected="true"] { background: var(--glass-3); box-shadow: var(--glass-edge); border-color: transparent; }
+[data-theme="vidro"] .pin { border-color: transparent; background: var(--glass-2); }
+[data-theme="vidro"] .menu, [data-theme="vidro"] .hovercard, [data-theme="vidro"] .suggest, [data-theme="vidro"] .sheet, [data-theme="vidro"] .panel { background: var(--float); backdrop-filter: blur(30px) saturate(180%); -webkit-backdrop-filter: blur(30px) saturate(180%); border-color: rgba(255,255,255,.12); box-shadow: var(--glass-edge); }
+[data-theme="vidro"] .scrim { background: rgba(5,5,10,.35); }
+[data-theme="vidro"] .lights i { background: rgba(255,255,255,.18); }
+/* Windows 11: Mica na janela (o fundo da área de trabalho bem borrado e quase opaco) e Acrylic nos menus */
+.os-win[data-theme="vidro"] .window, [data-theme="vidro"] .os-win .window { background: rgba(32,32,36,.78); backdrop-filter: blur(80px) saturate(120%); -webkit-backdrop-filter: blur(80px) saturate(120%); box-shadow: inset 0 0 0 1px rgba(255,255,255,.06), 0 20px 50px rgba(0,0,0,.4); }
+@media (prefers-reduced-transparency: reduce) {
+  [data-theme="vidro"] .window, [data-theme="vidro"] .menu, [data-theme="vidro"] .hovercard, [data-theme="vidro"] .suggest, [data-theme="vidro"] .sheet, [data-theme="vidro"] .panel { background: #111114; backdrop-filter: none; -webkit-backdrop-filter: none; }
+}
+
 /* ===== Windows: mesma marca, controles e fonte do Windows 11 ===== */
 .caption { display: none; margin-left: 6px; align-self: stretch; }
 .caption button { width: 46px; height: 100%; display: grid; place-items: center; color: var(--mute); }
@@ -400,7 +426,7 @@ select.sel { height: 30px; padding: 0 10px; border-radius: calc(8px * var(--roun
       <div class="seg" data-group="os"><button data-v="mac" aria-pressed="true">macOS</button><button data-v="win">Windows</button></div>
     </fieldset>
     <fieldset><legend>Tema</legend>
-      <div class="seg" data-group="theme"><button data-v="grafite" aria-pressed="true">Grafite</button><button data-v="brasa">Brasa</button></div>
+      <div class="seg" data-group="theme"><button data-v="grafite" aria-pressed="true">Grafite</button><button data-v="brasa">Brasa</button><button data-v="vidro">Vidro</button></div>
     </fieldset>
     <fieldset><legend>Página</legend>
       <div class="seg" data-group="state"><button data-v="normal" aria-pressed="true">Normal</button><button data-v="loading">Carregando</button><button data-v="error">Sem rede</button></div>
@@ -628,7 +654,7 @@ const INTERNAL = {
     const pane = {
       aparencia: `<h2>Aparência</h2><div class="group">
         <div class="opt"><span class="lbl">Posição das abas<small>Troca na hora, sem reiniciar. Atalho ⌘⇧S.</small></span>${segHTML("layout", [["top", "Em cima"], ["side", "Na lateral"]], layout)}</div>
-        <div class="opt"><span class="lbl">Tema<small>O mesmo do Agens. Grafite é o padrão.</small></span>${segHTML("theme", [["grafite", "Grafite"], ["brasa", "Brasa"]], theme)}</div>
+        <div class="opt"><span class="lbl">Tema<small>Os mesmos do Agens. Vidro usa o vidro do sistema e fica sólido com "reduzir transparência".</small></span>${segHTML("theme", [["grafite", "Grafite"], ["brasa", "Brasa"], ["vidro", "Vidro"]], theme)}</div>
         <div class="opt"><span class="lbl">Densidade<small>Compacta deixa a barra e as abas mais baixas.</small></span>${segHTML("dense", [["0", "Normal"], ["1", "Compacta"]], prefs.dense ? "1" : "0")}</div>
         <div class="opt"><span class="lbl">Barra de favoritos<small>Atalho ⌘⇧B.</small></span>${sw("bmbar", prefs.bmbar, "Mostrar barra de favoritos")}</div>
         <div class="opt"><span class="lbl">Cor do time<small>Aparece só no rosto do time: o monograma e o seletor.</small></span><div class="swatches">${["#FF7E98", "#FF9D5C", "#CF6FEA", "#9F86FF", "#3F9CFF", "#2BC7C0", "#7F9BC7"].map(col => `<button class="sw" style="background:${col}" aria-label="Cor ${col}" aria-pressed="${PROFILES[profile].color === col}" data-color="${col}"></button>`).join("")}</div></div>
@@ -836,7 +862,7 @@ function syncSeg(group, v) { document.querySelectorAll(`[data-group="${group}"] 
 const set = {
   layout: v => { win.classList.toggle("layout-side", v === "side"); win.classList.toggle("layout-top", v === "top"); $("#sideBtn").hidden = v !== "side"; },
   collapse: v => win.classList.toggle("collapsed", v === "collapsed"),
-  theme: v => { if (v === "brasa") root.dataset.theme = "brasa"; else delete root.dataset.theme; },
+  theme: v => { if (v === "brasa" || v === "vidro") root.dataset.theme = v; else delete root.dataset.theme; },
   state: v => { state = v; render(); },
   screen: v => win.classList.toggle("fullscreen", v === "full"),
   os: v => { document.body.classList.toggle("os-win", v === "win"); document.querySelectorAll("kbd").forEach(k => { k.dataset.mac ??= k.textContent; k.textContent = v === "win" ? k.dataset.mac.replace(/⌘⇧/g, "Ctrl+Shift+").replace(/⌘⌥/g, "Ctrl+Alt+").replace(/⌘/g, "Ctrl+").replace(/⌃⇥/g, "Ctrl+Tab").replace(/⌥/g, "Alt+") : k.dataset.mac; }); },

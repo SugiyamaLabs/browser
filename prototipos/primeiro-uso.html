@@ -17,6 +17,11 @@
   --ease: cubic-bezier(.16,1,.3,1); --spring: cubic-bezier(.34,1.56,.64,1);
   --round: 1; --pill: 0;
 }
+:root[data-theme="vidro"] { --line: rgba(255,255,255,.1); --line-strong: rgba(255,255,255,.18); --line-hover: rgba(255,255,255,.26); --hover: rgba(255,255,255,.06); --hover-2: rgba(255,255,255,.08); --raise: rgba(255,255,255,.1); --raise-2: rgba(255,255,255,.14); --sunk: rgba(0,0,0,.22); --round: 1.3; --pill: 1; }
+[data-theme="vidro"] body { background: radial-gradient(900px 600px at 15% 10%, #3a5a8c, transparent 60%), radial-gradient(800px 700px at 85% 30%, #8c4a6e, transparent 60%), radial-gradient(900px 600px at 50% 100%, #c08a4a, transparent 60%), #1a1b24; }
+[data-theme="vidro"] .ob, [data-theme="vidro"] .panel { background: rgba(28,28,34,.42); backdrop-filter: blur(40px) saturate(180%); -webkit-backdrop-filter: blur(40px) saturate(180%); border-color: rgba(255,255,255,.12); box-shadow: inset 0 1px 0 rgba(255,255,255,.14), 0 30px 80px rgba(0,0,0,.35); }
+[data-theme="vidro"] .form, [data-theme="vidro"] .field { background: rgba(255,255,255,.06); }
+@media (prefers-reduced-transparency: reduce) { [data-theme="vidro"] .ob, [data-theme="vidro"] .panel { background: #111114; backdrop-filter: none; } }
 :root[data-theme="brasa"] {
   --bg:#110D0A; --side:#16110D; --raise:#1E1712; --sunk:#130E0B; --hover:#211913; --hover-2:#241B15; --float:#241B15;
   --line:#2C221B; --line-strong:#47372A; --line-hover:#5A4636; --raise-2:#2A2018;
@@ -169,7 +174,7 @@ label.f { display: grid; gap: 6px; font-size: 12.5px; color: var(--mute); }
 </div>
 
 <aside class="panel"><b>Protótipo da primeira instalação</b>Da abertura do app até a primeira janela. Os times criados aqui são os spaces da lateral.
-  <div class="seg" id="theme"><button aria-pressed="true" data-v="grafite">Grafite</button><button aria-pressed="false" data-v="brasa">Brasa</button></div>
+  <div class="seg" id="theme"><button aria-pressed="true" data-v="grafite">Grafite</button><button aria-pressed="false" data-v="brasa">Brasa</button><button aria-pressed="false" data-v="vidro">Vidro</button></div>
   <div style="margin-top:8px"><button class="btn ghost" id="restart" style="padding:4px 8px;font-size:12.5px">Recomeçar</button></div>
 </aside>
 
@@ -218,7 +223,7 @@ const STEPS = [
         <button class="look" aria-pressed="${st.layout === "top"}" data-layout="top"><div class="mini top"><span class="tabs"><i></i><i></i><i></i></span><i></i><i class="pg"></i></div><b>Abas em cima</b><small>O jeito clássico.</small></button>
       </div>
       <div class="label">Tema</div>
-      <div class="seg" id="themeIn"><button data-v="grafite" aria-pressed="${st.theme === "grafite"}">Grafite</button><button data-v="brasa" aria-pressed="${st.theme === "brasa"}">Brasa</button></div>` },
+      <div class="seg" id="themeIn"><button data-v="grafite" aria-pressed="${st.theme === "grafite"}">Grafite</button><button data-v="brasa" aria-pressed="${st.theme === "brasa"}">Brasa</button><button data-v="vidro" aria-pressed="${st.theme === "vidro"}">Vidro</button></div>` },
   { next: "Perfeito", body: () => `<h1 id="obTitle">Sua privacidade já está no máximo</h1>
       <p class="lead">Não precisa ligar nada. Se um site quebrar, você libera só ele.</p>
       <div class="priv">${[["Bloqueador de anúncios e rastreadores", "Nível forte, sem extensão"], ["Cookies de terceiros bloqueados", ""], ["Proteção contra impressão digital", "Os sites não te reconhecem pelo seu Mac"], ["DNS criptografado", "A operadora não vê os sites que você abre"], ["Sempre HTTPS", ""], ["Links sem rastreadores", "utm, fbclid e parecidos saem do link"], ["Busca no DuckDuckGo", "Troque em Configurações › Busca"], ["Senhas no Keychain do Mac", ""]].map(([t, d]) => `<div>${okIc}<span>${t}${d ? `<small>${d}</small>` : ""}</span></div>`).join("")}</div>
@@ -229,7 +234,7 @@ const STEPS = [
       <p class="note">O macOS pergunta uma vez. Dá para mudar em Configurações › Ao abrir.</p>` },
   { next: "Abrir o Agens", body: () => `<div class="hero"><div class="breath">${mark(72)}</div>
       <h1 id="obTitle">Pronto.</h1>
-      <p class="lead">${st.teams.length} ${st.teams.length === 1 ? "time" : "times"}, abas ${st.layout === "side" ? "na lateral" : "em cima"}, tema ${st.theme === "brasa" ? "Brasa" : "Grafite"}${st.def ? ", navegador padrão" : ""}. ${st.what.Favoritos ? "Os favoritos do " + st.from + " já estão na barra." : ""}</p>
+      <p class="lead">${st.teams.length} ${st.teams.length === 1 ? "time" : "times"}, abas ${st.layout === "side" ? "na lateral" : "em cima"}, tema ${{ brasa: "Brasa", vidro: "Vidro" }[st.theme] || "Grafite"}${st.def ? ", navegador padrão" : ""}. ${st.what.Favoritos ? "Os favoritos do " + st.from + " já estão na barra." : ""}</p>
       <div class="what" style="justify-content:center;margin-top:22px">${st.teams.map(t => `<span class="chip"><span class="logo" style="width:16px;height:16px;font-size:9px;border-radius:4px;background:${t.color}">${letter(t.name)}</span>${esc(t.name)}</span>`).join("")}</div></div>` },
 ];
 
@@ -251,7 +256,7 @@ function addTeam() {
   const used = st.teams.map(t => t.color), free = Object.values(PALETTE).find(c => !used.includes(c));
   st.draft = { name: "", color: free || PALETTE.ardosia }; render();
 }
-function setTheme(v) { st.theme = v; if (v === "brasa") document.documentElement.dataset.theme = "brasa"; else delete document.documentElement.dataset.theme; document.querySelectorAll("#theme button").forEach(b => b.setAttribute("aria-pressed", b.dataset.v === v)); }
+function setTheme(v) { st.theme = v; if (v === "brasa" || v === "vidro") document.documentElement.dataset.theme = v; else delete document.documentElement.dataset.theme; document.querySelectorAll("#theme button").forEach(b => b.setAttribute("aria-pressed", b.dataset.v === v)); }
 
 $("#next").onclick = () => { if (st.step === 5) st.def = true; if (st.step === STEPS.length - 1) { st.step = 0; return render("in-l"); } go(1); };
 $("#back").onclick = () => { if (STEPS[st.step].alt) { if (st.step === 5) st.def = false; if (st.step === 1) Object.keys(st.what).forEach(k => st.what[k] = false); return go(1); } go(-1); };
