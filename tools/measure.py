@@ -99,8 +99,8 @@ def cdp(path, method="GET"):
 
 
 def launch(exe, profile, urls):
-    # mock keychain: our unsigned builds would otherwise block on a login keychain prompt; same flag for every browser
-    args = [exe, f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check", "--use-mock-keychain",
+    # mock keychain: our unsigned builds would otherwise block on a login keychain prompt. mute: no sound during runs (memory is the same)
+    args = [exe, f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check", "--use-mock-keychain", "--mute-audio",
             f"--remote-debugging-port={PORT}", *urls]
     return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
