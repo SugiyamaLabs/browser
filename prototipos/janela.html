@@ -274,9 +274,42 @@ select.sel { height: 30px; padding: 0 10px; border-radius: calc(8px * var(--roun
 .sw[aria-pressed="true"] { outline: 2px solid var(--light-2); outline-offset: 2px; }
 .lead { color: var(--mute); font-size: 13px; margin: -6px 0 18px; }
 
+/* ===== Modo claro: os mesmos papéis, invertidos. A luz quente vira o pêssego mais forte para ter contraste ===== */
+:root[data-mode="light"]:not([data-theme="brasa"]) {
+  --bg:#FAFAFB; --side:#F1F1F4; --raise:#FFFFFF; --sunk:#E9E9ED; --line:#E0E0E5; --line-strong:#CFCFD6; --line-hover:#B9B9C2;
+  --ink:#16161A; --mute:#5C5C66; --dim:#71717B; --hi:#16161A; --on-hi:#FFFFFF;
+  --hover:#E8E8EC; --hover-2:#E4E4E9; --float:#FFFFFF; --raise-2:#E2E2E7;
+  --light-2:#F7A95C; --light-3:#E8893A;
+  --surface: radial-gradient(1200px 520px at 50% -120px, rgba(255,201,138,.18), transparent 70%);
+}
+:root[data-mode="light"] .lights i { background: #D4D4DA; }
+:root[data-mode="light"] .logo, :root[data-mode="light"] .avatar { color: #0B0B0D; }
+:root[data-mode="light"] .player { background: #111114; }
+:root[data-mode="light"] .player .badge-live, :root[data-mode="light"] .play { color: #F2F2F4; }
+:root[data-mode="light"] .ntp .mark rect { fill: #16161A; }
+:root[data-mode="light"] .switch[aria-checked="true"]::after { background: #fff; }
+:root[data-mode="light"] ::selection { background: rgba(232,137,58,.25); }
+:root[data-mode="light"][data-theme="vidro"] {
+  --glass: rgba(250,250,252,.55); --glass-2: rgba(255,255,255,.55); --glass-3: rgba(255,255,255,.85);
+  --glass-edge: inset 0 1px 0 rgba(255,255,255,.9), inset 0 0 0 1px rgba(0,0,0,.06);
+  --line: rgba(0,0,0,.08); --line-strong: rgba(0,0,0,.14); --hover: rgba(0,0,0,.05); --raise: rgba(255,255,255,.7); --raise-2: rgba(255,255,255,.9);
+  --float: rgba(255,255,255,.72); --sunk: rgba(255,255,255,.45);
+}
+:root[data-mode="light"][data-theme="vidro"] body { background: radial-gradient(900px 600px at 15% 10%, #a9c4ef, transparent 60%), radial-gradient(800px 700px at 85% 30%, #f0b6d2, transparent 60%), radial-gradient(900px 600px at 50% 100%, #f6d3a0, transparent 60%), #eef0f6; }
+:root[data-mode="light"][data-theme="custom"] {
+  --bg: color-mix(in srgb, var(--c-tint) 5%, #FAFAFB); --side: color-mix(in srgb, var(--c-tint) 9%, #F1F1F4);
+  --raise: color-mix(in srgb, var(--c-tint) 3%, #FFFFFF); --sunk: color-mix(in srgb, var(--c-tint) 10%, #E9E9ED);
+  --hover: color-mix(in srgb, var(--c-tint) 12%, #E8E8EC); --hover-2: color-mix(in srgb, var(--c-tint) 14%, #E4E4E9);
+  --float: color-mix(in srgb, var(--c-tint) 4%, #FFFFFF); --raise-2: color-mix(in srgb, var(--c-tint) 14%, #E2E2E7);
+  --line: color-mix(in srgb, var(--c-tint) 18%, #E0E0E5); --line-strong: color-mix(in srgb, var(--c-tint) 24%, #CFCFD6);
+  --light-3: color-mix(in srgb, var(--c-accent) 75%, #000); --light-2: var(--c-accent);
+}
+:root[data-mode="light"][data-theme="custom"] .content.ntp-bg { background: linear-gradient(rgba(255,255,255,calc(var(--c-dim) + .3)), rgba(255,255,255,calc(var(--c-dim) + .3))), var(--c-image, none) center / cover, var(--bg); }
+:root[data-mode="light"][data-theme="custom"] body { background: linear-gradient(rgba(255,255,255,var(--c-dim)), rgba(255,255,255,var(--c-dim))), var(--c-image, none) center / cover fixed, var(--bg); }
+
 /* ===== Personalizado: a pessoa escolhe imagem, cores, vidro e arredondamento ===== */
 :root[data-theme="custom"] {
-  --c-tint: #7F9BC7; --c-accent: #FFC98A; --c-dim: .45; --c-blur: 36px; --c-round: 1;
+  --c-tint: #7F9BC7; --c-accent: #FFC98A; --c-dim: .45; --c-blur: 0px; --c-opaque: 45%; --c-round: 1;
   --bg: color-mix(in srgb, var(--c-tint) 10%, #0B0B0D); --side: color-mix(in srgb, var(--c-tint) 12%, #111114);
   --raise: color-mix(in srgb, var(--c-tint) 16%, #16161A); --sunk: color-mix(in srgb, var(--c-tint) 8%, #0F0F12);
   --hover: color-mix(in srgb, var(--c-tint) 14%, #18181C); --hover-2: color-mix(in srgb, var(--c-tint) 16%, #1B1B20);
@@ -287,9 +320,12 @@ select.sel { height: 30px; padding: 0 10px; border-radius: calc(8px * var(--roun
 }
 [data-theme="custom"] body { background: linear-gradient(rgba(0,0,0,var(--c-dim)), rgba(0,0,0,var(--c-dim))), var(--c-image, none) center / cover fixed, var(--bg); }
 [data-theme="custom"] .content.ntp-bg { background: linear-gradient(rgba(0,0,0,calc(var(--c-dim) + .1)), rgba(0,0,0,calc(var(--c-dim) + .1))), var(--c-image, none) center / cover, var(--bg); }
-[data-theme="custom"][data-base="vidro"] .window { background: color-mix(in srgb, var(--side) 45%, transparent); backdrop-filter: blur(var(--c-blur)) saturate(170%); -webkit-backdrop-filter: blur(var(--c-blur)) saturate(170%); border-color: rgba(255,255,255,.12); box-shadow: inset 0 1px 0 rgba(255,255,255,.12), 0 30px 80px rgba(0,0,0,.35); }
-[data-theme="custom"][data-base="vidro"] .menu, [data-theme="custom"][data-base="vidro"] .hovercard, [data-theme="custom"][data-base="vidro"] .suggest, [data-theme="custom"][data-base="vidro"] .sheet { background: color-mix(in srgb, var(--float) 60%, transparent); backdrop-filter: blur(var(--c-blur)) saturate(170%); -webkit-backdrop-filter: blur(var(--c-blur)) saturate(170%); }
-@media (prefers-reduced-transparency: reduce) { [data-theme="custom"][data-base="vidro"] .window { background: var(--side); backdrop-filter: none; } }
+/* Transparência e desfoque são independentes e mexem só no FUNDO da moldura:
+   textos, ícones, botões e a página continuam 100% opacos. Desfoque 0 = fundo nítido, sem vidro. */
+[data-theme="custom"] .window { background: color-mix(in srgb, var(--side) var(--c-opaque), transparent); backdrop-filter: blur(var(--c-blur)); -webkit-backdrop-filter: blur(var(--c-blur)); }
+[data-theme="custom"] .menu, [data-theme="custom"] .hovercard, [data-theme="custom"] .suggest, [data-theme="custom"] .sheet { background: color-mix(in srgb, var(--float) max(var(--c-opaque), 70%), transparent); backdrop-filter: blur(var(--c-blur)); -webkit-backdrop-filter: blur(var(--c-blur)); }
+[data-theme="custom"] .omni-field, [data-theme="custom"] .search { background: color-mix(in srgb, var(--sunk) max(var(--c-opaque), 60%), transparent); }
+@media (prefers-reduced-transparency: reduce) { [data-theme="custom"] .window, [data-theme="custom"] .menu, [data-theme="custom"] .sheet { background: var(--side); backdrop-filter: none; } }
 .wallpapers { display: flex; gap: 8px; flex-wrap: wrap; }
 .wp { width: 64px; height: 40px; border-radius: calc(8px * var(--round)); border: 1px solid var(--line); background-size: cover; background-position: center; display: grid; place-items: center; color: var(--dim); font-size: 11.5px; }
 .wp[aria-pressed="true"] { outline: 2px solid var(--light-2); outline-offset: 2px; }
@@ -450,6 +486,9 @@ select.sel { height: 30px; padding: 0 10px; border-radius: calc(8px * var(--roun
     </fieldset>
     <fieldset><legend>Tema</legend>
       <div class="seg" data-group="theme"><button data-v="grafite" aria-pressed="true">Grafite</button><button data-v="vidro">Vidro</button><button data-v="brasa">Brasa</button><button data-v="custom">Seu</button></div>
+    </fieldset>
+    <fieldset><legend>Modo</legend>
+      <div class="seg" data-group="mode"><button data-v="dark" aria-pressed="true">Escuro</button><button data-v="light">Claro</button><button data-v="system">Sistema</button></div>
     </fieldset>
     <fieldset><legend>Página</legend>
       <div class="seg" data-group="state"><button data-v="normal" aria-pressed="true">Normal</button><button data-v="loading">Carregando</button><button data-v="error">Sem rede</button></div>
@@ -678,6 +717,7 @@ const INTERNAL = {
     const pane = {
       aparencia: `<h2>Aparência</h2><div class="group">
         <div class="opt"><span class="lbl">Posição das abas<small>Troca na hora, sem reiniciar. Atalho ⌘⇧S.</small></span>${segHTML("layout", [["top", "Em cima"], ["side", "Na lateral"]], layout)}</div>
+        <div class="opt"><span class="lbl">Modo<small>${$('[data-group="theme"] [aria-pressed="true"]').dataset.v === "brasa" ? "A Brasa só existe escura." : "Vale para Grafite, Vidro e Personalizado."}</small></span>${segHTML("mode", [["dark", "Escuro"], ["light", "Claro"], ["system", "Sistema"]], prefs.mode || "dark")}</div>
         <div class="opt"><span class="lbl">Tema<small>Grafite, Vidro e Brasa são os do Agens. Personalizado é o seu.</small></span>${segHTML("theme", [["grafite", "Grafite"], ["vidro", "Vidro"], ["brasa", "Brasa"], ["custom", "Personalizado"]], theme)}</div>
         ${theme === "custom" ? customHTML() : ""}
         <div class="opt"><span class="lbl">Densidade<small>Compacta deixa a barra e as abas mais baixas.</small></span>${segHTML("dense", [["0", "Normal"], ["1", "Compacta"]], prefs.dense ? "1" : "0")}</div>
@@ -784,11 +824,11 @@ function folderMenu(anchor, f) {
   const r = anchor.getBoundingClientRect(); m.style.top = r.bottom + 4 + "px"; m.style.left = r.left + "px"; m.classList.add("open");
 }
 function applyPref(key, v) {
-  if (key === "layout" || key === "theme") { syncSeg(key, v); set[key](v); }
+  if (key === "layout" || key === "theme" || key === "mode") { syncSeg(key, v); set[key](v); }
   if (key === "dense") prefs.dense = v === "1";
   if (key === "adlevel") prefs.adlevel = v;
   if (key === "startup") prefs.startup = v;
-  if (key === "cbase") { custom.base = v; applyCustom(); }
+
   render();
 }
 // ===== Folha do time: criar ou editar um space =====
@@ -838,24 +878,25 @@ const WALLPAPERS = {
   por_do_sol: "linear-gradient(170deg, #2b1055 0%, #7597de 55%, #f6b28a 100%)",
   floresta: "linear-gradient(150deg, #0b1f14 0%, #1e4d3a 50%, #6b8f71 100%)",
 };
-let custom = { base: "vidro", wall: "aurora", img: null, dim: 35, tint: "#7F9BC7", accent: "#FFC98A", round: 100, blur: 36 };
+const CUSTOM_DEFAULT = { wall: "aurora", img: null, dim: 35, tint: "#7F9BC7", accent: "#FFC98A", round: 100, alpha: 55, blur: 0 };
+let custom = { ...CUSTOM_DEFAULT };
 try { Object.assign(custom, JSON.parse(localStorage.getItem("agens-tema-seu") || "{}")); custom.img = null; } catch (e) {}
 function applyCustom() {
   const st = root.style;
   st.setProperty("--c-image", custom.img ? `url("${custom.img}")` : WALLPAPERS[custom.wall] || "none");
   st.setProperty("--c-dim", custom.dim / 100); st.setProperty("--c-tint", custom.tint); st.setProperty("--c-accent", custom.accent);
   st.setProperty("--c-round", custom.round / 100); st.setProperty("--c-blur", custom.blur + "px");
-  root.dataset.base = custom.base;
+  st.setProperty("--c-opaque", (100 - custom.alpha) + "%");
   try { const { img, ...keep } = custom; localStorage.setItem("agens-tema-seu", JSON.stringify(keep)); } catch (e) {}
 }
 const rng = (key, min, max, unit, label) => `<div class="range"><input type="range" min="${min}" max="${max}" value="${custom[key]}" data-custom="${key}" aria-label="${label}"><output>${custom[key]}${unit}</output></div>`;
 function customHTML() {
-  return `<div class="opt"><span class="lbl">Base</span>${segHTML("cbase", [["solido", "Sólido"], ["vidro", "Vidro"]], custom.base)}</div>
-    <div class="opt" style="align-items:flex-start"><span class="lbl">Imagem de fundo<small>Atrás da janela e na nova aba.</small></span><div class="wallpapers">
+  return `<div class="opt"><span class="lbl">Transparência<small>Só o fundo da janela. Textos, botões e a página continuam opacos.</small></span>${rng("alpha", 0, 90, "%", "Transparência")}</div>
+    <div class="opt"><span class="lbl">Desfoque do fundo<small>0 = sem desfoque: o fundo aparece nítido. Mais alto vira vidro.</small></span>${rng("blur", 0, 80, "px", "Desfoque do fundo")}</div>
+    <div class="opt" style="flex-wrap:wrap"><span class="lbl" style="flex-basis:100%">Imagem de fundo<small>Atrás da janela e na nova aba.</small></span><div class="wallpapers">
       ${Object.entries(WALLPAPERS).map(([k, v]) => `<button class="wp" style="background:${v === "none" ? "var(--sunk)" : v}" aria-pressed="${!custom.img && custom.wall === k}" data-wall="${k}" aria-label="${k}">${k === "nenhuma" ? "nenhuma" : ""}</button>`).join("")}
       <label class="wp" style="cursor:pointer;${custom.img ? `background-image:url('${custom.img}');` : ""}" aria-pressed="${!!custom.img}" title="Escolher imagem do Mac">${custom.img ? "" : "sua…"}<input type="file" accept="image/*" id="wallFile" hidden></label></div></div>
     <div class="opt"><span class="lbl">Escurecer a imagem</span>${rng("dim", 0, 80, "%", "Escurecer a imagem")}</div>
-    ${custom.base === "vidro" ? `<div class="opt"><span class="lbl">Intensidade do vidro</span>${rng("blur", 8, 80, "px", "Intensidade do vidro")}</div>` : ""}
     <div class="opt"><span class="lbl">Cor da janela<small>Tinge os grafites.</small></span><div class="swatches">${["#7F9BC7", "#6E86FF", "#2BC7C0", "#CF6FEA", "#FF7E98", "#E3876F", "#8A8A94"].map(c => `<button class="sw" style="background:${c}" aria-pressed="${custom.tint === c}" data-ctint="${c}" aria-label="Cor ${c}"></button>`).join("")}<input type="color" value="${custom.tint}" data-cpick="tint" aria-label="Outra cor da janela" style="width:22px;height:22px;border:0;padding:0;background:none"></div></div>
     <div class="opt"><span class="lbl">Cor de destaque<small>Foco, ao vivo, estrela, time ativo.</small></span><div class="swatches">${["#FFC98A", "#FFE9C7", "#9F86FF", "#3CC0F0", "#2BC7C0", "#F46DB8", "#F4F4F6"].map(c => `<button class="sw" style="background:${c}" aria-pressed="${custom.accent === c}" data-caccent="${c}" aria-label="Destaque ${c}"></button>`).join("")}<input type="color" value="${custom.accent}" data-cpick="accent" aria-label="Outra cor de destaque" style="width:22px;height:22px;border:0;padding:0;background:none"></div></div>
     <div class="opt"><span class="lbl">Arredondamento</span>${rng("round", 50, 160, "%", "Arredondamento")}</div>
@@ -923,6 +964,7 @@ const set = {
   theme: v => { if (["brasa", "vidro", "custom"].includes(v)) root.dataset.theme = v; else delete root.dataset.theme; if (v === "custom") applyCustom(); },
   state: v => { state = v; render(); },
   screen: v => win.classList.toggle("fullscreen", v === "full"),
+  mode: v => { prefs.mode = v; const light = v === "light" || (v === "system" && matchMedia("(prefers-color-scheme: light)").matches); if (light) root.dataset.mode = "light"; else delete root.dataset.mode; },
   os: v => { document.body.classList.toggle("os-win", v === "win"); document.querySelectorAll("kbd").forEach(k => { k.dataset.mac ??= k.textContent; k.textContent = v === "win" ? k.dataset.mac.replace(/⌘⇧/g, "Ctrl+Shift+").replace(/⌘⌥/g, "Ctrl+Alt+").replace(/⌘/g, "Ctrl+").replace(/⌃⇥/g, "Ctrl+Tab").replace(/⌥/g, "Alt+") : k.dataset.mac; }); },
 };
 document.querySelectorAll(".seg").forEach(seg => seg.addEventListener("click", e => {
@@ -962,7 +1004,7 @@ document.addEventListener("click", e => {
   const wl = e.target.closest("[data-wall]"); if (wl) { custom.wall = wl.dataset.wall; custom.img = null; applyCustom(); return render(); }
   const ct = e.target.closest("[data-ctint]"); if (ct) { custom.tint = ct.dataset.ctint; applyCustom(); return render(); }
   const ca = e.target.closest("[data-caccent]"); if (ca) { custom.accent = ca.dataset.caccent; applyCustom(); return render(); }
-  if (e.target.closest('[data-act="customreset"]')) { custom = { base: "vidro", wall: "aurora", img: null, dim: 35, tint: "#7F9BC7", accent: "#FFC98A", round: 100, blur: 36 }; applyCustom(); return render(); }
+  if (e.target.closest('[data-act="customreset"]')) { custom = { ...CUSTOM_DEFAULT }; applyCustom(); return render(); }
   const col = e.target.closest("[data-color]"); if (col) { PROFILES[profile].color = col.dataset.color; return render(); }
   if (act === "profiles") return openProfiles(e.target.closest("[data-act]"));
   if (act === "toggle-side") { const c = !win.classList.contains("collapsed"); syncSeg("collapse", c ? "collapsed" : "open"); return set.collapse(c ? "collapsed" : "open"); }
@@ -1006,6 +1048,7 @@ document.addEventListener("change", e => {
   if (e.target.id === "wallFile" && e.target.files[0]) { custom.img = URL.createObjectURL(e.target.files[0]); applyCustom(); return render(); } const k = e.target.dataset.sel; if (k) { prefs[k] = e.target.value; render(); } });
 
 set.theme("grafite");
+matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => { if (prefs.mode === "system") set.mode("system"); });
 render();
 </script>
 </body>
