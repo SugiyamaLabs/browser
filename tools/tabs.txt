@@ -1,0 +1,23 @@
+# The fixed tab set for docs/performance.md: Willian's real use, mostly Twitch and YouTube, no sign-in.
+# One URL per line; change it only with a note in docs/medicoes.md.
+# Live channels go offline; compare browsers back to back on the same day.
+https://www.twitch.tv/
+https://www.twitch.tv/directory
+https://www.twitch.tv/directory/category/just-chatting
+https://www.twitch.tv/gaules
+https://www.twitch.tv/alanzoka
+https://www.twitch.tv/casimito
+https://www.twitch.tv/loud_coringa
+https://www.twitch.tv/directory/category/counter-strike
+https://www.youtube.com/
+https://www.youtube.com/watch?v=jfKfPfyJRdk   # 24/7 live stream
+https://www.youtube.com/watch?v=aqz-KE-bpKQ   # long 4K video
+https://www.youtube.com/watch?v=dQw4w9WgXcQ
+https://www.youtube.com/shorts
+https://www.youtube.com/results?search_query=counter+strike
+https://www.youtube.com/@LinusTechTips/videos
+https://www.youtube.com/feed/explore
+https://github.com/nodejs/node/pulls
+https://www.uol.com.br                         # heavy news site
+https://www.google.com/maps
+https://developer.mozilla.org/en-US/docs/Web/JavaScript
