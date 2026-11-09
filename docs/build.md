@@ -7,12 +7,13 @@ Chromium partindo do [ungoogled-chromium-macos](https://github.com/ungoogled-sof
 ```sh
 ./chromium/setup-mac.sh     # uma vez: Homebrew, Python 3.13 (venv), Metal toolchain, ccache
 ./chromium/fetch.sh         # baixa o Chromium da versão fixa e aplica os patches (ungoogled + chromium/patches)
-./chromium/build.sh         # configura e compila; incremental
-./chromium/run.sh           # abre o Chromium compilado em https://example.com, com perfil descartável
+./chromium/build.sh         # build oficial (release e medição), em out/Default; incremental
+./chromium/build.sh dev     # build dev (dia a dia), em out/Dev: sem LTO e sem PGO
+./chromium/run.sh [dev]     # abre o Chromium compilado em https://example.com, com perfil e Keychain descartáveis
 ```
 
 - `fetch.sh` sempre começa de um código novo (os patches não podem ser aplicados duas vezes). Rode de novo só ao trocar `VERSION` ou mexer em `chromium/patches/`.
-- `build.sh` mantém `out/Default` entre execuções. Depois de um `fetch.sh`, o ccache evita recompilar o que não mudou.
+- `build.sh` mantém `out/Default` (e `out/Dev`) entre execuções. Depois de um `fetch.sh`, o ccache evita recompilar o que não mudou.
 - Os flags são os oficiais do ungoogled (`is_official_build`, ThinLTO, PGO), mais os nossos em [`chromium/args.gn`](../chromium/args.gn). O binário é o mesmo que vai para a pessoa, e é ele que vale para medir memória.
 
 ## Medido de verdade (08/11/2026)
@@ -31,6 +32,19 @@ O `Chromium.app` final tem 370 MB.
 
 O build do zero usou 133.308 s de CPU em 52.797 s de relógio, só ~2,5 núcleos em média. Quem segura é o link com ThinLTO e PGO, que é quase todo serial. O ccache teve 0% de acerto no build do zero, como esperado. O ganho dele num segundo `fetch.sh` + `build.sh` **ainda não foi medido**.
 
+## Modo dev (09/11/2026)
+
+`build.sh dev` usa os mesmos códigos e patches, com [`chromium/args.dev.gn`](../chromium/args.dev.gn) por cima: `is_official_build=false`, sem ThinLTO, sem PGO e sem símbolos. Nunca serve para medir memória nem para release.
+
+| Etapa | Tempo | Disco |
+|---|---|---|
+| `build.sh dev` do zero (56.348 passos) | 8 h 16 min (29.770 s) | 8,9 GB em `out/Dev` |
+| `build.sh dev` depois de mudar um `.cc` do `chrome/browser/ui` | **23 s** | — |
+
+O build do zero usou 139.495 s de CPU, ~4,7 núcleos em média. O ganho de verdade do modo dev está no incremental: o link sem LTO leva segundos.
+
+Component build ficou de fora: com o toolchain Rust pronto do ungoogled, as `.dylib` não acham os símbolos do alocador do Rust (`__rustc::__rust_alloc`) e o link falha.
+
 ## Como foi verificado
 
 `run.sh` com `--remote-debugging-port` abriu a janela, e a aba carregou `https://example.com/` com o título "Example Domain" (Chromium 156.0.8078.79).
@@ -42,6 +56,7 @@ O build do zero usou 133.308 s de CPU em 52.797 s de relógio, só ~2,5 núcleos
 | `ld64.lld: ... libSystem.tbd: malformed file ... unknown target` ao compilar o bindgen | o lld do Chromium 156 não conhece o alvo `arm64e.x1` do SDK do macOS 27 (Xcode 27.2) | fixam o SDK 26.5 dos Command Line Tools (`MAC_SDK` em `env.sh`, `SDKROOT` e `mac_sdk_path`) |
 | `gn gen` falha em `update_pgo_profiles.py`: perfil `chrome-mac-arm-...profdata` não existe | o tarball (`retrieve_and_unpack_resource.py -d`) só traz o perfil de PGO do Linux | `fetch.sh` usa `-g` sem `-d`, que clona com o perfil `mac-arm` |
 | `cannot execute tool 'metal' due to missing Metal Toolchain` | Xcode novo não traz o Metal toolchain | `setup-mac.sh` roda `xcodebuild -downloadComponent MetalToolchain` |
+| a página não carrega e o macOS pede a senha do Keychain para "Chromium Safe Storage" | cada build sem assinatura é um app novo para o Keychain, e a rede espera a chave dos cookies | `run.sh` e `tools/measure.py` passam `--use-mock-keychain` |
 
 ## Rede durante o build
 

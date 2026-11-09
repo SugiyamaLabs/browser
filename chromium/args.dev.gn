@@ -1,0 +1,9 @@
+# Dev mode (build.sh dev): appended after the official args; later assignments win in GN.
+# Fast links for day-to-day work. Never use this build to measure memory or ship.
+is_official_build = false
+use_thin_lto = false
+chrome_pgo_phase = 0
+# No component build: with the prebuilt Rust toolchain, dylibs miss the Rust allocator symbols (__rust_alloc).
+# shortcut: static link only; revisit if incremental links get slow.
+symbol_level = 0
+blink_symbol_level = 0
