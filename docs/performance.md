@@ -49,7 +49,7 @@ Tudo por cima do Chromium, em patches pequenos e em camadas, para o rebase mensa
 
   | Métrica | Como |
   |---|---|
-  | Memória total | soma do `phys_footprint` de todos os processos do navegador (`footprint`), o mesmo número do Monitor de Atividade; medida 5 min depois de abrir as 20 abas |
+  | Memória total | `total footprint` de todos os processos do navegador (`footprint`), o mesmo número do Monitor de Atividade; medida **10 min** depois de abrir as 20 abas (até 09/11/2026 eram 5 min; mudou porque as abas dormem aos 5 min, #8) |
   | Memória por aba | memória total ÷ abas, e o processo de cada aba no gerenciador de tarefas do navegador |
   | Processos | quantos processos o navegador tem com as 20 abas |
   | Tempo para abrir | frio (depois de reiniciar) e quente, até a primeira página pintada |
@@ -81,5 +81,16 @@ tools/measure.py brave              # 3 rodadas de 5 min; imprime a linha para d
 - `BROWSER`: `brave`, `chrome`, `ungoogled` (build oficial), `dev` (build dev, nunca para medir) ou o caminho do executável.
 - Os perfis de medição ficam em `~/browser-work/bench-profiles/<navegador>`, separados do perfil do dia a dia. Os JSON de cada rodada ficam em `~/browser-work/measurements/`.
 - As abas estão em [`tools/tabs.txt`](../tools/tabs.txt). Trocou a lista, anote em `medicoes.md`.
+- Cada rodada espera 10 min depois de abrir as abas (`--settle`).
 - O script mede o tempo do lançamento até o `load` de uma página local (com o perfil já existente), a memória total (`total footprint` do `footprint`, que conta a memória compartilhada uma vez), a memória por aba e o nº de processos. Speedometer 3 e bateria ainda são feitos à mão.
 - Meça com o Mac parado: sem build rodando e na tomada.
+
+## Abas que dormem (#8)
+
+Patch [`chromium/patches/sugiyamalabs/sleeping-tabs.patch`](../chromium/patches/sugiyamalabs/sleeping-tabs.patch), em cima do Memory Saver do Chromium:
+
+- Memory Saver **ligado por padrão**.
+- Uma aba escondida há **5 min** é descartada: o processo dela fecha, e a URL, o histórico e a rolagem ficam guardados. Ao voltar, ela recarrega.
+- O tempo é o parâmetro `discard_after` da feature `SleepingTabs` e muda sem recompilar: `--enable-features=SleepingTabs:discard_after/2m`. Desligar: `--disable-features=SleepingTabs`, que volta às 2/4/6 h do Chromium.
+- Valem as proteções do Chromium. **Não dorme:** aba visível, aba ativa de qualquer janela, aba fixada, aba tocando áudio (e até 1 min depois), com formulário editado, usando câmera, microfone ou tela, em Picture-in-Picture, com DevTools aberto, ou que mudou título ou ícone em segundo plano. Também não dorme aba revisitada mais de 15 vezes.
+- **Ainda não protegido:** upload em andamento. O Chromium não tem esse motivo, e fica para uma próxima versão.

@@ -99,8 +99,8 @@ def cdp(path, method="GET"):
 
 
 def launch(exe, profile, urls):
-    # mock keychain: our unsigned builds would otherwise block on a login keychain prompt; same flag for every browser
-    args = [exe, f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check", "--use-mock-keychain",
+    # mock keychain: our unsigned builds would otherwise block on a login keychain prompt. mute: no sound during runs (memory is the same)
+    args = [exe, f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check", "--use-mock-keychain", "--mute-audio",
             f"--remote-debugging-port={PORT}", *urls]
     return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -153,7 +153,8 @@ def main():
     ap.add_argument("--tabs", default=ROOT / "tabs.txt")
     ap.add_argument("--profile", help="default: $BROWSER_WORK/bench-profiles/<browser>")
     ap.add_argument("--runs", type=int, default=3)
-    ap.add_argument("--settle", type=int, default=300, help="seconds after opening the tabs (default 300)")
+    # 10 min: tabs sleep after 5 min hidden (#8), so 5 min would catch the transition
+    ap.add_argument("--settle", type=int, default=600, help="seconds after opening the tabs (default 600)")
     ap.add_argument("--login", action="store_true")
     a = ap.parse_args()
 

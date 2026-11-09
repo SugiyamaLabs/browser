@@ -1,0 +1,90 @@
+--- a/components/performance_manager/user_tuning/prefs.cc
++++ b/components/performance_manager/user_tuning/prefs.cc
+@@ -32,7 +32,7 @@
+       kMemorySaverModeTimeBeforeDiscardInMinutes,
+       kDefaultMemorySaverModeTimeBeforeDiscardInMinutes);
+   registry->RegisterIntegerPref(
+-      kMemorySaverModeState, static_cast<int>(MemorySaverModeState::kDisabled));
++      kMemorySaverModeState, static_cast<int>(MemorySaverModeState::kEnabled));
+   registry->RegisterIntegerPref(
+       kMemorySaverModeAggressiveness,
+       static_cast<int>(MemorySaverModeAggressiveness::kMedium));
+--- a/chrome/browser/performance_manager/policies/memory_saver_mode_policy.h
++++ b/chrome/browser/performance_manager/policies/memory_saver_mode_policy.h
+@@ -8,6 +8,9 @@
+ #include <map>
+ #include <memory>
+ 
++#include "base/feature_list.h"
++#include "base/metrics/field_trial_params.h"
++#include "base/time/time.h"
+ #include "base/timer/timer.h"
+ #include "components/performance_manager/public/decorators/tab_page_decorator.h"
+ #include "components/performance_manager/public/graph/graph.h"
+@@ -16,6 +19,13 @@
+ 
+ namespace performance_manager::policies {
+ 
++// SugiyamaLabs: sleeping tabs. A tab hidden for `discard_after` is discarded
++// (state kept, reloaded on return), within the usual discard protections
++// (audio, forms, capture, pinned, active...). Tune without rebuilding:
++// --enable-features=SleepingTabs:discard_after/2m
++BASE_DECLARE_FEATURE(kSleepingTabs);
++extern const base::FeatureParam<base::TimeDelta> kSleepingTabsDiscardAfter;
++
+ // This policy is responsible for discarding tabs after they have been
+ // backgrounded for a certain amount of time, when Memory Saver Mode is
+ // enabled by the user.
+--- a/chrome/browser/performance_manager/policies/memory_saver_mode_policy.cc
++++ b/chrome/browser/performance_manager/policies/memory_saver_mode_policy.cc
+@@ -13,6 +13,10 @@
+ 
+ namespace performance_manager::policies {
+ 
++BASE_FEATURE(kSleepingTabs, base::FEATURE_ENABLED_BY_DEFAULT);
++const base::FeatureParam<base::TimeDelta> kSleepingTabsDiscardAfter{
++    &kSleepingTabs, "discard_after", base::Minutes(5)};
++
+ namespace {
+ MemorySaverModePolicy* g_memory_saver_mode_policy = nullptr;
+ using user_tuning::prefs::MemorySaverModeAggressiveness;
+@@ -200,6 +204,9 @@
+ 
+ base::TimeDelta MemorySaverModePolicy::GetTimeBeforeDiscardForCurrentMode()
+     const {
++  if (base::FeatureList::IsEnabled(kSleepingTabs)) {
++    return kSleepingTabsDiscardAfter.Get();
++  }
+   switch (mode_) {
+     case MemorySaverModeAggressiveness::kConservative:
+       return base::Hours(6);
+--- a/chrome/browser/performance_manager/policies/discard_eligibility_policy.cc
++++ b/chrome/browser/performance_manager/policies/discard_eligibility_policy.cc
+@@ -3,6 +3,13 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/performance_manager/policies/discard_eligibility_policy.h"
++
++#include <algorithm>
++
++#include "build/build_config.h"
++#if !BUILDFLAG(IS_ANDROID)
++#include "chrome/browser/performance_manager/policies/memory_saver_mode_policy.h"
++#endif
+ 
+ #include "base/metrics/histogram_functions.h"
+ #include "base/strings/strcat.h"
+@@ -185,6 +192,13 @@
+ 
+   base::TimeDelta minimum_time_in_background =
+       internal::kNonVisiblePagesUrgentProtectionTime;
++#if !BUILDFLAG(IS_ANDROID)
++  // SugiyamaLabs: a sleeping tab may go before the default 10 min protection.
++  if (base::FeatureList::IsEnabled(kSleepingTabs)) {
++    minimum_time_in_background =
++        std::min(minimum_time_in_background, kSleepingTabsDiscardAfter.Get());
++  }
++#endif
+ #if BUILDFLAG(IS_ANDROID)
+   if (base::android::device_info::is_desktop() ||
+       base::FeatureList::IsEnabled(
