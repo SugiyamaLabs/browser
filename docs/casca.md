@@ -29,6 +29,13 @@ janela do Chromium            WebUIBrowserWindow (Webium), sem a página HTML
 - **Cola:** implementa a API sobre o `TabStripModel`, põe a interface por cima da janela e a aba ativa onde a interface mandar.
 - **Janela:** a da Webium. O Chromium já reconhece essa "janela sem Views" em uns 20 pontos do núcleo, e uma cópia nossa obrigaria a mexer em todos eles. O nosso patch nela tem umas 20 linhas, atrás de `agens::IsNativeShellEnabled()`.
 
+## Comportamentos
+
+- **Buscador:** texto que não é endereço vai para o buscador padrão. Cada ato começa com o **DuckDuckGo**, mas só enquanto ninguém escolheu um buscador: depois da primeira escolha (a nossa ou a da pessoa em Configurações › Buscador), ela vale e não é mais trocada.
+- **Lateral aberta ou recolhida:** o botão na barra e **⌘B** alternam entre a coluna aberta (236 pt) e a faixa de ícones (40 pt). A escolha fica salva. No Windows o atalho será **Ctrl+B**, junto com a casca WinUI (ainda não existe). Na faixa, o ⌘B do navegador vem antes do da página: em editores, o negrito é ⌘B, então fica a decisão de manter ou trocar.
+
+![Lateral recolhida](casca-recolhida.png)
+
 ## Flags
 
 - No nosso build, `Webium` e `AgensNativeShell` vêm **ligadas por padrão**.

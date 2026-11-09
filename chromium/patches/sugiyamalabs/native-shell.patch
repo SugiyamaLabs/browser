@@ -129,10 +129,10 @@ index 0000000000..152312203b
 +#endif  // CHROME_BROWSER_AGENS_EMBED_NATIVE_SHELL_H_
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
 new file mode 100644
-index 0000000000..d195c63385
+index 0000000000..e2ca8990c9
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
-@@ -0,0 +1,438 @@
+@@ -0,0 +1,475 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Engine side of agens_embed.h on macOS: an AgensWindow over the Browser's tab strip, and the
 +// views::View that fills the Webium window (the UI's sidebar beside the active tab).
@@ -164,6 +164,13 @@ index 0000000000..d195c63385
 +#include "chrome/browser/profiles/profile_attributes_storage.h"
 +#include "chrome/browser/profiles/profile_manager.h"
 +#include "chrome/browser/profiles/profile_window.h"
++#include "chrome/browser/search_engines/template_url_service_factory.h"
++#include "components/prefs/pref_service.h"
++#include "components/search_engines/default_search_manager.h"
++#include "components/search_engines/template_url.h"
++#include "components/search_engines/template_url_data_util.h"
++#include "components/search_engines/template_url_service.h"
++#include "third_party/search_engines_data/resources/definitions/prepopulated_engines.h"
 +#include "chrome/browser/ui/browser_commands.h"
 +#include "chrome/browser/ui/browser_element_identifiers.h"
 +#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
@@ -195,6 +202,35 @@ index 0000000000..d195c63385
 +  explicit AgensWindow(BrowserWindowInterface* browser) : browser(browser) {
 +    browser->GetTabStripModel()->AddObserver(this);
 +    Storage().AddObserver(this);
++    PreferDuckDuckGo();
++  }
++
++  // Each ato starts searching with DuckDuckGo. Only while nobody has picked a default yet: once
++  // set (by this or by the person in Configurações), the choice is theirs and stays.
++  void PreferDuckDuckGo() {
++    Profile* profile = browser->GetProfile()->GetOriginalProfile();
++    if (profile->GetPrefs()->HasPrefPath(DefaultSearchManager::kDefaultSearchProviderDataPrefName)) {
++      return;
++    }
++    TemplateURLService* service = TemplateURLServiceFactory::GetForProfile(profile);
++    if (!service) return;
++    if (!service->loaded()) {
++      search_loaded_ = service->RegisterOnLoadedCallback(
++          base::BindOnce(&AgensWindow::PreferDuckDuckGo, weak.GetWeakPtr()));
++      service->Load();
++      return;
++    }
++    TemplateURL* ddg = nullptr;
++    for (TemplateURL* t : service->GetTemplateURLs()) {
++      if (t->prepopulate_id() == TemplateURLPrepopulateData::duckduckgo.id) ddg = t;
++    }
++    if (!ddg) {
++      ddg = service->Add(std::make_unique<TemplateURL>(
++          *TemplateURLDataFromPrepopulatedEngine(TemplateURLPrepopulateData::duckduckgo)));
++    }
++    if (ddg && service->GetDefaultSearchProvider() != ddg) {
++      service->SetUserSelectedDefaultSearchProvider(ddg);
++    }
 +  }
 +  ~AgensWindow() override { Storage().RemoveObserver(this); }
 +
@@ -387,6 +423,7 @@ index 0000000000..d195c63385
 +  std::unique_ptr<AutocompleteController> autocomplete;
 +  base::RepeatingClosure relayout;
 +  bool notify_pending = false;
++  base::CallbackListSubscription search_loaded_;
 +  base::WeakPtrFactory<AgensWindow> weak{this};
 +};
 +
@@ -573,10 +610,10 @@ index 0000000000..d195c63385
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..71ab65c05a
+index 0000000000..2b0b05832d
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,895 @@
+@@ -0,0 +1,962 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -623,6 +660,9 @@ index 0000000000..71ab65c05a
 +
 +// Layout (prototype: toolbar, then body with 14 pt padding, 236 pt sidebar, 10 pt gap).
 +static const CGFloat kToolbar = 52, kPad = 14, kSide = 236, kGap = 10, kRow = 32, kAtos = 46;
++static const CGFloat kRail = 40;        // the collapsed column (prototype .collapsed .sidebar)
++static const CGFloat kLightsEnd = 78;   // the traffic lights end here
++static NSString* const kCollapsedKey = @"AgensSidebarCollapsed";
 +
 +static NSImage* Symbol(NSString* name, CGFloat size = 15) {
 +  NSImage* image = [NSImage imageWithSystemSymbolName:name accessibilityDescription:nil];
@@ -862,17 +902,26 @@ index 0000000000..71ab65c05a
 +  }
 +  return self;
 +}
++- (BOOL)compact {
++  return NSWidth(self.bounds) < 60;  // collapsed column: the favicon only
++}
 +- (void)layout {
 +  [super layout];
 +  CGFloat w = NSWidth(self.bounds);
++  CGFloat iconX = self.compact ? (w - 16) / 2 : 8;
++  _favicon.frame = NSMakeRect(iconX, 8, 16, 16);
++  _spinner.frame = _favicon.frame;
 +  _close.frame = NSMakeRect(w - 26, 6, 20, 20);
 +  _title.frame = NSMakeRect(34, 7, w - 34 - 30, 18);
++  _title.hidden = self.compact;
++  [self refresh];
 +}
 +- (void)updateWith:(const AgensTab&)tab {
 +  // Our new tab page has no URL; never show Chromium's own title for it.
 +  NSString* title = tab.url[0] ? @(tab.title) : @"Nova aba";
 +  if (!title.length) title = @(tab.url);
 +  _title.stringValue = title;
++  self.toolTip = title;
 +  self.accessibilityLabel = tab.sleeping ? [title stringByAppendingString:@", dormindo"] : title;
 +  NSImage* icon = nil;
 +  if (tab.favicon_png) {
@@ -894,7 +943,7 @@ index 0000000000..71ab65c05a
 +- (void)refresh {
 +  [super refresh];
 +  _title.textColor = (self.selected || self.hovered) ? kInk.color() : kMute.color();
-+  _close.hidden = !(self.selected || self.hovered);
++  _close.hidden = self.compact || !(self.selected || self.hovered);
 +}
 +- (void)otherMouseDown:(NSEvent*)event {  // middle click closes, like every browser
 +  if (_onClose) _onClose();
@@ -1097,6 +1146,11 @@ index 0000000000..71ab65c05a
 +  NSMutableArray<AgensAtoButton*>* _atoButtons;
 +  AgensToolButton* _addAto;
 +  NSView* _atoDot;
++  AgensToolButton* _toggle;
++  NSImageView* _newTabPlus;
++  NSTextField* _newTabLabel;
++  BOOL _collapsed;
++  id _keyMonitor;
 +  AgensNewTabView* _ntp;
 +  NSString* _url;
 +  BOOL _loading;
@@ -1149,19 +1203,36 @@ index 0000000000..71ab65c05a
 +    for (NSView* line in @[ _separator, _atosLine ]) line.wantsLayer = YES;
 +
 +    _newTab = [[AgensHoverView alloc] init];
-+    NSImageView* plus = [NSImageView imageViewWithImage:Symbol(@"plus", 13)];
-+    plus.contentTintColor = kDim.color();
-+    plus.frame = NSMakeRect(8, 8, 16, 16);
-+    NSTextField* label = Label(13, NSFontWeightRegular, kDim);
-+    label.stringValue = @"Nova aba";
-+    label.frame = NSMakeRect(34, 7, 150, 18);
-+    [_newTab addSubview:plus];
-+    [_newTab addSubview:label];
++    _newTabPlus = [NSImageView imageViewWithImage:Symbol(@"plus", 13)];
++    _newTabPlus.contentTintColor = kDim.color();
++    _newTabLabel = Label(13, NSFontWeightRegular, kDim);
++    _newTabLabel.stringValue = @"Nova aba";
++    [_newTab addSubview:_newTabPlus];
++    [_newTab addSubview:_newTabLabel];
++    _newTab.toolTip = @"Nova aba (⌘T)";
 +    _newTab.accessibilityLabel = @"Nova aba";
 +    _newTab.onPress = ^{ [weak run:agens_window_new_tab]; };
 +
 +    _addAto = [[AgensToolButton alloc] initWithSymbol:@"plus" label:@"Novo ato"];
 +    _addAto.onPress = ^{ [weak run:agens_window_new_ato]; };
++    // Collapse/expand the column: the button and ⌘B (Ctrl+B on Windows).
++    _collapsed = [NSUserDefaults.standardUserDefaults boolForKey:kCollapsedKey];
++    _toggle = [[AgensToolButton alloc] initWithSymbol:@"sidebar.left" label:@"Recolher ou abrir a lateral (⌘B)"];
++    _toggle.onPress = ^{ [weak toggleSidebar]; };
++    _keyMonitor = [NSEvent
++        addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
++                                     handler:^NSEvent*(NSEvent* event) {
++                                       AgensChrome* strong = weak;
++                                       NSEventModifierFlags mods = event.modifierFlags &
++                                           NSEventModifierFlagDeviceIndependentFlagsMask;
++                                       if (strong && event.window == strong.window &&
++                                           mods == NSEventModifierFlagCommand &&
++                                           [event.charactersIgnoringModifiers isEqualToString:@"b"]) {
++                                         [strong toggleSidebar];
++                                         return nil;
++                                       }
++                                       return event;
++                                     }];
 +    _atoDot = [[NSView alloc] init];
 +    _atoDot.wantsLayer = YES;
 +    _atoDot.layer.cornerRadius = 2;
@@ -1172,7 +1243,7 @@ index 0000000000..71ab65c05a
 +    _ntp.field.action = @selector(go:);
 +    _ntp.field.delegate = self;
 +
-+    for (NSView* v in @[ _back, _forward, _reload, _omni, _atoTile, _atoName, _separator, _newTab,
++    for (NSView* v in @[ _toggle, _back, _forward, _reload, _omni, _atoTile, _atoName, _separator, _newTab,
 +                         _atosLine, _addAto, _atoDot, _ntp, _suggest ]) {
 +      [self addSubview:v];
 +    }
@@ -1212,47 +1283,72 @@ index 0000000000..71ab65c05a
 +}
 +
 +- (AgensRect)layoutForWidth:(int)width height:(int)height {
-+  // Two columns, like the body below: back/forward/reload end where the tab column ends, and
-+  // the address has the same edges as the page card.
-+  CGFloat columnEnd = kPad + kSide;
-+  _back.frame = NSMakeRect(columnEnd - 88, 12, 28, 28);
-+  _forward.frame = NSMakeRect(columnEnd - 58, 12, 28, 28);
-+  _reload.frame = NSMakeRect(columnEnd - 28, 12, 28, 28);
-+  CGFloat omniX = columnEnd + kGap;
++  // Open column: two columns like the body below (buttons end where the tab column ends, the
++  // address has the page card's edges). Collapsed: the buttons follow the traffic lights.
++  const CGFloat side = _collapsed ? kRail : kSide;
++  CGFloat columnEnd = kPad + side;
++  CGFloat navX = _collapsed ? kLightsEnd : columnEnd - 118;
++  _toggle.frame = NSMakeRect(navX, 12, 28, 28);
++  _back.frame = NSMakeRect(navX + 30, 12, 28, 28);
++  _forward.frame = NSMakeRect(navX + 60, 12, 28, 28);
++  _reload.frame = NSMakeRect(navX + 90, 12, 28, 28);
++  CGFloat omniX = _collapsed ? navX + 126 : columnEnd + kGap;
 +  _omni.frame = NSMakeRect(omniX, 9, width - omniX - kPad, 34);
 +  _omniIcon.frame = NSMakeRect(12, 10, 14, 14);
 +  _address.frame = NSMakeRect(33, 8, NSWidth(_omni.frame) - 33 - 12, 18);
 +
 +  // Column: ato title (prototype .space-title), separator, new tab, tabs.
 +  CGFloat y = kToolbar;
-+  _atoTile.frame = NSMakeRect(kPad + 8, y + 7, 18, 18);
++  CGFloat inset = _collapsed ? (side - 18) / 2 : 8;
++  _atoTile.frame = NSMakeRect(kPad + inset, y + 7, 18, 18);
 +  _atoName.frame = NSMakeRect(kPad + 35, y + 7, kSide - 43, 18);
++  _atoName.hidden = _collapsed;
 +  y += kRow + 6;
-+  _separator.frame = NSMakeRect(kPad + 8, y, kSide - 16, 1);
++  _separator.frame = NSMakeRect(kPad + (_collapsed ? 6 : 8), y, side - (_collapsed ? 12 : 16), 1);
 +  y += 7;
-+  _newTab.frame = NSMakeRect(kPad, y, kSide, kRow);
++  _newTab.frame = NSMakeRect(kPad, y, side, kRow);
++  _newTabPlus.frame = NSMakeRect(_collapsed ? (side - 16) / 2 : 8, 8, 16, 16);
++  _newTabLabel.frame = NSMakeRect(34, 7, 150, 18);
++  _newTabLabel.hidden = _collapsed;
 +  y += kRow + 1;
 +  for (AgensTabRow* row in _rows) {
-+    row.frame = NSMakeRect(kPad, y, kSide, kRow);
++    row.frame = NSMakeRect(kPad, y, side, kRow);
 +    y += kRow + 1;
 +  }
 +
-+  // Atos row at the foot, centered, with a line above (prototype .spaces).
-+  CGFloat footY = height - kPad - kAtos;
-+  _atosLine.frame = NSMakeRect(kPad, footY, kSide, 1);
-+  CGFloat x = kPad + (kSide - (_atoButtons.count + 1) * 32) / 2;
++  // Atos at the foot with a line above (prototype .spaces): a centered row when open, a column
++  // when collapsed. The warm dot marks the current ato: under it, or to its left in the column.
 +  _atoDot.hidden = YES;
-+  for (AgensAtoButton* b in _atoButtons) {
-+    b.frame = NSMakeRect(x, footY + 8, 30, 28);
-+    if (b.selected) {
-+      _atoDot.frame = NSMakeRect(x + 13, footY + 8 + 28 + 3, 4, 4);
-+      _atoDot.hidden = NO;
++  const NSUInteger slots = _atoButtons.count + 1;
++  if (!_collapsed) {
++    CGFloat footY = height - kPad - kAtos;
++    _atosLine.frame = NSMakeRect(kPad, footY, side, 1);
++    CGFloat x = kPad + (side - slots * 32) / 2;
++    for (AgensAtoButton* b in _atoButtons) {
++      b.frame = NSMakeRect(x, footY + 8, 30, 28);
++      if (b.selected) {
++        _atoDot.frame = NSMakeRect(x + 13, footY + 8 + 28 + 3, 4, 4);
++        _atoDot.hidden = NO;
++      }
++      x += 32;
 +    }
-+    x += 32;
++    _addAto.frame = NSMakeRect(x, footY + 8, 30, 28);
++  } else {
++    CGFloat footY = height - kPad - 8 - slots * 32;
++    _atosLine.frame = NSMakeRect(kPad + 6, footY, side - 12, 1);
++    CGFloat x = kPad + (side - 30) / 2, by = footY + 8;
++    for (AgensAtoButton* b in _atoButtons) {
++      b.frame = NSMakeRect(x, by, 30, 28);
++      if (b.selected) {
++        _atoDot.frame = NSMakeRect(x - 5, by + 12, 4, 4);
++        _atoDot.hidden = NO;
++      }
++      by += 32;
++    }
++    _addAto.frame = NSMakeRect(x, by, 30, 28);
 +  }
-+  _addAto.frame = NSMakeRect(x, footY + 8, 30, 28);
 +
-+  _page = NSMakeRect(kPad + kSide + kGap, kToolbar, width - (kPad + kSide + kGap) - kPad,
++  _page = NSMakeRect(columnEnd + kGap, kToolbar, width - (columnEnd + kGap) - kPad,
 +                     height - kToolbar - kPad);
 +  _ntp.frame = NSInsetRect(_page, 1, 1);
 +
@@ -1419,6 +1515,12 @@ index 0000000000..71ab65c05a
 +
 +// --- Actions.
 +
++- (void)toggleSidebar {
++  _collapsed = !_collapsed;
++  [NSUserDefaults.standardUserDefaults setBool:_collapsed forKey:kCollapsedKey];
++  [self relayout];
++  if (_window) agens_window_relayout(_window);  // the page moves with the column
++}
 +- (void)run:(void (*)(AgensWindow*))action {
 +  if (_window) action(_window);
 +}
@@ -1436,6 +1538,8 @@ index 0000000000..71ab65c05a
 +  [self closeSuggestions];
 +}
 +- (void)detach {
++  if (_keyMonitor) [NSEvent removeMonitor:_keyMonitor];
++  _keyMonitor = nil;
 +  if (_window) {
 +    agens_window_set_tabs_observer(_window, nullptr, nullptr);
 +    agens_window_set_atos_observer(_window, nullptr, nullptr);
