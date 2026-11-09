@@ -15,7 +15,9 @@ interface (AppKit/Swift)      chrome/browser/agens/ui/       barra, abas e cart�
         │  só enxerga ↓
 API em C (embed/)             chrome/browser/agens/embed/agens_embed.h
         │
-cola com o Chromium (C++)     chrome/browser/agens/embed/native_shell_mac.mm
+cola comum (C++)              chrome/browser/agens/embed/agens_window.h, native_shell.cc
+        │
+hospedeiro por sistema        chrome/browser/agens/embed/native_shell_mac.mm (Windows: _win.cc)
         │
 janela do Chromium            WebUIBrowserWindow (Webium), sem a página HTML
 ```
@@ -26,7 +28,8 @@ janela do Chromium            WebUIBrowserWindow (Webium), sem a página HTML
   - sugestões do endereço, só de fontes locais (histórico, favoritos, atalhos e a busca do que foi digitado). As sugestões remotas de busca seguem desligadas, como o ungoogled deixa;
   - atos (um perfil do Chromium cada): lista com observador, trocar e criar. Trocar abre a janela do outro ato no lugar desta;
   - os ganchos da interface: `agens_ui_create_chrome`, `agens_ui_layout` (diz onde fica a página), `agens_ui_colors` (as cores que o motor pinta atrás), `agens_ui_focus_address` e `agens_ui_destroy_chrome`; e `agens_window_relayout` para a interface pedir nova pintura ao trocar claro/escuro.
-- **Cola:** implementa a API sobre o `TabStripModel`, põe a interface por cima da janela e a aba ativa onde a interface mandar.
+- **Cola comum** (`agens_window.h`, `native_shell.cc`): implementa a API sobre o Chromium (abas, sugestões, atos, buscador padrão, favoritos). Não tem nada de Mac: o Windows usa a mesma.
+- **Hospedeiro por sistema** (`native_shell_mac.mm`): põe a interface por cima da janela, a aba ativa onde a interface mandar e a âncora dos balões do Chromium (o ícone do site).
 - **Janela:** a da Webium. O Chromium já reconhece essa "janela sem Views" em uns 20 pontos do núcleo, e uma cópia nossa obrigaria a mexer em todos eles. O nosso patch nela tem umas 20 linhas, atrás de `agens::IsNativeShellEnabled()`.
 
 ## Comportamentos
@@ -39,6 +42,24 @@ janela do Chromium            WebUIBrowserWindow (Webium), sem a página HTML
 - **Sem o seletor de perfis do Chromium:** com mais de um ato, o navegador abre direto no último usado; trocar de ato é pela coluna.
 - **Muitas abas e atos:** a lista de abas rola entre "Nova aba" e o pé, com uma barra fina (some na lateral recolhida). O pé mostra até 6 atos (5 recolhida); além disso, "⋯" abre a lista completa, e o ato atual nunca sai do pé.
 - **Barra:** estrela de favoritar dentro do endereço e menu "⋯" (Nova aba, Favoritos, Histórico, Configurações); por enquanto essas três abrem as páginas do Chromium.
+
+## O que o Agens embute (e o que não)
+
+O instalador do Agens instala o navegador junto, como app próprio, e o Agens o usa por fora (issues #58, #59). O kit cobre só o miolo: **abas, a página e os atos**. Configurações, temas, menu, nova aba, primeira instalação e bloqueador são do navegador e não entram no kit.
+
+## Windows (issue #61)
+
+O que já está pronto para ele:
+- a API em C e a cola comum compilam em qualquer sistema e não usam nada de Mac;
+- `IsNativeShellEnabled()` só liga no Mac, e a Webium só vem ligada por padrão no Mac. No Windows, até existir o hospedeiro, a janela continua a Views do Chromium;
+- `CreateNativeShellView` e `FocusNativeLocationBar` têm versões vazias fora do Mac, para o build fechar.
+
+O que o Windows precisa escrever:
+1. `native_shell_win.cc`: o mesmo papel do `native_shell_mac.mm`, com a interface num HWND filho por cima da janela da Webium.
+2. `chrome/browser/agens/ui/chrome_win.cc`: a interface em WinUI (Mica/Fluent), implementando os mesmos ganchos `agens_ui_*`.
+3. Atalhos com Ctrl no lugar de ⌘ (Ctrl+S lateral, Ctrl+L endereço).
+
+Depende do Chromium compilando no Windows (#3), que precisa de uma máquina Windows. **Isso não foi compilado no Windows ainda**: as versões vazias e os `#if` foram escritos, mas só testados no Mac.
 
 ## Flags
 

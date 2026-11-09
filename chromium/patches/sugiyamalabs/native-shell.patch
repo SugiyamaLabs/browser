@@ -108,57 +108,21 @@ index 0000000000..df4684de27
 +#endif
 +
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EMBED_H_
-diff --git a/chrome/browser/agens/embed/native_shell.h b/chrome/browser/agens/embed/native_shell.h
+diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
 new file mode 100644
-index 0000000000..152312203b
+index 0000000000..e0a3425c0e
 --- /dev/null
-+++ b/chrome/browser/agens/embed/native_shell.h
-@@ -0,0 +1,28 @@
++++ b/chrome/browser/agens/embed/agens_window.h
+@@ -0,0 +1,308 @@
 +// Copyright 2026 SugiyamaLabs.
-+// Glue between Chromium's Webium window (WebUIBrowserWindow, without its HTML page) and the
-+// agens_embed.h interface.
-+#ifndef CHROME_BROWSER_AGENS_EMBED_NATIVE_SHELL_H_
-+#define CHROME_BROWSER_AGENS_EMBED_NATIVE_SHELL_H_
-+
-+#include <memory>
-+
-+#include "base/feature_list.h"
-+
-+class BrowserWindowInterface;
-+namespace views {
-+class View;
-+class Widget;
-+}  // namespace views
-+
-+namespace agens {
-+
-+// On by default together with Webium. --disable-features=Webium brings back the Views window.
-+BASE_DECLARE_FEATURE(kAgensNativeShell);
-+bool IsNativeShellEnabled();
-+
-+std::unique_ptr<views::View> CreateNativeShellView(BrowserWindowInterface* browser);
-+void FocusNativeLocationBar(views::Widget* widget);
-+
-+}  // namespace agens
-+
-+#endif  // CHROME_BROWSER_AGENS_EMBED_NATIVE_SHELL_H_
-diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
-new file mode 100644
-index 0000000000..dbbae2986b
---- /dev/null
-+++ b/chrome/browser/agens/embed/native_shell_mac.mm
-@@ -0,0 +1,529 @@
-+// Copyright 2026 SugiyamaLabs.
-+// Engine side of agens_embed.h on macOS: an AgensWindow over the Browser's tab strip, and the
-+// views::View that fills the Webium window (the UI's sidebar beside the active tab).
-+
-+#include "chrome/browser/agens/embed/native_shell.h"
-+
-+#import <AppKit/AppKit.h>
++// One browser window as the embed API sees it (agens_embed.h): tabs, suggestions, atos, search
++// default, bookmarks. Platform-neutral; each platform's shell (native_shell_mac.mm, later
++// native_shell_win.cc) only hosts the UI and the page.
++#ifndef CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
++#define CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
 +
 +#include <string>
 +#include <vector>
-+
 +#include "base/memory/raw_ptr.h"
 +#include "base/memory/weak_ptr.h"
 +#include "base/task/sequenced_task_runner.h"
@@ -203,18 +167,11 @@ index 0000000000..dbbae2986b
 +#include "components/omnibox/browser/autocomplete_match.h"
 +#include "content/public/browser/navigation_controller.h"
 +#include "content/public/browser/web_contents.h"
-+#include "ui/base/metadata/metadata_header_macros.h"
-+#include "ui/base/metadata/metadata_impl_macros.h"
++#include "ui/base/base_window.h"
 +#include "ui/gfx/codec/png_codec.h"
-+#include "ui/gfx/geometry/rounded_corners_f.h"
++#include "ui/gfx/geometry/rect.h"
 +#include "ui/gfx/image/image_skia.h"
 +#include "ui/gfx/image/image_skia_rep.h"
-+#include "ui/base/base_window.h"
-+#include "ui/views/background.h"
-+#include "ui/views/border.h"
-+#include "ui/views/controls/webview/webview.h"
-+#include "ui/views/view_class_properties.h"
-+#include "ui/views/widget/widget.h"
 +
 +struct AgensWindow : public TabStripModelObserver,
 +                     public AutocompleteController::Observer,
@@ -464,6 +421,22 @@ index 0000000000..dbbae2986b
 +  base::WeakPtrFactory<AgensWindow> weak{this};
 +};
 +
++#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
+diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
+new file mode 100644
+index 0000000000..bfd0d44341
+--- /dev/null
++++ b/chrome/browser/agens/embed/native_shell.cc
+@@ -0,0 +1,123 @@
++// Copyright 2026 SugiyamaLabs.
++// The embed API (agens_embed.h) on top of AgensWindow. Same code on every platform.
++
++#include "chrome/browser/agens/embed/native_shell.h"
++
++#include "chrome/browser/agens/embed/agens_window.h"
++#include "build/build_config.h"
++#include "ui/views/view.h"
++
 +extern "C" {
 +
 +void agens_window_set_tabs_observer(AgensWindow* w, AgensTabsChanged observer, void* context) {
@@ -564,8 +537,84 @@ index 0000000000..dbbae2986b
 +BASE_FEATURE(kAgensNativeShell, base::FEATURE_ENABLED_BY_DEFAULT);
 +
 +bool IsNativeShellEnabled() {
-+  return base::FeatureList::IsEnabled(kAgensNativeShell);
++  // shortcut: only macOS has a host so far; Windows gets native_shell_win.cc in issue #61.
++  return BUILDFLAG(IS_MAC) && base::FeatureList::IsEnabled(kAgensNativeShell);
 +}
++
++#if !BUILDFLAG(IS_MAC)
++// Never called while IsNativeShellEnabled() is false; they keep other platforms linking.
++std::unique_ptr<views::View> CreateNativeShellView(BrowserWindowInterface*) {
++  NOTREACHED();
++}
++void FocusNativeLocationBar(views::Widget*) {}
++#endif
++
++
++}  // namespace agens
+diff --git a/chrome/browser/agens/embed/native_shell.h b/chrome/browser/agens/embed/native_shell.h
+new file mode 100644
+index 0000000000..152312203b
+--- /dev/null
++++ b/chrome/browser/agens/embed/native_shell.h
+@@ -0,0 +1,28 @@
++// Copyright 2026 SugiyamaLabs.
++// Glue between Chromium's Webium window (WebUIBrowserWindow, without its HTML page) and the
++// agens_embed.h interface.
++#ifndef CHROME_BROWSER_AGENS_EMBED_NATIVE_SHELL_H_
++#define CHROME_BROWSER_AGENS_EMBED_NATIVE_SHELL_H_
++
++#include <memory>
++
++#include "base/feature_list.h"
++
++class BrowserWindowInterface;
++namespace views {
++class View;
++class Widget;
++}  // namespace views
++
++namespace agens {
++
++// On by default together with Webium. --disable-features=Webium brings back the Views window.
++BASE_DECLARE_FEATURE(kAgensNativeShell);
++bool IsNativeShellEnabled();
++
++std::unique_ptr<views::View> CreateNativeShellView(BrowserWindowInterface* browser);
++void FocusNativeLocationBar(views::Widget* widget);
++
++}  // namespace agens
++
++#endif  // CHROME_BROWSER_AGENS_EMBED_NATIVE_SHELL_H_
+diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
+new file mode 100644
+index 0000000000..60c00ae5eb
+--- /dev/null
++++ b/chrome/browser/agens/embed/native_shell_mac.mm
+@@ -0,0 +1,135 @@
++// Copyright 2026 SugiyamaLabs.
++// The macOS host: the views::View that fills the Webium window, puts the UI's chrome (an NSView)
++// over it and the active tab in the page card. Everything else is shared (agens_window.h,
++// native_shell.cc); Windows writes its own host next to this one.
++
++#include "chrome/browser/agens/embed/native_shell.h"
++
++#import <AppKit/AppKit.h>
++
++#include "chrome/browser/agens/embed/agens_window.h"
++#include "ui/base/metadata/metadata_header_macros.h"
++#include "ui/base/metadata/metadata_impl_macros.h"
++#include "ui/gfx/codec/png_codec.h"
++#include "ui/gfx/geometry/rounded_corners_f.h"
++#include "ui/gfx/image/image_skia.h"
++#include "ui/gfx/image/image_skia_rep.h"
++#include "ui/base/base_window.h"
++#include "ui/views/background.h"
++#include "ui/views/border.h"
++#include "ui/views/controls/webview/webview.h"
++#include "ui/views/view_class_properties.h"
++#include "ui/views/widget/widget.h"
++
++namespace agens {
 +
 +namespace {
 +
@@ -679,10 +728,10 @@ index 0000000000..dbbae2986b
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..015925d837
+index 0000000000..0f506e2b90
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,1138 @@
+@@ -0,0 +1,1251 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -741,6 +790,24 @@ index 0000000000..015925d837
 +                                                 configurationWithPointSize:size
 +                                                                     weight:NSFontWeightRegular]];
 +}
++// Icons from the Agens set (prototipos/janela.html: 20 grid, 1.6 stroke, round caps), drawn as
++// template images so they take the tint like SF Symbols do.
++static NSImage* AgensIcon(NSString* paths, CGFloat size = 17) {
++  NSString* svg = [NSString stringWithFormat:
++      @"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' width='%g' height='%g' fill='none' "
++      @"stroke='#000' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'>%@</svg>",
++      size, size, paths];
++  NSImage* image = [[NSImage alloc] initWithData:[svg dataUsingEncoding:NSUTF8StringEncoding]];
++  [image setTemplate:YES];  // "template" is a C++ keyword here
++  return image;
++}
++static NSString* const kIconPlus = @"<path d='M10 4.5V15.5 M4.5 10H15.5'/>";
++static NSString* const kIconStar = @"<path d='M10 3.6l1.9 4 4.3.5-3.2 2.9.9 4.3L10 13.1l-3.9 2.2.9-4.3-3.2-2.9 4.3-.5z'/>";
++static NSString* const kIconClock = @"<circle cx='10' cy='10' r='6.5'/><path d='M10 6.5V10l2.5 1.5'/>";
++static NSString* const kIconSettings =
++    @"<circle cx='10' cy='10' r='2.6'/><path d='M10 3v2M10 15v2M3 10h2M15 10h2M5 5l1.4 1.4M13.6 13.6L15 "
++    @"15M5 15l1.4-1.4M13.6 6.4L15 5'/>";
++
 +static NSTextField* Label(CGFloat size, NSFontWeight weight, const Token& color) {
 +  NSTextField* label = [NSTextField labelWithString:@""];
 +  label.font = [NSFont systemFontOfSize:size weight:weight];
@@ -1213,6 +1280,47 @@ index 0000000000..015925d837
 +}
 +@end
 +
++// One item of our menus (prototype .menu .mi): icon, label, shortcut on the right in mono.
++@interface AgensMenuRow : AgensHoverView
++- (instancetype)initWithIcon:(NSString*)icon title:(NSString*)title key:(NSString*)key;
++@end
++@implementation AgensMenuRow {
++  NSImageView* _icon;
++  NSTextField* _title;
++  NSTextField* _key;
++}
++- (instancetype)initWithIcon:(NSString*)icon title:(NSString*)title key:(NSString*)key {
++  if ((self = [super initWithFrame:NSZeroRect])) {
++    self.layer.cornerRadius = 7;
++    _icon = [NSImageView imageViewWithImage:AgensIcon(icon)];
++    _icon.contentTintColor = kDim.color();
++    _title = Label(13, NSFontWeightRegular, kMute);
++    _title.stringValue = title;
++    _key = [NSTextField labelWithString:key];
++    _key.font = [NSFont monospacedSystemFontOfSize:11.5 weight:NSFontWeightRegular];
++    _key.textColor = kDim.color();
++    _key.alignment = NSTextAlignmentRight;
++    for (NSView* v in @[ _icon, _title, _key ]) [self addSubview:v];
++    self.accessibilityLabel = title;
++  }
++  return self;
++}
++- (NSAccessibilityRole)accessibilityRole {
++  return NSAccessibilityMenuItemRole;
++}
++- (void)layout {
++  [super layout];
++  CGFloat w = NSWidth(self.bounds);
++  _icon.frame = NSMakeRect(10, 8, 17, 17);
++  _key.frame = NSMakeRect(w - 10 - 60, 9, 60, 16);
++  _title.frame = NSMakeRect(37, 8, w - 37 - 70, 18);
++}
++- (void)refresh {
++  self.layer.backgroundColor = self.hovered ? CG(kRaise, self) : NSColor.clearColor.CGColor;
++  _title.textColor = self.hovered ? kInk.color() : kMute.color();
++}
++@end
++
 +// ---------------------------------------------------------------------------------------------
 +// The chrome.
 +
@@ -1266,6 +1374,8 @@ index 0000000000..015925d837
 +  AgensToolButton* _toggle;
 +  AgensToolButton* _star;  // in the address, right side (prototype .star)
 +  AgensToolButton* _menu;  // "⋯" after the address
++  NSView* _menuView;       // its menu (prototype .menu), shown under it
++  id _clickMonitor;
 +  BOOL _bookmarked;
 +  NSImageView* _newTabPlus;
 +  NSTextField* _newTabLabel;
@@ -1722,28 +1832,79 @@ index 0000000000..015925d837
 +
 +// --- Actions.
 +
-+// The window menu (prototype: Nova aba, Favoritos, Histórico, Configurações).
++// The window menu (prototype openMainMenu): Nova aba, Favoritos, Histórico, Configurações.
 +- (void)showMenu {
-+  NSMenu* menu = [[NSMenu alloc] initWithTitle:@"Menu"];
-+  struct Item {
-+    NSString* title;
-+    NSString* symbol;
-+    NSString* key;
-+    NSEventModifierFlags mods;
-+    SEL action;
-+  } items[] = {
-+      {@"Nova aba", @"plus", @"t", NSEventModifierFlagCommand, @selector(menuNewTab:)},
-+      {@"Favoritos", @"star", @"b", NSEventModifierFlagCommand | NSEventModifierFlagOption, @selector(menuBookmarks:)},
-+      {@"Histórico", @"clock", @"y", NSEventModifierFlagCommand, @selector(menuHistory:)},
-+      {@"Configurações", @"gearshape", @",", NSEventModifierFlagCommand, @selector(menuSettings:)},
-+  };
-+  for (const Item& it : items) {
-+    NSMenuItem* item = [menu addItemWithTitle:it.title action:it.action keyEquivalent:it.key];
-+    item.keyEquivalentModifierMask = it.mods;
-+    item.target = self;
-+    item.image = Symbol(it.symbol, 13);
++  if (_menuView) {
++    [self closeMenu];
++    return;
 +  }
-+  [menu popUpMenuPositioningItem:nil atLocation:NSMakePoint(NSMaxX(_menu.frame) - 4, NSMaxY(_menu.frame) + 4) inView:self];
++  __weak AgensChrome* weak = self;
++  struct Item {
++    NSString* icon;
++    NSString* title;
++    NSString* key;
++    void (^action)(void);
++  } items[] = {
++      {kIconPlus, @"Nova aba", @"⌘T", ^{ [weak menuNewTab:nil]; }},
++      {kIconStar, @"Favoritos", @"⌘⌥B", ^{ [weak menuBookmarks:nil]; }},
++      {kIconClock, @"Histórico", @"⌘Y", ^{ [weak menuHistory:nil]; }},
++      {kIconSettings, @"Configurações", @"⌘,", ^{ [weak menuSettings:nil]; }},
++  };
++  const CGFloat w = 260, rowH = 33;
++  _menuView = [[NSView alloc] initWithFrame:NSMakeRect(MAX(8, NSMaxX(_menu.frame) - w), NSMaxY(_menu.frame) + 6, w,
++                                                       std::size(items) * rowH + 10)];
++  _menuView.wantsLayer = YES;
++  _menuView.layer.cornerRadius = 12;
++  _menuView.layer.borderWidth = 1;
++  _menuView.layer.backgroundColor = CG(kFloat, self);
++  _menuView.layer.borderColor = CG(kLineStrong, self);
++  _menuView.accessibilityRole = NSAccessibilityMenuRole;
++  _menuView.accessibilityLabel = @"Menu";
++  CGFloat y = NSHeight(_menuView.frame) - 5 - rowH;  // the menu view isn't flipped
++  for (const Item& it : items) {
++    AgensMenuRow* row = [[AgensMenuRow alloc] initWithIcon:it.icon title:it.title key:it.key];
++    void (^action)(void) = it.action;
++    row.onPress = ^{
++      [weak closeMenu];
++      action();
++    };
++    row.frame = NSMakeRect(5, y, w - 10, rowH);
++    [_menuView addSubview:row];
++    y -= rowH;
++  }
++  [self addSubview:_menuView];
++  // Rise in, as the prototype (.2s); a click anywhere else or Esc closes it.
++  _menuView.alphaValue = 0;
++  [NSAnimationContext runAnimationGroup:^(NSAnimationContext* ctx) {
++    ctx.duration = 0.2;
++    self->_menuView.animator.alphaValue = 1;
++  }];
++  _clickMonitor = [NSEvent
++      addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown | NSEventMaskKeyDown
++                                   handler:^NSEvent*(NSEvent* event) {
++                                     AgensChrome* strong = weak;
++                                     if (!strong || !strong->_menuView) return event;
++                                     if (event.type == NSEventTypeKeyDown) {
++                                       if (event.keyCode == 53) {  // Esc
++                                         [strong closeMenu];
++                                         return nil;
++                                       }
++                                       return event;
++                                     }
++                                     NSPoint p = [strong convertPoint:event.locationInWindow fromView:nil];
++                                     if (event.window != strong.window ||
++                                         (!NSPointInRect(p, strong->_menuView.frame) &&
++                                          !NSPointInRect(p, strong->_menu.frame))) {
++                                       [strong closeMenu];
++                                     }
++                                     return event;
++                                   }];
++}
++- (void)closeMenu {
++  [_menuView removeFromSuperview];
++  _menuView = nil;
++  if (_clickMonitor) [NSEvent removeMonitor:_clickMonitor];
++  _clickMonitor = nil;
 +}
 +- (void)menuNewTab:(id)sender {
 +  [self run:agens_window_new_tab];
@@ -1780,6 +1941,7 @@ index 0000000000..015925d837
 +  [self closeSuggestions];
 +}
 +- (void)detach {
++  [self closeMenu];
 +  if (_keyMonitor) [NSEvent removeMonitor:_keyMonitor];
 +  _keyMonitor = nil;
 +  if (_window) {
@@ -1860,17 +2022,24 @@ index 886649ae98..3adfa8a130 100644
    }
  
 diff --git a/chrome/browser/ui/webui_browser/BUILD.gn b/chrome/browser/ui/webui_browser/BUILD.gn
-index db2aba2a32..29893018b0 100644
+index db2aba2a32..fcb8dea37a 100644
 --- a/chrome/browser/ui/webui_browser/BUILD.gn
 +++ b/chrome/browser/ui/webui_browser/BUILD.gn
-@@ -80,7 +80,14 @@ source_set("impl") {
+@@ -77,10 +77,21 @@ source_set("impl") {
+     "webui_browser_window.cc",
+     "webui_stub_location_bar.cc",
+     "zoom_bubble_manager_webui_browser.cc",
++
++    # agens: the embed API and its platform-neutral side (docs/casca.md).
++    "//chrome/browser/agens/embed/agens_embed.h",
++    "//chrome/browser/agens/embed/agens_window.h",
++    "//chrome/browser/agens/embed/native_shell.cc",
++    "//chrome/browser/agens/embed/native_shell.h",
    ]
  
    if (is_mac) {
 -    sources += [ "webui_browser_window_mac.mm" ]
 +    sources += [
-+      "//chrome/browser/agens/embed/agens_embed.h",
-+      "//chrome/browser/agens/embed/native_shell.h",
 +      "//chrome/browser/agens/embed/native_shell_mac.mm",
 +      "//chrome/browser/agens/ui/chrome_mac.mm",
 +      "//chrome/browser/agens/ui/logo_svg.h",
@@ -2047,15 +2216,21 @@ index 7188576c05..3a6546a9c8 100644
  
    raw_ptr<BrowserWindowInterface> browser_;
 diff --git a/chrome/common/chrome_features.cc b/chrome/common/chrome_features.cc
-index 42e1a94e45..bc8a3c882b 100644
+index 42e1a94e45..2ac338faac 100644
 --- a/chrome/common/chrome_features.cc
 +++ b/chrome/common/chrome_features.cc
-@@ -1938,7 +1938,7 @@ BASE_FEATURE(kWebAppUpgradeToDatabaseVersion6,
+@@ -1938,7 +1938,13 @@ BASE_FEATURE(kWebAppUpgradeToDatabaseVersion6,
               base::FEATURE_ENABLED_BY_DEFAULT);
  
  #if !BUILDFLAG(IS_ANDROID)
 -BASE_FEATURE(kWebium, base::FEATURE_DISABLED_BY_DEFAULT);
-+BASE_FEATURE(kWebium, base::FEATURE_ENABLED_BY_DEFAULT);  // agens: our window (native shell)
++// agens: our window (native shell) on macOS; elsewhere it waits for its host (issue #61).
++BASE_FEATURE(kWebium,
++#if BUILDFLAG(IS_MAC)
++             base::FEATURE_ENABLED_BY_DEFAULT);
++#else
++             base::FEATURE_DISABLED_BY_DEFAULT);
++#endif
  // When enable, the reload button will be replaced with the a WebView, and
  // chrome://webui-toolbar.top-chrome will be loaded as the content.
  // crbug.com/444358999
