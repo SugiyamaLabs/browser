@@ -3,6 +3,7 @@
 is_official_build = false
 use_thin_lto = false
 chrome_pgo_phase = 0
-is_component_build = true
+# No component build: with the prebuilt Rust toolchain, dylibs miss the Rust allocator symbols (__rust_alloc).
+# shortcut: static link only; revisit if incremental links get slow.
 symbol_level = 0
 blink_symbol_level = 0
