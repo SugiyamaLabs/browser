@@ -264,6 +264,43 @@ select.sel { height: 30px; padding: 0 10px; border-radius: calc(8px * var(--roun
 .sw[aria-pressed="true"] { outline: 2px solid var(--light-2); outline-offset: 2px; }
 .lead { color: var(--mute); font-size: 13px; margin: -6px 0 18px; }
 
+/* ===== Windows: mesma marca, controles e fonte do Windows 11 ===== */
+.caption { display: none; margin-left: 6px; align-self: stretch; }
+.caption button { width: 46px; height: 100%; display: grid; place-items: center; color: var(--mute); }
+.caption button:hover { background: var(--hover); color: var(--ink); }
+.caption button.close:hover { background: #C42B1C; color: #fff; }  /* o vermelho do sistema: único vermelho, e é do Windows */
+.os-win { --ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; --mono: "Cascadia Mono", Consolas, monospace; }
+.os-win .window { border-radius: 8px; }
+.os-win .lights { display: none !important; }
+.os-win .caption { display: flex; }
+.os-win .tabstrip { padding-left: 10px; padding-right: 0; padding-top: 0; height: 40px; }
+.os-win .tabstrip .newtab-btn { margin-right: auto; }
+.os-win .layout-side .toolbar { padding-right: 0; padding-top: 0; }
+.os-win .layout-side .toolbar .caption { height: 40px; }
+.os-win .layout-top .toolbar .caption { display: none; }
+
+/* ===== Folha: criar e configurar um time (space) ===== */
+.scrim { position: fixed; inset: 0; z-index: 50; background: rgba(5,5,7,.6); display: none; place-items: center; }
+.scrim.open { display: grid; animation: fade .2s var(--ease); }
+@keyframes fade { from { opacity: 0; } }
+.sheet { width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow: auto; background: var(--side); border: 1px solid var(--line-strong); border-radius: calc(16px * var(--round)); animation: sheetIn .32s var(--spring); }
+@keyframes sheetIn { from { opacity: 0; transform: translateY(12px) scale(.98); } }
+.sheet-h { display: flex; align-items: center; gap: 14px; padding: 20px 22px 16px; border-bottom: 1px solid var(--line); }
+.sheet-h h2 { margin: 0; font-size: 15px; font-weight: 600; flex: 1; }
+.sheet-b { padding: 18px 22px; display: grid; gap: 18px; }
+.sheet-f { display: flex; gap: 10px; padding: 14px 22px; border-top: 1px solid var(--line); }
+.sheet-f .grow { flex: 1; }
+.logo.big { width: 48px; height: 48px; font-size: 21px; border-radius: calc(12px * var(--round)); }
+.fld { display: grid; gap: 6px; font-size: 12.5px; color: var(--mute); }
+.field { height: 36px; padding: 0 12px; border-radius: calc(10px * var(--round)); background: var(--sunk); border: 1px solid var(--line); color: var(--ink); outline: 0; width: 100%; font-size: 14px; }
+.field:focus { border-color: var(--line-strong); }
+.palette { display: grid; grid-template-columns: repeat(12, 1fr); gap: 6px; }
+.palette .sw { width: auto; aspect-ratio: 1; height: auto; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px; min-height: 36px; border-radius: calc(10px * var(--round)); background: var(--sunk); border: 1px solid var(--line); }
+.chips .chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px 2px 9px; border: 1px solid var(--line-strong); border-radius: max(calc(7px * var(--round)), calc(var(--pill) * 999px)); font: 12px var(--mono); color: var(--ink); }
+.chips .chip button { width: 18px; height: 18px; display: grid; place-items: center; color: var(--dim); border-radius: 5px; }
+.chips input { flex: 1; min-width: 140px; border: 0; outline: 0; background: transparent; color: var(--ink); font-size: 13px; padding: 2px 4px; }
+
 /* ===== Densidade compacta ===== */
 .dense .tabstrip { height: 40px; } .dense .ttab { height: 28px; }
 .dense .toolbar { padding-top: 6px; padding-bottom: 8px; } .dense .omni-field { height: 30px; }
@@ -313,6 +350,7 @@ select.sel { height: 30px; padding: 0 10px; border-radius: calc(8px * var(--roun
       <div class="lights" aria-hidden="true"><i></i><i></i><i></i></div>
       <div class="tabs-top" role="tablist" aria-label="Abas" id="tabsTop"></div>
       <button class="newtab-btn" aria-label="Nova aba (⌘T)" data-act="newtab"><svg class="icon"><use href="#i-plus"/></svg></button>
+      <div class="caption" aria-hidden="true"><button tabindex="-1"><svg class="icon" viewBox="0 0 16 16" style="width:10px;height:10px"><path d="M1 8h14"/></svg></button><button tabindex="-1"><svg class="icon" viewBox="0 0 16 16" style="width:10px;height:10px"><rect x="1.5" y="1.5" width="13" height="13" rx="1.5"/></svg></button><button class="close" tabindex="-1"><svg class="icon" viewBox="0 0 16 16" style="width:10px;height:10px"><path d="m2 2 12 12M14 2 2 14"/></svg></button></div>
     </div>
     <div class="toolbar">
       <div class="lights" aria-hidden="true"><i></i><i></i><i></i></div>
@@ -330,6 +368,7 @@ select.sel { height: 30px; padding: 0 10px; border-radius: calc(8px * var(--roun
       </div>
       <div class="profiles" id="profiles" role="group" aria-label="Perfil do time"></div>
       <button class="tbtn" aria-label="Menu" aria-haspopup="menu" data-act="mainmenu"><svg class="icon"><use href="#i-menu"/></svg></button>
+      <div class="caption" aria-hidden="true"><button tabindex="-1"><svg class="icon" viewBox="0 0 16 16" style="width:10px;height:10px"><path d="M1 8h14"/></svg></button><button tabindex="-1"><svg class="icon" viewBox="0 0 16 16" style="width:10px;height:10px"><rect x="1.5" y="1.5" width="13" height="13" rx="1.5"/></svg></button><button class="close" tabindex="-1"><svg class="icon" viewBox="0 0 16 16" style="width:10px;height:10px"><path d="m2 2 12 12M14 2 2 14"/></svg></button></div>
     </div>
     <nav class="bmbar" id="bmbar" aria-label="Barra de favoritos"></nav>
     <div class="loadbar" aria-hidden="true"></div>
@@ -357,6 +396,9 @@ select.sel { height: 30px; padding: 0 10px; border-radius: calc(8px * var(--roun
     <fieldset><legend>Lateral</legend>
       <div class="seg" data-group="collapse"><button data-v="open" aria-pressed="true">Aberta</button><button data-v="collapsed">Recolhida</button></div>
     </fieldset>
+    <fieldset><legend>Sistema</legend>
+      <div class="seg" data-group="os"><button data-v="mac" aria-pressed="true">macOS</button><button data-v="win">Windows</button></div>
+    </fieldset>
     <fieldset><legend>Tema</legend>
       <div class="seg" data-group="theme"><button data-v="grafite" aria-pressed="true">Grafite</button><button data-v="brasa">Brasa</button></div>
     </fieldset>
@@ -370,7 +412,8 @@ select.sel { height: 30px; padding: 0 10px; border-radius: calc(8px * var(--roun
       <li>Menu <b>⋯</b>: favoritos, histórico e configurações. Estrela na barra: favoritar a aba.</li>
       <li>Passe o mouse numa aba: cartão com a memória dela.</li>
       <li>Abas cinza: dormindo (#24). Clique para acordar.</li>
-      <li>Abas na lateral: os times ficam no pé, como os Spaces do Arc. Cada time tem as próprias abas.</li>
+      <li>Abas na lateral: os times ficam no pé, como os Spaces do Arc. Cada time tem as próprias abas. O <b>+</b> cria um time.</li>
+      <li>Primeira instalação: <a href="primeiro-uso.html" style="color:var(--light-2)">primeiro-uso.html</a></li>
       <li><kbd>⌘L</kbd> barra · <kbd>⌘T</kbd> nova aba · <kbd>⌘⇧S</kbd> lateral · <kbd>⌘1–9</kbd> aba · <kbd>⌃⇥</kbd> próxima · <kbd>⌘⇧1–5</kbd> time · <kbd>⌘D</kbd> favoritar · <kbd>⌘⇧B</kbd> barra de favoritos · <kbd>⌘Y</kbd> histórico · <kbd>⌘,</kbd> configurações</li>
     </ul>
     <div class="mem"><span>Memória (simulada)</span><b id="memTotal">—</b></div>
@@ -379,12 +422,13 @@ select.sel { height: 30px; padding: 0 10px; border-radius: calc(8px * var(--roun
 
 <div class="hovercard" id="hover" role="tooltip"></div>
 <div class="menu" id="menu" role="menu" aria-label="Perfis"></div>
+<div class="scrim" id="scrim"><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle" id="sheet"></div></div>
 
 <script>
 // times: a cor do time mora só no rosto (monograma), nunca na janela
 const PROFILES = [
   { id: "pessoal", name: "Pessoal", color: "#FF9D5C", letter: "P" },
-  { id: "a", name: "Cliente A", color: "#3F9CFF", letter: "A" },
+  { id: "a", name: "Cliente A", color: "#3F9CFF", letter: "A", sites: ["cliente-a.test", "github.com/cliente-a"] },
   { id: "b", name: "Cliente B", color: "#FF7E98", letter: "B", asleep: true },
   { id: "e", name: "Estúdio", color: "#CF6FEA", letter: "E", asleep: true },
   { id: "x", name: "Projeto X", color: "#2BC7C0", letter: "X", asleep: true },
@@ -649,7 +693,8 @@ const INTERNAL = {
         <div class="opt"><span class="lbl">Configurações de proxy<small>Usa as do macOS.</small></span><button class="btn sm">Abrir</button></div>
         <div class="opt"><span class="lbl">Restaurar as configurações originais</span><button class="btn sm">Restaurar…</button></div>
       </div>`,
-      perfis: `<h2>Perfis</h2><div class="group">${PROFILES.map((p, i) => `<div class="opt"><span class="logo" style="background:${p.color}">${p.letter}</span><span class="lbl">${esc(p.name)}<small>${i === profile ? "Em uso" : p.asleep ? "Dormindo · 0 MB" : "Aberto"} · cookies, logins, extensões e histórico separados</small></span><button class="btn sm">Editar</button></div>`).join("")}</div>
+      perfis: `<h2>Perfis</h2><div class="group">${PROFILES.map((p, i) => `<div class="opt"><span class="logo" style="background:${p.color}">${p.letter}</span><span class="lbl">${esc(p.name)}<small>${i === profile ? "Em uso" : p.asleep ? "Dormindo · 0 MB" : "Aberto"}${p.sites?.length ? " · " + p.sites.map(esc).join(", ") : ""}</small></span><button class="btn sm" data-edit="${i}">Configurar</button></div>`).join("")}
+        <div class="opt"><span class="lbl">Novo time<small>Um espaço com abas, logins e extensões só dele.</small></span><button class="btn sm" data-newteam>Criar…</button></div></div>
         <div class="group"><div class="opt"><span class="lbl">Perfis fora de uso dormem<small>Só o perfil em uso fica carregado.</small></span>${sw("x", true, "Perfis fora de uso dormem")}</div>
         <div class="opt"><span class="lbl">Importar favoritos e senhas<small>Do Brave, Chrome ou Safari, para o perfil em uso.</small></span><button class="btn sm">Importar…</button></div></div>`,
       busca: `<h2>Busca</h2><div class="group"><div class="opt"><span class="lbl">Buscador da barra de endereço</span><select class="sel" data-sel="search" aria-label="Buscador">${["DuckDuckGo", "Google", "Bing", "Brave Search", "Kagi"].map(o => `<option ${prefs.search === o ? "selected" : ""}>${o}</option>`).join("")}</select></div>
@@ -694,6 +739,45 @@ function applyPref(key, v) {
   if (key === "startup") prefs.startup = v;
   render();
 }
+// ===== Folha do time: criar ou editar um space =====
+const TEAM_PALETTE = ["#FF7E98", "#FF9D5C", "#E3876F", "#F46DB8", "#CF6FEA", "#A97AB8", "#9F86FF", "#6E86FF", "#3F9CFF", "#3CC0F0", "#2BC7C0", "#7F9BC7"];
+let draft = null;
+const teamLetter = n => (n.trim().split(/\s+/).pop()[0] || "?").toUpperCase();
+function openTeamSheet(i) {
+  const editing = Number.isInteger(i), p = editing ? PROFILES[i] : null;
+  const free = TEAM_PALETTE.find(c => !PROFILES.some(q => q.color === c)) || TEAM_PALETTE[11];
+  draft = editing ? { i, name: p.name, color: p.color, sites: [...(p.sites || [])], copy: "vazio", dl: !!p.dl, sleep: p.sleep !== false }
+                  : { i: null, name: "", color: free, sites: [], copy: "vazio", dl: true, sleep: true };
+  renderSheet(); $("#scrim").classList.add("open"); setTimeout(() => $("#teamName").focus(), 30);
+}
+function renderSheet() {
+  const d = draft, editing = d.i !== null;
+  $("#sheet").innerHTML = `<div class="sheet-h"><span class="logo big" style="background:${d.color}" id="teamPrev">${d.name ? teamLetter(d.name) : "?"}</span><h2 id="sheetTitle">${editing ? "Configurar " + esc(d.name) : "Novo time"}</h2><button class="tbtn" aria-label="Fechar" data-sheet="close"><svg class="icon"><use href="#i-x"/></svg></button></div>
+    <div class="sheet-b">
+      <label class="fld">Nome<input class="field" id="teamName" placeholder="Cliente A" value="${esc(d.name)}" autocomplete="off"></label>
+      <div class="fld">Cor (aparece só no rosto do time)<div class="palette">${TEAM_PALETTE.map(c => `<button class="sw" style="background:${c}" aria-label="Cor ${c}" aria-pressed="${d.color === c}" data-tcolor="${c}"></button>`).join("")}</div></div>
+      <div class="fld">Links destes sites abrem neste time<div class="chips" id="chips">${d.sites.map((s, k) => `<span class="chip">${esc(s)}<button aria-label="Tirar ${esc(s)}" data-rmsite="${k}"><svg class="icon" style="width:11px;height:11px"><use href="#i-x"/></svg></button></span>`).join("")}<input id="siteIn" placeholder="${d.sites.length ? "" : "cliente-a.test, github.com/cliente-a…"}" aria-label="Adicionar site"></div></div>
+      ${editing ? "" : `<div class="fld">Começar com${segHTML("tcopy", [["vazio", "Vazio"], ["favoritos", "Favoritos do Pessoal"], ["tudo", "Favoritos e extensões"]], d.copy)}</div>`}
+      <div class="group" style="margin:0">
+        <div class="opt"><span class="lbl">Cookies, logins, extensões e histórico só deste time<small>Sempre separado. É o que faz um time ser um time.</small></span><span style="color:var(--mute)">Sempre</span></div>
+        <div class="opt"><span class="lbl">Dormir quando fora de uso<small>Libera a memória do time inteiro até você voltar.</small></span><button class="switch" role="switch" aria-checked="${d.sleep}" aria-label="Dormir quando fora de uso" data-tsw="sleep"></button></div>
+        <div class="opt"><span class="lbl">Pasta de downloads própria<small class="mono">~/Downloads/${esc(d.name || "Novo time")}</small></span><button class="switch" role="switch" aria-checked="${d.dl}" aria-label="Pasta de downloads própria" data-tsw="dl"></button></div>
+      </div>
+    </div>
+    <div class="sheet-f">${editing && d.i !== 0 ? `<button class="btn sm" data-sheet="delete">Apagar time…</button>` : ""}<span class="grow"></span><button class="btn sm" data-sheet="close">Cancelar</button><button class="btn sm pri" data-sheet="save" ${d.name.trim() ? "" : "disabled style=\"opacity:.45\""}>${editing ? "Salvar" : "Criar time"}</button></div>`;
+}
+function closeSheet() { $("#scrim").classList.remove("open"); draft = null; }
+function saveTeam() {
+  const d = draft; if (!d.name.trim()) return;
+  const data = { name: d.name.trim(), color: d.color, letter: teamLetter(d.name), sites: d.sites, dl: d.dl, sleep: d.sleep };
+  if (d.i !== null) { Object.assign(PROFILES[d.i], data); closeSheet(); return render(); }
+  PROFILES.push({ id: "t" + PROFILES.length, ...data });
+  const i = PROFILES.length - 1;
+  SPACE_TABS[i] = d.copy === "vazio" ? [] : []; SPACE_ACTIVE[i] = null;
+  closeSheet(); setProfile(i);
+}
+function addSite(v) { v = v.trim().replace(/^https?:\/\//, "").replace(/\/$/, ""); if (v && !draft.sites.includes(v)) draft.sites.push(v); renderSheet(); $("#siteIn").focus(); }
+
 function closeTab(i) { tabs.splice(i, 1); if (active >= tabs.length) active = tabs.length - 1; if (active < 0) active = null; render(); }
 function newTab() { active = null; render(); $("#content input")?.focus(); }
 
@@ -755,6 +839,7 @@ const set = {
   theme: v => { if (v === "brasa") root.dataset.theme = "brasa"; else delete root.dataset.theme; },
   state: v => { state = v; render(); },
   screen: v => win.classList.toggle("fullscreen", v === "full"),
+  os: v => { document.body.classList.toggle("os-win", v === "win"); document.querySelectorAll("kbd").forEach(k => { k.dataset.mac ??= k.textContent; k.textContent = v === "win" ? k.dataset.mac.replace(/⌘⇧/g, "Ctrl+Shift+").replace(/⌘⌥/g, "Ctrl+Alt+").replace(/⌘/g, "Ctrl+").replace(/⌃⇥/g, "Ctrl+Tab").replace(/⌥/g, "Alt+") : k.dataset.mac; }); },
 };
 document.querySelectorAll(".seg").forEach(seg => seg.addEventListener("click", e => {
   const b = e.target.closest("button"); if (!b) return; syncSeg(seg.dataset.group, b.dataset.v); set[seg.dataset.group](b.dataset.v);
@@ -762,6 +847,19 @@ document.querySelectorAll(".seg").forEach(seg => seg.addEventListener("click", e
 
 // Cliques e teclado
 document.addEventListener("click", e => {
+  if (draft) {
+    const sh = e.target.closest("[data-sheet]")?.dataset.sheet;
+    if (sh === "close" || e.target.id === "scrim") return closeSheet();
+    if (sh === "save") return saveTeam();
+    if (sh === "delete") { const i = draft.i; PROFILES.splice(i, 1); delete SPACE_TABS[i]; closeSheet(); profile = -1; return setProfile(0); }
+    const c = e.target.closest("[data-tcolor]"); if (c) { draft.color = c.dataset.tcolor; return renderSheet(); }
+    const rs = e.target.closest("[data-rmsite]"); if (rs) { draft.sites.splice(+rs.dataset.rmsite, 1); return renderSheet(); }
+    const ts = e.target.closest("[data-tsw]"); if (ts) { draft[ts.dataset.tsw] = !draft[ts.dataset.tsw]; return renderSheet(); }
+    const tc = e.target.closest('[data-pref="tcopy"]'); if (tc) { draft.copy = tc.dataset.v; return renderSheet(); }
+    return;
+  }
+  if (e.target.closest(".space.add") || e.target.closest("[data-newteam]")) return openTeamSheet();
+  const ed = e.target.closest("[data-edit]"); if (ed) return openTeamSheet(+ed.dataset.edit);
   const close = e.target.closest("[data-close]"); if (close) { e.stopPropagation(); closeTab(+close.dataset.close); return; }
   const p = e.target.closest("[data-p]"); if (p) { setProfile(+p.dataset.p); return; }
   const act = e.target.closest("[data-act]")?.dataset.act;
@@ -786,6 +884,12 @@ document.addEventListener("click", e => {
   if (!e.target.closest(".menu")) $("#menu").classList.remove("open");
 });
 document.addEventListener("keydown", e => {
+  if (draft) {
+    if (e.key === "Escape") return closeSheet();
+    if (e.target.id === "siteIn" && (e.key === "Enter" || e.key === ",")) { e.preventDefault(); return addSite(e.target.value); }
+    if (e.key === "Enter" && e.target.id === "teamName") { e.preventDefault(); return saveTeam(); }
+    return;
+  }
   if (e.key === "Escape") { $("#menu").classList.remove("open"); input.blur(); }
   if (document.activeElement?.getAttribute("role") === "tab" && (e.key === "Enter" || e.key === " ")) { select(+document.activeElement.dataset.i); e.preventDefault(); }
   if (!e.metaKey && !e.ctrlKey) return;
@@ -805,6 +909,7 @@ document.addEventListener("keydown", e => {
 });
 
 document.addEventListener("input", e => {
+  if (draft && e.target.id === "teamName") { draft.name = e.target.value; $("#teamPrev").textContent = draft.name ? teamLetter(draft.name) : "?"; const b = $('[data-sheet="save"]'); b.disabled = !draft.name.trim(); b.style.opacity = b.disabled ? .45 : 1; return; }
   if (e.target.id === "histQ") { historyQuery = e.target.value; const pos = e.target.selectionStart; render(); const q = $("#histQ"); q.focus(); q.setSelectionRange(pos, pos); }
 });
 document.addEventListener("change", e => { const k = e.target.dataset.sel; if (k) { prefs[k] = e.target.value; render(); } });
