@@ -153,7 +153,8 @@ def main():
     ap.add_argument("--tabs", default=ROOT / "tabs.txt")
     ap.add_argument("--profile", help="default: $BROWSER_WORK/bench-profiles/<browser>")
     ap.add_argument("--runs", type=int, default=3)
-    ap.add_argument("--settle", type=int, default=300, help="seconds after opening the tabs (default 300)")
+    # 10 min: tabs sleep after 5 min hidden (#8), so 5 min would catch the transition
+    ap.add_argument("--settle", type=int, default=600, help="seconds after opening the tabs (default 600)")
     ap.add_argument("--login", action="store_true")
     a = ap.parse_args()
 
