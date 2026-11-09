@@ -1,0 +1,40 @@
+<!doctype html><html lang="pt-BR"><meta charset="utf-8"><title>Logo do navegador</title>
+<style>
+body{margin:0;font:14px -apple-system,system-ui,sans-serif;color:#F2F2F4;background:#0B0B0D}
+.wrap{display:grid;grid-template-columns:1fr 1fr;min-height:100vh}
+.side{padding:36px 32px;display:grid;gap:26px;align-content:start}
+.dark{background:#0B0B0D}.light{background:#F6F5F2;color:#16161A}
+h2{margin:0;font-size:15px;font-weight:600}.lbl{font-size:12px;color:#9A9AA4}.light .lbl{color:#55555E}
+.row{display:flex;gap:22px;align-items:flex-end;flex-wrap:wrap}.cap{display:grid;justify-items:center;gap:6px;font-size:11.5px;color:#9A9AA4}.light .cap{color:#55555E}
+.tab{display:flex;align-items:center;gap:8px;height:30px;padding:0 10px;border-radius:9px;background:#16161A;border:1px solid #24242A;font-size:12.5px}
+.light .tab{background:#fff;border-color:#E0E0E5}
+.lock{display:flex;align-items:center;gap:12px}.lock b{font:700 22px/1 Unbounded,-apple-system,sans-serif;letter-spacing:-.02em}
+.lock span{font-size:15px;color:#9A9AA4;padding-left:12px;border-left:1px solid #3A3A42}.light .lock span{color:#5C5C66;border-color:#CFCFD6}
+.mono-d{color:#F2F2F4}.mono-l{color:#16161A}
+</style>
+<div class="wrap">
+ <div class="side dark"><h2>Escuro</h2>
+  <div><div class="lbl">Ícone do app</div><div class="row" style="margin-top:10px">
+   <div class="cap"><img src="icone-macos-escuro.svg" width="160">macOS</div>
+   <div class="cap"><img src="icone-macos-escuro.svg" width="64">Dock</div>
+   <div class="cap"><img src="icone-windows-escuro.svg" width="96">Windows</div>
+   <div class="cap"><img src="icone-windows-escuro.svg" width="32">Barra de tarefas</div></div></div>
+  <div class="lock"><img src="marca-escuro.svg" width="44"><b>agens</b><span>navegador</span></div>
+  <div><div class="lbl">Pequeno (a versão de 16 a 32 px tira o cartão de trás)</div><div class="row" style="margin-top:10px;align-items:center">
+   <div class="tab"><img src="marca-pequena-escuro.svg" width="16">agens://nova-aba</div>
+   <div class="cap"><img src="marca-pequena-escuro.svg" width="32">32 px</div><div class="cap"><img src="marca-pequena-escuro.svg" width="16">16 px</div>
+   <div class="cap mono-d"><img src="marca-uma-cor-branca.svg" width="40">uma cor</div></div></div>
+ </div>
+ <div class="side light"><h2>Claro</h2>
+  <div><div class="lbl">Ícone do app</div><div class="row" style="margin-top:10px">
+   <div class="cap"><img src="icone-macos-claro.svg" width="160">macOS</div>
+   <div class="cap"><img src="icone-macos-claro.svg" width="64">Dock</div>
+   <div class="cap"><img src="icone-windows-claro.svg" width="96">Windows</div>
+   <div class="cap"><img src="icone-windows-claro.svg" width="32">Barra de tarefas</div></div></div>
+  <div class="lock"><img src="marca-claro.svg" width="44"><b>agens</b><span>navegador</span></div>
+  <div><div class="lbl">Pequeno</div><div class="row" style="margin-top:10px;align-items:center">
+   <div class="tab"><img src="marca-pequena-claro.svg" width="16">agens://nova-aba</div>
+   <div class="cap"><img src="marca-pequena-claro.svg" width="32">32 px</div><div class="cap"><img src="marca-pequena-claro.svg" width="16">16 px</div>
+   <div class="cap mono-l"><img src="marca-uma-cor-preta.svg" width="40">uma cor</div></div></div>
+ </div>
+</div></html>
