@@ -1,11 +1,11 @@
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
 new file mode 100644
-index 0000000000..3c652f80f5
+index 0000000000..44db192ab6
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embed.h
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,58 @@
 +// Copyright 2026 SugiyamaLabs.
-+// The boundary between the engine and any interface (the browser's own sidebar today, the Agens
++// The boundary between the engine and any interface (the browser's own chrome today, the Agens
 +// app later). Plain C on purpose: no Chromium or C++ types cross it, Swift imports it as is, and
 +// what sits under it (today Chromium's Webium window) can change without touching the UI.
 +#ifndef CHROME_BROWSER_AGENS_EMBED_AGENS_EMBED_H_
@@ -21,11 +21,21 @@ index 0000000000..3c652f80f5
 +typedef struct {
 +  const char* title;  // UTF-8, never null
 +  const char* url;    // UTF-8, empty for the new tab page
++  const unsigned char* favicon_png;  // 32x32 PNG (2x), null when the page has none yet
++  int favicon_png_size;
 +  int active;
 +  int loading;
++  int sleeping;  // discarded to save memory; reloads when activated
++  int can_go_back;
++  int can_go_forward;
 +} AgensTab;
 +
-+// Strings and the array are only valid during the call; copy what you keep.
++// Top-left origin, in points.
++typedef struct {
++  int x, y, width, height;
++} AgensRect;
++
++// Strings, icons and the array are only valid during the call; copy what you keep.
 +typedef void (*AgensTabsChanged)(void* context, const AgensTab* tabs, int count);
 +
 +void agens_window_set_tabs_observer(AgensWindow* window, AgensTabsChanged observer, void* context);
@@ -37,12 +47,15 @@ index 0000000000..3c652f80f5
 +void agens_window_back(AgensWindow* window);
 +void agens_window_forward(AgensWindow* window);
 +void agens_window_reload(AgensWindow* window);
++void agens_window_stop(AgensWindow* window);
 +
-+// Implemented by the interface. The sidebar is a platform view (NSView* on macOS), returned
-+// retained; the engine places it and calls destroy when the window closes.
-+void* agens_ui_create_sidebar(AgensWindow* window);
-+void agens_ui_focus_address(void* sidebar);
-+void agens_ui_destroy_sidebar(void* sidebar);
++// Implemented by the interface. The chrome is a platform view (NSView* on macOS) the size of the
++// window, returned retained; it must let clicks through where the page sits. The engine puts the
++// page where agens_ui_layout says, and calls destroy when the window closes.
++void* agens_ui_create_chrome(AgensWindow* window);
++AgensRect agens_ui_layout(void* chrome, int width, int height);
++void agens_ui_focus_address(void* chrome);
++void agens_ui_destroy_chrome(void* chrome);
 +
 +#ifdef __cplusplus
 +}
@@ -85,10 +98,10 @@ index 0000000000..152312203b
 +#endif  // CHROME_BROWSER_AGENS_EMBED_NATIVE_SHELL_H_
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
 new file mode 100644
-index 0000000000..0d7ce2261a
+index 0000000000..874999027b
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
-@@ -0,0 +1,198 @@
+@@ -0,0 +1,223 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Engine side of agens_embed.h on macOS: an AgensWindow over the Browser's tab strip, and the
 +// views::View that fills the Webium window (the UI's sidebar beside the active tab).
@@ -111,13 +124,19 @@ index 0000000000..0d7ce2261a
 +#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 +#include "chrome/browser/ui/tabs/tab_strip_model.h"
 +#include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
++#include "components/favicon/content/content_favicon_driver.h"
 +#include "components/omnibox/browser/autocomplete_classifier.h"
 +#include "components/omnibox/browser/autocomplete_match.h"
 +#include "content/public/browser/navigation_controller.h"
 +#include "content/public/browser/web_contents.h"
 +#include "ui/base/metadata/metadata_header_macros.h"
 +#include "ui/base/metadata/metadata_impl_macros.h"
++#include "ui/gfx/codec/png_codec.h"
++#include "ui/gfx/geometry/rounded_corners_f.h"
++#include "ui/gfx/image/image_skia.h"
++#include "ui/gfx/image/image_skia_rep.h"
 +#include "ui/views/background.h"
++#include "ui/views/border.h"
 +#include "ui/views/controls/webview/webview.h"
 +#include "ui/views/view_class_properties.h"
 +#include "ui/views/widget/widget.h"
@@ -131,17 +150,26 @@ index 0000000000..0d7ce2261a
 +
 +  void Notify() {
 +    if (!observer) return;
-+    std::vector<std::string> titles, urls;
-+    std::vector<AgensTab> tabs;
-+    for (int i = 0; i < model()->count(); ++i) {
++    const int count = model()->count();
++    std::vector<std::string> titles(count), urls(count);
++    std::vector<std::vector<uint8_t>> icons(count);
++    std::vector<AgensTab> tabs(count);
++    for (int i = 0; i < count; ++i) {
 +      content::WebContents* contents = model()->GetWebContentsAt(i);
-+      titles.push_back(base::UTF16ToUTF8(contents->GetTitle()));
-+      std::string url = contents->GetVisibleURL().spec();
-+      urls.push_back(url.starts_with("chrome://newtab") ? "" : url);
-+    }
-+    for (int i = 0; i < model()->count(); ++i) {
-+      tabs.push_back({titles[i].c_str(), urls[i].c_str(), i == model()->active_index(),
-+                      model()->GetWebContentsAt(i)->IsLoading()});
++      titles[i] = base::UTF16ToUTF8(contents->GetTitle());
++      urls[i] = contents->GetVisibleURL().spec();
++      if (urls[i].starts_with("chrome://newtab")) urls[i].clear();
++      if (auto* driver = favicon::ContentFaviconDriver::FromWebContents(contents)) {
++        gfx::Image icon = driver->GetFavicon();
++        if (!icon.IsEmpty()) {
++          const SkBitmap& bitmap = icon.AsImageSkia().GetRepresentation(2.0f).GetBitmap();
++          icons[i] = gfx::PNGCodec::EncodeBGRASkBitmap(bitmap, false).value_or(std::vector<uint8_t>());
++        }
++      }
++      tabs[i] = {titles[i].c_str(), urls[i].c_str(), icons[i].empty() ? nullptr : icons[i].data(),
++                 static_cast<int>(icons[i].size()), i == model()->active_index(),
++                 contents->IsLoading(), contents->WasDiscarded(),
++                 contents->GetController().CanGoBack(), contents->GetController().CanGoForward()};
 +    }
 +    observer(context, tabs.data(), static_cast<int>(tabs.size()));
 +  }
@@ -198,6 +226,9 @@ index 0000000000..0d7ce2261a
 +void agens_window_reload(AgensWindow* w) {
 +  chrome::ExecuteCommand(w->browser, IDC_RELOAD);
 +}
++void agens_window_stop(AgensWindow* w) {
++  chrome::ExecuteCommand(w->browser, IDC_STOP);
++}
 +
 +}  // extern "C"
 +
@@ -215,45 +246,50 @@ index 0000000000..0d7ce2261a
 +  METADATA_HEADER(NativeShellView, views::View)
 +
 + public:
-+  static constexpr int kSidebarWidth = 248;
++  static constexpr float kRadius = 12;  // the page card, as in the prototype
 +  static constexpr int kViewId = 0x4167;  // lookup from the window (Cmd+L)
 +
 +  explicit NativeShellView(BrowserWindowInterface* browser)
 +      : window_(std::make_unique<AgensWindow>(browser)) {
 +    SetID(kViewId);
-+    SetBackground(views::CreateSolidBackground(SkColorSetRGB(0x0B, 0x0B, 0x0D)));
++    SetBackground(views::CreateSolidBackground(SkColorSetRGB(0x11, 0x11, 0x14)));  // --side
++    card_ = AddChildView(std::make_unique<views::View>());
++    card_->SetBackground(views::CreateRoundedRectBackground(SkColorSetRGB(0x0B, 0x0B, 0x0D), kRadius, 1));
++    card_->SetBorder(views::CreateRoundedRectBorder(1, kRadius, SkColorSetRGB(0x24, 0x24, 0x2A)));
 +    contents_ = AddChildView(std::make_unique<views::WebView>(browser->GetProfile()));
 +    // Webium sizes new tabs from this element (GetContentsBoundsInScreen).
 +    contents_->SetProperty(views::kElementIdentifierKey, kContentsContainerViewElementId);
 +    browser->GetTabStripModel()->AddObserver(this);
-+    sidebar_ = (__bridge_transfer NSView*)agens_ui_create_sidebar(window_.get());
++    chrome_ = (__bridge_transfer NSView*)agens_ui_create_chrome(window_.get());
 +  }
 +  ~NativeShellView() override {
-+    agens_ui_destroy_sidebar((__bridge void*)sidebar_);
-+    [sidebar_ removeFromSuperview];
++    agens_ui_destroy_chrome((__bridge void*)chrome_);
++    [chrome_ removeFromSuperview];
 +    contents_->SetWebContents(nullptr);
 +  }
 +
-+  void FocusAddress() { agens_ui_focus_address((__bridge void*)sidebar_); }
++  void FocusAddress() { agens_ui_focus_address((__bridge void*)chrome_); }
 +
 +  // views::View:
 +  void AddedToWidget() override {
-+    // The views content view is layer-hosting and won't draw AppKit subviews, so the
-+    // sidebar is a sibling above it in the window frame (below the traffic lights).
++    // The views content view is layer-hosting and won't draw AppKit subviews, so the chrome
++    // is a sibling above it in the window frame (below the traffic lights).
 +    NSWindow* window = GetWidget()->GetNativeWindow().GetNativeNSWindow();
-+    sidebar_.autoresizingMask = NSViewHeightSizable | NSViewMaxXMargin;
-+    [window.contentView.superview addSubview:sidebar_
++    [window.contentView.superview addSubview:chrome_
 +                                  positioned:NSWindowAbove
 +                                  relativeTo:window.contentView];
 +  }
 +  void Layout(PassKey) override {
-+    if (sidebar_.superview) {
++    if (chrome_.superview) {
 +      NSView* content = GetWidget()->GetNativeWindow().GetNativeNSWindow().contentView;
-+      sidebar_.frame = [content convertRect:NSMakeRect(0, 0, kSidebarWidth, NSHeight(content.bounds))
-+                                     toView:sidebar_.superview];
++      chrome_.frame = [content convertRect:content.bounds toView:chrome_.superview];
 +    }
-+    // A small inset so the page reads as a card on the window, like the prototype.
-+    contents_->SetBounds(kSidebarWidth, 8, width() - kSidebarWidth - 8, height() - 16);
++    AgensRect page = agens_ui_layout((__bridge void*)chrome_, width(), height());
++    gfx::Rect card(page.x, page.y, page.width, page.height);
++    card_->SetBoundsRect(card);
++    card.Inset(1);
++    contents_->SetBoundsRect(card);
++    contents_->holder()->SetNativeViewCornerRadii(gfx::RoundedCornersF(kRadius - 1));
 +  }
 +
 +  // TabStripModelObserver: the page area follows the active tab.
@@ -261,13 +297,15 @@ index 0000000000..0d7ce2261a
 +                              const TabStripSelectionChange& selection) override {
 +    if (selection.active_tab_changed()) {
 +      contents_->SetWebContents(selection.new_contents);
++      contents_->holder()->SetNativeViewCornerRadii(gfx::RoundedCornersF(kRadius - 1));
 +    }
 +  }
 +
 + private:
 +  std::unique_ptr<AgensWindow> window_;
++  raw_ptr<views::View> card_;
 +  raw_ptr<views::WebView> contents_;
-+  NSView* __strong sidebar_;
++  NSView* __strong chrome_;
 +};
 +
 +BEGIN_METADATA(NativeShellView)
@@ -287,212 +325,452 @@ index 0000000000..0d7ce2261a
 +}
 +
 +}  // namespace agens
-diff --git a/chrome/browser/agens/ui/sidebar_mac.mm b/chrome/browser/agens/ui/sidebar_mac.mm
+diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..fcebfac41a
+index 0000000000..b0957bd10c
 --- /dev/null
-+++ b/chrome/browser/agens/ui/sidebar_mac.mm
-@@ -0,0 +1,198 @@
++++ b/chrome/browser/agens/ui/chrome_mac.mm
+@@ -0,0 +1,438 @@
 +// Copyright 2026 SugiyamaLabs.
-+// The browser's sidebar: address field, back/forward/reload, tab list. Only AppKit and
-+// agens_embed.h here, so the same code can move to the Swift app / BrowserKit unchanged.
++// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side, Grafite dark):
++// a 52 pt toolbar (back, forward, reload, address), the tab column on the left and the page as a
++// rounded card. Only AppKit and agens_embed.h here, so it can move to the Swift app unchanged.
 +
 +#import <AppKit/AppKit.h>
 +
 +#include "chrome/browser/agens/embed/agens_embed.h"
 +
-+// Grafite (dark) tokens from docs/visual.md.
++// Grafite (dark) tokens, docs/visual.md.
 +static NSColor* Hex(unsigned rgb, CGFloat a = 1) {
 +  return [NSColor colorWithSRGBRed:((rgb >> 16) & 255) / 255.0
 +                             green:((rgb >> 8) & 255) / 255.0
 +                              blue:(rgb & 255) / 255.0
 +                             alpha:a];
 +}
++static NSColor* Ink() { return Hex(0xF2F2F4); }
++static NSColor* Mute() { return Hex(0x9A9AA4); }
++static NSColor* Dim() { return Hex(0x8A8A94); }
++static NSColor* Raise() { return Hex(0x16161A); }
++static NSColor* Hover() { return Hex(0x18181C); }
++static NSColor* Sunk() { return Hex(0x0F0F12); }
++static NSColor* Line() { return Hex(0x24242A); }
++static NSColor* LineStrong() { return Hex(0x3A3A42); }
 +
-+enum { kBack, kForward, kReload, kNewTab };
++// Layout (prototype: toolbar, then body with 14 pt padding, 236 pt sidebar, 10 pt gap).
++static const CGFloat kToolbar = 52, kPad = 14, kSide = 236, kGap = 10, kRow = 32;
++static const CGFloat kLightsEnd = 78;  // the traffic lights end here
 +
-+@interface AgensSidebar : NSVisualEffectView <NSTextFieldDelegate>
++static NSImage* Symbol(NSString* name, CGFloat size = 15) {
++  NSImage* image = [NSImage imageWithSystemSymbolName:name accessibilityDescription:nil];
++  return [image imageWithSymbolConfiguration:[NSImageSymbolConfiguration
++                                                 configurationWithPointSize:size
++                                                                     weight:NSFontWeightRegular]];
++}
++
++// A view whose plain background drags the window, like a title bar.
++@interface AgensDragView : NSView
++@end
++@implementation AgensDragView
++- (BOOL)isFlipped {
++  return YES;
++}
++- (BOOL)mouseDownCanMoveWindow {
++  return YES;
++}
++- (void)mouseDown:(NSEvent*)event {
++  if (event.clickCount == 2) {
++    [self.window performZoom:nil];
++  } else {
++    [self.window performWindowDragWithEvent:event];
++  }
++}
++@end
++
++// Rounded hover/selected background, as the prototype's .tbtn / .stab.
++@interface AgensHoverView : AgensDragView
++@property(nonatomic) BOOL selected;
++@property(nonatomic) BOOL hovered;
++@property(nonatomic, copy) void (^onPress)(void);
++@end
++@implementation AgensHoverView {
++  NSTrackingArea* _tracking;
++}
++@synthesize selected = _selected;
++@synthesize hovered = _hovered;
++@synthesize onPress = _onPress;
++- (instancetype)initWithFrame:(NSRect)frame {
++  if ((self = [super initWithFrame:frame])) {
++    self.wantsLayer = YES;
++    self.layer.cornerRadius = 8;
++  }
++  return self;
++}
++- (void)updateTrackingAreas {
++  [super updateTrackingAreas];
++  if (_tracking) [self removeTrackingArea:_tracking];
++  _tracking = [[NSTrackingArea alloc]
++      initWithRect:NSZeroRect
++           options:NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect
++             owner:self
++          userInfo:nil];
++  [self addTrackingArea:_tracking];
++}
++- (void)refresh {
++  self.layer.backgroundColor = (_selected ? Raise() : _hovered ? Hover() : NSColor.clearColor).CGColor;
++}
++- (void)setSelected:(BOOL)selected {
++  _selected = selected;
++  [self refresh];
++}
++- (void)mouseEntered:(NSEvent*)event {
++  _hovered = YES;
++  [self refresh];
++}
++- (void)mouseExited:(NSEvent*)event {
++  _hovered = NO;
++  [self refresh];
++}
++- (void)mouseDown:(NSEvent*)event {
++  if (_onPress) _onPress();
++}
++- (BOOL)isAccessibilityElement {
++  return YES;
++}
++- (NSAccessibilityRole)accessibilityRole {
++  return NSAccessibilityButtonRole;
++}
++- (BOOL)accessibilityPerformPress {
++  if (_onPress) _onPress();
++  return YES;
++}
++@end
++
++// Toolbar button: 28 pt square, dim symbol, hover background.
++@interface AgensToolButton : AgensHoverView
++@property(nonatomic, readonly) NSImageView* icon;
++@property(nonatomic) BOOL enabled;
++@end
++@implementation AgensToolButton
++@synthesize icon = _icon;
++@synthesize enabled = _enabled;
++- (instancetype)initWithSymbol:(NSString*)symbol label:(NSString*)label {
++  if ((self = [super initWithFrame:NSMakeRect(0, 0, 28, 28)])) {
++    _icon = [NSImageView imageViewWithImage:Symbol(symbol)];
++    _icon.contentTintColor = Dim();
++    _icon.frame = self.bounds;
++    [self addSubview:_icon];
++    self.accessibilityLabel = label;
++    self.toolTip = label;
++    self.enabled = YES;
++  }
++  return self;
++}
++- (void)setEnabled:(BOOL)enabled {
++  _enabled = enabled;
++  self.alphaValue = enabled ? 1 : 0.35;
++}
++- (void)setSymbol:(NSString*)symbol {
++  _icon.image = Symbol(symbol);
++}
++- (void)mouseDown:(NSEvent*)event {
++  if (_enabled) [super mouseDown:event];
++}
++- (void)refresh {
++  self.layer.backgroundColor = (self.hovered && _enabled ? Raise() : NSColor.clearColor).CGColor;
++}
++@end
++
++// One tab in the column: favicon (or spinner), title, close on hover.
++@interface AgensTabRow : AgensHoverView
++@property(nonatomic) int index;
++@property(nonatomic, copy) void (^onClose)(void);
++- (void)updateWith:(const AgensTab&)tab;
++@end
++@implementation AgensTabRow {
++  NSImageView* _favicon;
++  NSProgressIndicator* _spinner;
++  NSTextField* _title;
++  NSButton* _close;
++  BOOL _sleeping;
++}
++@synthesize index = _index;
++@synthesize onClose = _onClose;
++- (instancetype)initWithFrame:(NSRect)frame {
++  if ((self = [super initWithFrame:frame])) {
++    _favicon = [[NSImageView alloc] initWithFrame:NSMakeRect(8, 8, 16, 16)];
++    _spinner = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(8, 8, 16, 16)];
++    _spinner.style = NSProgressIndicatorStyleSpinning;
++    _spinner.controlSize = NSControlSizeSmall;
++    _spinner.displayedWhenStopped = NO;
++    _spinner.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
++    _title = [NSTextField labelWithString:@""];
++    _title.font = [NSFont systemFontOfSize:13];
++    _title.lineBreakMode = NSLineBreakByTruncatingTail;
++    _close = [NSButton buttonWithImage:Symbol(@"xmark", 10) target:self action:@selector(closeTab:)];
++    _close.bordered = NO;
++    _close.contentTintColor = Dim();
++    _close.toolTip = @"Fechar aba";
++    _close.accessibilityLabel = @"Fechar aba";
++    for (NSView* v in @[ _favicon, _spinner, _title, _close ]) [self addSubview:v];
++  }
++  return self;
++}
++- (void)layout {
++  [super layout];
++  CGFloat w = NSWidth(self.bounds);
++  _close.frame = NSMakeRect(w - 26, 6, 20, 20);
++  _title.frame = NSMakeRect(34, 7, w - 34 - 30, 18);
++}
++- (void)updateWith:(const AgensTab&)tab {
++  NSString* title = @(tab.title);
++  if (!title.length) title = tab.url[0] ? @(tab.url) : @"Nova aba";
++  _title.stringValue = title;
++  self.accessibilityLabel = title;
++  NSImage* icon = nil;
++  if (tab.favicon_png) {
++    icon = [[NSImage alloc] initWithData:[NSData dataWithBytes:tab.favicon_png
++                                                        length:tab.favicon_png_size]];
++    icon.size = NSMakeSize(16, 16);
++  }
++  _favicon.image = icon ?: Symbol(@"globe", 13);
++  _favicon.contentTintColor = Mute();
++  _sleeping = tab.sleeping;
++  // Sleeping tabs: gray, dim icon (prototype: .sleeping .fav).
++  _favicon.alphaValue = _sleeping ? 0.4 : 1;
++  if (tab.loading) {
++    [_spinner startAnimation:nil];
++  } else {
++    [_spinner stopAnimation:nil];
++  }
++  _favicon.hidden = tab.loading;
++  self.selected = tab.active;
++  [self refresh];
++}
++- (void)refresh {
++  [super refresh];
++  _title.textColor = (self.selected || self.hovered) ? Ink() : Mute();
++  _close.hidden = !(self.selected || self.hovered);
++}
++- (void)otherMouseDown:(NSEvent*)event {  // middle click closes, like every browser
++  if (_onClose) _onClose();
++}
++- (void)closeTab:(id)sender {
++  if (_onClose) _onClose();
++}
++@end
++
++@interface AgensChrome : AgensDragView <NSTextFieldDelegate>
 +- (instancetype)initWithWindow:(AgensWindow*)window;
 +- (void)detach;
 +- (void)focusAddress;
 +- (void)setTabs:(const AgensTab*)tabs count:(int)count;
++- (AgensRect)layoutForWidth:(int)width height:(int)height;
 +@end
 +
 +static void TabsChanged(void* context, const AgensTab* tabs, int count) {
-+  [(__bridge AgensSidebar*)context setTabs:tabs count:count];
++  [(__bridge AgensChrome*)context setTabs:tabs count:count];
 +}
 +
-+@implementation AgensSidebar {
++@implementation AgensChrome {
 +  AgensWindow* _window;  // owned by the engine; null after detach
++  AgensToolButton* _back;
++  AgensToolButton* _forward;
++  AgensToolButton* _reload;
++  NSView* _omni;
++  NSImageView* _omniIcon;
 +  NSTextField* _address;
-+  NSStackView* _tabs;
-+}
-+
-+- (NSButton*)symbol:(NSString*)name label:(NSString*)label tag:(NSInteger)tag action:(SEL)action {
-+  NSButton* b = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:name
-+                                                    accessibilityDescription:label]
-+                                   target:self
-+                                   action:action];
-+  b.bordered = NO;
-+  b.tag = tag;
-+  b.contentTintColor = Hex(0x9A9AA4);
-+  b.toolTip = label;
-+  return b;
++  AgensHoverView* _newTab;
++  NSMutableArray<AgensTabRow*>* _rows;
++  NSString* _url;
++  BOOL _loading;
++  NSRect _page;
 +}
 +
 +- (instancetype)initWithWindow:(AgensWindow*)window {
 +  if ((self = [super initWithFrame:NSZeroRect])) {
 +    _window = window;
-+    self.material = NSVisualEffectMaterialSidebar;
-+    self.blendingMode = NSVisualEffectBlendingModeWithinWindow;
-+    self.state = NSVisualEffectStateActive;
++    _rows = [NSMutableArray array];
++    _url = @"";
 +    self.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
-+    self.wantsLayer = YES;
++    self.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 +
-+    // Back / forward / reload, to the right of the traffic lights.
-+    NSStackView* nav = [NSStackView stackViewWithViews:@[
-+      [self symbol:@"chevron.left" label:@"Voltar" tag:kBack action:@selector(command:)],
-+      [self symbol:@"chevron.right" label:@"Avançar" tag:kForward action:@selector(command:)],
-+      [self symbol:@"arrow.clockwise" label:@"Recarregar" tag:kReload action:@selector(command:)],
-+    ]];
-+    nav.spacing = 14;
++    __weak AgensChrome* weak = self;
++    _back = [[AgensToolButton alloc] initWithSymbol:@"chevron.left" label:@"Voltar"];
++    _back.onPress = ^{ [weak run:agens_window_back]; };
++    _forward = [[AgensToolButton alloc] initWithSymbol:@"chevron.right" label:@"Avançar"];
++    _forward.onPress = ^{ [weak run:agens_window_forward]; };
++    _reload = [[AgensToolButton alloc] initWithSymbol:@"arrow.clockwise" label:@"Recarregar"];
++    _reload.onPress = ^{ [weak reloadOrStop]; };
 +
-+    _address = [NSTextField textFieldWithString:@""];
-+    _address.placeholderString = @"Buscar ou digitar endereço";
-+    _address.bezelStyle = NSTextFieldRoundedBezel;
++    // Address: a sunk well with a border (prototype .omni-field).
++    _omni = [[NSView alloc] init];
++    _omni.wantsLayer = YES;
++    _omni.layer.cornerRadius = 10;
++    _omni.layer.backgroundColor = Sunk().CGColor;
++    _omni.layer.borderWidth = 1;
++    _omni.layer.borderColor = Line().CGColor;
++    _omniIcon = [NSImageView imageViewWithImage:Symbol(@"magnifyingglass", 12)];
++    _omniIcon.contentTintColor = Dim();
++    _address = [[NSTextField alloc] init];
++    _address.bordered = NO;
++    _address.drawsBackground = NO;
++    _address.focusRingType = NSFocusRingTypeNone;
 +    _address.font = [NSFont systemFontOfSize:13];
++    _address.textColor = Ink();
++    _address.placeholderAttributedString = [[NSAttributedString alloc]
++        initWithString:@"Buscar ou digitar endereço"
++            attributes:@{NSForegroundColorAttributeName : Dim(), NSFontAttributeName : _address.font}];
++    _address.lineBreakMode = NSLineBreakByTruncatingTail;
++    _address.cell.scrollable = YES;
++    _address.cell.usesSingleLineMode = YES;
 +    _address.delegate = self;
 +    _address.target = self;
 +    _address.action = @selector(go:);
-+    _address.lineBreakMode = NSLineBreakByTruncatingTail;
-+    _address.cell.scrollable = YES;
-+    _address.accessibilityLabel = @"Endereço";
++    _address.accessibilityLabel = @"Endereço e busca";
++    [_omni addSubview:_omniIcon];
++    [_omni addSubview:_address];
 +
-+    NSButton* newTab = [NSButton buttonWithTitle:@"Nova aba" target:self action:@selector(command:)];
-+    newTab.tag = kNewTab;
-+    newTab.bordered = NO;
-+    newTab.image = [NSImage imageWithSystemSymbolName:@"plus" accessibilityDescription:nil];
-+    newTab.imagePosition = NSImageLeading;
-+    newTab.contentTintColor = Hex(0x9A9AA4);
-+    newTab.alignment = NSTextAlignmentLeft;
++    _newTab = [[AgensHoverView alloc] init];
++    NSImageView* plus = [NSImageView imageViewWithImage:Symbol(@"plus", 13)];
++    plus.contentTintColor = Dim();
++    plus.frame = NSMakeRect(8, 8, 16, 16);
++    NSTextField* label = [NSTextField labelWithString:@"Nova aba"];
++    label.font = [NSFont systemFontOfSize:13];
++    label.textColor = Dim();
++    label.frame = NSMakeRect(34, 7, 150, 18);
++    [_newTab addSubview:plus];
++    [_newTab addSubview:label];
++    _newTab.accessibilityLabel = @"Nova aba";
++    _newTab.onPress = ^{ [weak run:agens_window_new_tab]; };
 +
-+    _tabs = [[NSStackView alloc] init];
-+    _tabs.orientation = NSUserInterfaceLayoutOrientationVertical;
-+    _tabs.alignment = NSLayoutAttributeLeading;
-+    _tabs.spacing = 2;
-+
-+    NSStackView* column = [NSStackView stackViewWithViews:@[ _address, _tabs, newTab ]];
-+    column.orientation = NSUserInterfaceLayoutOrientationVertical;
-+    column.alignment = NSLayoutAttributeLeading;
-+    column.spacing = 10;
-+    [column setCustomSpacing:14 afterView:_address];
-+
-+    for (NSView* v in @[ nav, column ]) {
-+      v.translatesAutoresizingMaskIntoConstraints = NO;
-+      [self addSubview:v];
-+    }
-+    [NSLayoutConstraint activateConstraints:@[
-+      [nav.topAnchor constraintEqualToAnchor:self.topAnchor constant:12],
-+      [nav.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-14],
-+      [column.topAnchor constraintEqualToAnchor:self.topAnchor constant:46],
-+      [column.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:10],
-+      [column.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-10],
-+      [_address.widthAnchor constraintEqualToAnchor:column.widthAnchor],
-+      [_tabs.widthAnchor constraintEqualToAnchor:column.widthAnchor],
-+    ]];
++    for (NSView* v in @[ _back, _forward, _reload, _omni, _newTab ]) [self addSubview:v];
 +    agens_window_set_tabs_observer(_window, TabsChanged, (__bridge void*)self);
 +  }
 +  return self;
 +}
 +
-+// The traffic lights sit on the sidebar, so its background drags the window.
-+- (BOOL)mouseDownCanMoveWindow {
-+  return YES;
-+}
-+- (void)mouseDown:(NSEvent*)event {
-+  [self.window performWindowDragWithEvent:event];
++// Clicks where the page is go to the page underneath.
++- (NSView*)hitTest:(NSPoint)point {
++  NSPoint local = [self convertPoint:point fromView:self.superview];
++  if (NSPointInRect(local, _page)) return nil;
++  return [super hitTest:point];
 +}
 +
++- (AgensRect)layoutForWidth:(int)width height:(int)height {
++  _back.frame = NSMakeRect(kLightsEnd, 12, 28, 28);
++  _forward.frame = NSMakeRect(kLightsEnd + 30, 12, 28, 28);
++  _reload.frame = NSMakeRect(kLightsEnd + 60, 12, 28, 28);
++  CGFloat omniX = kLightsEnd + 96;
++  _omni.frame = NSMakeRect(omniX, 9, width - omniX - kPad, 34);
++  _omniIcon.frame = NSMakeRect(12, 10, 14, 14);
++  _address.frame = NSMakeRect(33, 8, NSWidth(_omni.frame) - 33 - 12, 18);
++
++  CGFloat y = kToolbar;
++  _newTab.frame = NSMakeRect(kPad, y, kSide, kRow);
++  y += kRow + 1;
++  for (AgensTabRow* row in _rows) {
++    row.frame = NSMakeRect(kPad, y, kSide, kRow);
++    y += kRow + 1;
++  }
++  _page = NSMakeRect(kPad + kSide + kGap, kToolbar, width - (kPad + kSide + kGap) - kPad,
++                     height - kToolbar - kPad);
++  return {(int)NSMinX(_page), (int)NSMinY(_page), (int)NSWidth(_page), (int)NSHeight(_page)};
++}
++
++- (void)setTabs:(const AgensTab*)tabs count:(int)count {
++  __weak AgensChrome* weak = self;
++  while ((int)_rows.count < count) {
++    AgensTabRow* row = [[AgensTabRow alloc] initWithFrame:NSMakeRect(0, 0, kSide, kRow)];
++    __weak AgensTabRow* weakRow = row;
++    row.onPress = ^{ [weak activate:weakRow.index]; };
++    row.onClose = ^{ [weak close:weakRow.index]; };
++    [self addSubview:row];
++    [_rows addObject:row];
++  }
++  while ((int)_rows.count > count) {
++    [_rows.lastObject removeFromSuperview];
++    [_rows removeLastObject];
++  }
++  for (int i = 0; i < count; ++i) {
++    _rows[i].index = i;
++    [_rows[i] updateWith:tabs[i]];
++    if (!tabs[i].active) continue;
++    _url = @(tabs[i].url);
++    _loading = tabs[i].loading;
++    _back.enabled = tabs[i].can_go_back;
++    _forward.enabled = tabs[i].can_go_forward;
++  }
++  [_reload setSymbol:_loading ? @"xmark" : @"arrow.clockwise"];
++  _reload.accessibilityLabel = _loading ? @"Parar" : @"Recarregar";
++  BOOL secure = [_url hasPrefix:@"https://"];
++  _omniIcon.image = Symbol(_url.length == 0 ? @"magnifyingglass" : secure ? @"lock.fill" : @"globe", 12);
++  // Don't overwrite what the person is typing.
++  if (_address.currentEditor == nil) _address.stringValue = [self displayURL];
++  [self layoutForWidth:(int)NSWidth(self.bounds) height:(int)NSHeight(self.bounds)];
++}
++
++// The address as the prototype shows it: no https:// or www., no lone trailing slash.
++- (NSString*)displayURL {
++  NSString* s = _url;
++  for (NSString* p in @[ @"https://", @"www." ]) {
++    if ([s hasPrefix:p]) s = [s substringFromIndex:p.length];
++  }
++  NSRange slash = [s rangeOfString:@"/"];
++  if (slash.location != NSNotFound && slash.location == s.length - 1) s = [s substringToIndex:slash.location];
++  return s;
++}
++
++- (void)controlTextDidBeginEditing:(NSNotification*)note {
++  _omni.layer.borderColor = LineStrong().CGColor;
++}
++- (void)controlTextDidEndEditing:(NSNotification*)note {
++  _omni.layer.borderColor = Line().CGColor;
++  _address.stringValue = [self displayURL];
++}
++
++- (void)run:(void (*)(AgensWindow*))action {
++  if (_window) action(_window);
++}
++- (void)reloadOrStop {
++  [self run:_loading ? agens_window_stop : agens_window_reload];
++}
++- (void)activate:(int)index {
++  if (_window) agens_window_activate_tab(_window, index);
++}
++- (void)close:(int)index {
++  if (_window) agens_window_close_tab(_window, index);
++}
++- (void)go:(NSTextField*)sender {
++  if (_window && sender.stringValue.length) agens_window_navigate(_window, sender.stringValue.UTF8String);
++}
 +- (void)detach {
 +  if (_window) agens_window_set_tabs_observer(_window, nullptr, nullptr);
 +  _window = nullptr;
 +}
-+
 +- (void)focusAddress {
++  _address.stringValue = _url;  // the full address while editing
 +  [self.window makeFirstResponder:_address];
-+}
-+
-+- (void)setTabs:(const AgensTab*)tabs count:(int)count {
-+  for (NSView* v in [_tabs.arrangedSubviews copy]) {
-+    [_tabs removeArrangedSubview:v];
-+    [v removeFromSuperview];
-+  }
-+  NSString* activeURL = @"";
-+  for (int i = 0; i < count; ++i) {
-+    NSString* title = @(tabs[i].title);
-+    if (tabs[i].active) activeURL = @(tabs[i].url);
-+    NSButton* tab = [NSButton buttonWithTitle:title.length ? title : @"Nova aba"
-+                                       target:self
-+                                       action:@selector(activate:)];
-+    tab.tag = i;
-+    tab.bordered = NO;
-+    tab.alignment = NSTextAlignmentLeft;
-+    tab.lineBreakMode = NSLineBreakByTruncatingTail;
-+    tab.contentTintColor = Hex(0xF2F2F4);
-+    tab.font = [NSFont systemFontOfSize:13
-+                                 weight:tabs[i].active ? NSFontWeightMedium : NSFontWeightRegular];
-+    [tab setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
-+                                  forOrientation:NSLayoutConstraintOrientationHorizontal];
-+    NSButton* close = [self symbol:@"xmark" label:@"Fechar aba" tag:i action:@selector(close:)];
-+    NSStackView* row = [NSStackView stackViewWithViews:@[ tab, close ]];
-+    row.edgeInsets = NSEdgeInsetsMake(6, 10, 6, 10);
-+    row.wantsLayer = YES;
-+    row.layer.cornerRadius = 8;
-+    row.layer.backgroundColor =
-+        tabs[i].active ? Hex(0xFFFFFF, 0.08).CGColor : NSColor.clearColor.CGColor;
-+    row.accessibilityRole = NSAccessibilityRowRole;
-+    [_tabs addArrangedSubview:row];
-+    [row.widthAnchor constraintEqualToAnchor:_tabs.widthAnchor].active = YES;
-+  }
-+  // Don't overwrite what the person is typing.
-+  if (_address.currentEditor == nil) _address.stringValue = activeURL;
-+}
-+
-+- (void)activate:(NSButton*)sender {
-+  if (_window) agens_window_activate_tab(_window, (int)sender.tag);
-+}
-+- (void)close:(NSButton*)sender {
-+  if (_window) agens_window_close_tab(_window, (int)sender.tag);
-+}
-+- (void)command:(NSButton*)sender {
-+  if (!_window) return;
-+  switch (sender.tag) {
-+    case kBack: agens_window_back(_window); break;
-+    case kForward: agens_window_forward(_window); break;
-+    case kReload: agens_window_reload(_window); break;
-+    case kNewTab: agens_window_new_tab(_window); break;
-+  }
-+}
-+- (void)go:(NSTextField*)sender {
-+  if (_window) agens_window_navigate(_window, sender.stringValue.UTF8String);
 +}
 +@end
 +
 +extern "C" {
 +
-+void* agens_ui_create_sidebar(AgensWindow* window) {
-+  return (__bridge_retained void*)[[AgensSidebar alloc] initWithWindow:window];
++void* agens_ui_create_chrome(AgensWindow* window) {
++  return (__bridge_retained void*)[[AgensChrome alloc] initWithWindow:window];
 +}
-+void agens_ui_focus_address(void* sidebar) {
-+  [(__bridge AgensSidebar*)sidebar focusAddress];
++AgensRect agens_ui_layout(void* chrome, int width, int height) {
++  return [(__bridge AgensChrome*)chrome layoutForWidth:width height:height];
 +}
-+void agens_ui_destroy_sidebar(void* sidebar) {
-+  [(__bridge AgensSidebar*)sidebar detach];
++void agens_ui_focus_address(void* chrome) {
++  [(__bridge AgensChrome*)chrome focusAddress];
++}
++void agens_ui_destroy_chrome(void* chrome) {
++  [(__bridge AgensChrome*)chrome detach];
 +}
 +
 +}  // extern "C"
 diff --git a/chrome/browser/ui/webui_browser/BUILD.gn b/chrome/browser/ui/webui_browser/BUILD.gn
-index db2aba2a32..10da89e4d7 100644
+index db2aba2a32..4b76f46b66 100644
 --- a/chrome/browser/ui/webui_browser/BUILD.gn
 +++ b/chrome/browser/ui/webui_browser/BUILD.gn
 @@ -80,7 +80,13 @@ source_set("impl") {
@@ -504,7 +782,7 @@ index db2aba2a32..10da89e4d7 100644
 +      "//chrome/browser/agens/embed/agens_embed.h",
 +      "//chrome/browser/agens/embed/native_shell.h",
 +      "//chrome/browser/agens/embed/native_shell_mac.mm",
-+      "//chrome/browser/agens/ui/sidebar_mac.mm",
++      "//chrome/browser/agens/ui/chrome_mac.mm",
 +      "webui_browser_window_mac.mm",
 +    ]
    }
@@ -655,6 +933,28 @@ index f83d197409..1507c0b06f 100644
  }
  
  WebUIBrowserSidePanelUI* WebUIBrowserWindow::GetWebUIBrowserSidePanelUI() {
+diff --git a/chrome/browser/ui/webui_browser/webui_browser_window_mac.mm b/chrome/browser/ui/webui_browser/webui_browser_window_mac.mm
+index 7188576c05..3a6546a9c8 100644
+--- a/chrome/browser/ui/webui_browser/webui_browser_window_mac.mm
++++ b/chrome/browser/ui/webui_browser/webui_browser_window_mac.mm
+@@ -7,6 +7,7 @@
+ #import <AppKit/AppKit.h>
+ 
+ #include "build/build_config.h"
++#include "chrome/browser/agens/embed/native_shell.h"
+ #include "chrome/app/chrome_command_ids.h"
+ #include "chrome/browser/apps/app_shim/app_shim_host_mac.h"
+ #include "chrome/browser/apps/app_shim/app_shim_manager_mac.h"
+@@ -177,7 +178,8 @@ void PopulateCreateWindowParams(
+   void GetWindowFrameTitlebarHeight(bool* override_titlebar_height,
+                                     float* titlebar_height) override {
+     *override_titlebar_height = true;
+-    *titlebar_height = 40;
++    // agens: the traffic lights center on our 52 pt toolbar.
++    *titlebar_height = agens::IsNativeShellEnabled() ? 52 : 40;
+   }
+ 
+   raw_ptr<BrowserWindowInterface> browser_;
 diff --git a/chrome/common/chrome_features.cc b/chrome/common/chrome_features.cc
 index 42e1a94e45..bc8a3c882b 100644
 --- a/chrome/common/chrome_features.cc
