@@ -422,8 +422,8 @@ const HISTORY = [
   ["Ontem", "16:20", "Just Chatting - Twitch", "twitch.tv", "T", C[0]],
   ["Sábado, 7 de novembro", "14:03", "SugiyamaLabs/agens", "github.com", "GH", C[2]],
 ];
-const prefs = { bmbar: true, dense: false, sleepAfter: "5", sleepOn: true, search: "DuckDuckGo", restore: true, adblock: true, adlevel: "padrao", annoy: true,
-  startup: "continuar", lang: "Português (Brasil)", zoom: "100%", font: "Médio", minFont: "Nenhum", cookies: "Bloquear", dns: "Do sistema" };
+const prefs = { bmbar: true, dense: false, sleepAfter: "5", sleepOn: true, search: "DuckDuckGo", restore: true, adblock: true, adlevel: "forte", annoy: true,
+  startup: "continuar", lang: "Português (Brasil)", zoom: "100%", font: "Médio", minFont: "Nenhum", cookies: "Bloquear", dns: "Quad9 (criptografado)" };
 let settingsSection = "aparencia", historyQuery = "";
 // Spaces: cada time tem as próprias abas e a aba ativa
 const SPACE_TABS = {
@@ -596,7 +596,7 @@ const INTERNAL = {
       <div class="group"><div class="opt"><span class="lbl">Sites que nunca dormem<small>twitch.tv/gaules</small></span><button class="btn sm">Adicionar…</button></div></div>`,
       bloqueador: `<h2>Bloqueador</h2><p class="lead">Nativo, dentro do Agens: não é extensão e não gasta memória por aba.</p><div class="group">
         <div class="opt"><span class="lbl">Bloquear anúncios e rastreadores<small>Hoje: <span class="mono">1.284</span> bloqueados · <span class="mono">~38 MB</span> de memória e <span class="mono">96 MB</span> de dados poupados.</small></span>${sw("adblock", prefs.adblock, "Bloquear anúncios e rastreadores")}</div>
-        <div class="opt"><span class="lbl">Nível<small>Padrão quebra quase nenhum site.</small></span>${segHTML("adlevel", [["padrao", "Padrão"], ["forte", "Forte"]], prefs.adlevel)}</div>
+        <div class="opt"><span class="lbl">Nível<small>Forte vem ligado. Se um site quebrar, libere só ele.</small></span>${segHTML("adlevel", [["padrao", "Padrão"], ["forte", "Forte"]], prefs.adlevel)}</div>
         <div class="opt"><span class="lbl">Avisos de cookies e pop-ups de "fique por dentro"</span>${sw("annoy", prefs.annoy, "Esconder avisos de cookies")}</div>
         <div class="opt"><span class="lbl">Listas<small>EasyList, EasyPrivacy e as do uBlock Origin. Vêm junto com cada atualização do Agens: o bloqueador não baixa nada sozinho.</small></span></div>
       </div><div class="group"><div class="opt"><span class="lbl">Sites liberados<small>twitch.tv/gaules (apoiar o canal)</small></span><button class="btn sm">Adicionar…</button></div></div>`,
@@ -606,7 +606,7 @@ const INTERNAL = {
         <div class="opt"><span class="lbl">Avisar antes de sair com várias abas<small>⌘Q pede confirmação.</small></span>${tog("warnQuit", "Avisar antes de sair")}</div>
       </div>`,
       permissoes: `<h2>Permissões dos sites</h2><p class="lead">O padrão vale para todos os sites; cada site pode ter a sua exceção.</p><div class="group">
-        ${[["Câmera", "Perguntar"], ["Microfone", "Perguntar"], ["Localização", "Perguntar"], ["Notificações", "Perguntar"], ["Pop-ups e redirecionamentos", "Bloquear"], ["Som", "Permitir"], ["Reprodução automática com som", "Bloquear"], ["Área de transferência", "Perguntar"], ["Downloads automáticos", "Perguntar"], ["JavaScript", "Permitir"], ["Conteúdo protegido (DRM)", "Permitir"]].map(([n, v]) => `<div class="opt"><span class="lbl">${n}</span><select class="sel" aria-label="${n}"><option ${v === "Perguntar" ? "selected" : ""}>Perguntar</option><option ${v === "Permitir" ? "selected" : ""}>Permitir</option><option ${v === "Bloquear" ? "selected" : ""}>Bloquear</option></select></div>`).join("")}
+        ${[["Câmera", "Perguntar"], ["Microfone", "Perguntar"], ["Localização", "Bloquear"], ["Notificações", "Bloquear"], ["Pop-ups e redirecionamentos", "Bloquear"], ["Som", "Permitir"], ["Reprodução automática com som", "Bloquear"], ["Área de transferência", "Perguntar"], ["Downloads automáticos", "Perguntar"], ["JavaScript", "Permitir"], ["Conteúdo protegido (DRM)", "Permitir"]].map(([n, v]) => `<div class="opt"><span class="lbl">${n}</span><select class="sel" aria-label="${n}"><option ${v === "Perguntar" ? "selected" : ""}>Perguntar</option><option ${v === "Permitir" ? "selected" : ""}>Permitir</option><option ${v === "Bloquear" ? "selected" : ""}>Bloquear</option></select></div>`).join("")}
       </div><div class="group"><div class="opt"><span class="lbl">Exceções por site<small>meet.google.com · câmera e microfone permitidos</small></span><button class="btn sm">Ver todas</button></div></div>`,
       senhas: `<h2>Senhas e preenchimento</h2><div class="group">
         <div class="opt"><span class="lbl">Oferecer para salvar senhas<small>Guardadas no Keychain do Mac, por perfil.</small></span>${tog("savePw", "Oferecer para salvar senhas")}</div>
@@ -654,14 +654,18 @@ const INTERNAL = {
         <div class="opt"><span class="lbl">Importar favoritos e senhas<small>Do Brave, Chrome ou Safari, para o perfil em uso.</small></span><button class="btn sm">Importar…</button></div></div>`,
       busca: `<h2>Busca</h2><div class="group"><div class="opt"><span class="lbl">Buscador da barra de endereço</span><select class="sel" data-sel="search" aria-label="Buscador">${["DuckDuckGo", "Google", "Bing", "Brave Search", "Kagi"].map(o => `<option ${prefs.search === o ? "selected" : ""}>${o}</option>`).join("")}</select></div>
         <div class="opt"><span class="lbl">Sugestões enquanto digita<small>Vêm do histórico e dos favoritos deste Mac. Não pergunta nada ao buscador.</small></span>${sw("x2", true, "Sugestões locais")}</div></div>`,
-      privacidade: `<h2>Privacidade</h2><div class="group">
+      privacidade: `<h2>Privacidade e segurança</h2><p class="lead">Tudo no máximo desde a primeira vez que o Agens abre. Você só afrouxa o que quiser, site por site.</p><div class="group">
         <div class="opt"><span class="lbl">Telemetria<small>Não existe. O navegador parado faz zero conexões (medido, docs/sem-telemetria.md).</small></span><span style="color:var(--mute)">Desligada sempre</span></div>
         <div class="opt"><span class="lbl">Cookies de terceiros</span>${sel("cookies", ["Bloquear", "Bloquear na janela anônima", "Permitir"], "Cookies de terceiros")}</div>
         <div class="opt"><span class="lbl">Sempre usar conexão segura (HTTPS)<small>Avisa antes de abrir um site sem HTTPS.</small></span>${tog("https", "Sempre HTTPS")}</div>
-        <div class="opt"><span class="lbl">DNS seguro<small>Usa o DNS do sistema; dá para escolher um provedor com DNS over HTTPS.</small></span>${sel("dns", ["Do sistema", "Cloudflare (1.1.1.1)", "Quad9", "NextDNS"], "DNS seguro")}</div>
-        <div class="opt"><span class="lbl">Pedir aos sites para não rastrear</span>${tog("gpc", "Global Privacy Control")}</div>
+        <div class="opt"><span class="lbl">DNS seguro<small>Criptografado por padrão, para o provedor de internet não ver os sites que você abre.</small></span>${sel("dns", ["Quad9 (criptografado)", "Cloudflare (criptografado)", "NextDNS (criptografado)", "Do sistema (sem criptografia)"], "DNS seguro")}</div>
+        <div class="opt"><span class="lbl">Pedir aos sites para não rastrear<small>Global Privacy Control.</small></span>${tog("gpc", "Global Privacy Control")}</div>
+        <div class="opt"><span class="lbl">Proteção contra impressão digital<small>Os sites não conseguem te reconhecer pelo jeito do seu Mac (fontes, tela, placa de vídeo).</small></span>${tog("fp", "Proteção contra impressão digital")}</div>
+        <div class="opt"><span class="lbl">Tirar rastreadores dos links<small>Remove utm_, fbclid, gclid e parecidos ao abrir um link.</small></span>${tog("strip", "Tirar rastreadores dos links")}</div>
+        <div class="opt"><span class="lbl">Não revelar o IP local em chamadas de vídeo<small>WebRTC só pela rota padrão.</small></span>${tog("webrtc", "Proteger IP no WebRTC")}</div>
+        <div class="opt"><span class="lbl">Enviar só o domínio de onde você veio<small>Os sites não veem a página exata que te mandou para lá.</small></span>${tog("referrer", "Referenciador mínimo")}</div>
         <div class="opt"><span class="lbl">Navegação segura<small>Listas de sites perigosos que vêm com cada atualização, verificadas no próprio Mac.</small></span>${tog("safe", "Navegação segura local")}</div>
-        <div class="opt"><span class="lbl">Ao fechar, apagar<small>Histórico, cookies e cache, por perfil.</small></span><button class="btn sm">Escolher…</button></div>
+        <div class="opt"><span class="lbl">Ao fechar, apagar<small>Histórico, cookies e cache, por perfil. Desligado: apagar cookies tira você de todos os logins.</small></span><button class="btn sm">Escolher…</button></div>
         <div class="opt"><span class="lbl">Apagar dados de navegação</span><button class="btn sm" data-act="clearhist">Apagar…</button></div></div>`,
       sobre: `<h2>Sobre</h2><div class="group"><div class="opt"><span class="logo" style="background:var(--hi);width:28px;height:28px;border-radius:calc(8px * var(--round))"><svg viewBox="21 21 128 128" width="22" height="22" aria-hidden="true"><defs><mask id="am"><rect width="200" height="200" fill="#fff"/><circle cx="52" cy="52" r="34" fill="#000"/></mask></defs><rect x="52" y="52" width="92" height="92" rx="24" fill="#0B0B0D" mask="url(#am)"/><circle cx="52" cy="52" r="26" fill="#F7A95C"/></svg></span><span class="lbl">Agens<small>Versão <span class="mono">1.0.0 (156)</span> · SugiyamaLabs</small></span><span style="color:var(--mute)">Atualizado</span></div>
         <div class="opt"><span class="lbl">Avisos de código aberto<small>As licenças dos projetos que o Agens usa por dentro.</small></span><button class="btn sm">Ver</button></div>
