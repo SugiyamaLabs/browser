@@ -178,6 +178,69 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 .btn:hover { filter: brightness(1.08); }
 .sleeping-page { height: 100%; display: grid; place-items: center; text-align: center; color: var(--text-2); }
 
+/* Favoritos */
+.star { width: 24px; height: 24px; margin-right: -6px; border-radius: var(--radius-sm); display: grid; place-items: center; color: var(--text-3); }
+.star:hover { background: var(--hover); color: var(--text-2); }
+.star.on { color: #f5a524; }
+.star.on .icon { fill: currentColor; }
+.bmbar { height: 32px; display: flex; align-items: center; gap: 2px; padding: 0 var(--space-3); flex: none; background: var(--active-tab); border-bottom: 1px solid var(--line); overflow: hidden; }
+.layout-side .bmbar { background: transparent; border: 0; padding-left: var(--space-3); }
+.bm { height: 24px; display: flex; align-items: center; gap: var(--space-2); padding: 0 var(--space-3); border-radius: var(--radius-sm); color: var(--text-2); font-size: var(--text-sm); white-space: nowrap; }
+.bm:hover { background: var(--hover); color: var(--text); }
+.bm .fav { width: 14px; height: 14px; font-size: 8px; border-radius: 3px; }
+.bm-folder .icon { width: 14px; height: 14px; }
+
+/* Páginas internas (navegador://) */
+.ip { max-width: 820px; margin: 0 auto; padding: 32px var(--space-6) 48px; }
+.ip-head { display: flex; align-items: center; gap: var(--space-4); margin-bottom: var(--space-5); }
+.ip-head h1 { font-size: var(--text-xl); font-weight: 600; margin: 0; letter-spacing: -.01em; flex: 1; }
+.search { height: 32px; display: flex; align-items: center; gap: var(--space-3); padding: 0 var(--space-4); border-radius: var(--radius-md); background: var(--surface-2); color: var(--text-2); width: 280px; }
+.search input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; font: inherit; color: var(--text); }
+.search:focus-within { box-shadow: 0 0 0 2px var(--focus); }
+.day { font-size: var(--text-xs); font-weight: 600; color: var(--text-2); text-transform: uppercase; letter-spacing: .05em; margin: var(--space-5) 0 var(--space-2); }
+.row { display: flex; align-items: center; gap: var(--space-4); padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); }
+.row:hover { background: var(--hover); }
+.row .time { width: 44px; color: var(--text-3); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+.row .t { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row .d { color: var(--text-3); font-size: var(--text-sm); }
+.row .rm { opacity: 0; } .row:hover .rm { opacity: 1; }
+.ghost { height: 30px; padding: 0 var(--space-4); border-radius: var(--radius-md); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); }
+.ghost:hover { background: var(--hover); }
+.ghost.danger { color: var(--danger); }
+.empty { color: var(--text-3); padding: var(--space-6) 0; text-align: center; }
+.folder { display: flex; align-items: center; gap: var(--space-3); font-weight: 600; margin: var(--space-5) 0 var(--space-2); }
+
+.settings { display: grid; grid-template-columns: 200px 1fr; height: 100%; }
+.snav { padding: 32px var(--space-3); border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: 2px; }
+.snav h1 { font-size: var(--text-lg); font-weight: 600; margin: 0 var(--space-3) var(--space-4); }
+.snav button { height: 30px; padding: 0 var(--space-3); border-radius: var(--radius-md); text-align: left; color: var(--text-2); }
+.snav button:hover { background: var(--hover); }
+.snav button[aria-current="page"] { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--text); font-weight: 500; }
+.spane { padding: 32px 40px 48px; overflow: auto; max-width: 720px; }
+.spane h2 { font-size: var(--text-xl); font-weight: 600; margin: 0 0 var(--space-5); letter-spacing: -.01em; }
+.group { border-radius: var(--radius-lg); background: var(--surface-2); margin-bottom: var(--space-5); }
+.opt { display: flex; align-items: center; gap: var(--space-5); padding: var(--space-4) var(--space-5); border-top: 1px solid var(--line); min-height: 52px; }
+.opt:first-child { border-top: 0; }
+.opt .lbl { flex: 1; }
+.opt .lbl small { display: block; color: var(--text-2); font-size: var(--text-sm); margin-top: 2px; }
+.opt .seg { background: var(--surface); }
+.opt .seg button { padding: 0 var(--space-4); flex: none; }
+.opt .seg button[aria-pressed="true"] { background: var(--surface-2); }
+.switch { width: 38px; height: 22px; border-radius: 11px; background: var(--text-3); position: relative; flex: none; transition: background var(--dur) var(--ease); }
+.switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.25); transition: transform var(--dur) var(--ease); }
+.switch[aria-checked="true"] { background: var(--accent); }
+.switch[aria-checked="true"]::after { transform: translateX(16px); }
+select.sel { height: 28px; padding: 0 var(--space-3); border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--surface); color: var(--text); font: inherit; }
+.swatches { display: flex; gap: var(--space-2); }
+.sw { width: 22px; height: 22px; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(0,0,0,.1); }
+.sw[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--surface-2), 0 0 0 4px var(--text-2); }
+.note { color: var(--text-2); font-size: var(--text-sm); margin: calc(-1 * var(--space-3)) 0 var(--space-5) var(--space-2); }
+
+/* Densidade compacta */
+.dense .tabstrip { height: 32px; } .dense .ttab { height: 27px; }
+.dense .toolbar { height: 38px; } .dense .omni-field { height: 26px; }
+.dense .bmbar { height: 28px; } .dense .stab { height: 28px; }
+
 /* ===== Menu de perfis ===== */
 .menu { position: fixed; z-index: 20; width: 260px; padding: var(--space-2); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-pop); display: none; }
 .menu.open { display: block; }
@@ -218,6 +281,10 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
   <symbol id="i-chev" viewBox="0 0 16 16"><path d="m4.5 6.5 3.5 3.5 3.5-3.5"/></symbol>
   <symbol id="i-play" viewBox="0 0 16 16"><path d="M5 3.5v9l7-4.5z" fill="currentColor" stroke="none"/></symbol>
   <symbol id="i-wifi" viewBox="0 0 24 24"><path d="M2 8.5a15 15 0 0 1 20 0M5 12a10.5 10.5 0 0 1 14 0M8.5 15.5a5.5 5.5 0 0 1 7 0M12 19h.01"/><path d="m3 3 18 18"/></symbol>
+  <symbol id="i-star" viewBox="0 0 16 16"><path d="m8 2 1.8 3.8 4.2.5-3.1 2.9.8 4.1L8 11.3l-3.7 2 .8-4.1L2 6.3l4.2-.5z"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 16 16"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.6l1.4 1.5h5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5"/><path d="M8 5v3l2 1.5"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2"/><path d="M8 1.8v1.6M8 12.6v1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M1.8 8h1.6M12.6 8h1.6M3.6 12.4l1.1-1.1M11.3 4.7l1.1-1.1"/></symbol>
   <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></symbol>
 </svg>
 
@@ -238,12 +305,14 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
         <label class="omni-field">
           <svg class="icon lock" id="omniIcon"><use href="#i-lock"/></svg>
           <input id="omniInput" aria-label="Endereço e busca (⌘L)" autocomplete="off" spellcheck="false">
+          <button class="star" id="star" aria-label="Adicionar aos favoritos (⌘D)" aria-pressed="false" data-act="star"><svg class="icon"><use href="#i-star"/></svg></button>
         </label>
         <div class="suggest" role="listbox" aria-label="Sugestões" id="suggest"></div>
       </div>
       <button class="profile-chip" aria-label="Trocar de perfil" aria-haspopup="menu" data-act="profiles" id="profileChip"><span class="avatar" id="chipAvatar"></span><span id="chipName"></span></button>
-      <button class="tbtn" aria-label="Menu"><svg class="icon"><use href="#i-menu"/></svg></button>
+      <button class="tbtn" aria-label="Menu" aria-haspopup="menu" data-act="mainmenu"><svg class="icon"><use href="#i-menu"/></svg></button>
     </div>
+    <nav class="bmbar" id="bmbar" aria-label="Barra de favoritos"></nav>
     <div class="loadbar" aria-hidden="true"></div>
     <div class="body">
       <nav class="sidebar" aria-label="Abas na lateral">
@@ -276,9 +345,10 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
       <div class="seg" data-group="screen"><button data-v="window" aria-pressed="true">Janela</button><button data-v="full">Tela cheia</button></div>
     </fieldset>
     <ul>
+      <li>Menu <b>⋯</b>: favoritos, histórico e configurações. Estrela na barra: favoritar a aba.</li>
       <li>Passe o mouse numa aba: cartão com a memória dela.</li>
       <li>Abas cinza com a lua: dormindo (#24). Clique para acordar.</li>
-      <li><kbd>⌘L</kbd> barra · <kbd>⌘T</kbd> nova aba · <kbd>⌘⇧S</kbd> lateral · <kbd>⌘1–9</kbd> aba · <kbd>⌃⇥</kbd> próxima · <kbd>⌘⇧P</kbd> perfil</li>
+      <li><kbd>⌘L</kbd> barra · <kbd>⌘T</kbd> nova aba · <kbd>⌘⇧S</kbd> lateral · <kbd>⌘1–9</kbd> aba · <kbd>⌃⇥</kbd> próxima · <kbd>⌘⇧P</kbd> perfil · <kbd>⌘D</kbd> favoritar · <kbd>⌘⇧B</kbd> barra de favoritos · <kbd>⌘Y</kbd> histórico · <kbd>⌘,</kbd> configurações</li>
     </ul>
     <div class="mem"><span>Memória (simulada)</span><b id="memTotal">—</b></div>
   </aside>
@@ -306,6 +376,29 @@ let tabs = [
   { t: "counter strike - YouTube", u: "youtube.com/results?search_query=counter+strike", l: "▶", c: C[1], kind: "article", sleeping: true, mem: 0, was: 210 },
   { t: "alanzoka - Twitch", u: "twitch.tv/alanzoka", l: "A", c: C[0], kind: "live", live: true, sleeping: true, mem: 0, was: 380 },
 ];
+let bookmarks = [
+  { t: "gaules", u: "twitch.tv/gaules", l: "G", c: C[0], f: "Lives" },
+  { t: "alanzoka", u: "twitch.tv/alanzoka", l: "A", c: C[0], f: "Lives" },
+  { t: "Lofi Girl", u: "youtube.com/watch?v=jfKfPfyJRdk", l: "▶", c: C[1], f: "Lives" },
+  { t: "nodejs/node", u: "github.com/nodejs/node/pulls", l: "GH", c: C[2] },
+  { t: "MDN", u: "developer.mozilla.org/docs/Web/JavaScript", l: "M", c: C[3] },
+  { t: "Agens", u: "github.com/SugiyamaLabs/agens", l: "GH", c: C[2], f: "Trabalho" },
+  { t: "Board do navegador", u: "github.com/orgs/SugiyamaLabs/projects/3", l: "GH", c: C[2], f: "Trabalho" },
+];
+const HISTORY = [
+  ["Hoje", "21:42", "Lofi Girl - lofi hip hop radio", "youtube.com", "▶", C[1]],
+  ["Hoje", "21:30", "gaules - Twitch", "twitch.tv", "G", C[0]],
+  ["Hoje", "20:58", "Pull requests · nodejs/node", "github.com", "GH", C[2]],
+  ["Hoje", "20:41", "JavaScript | MDN", "developer.mozilla.org", "M", C[3]],
+  ["Hoje", "19:12", "UOL - O melhor conteúdo", "uol.com.br", "U", C[4]],
+  ["Hoje", "18:05", "Google Maps", "google.com/maps", "Ma", C[5]],
+  ["Ontem", "23:10", "alanzoka - Twitch", "twitch.tv", "A", C[0]],
+  ["Ontem", "22:47", "counter strike - YouTube", "youtube.com", "▶", C[1]],
+  ["Ontem", "16:20", "Just Chatting - Twitch", "twitch.tv", "T", C[0]],
+  ["Sábado, 7 de novembro", "14:03", "SugiyamaLabs/agens", "github.com", "GH", C[2]],
+];
+const prefs = { bmbar: true, dense: false, sleepAfter: "5", sleepOn: true, search: "DuckDuckGo", restore: true };
+let settingsSection = "aparencia", historyQuery = "";
 let active = 1, profile = 0, state = "normal";
 const $ = s => document.querySelector(s), win = $("#win"), root = document.documentElement;
 const esc = s => s.replace(/[&<>"]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
@@ -329,7 +422,13 @@ function render() {
   $("#chipName").textContent = p.name; $("#sideName").textContent = p.name;
   const tab = tabs[active];
   $("#omniInput").value = tab ? tab.u : "";
-  $("#omniIcon").innerHTML = `<use href="#${tab ? "i-lock" : "i-search"}"/>`;
+  const starred = !!tab && tab.kind !== "internal" && bookmarks.some(b => b.u === tab.u);
+  $("#star").hidden = !tab || tab.kind === "internal";
+  $("#star").classList.toggle("on", starred); $("#star").setAttribute("aria-pressed", starred);
+  $("#star").setAttribute("aria-label", starred ? "Remover dos favoritos (⌘D)" : "Adicionar aos favoritos (⌘D)");
+  $("#bmbar").hidden = !prefs.bmbar; win.classList.toggle("dense", prefs.dense);
+  renderBmBar();
+  $("#omniIcon").innerHTML = `<use href="#${!tab ? "i-search" : tab.kind === "internal" ? "i-gear" : "i-lock"}"/>`;
   win.classList.toggle("loading", state === "loading");
   $("#reloadBtn").innerHTML = `<svg class="icon"><use href="#${state === "loading" ? "i-stop" : "i-reload"}"/></svg>`;
   renderContent();
@@ -339,6 +438,7 @@ function render() {
 
 function renderContent() {
   const tab = tabs[active], c = $("#content");
+  if (tab && tab.kind === "internal") { c.innerHTML = INTERNAL[tab.page](); return; }
   if (!tab) {
     c.innerHTML = `<div class="ntp"><div class="ntp-inner"><h1>Boa tarde</h1>
       <label class="omni-field"><svg class="icon"><use href="#i-search"/></svg><input aria-label="Buscar ou digitar endereço" placeholder="Buscar ou digitar endereço"></label>
@@ -371,6 +471,108 @@ function select(i) {
     setTimeout(() => { state = "normal"; syncSeg("state", "normal"); render(); }, 900);
     return;
   }
+  render();
+}
+function renderBmBar() {
+  const loose = bookmarks.filter(b => !b.f), folders = [...new Set(bookmarks.filter(b => b.f).map(b => b.f))];
+  $("#bmbar").innerHTML = folders.map(f => `<button class="bm bm-folder" data-folder="${esc(f)}" aria-haspopup="menu"><svg class="icon"><use href="#i-folder"/></svg>${esc(f)}</button>`).join("")
+    + loose.map(b => `<button class="bm" data-open="${esc(b.u)}">${fav(b)}${esc(b.t)}</button>`).join("");
+}
+function openUrl(u) {
+  const i = tabs.findIndex(t => t.u === u);
+  if (i >= 0) return select(i);
+  const b = bookmarks.find(x => x.u === u) || {};
+  tabs.push({ t: b.t || u, u, l: b.l || "•", c: b.c || C[7], kind: u.includes("twitch") || u.includes("watch") ? "live" : "article", live: u.includes("twitch.tv/") && !u.includes("directory"), mem: 180 });
+  select(tabs.length - 1);
+}
+const INTERNAL_URL = { history: "navegador://historico", bookmarks: "navegador://favoritos", settings: "navegador://configuracoes" };
+const INTERNAL_TITLE = { history: "Histórico", bookmarks: "Favoritos", settings: "Configurações" };
+function openInternal(page) {
+  const i = tabs.findIndex(t => t.page === page);
+  if (i >= 0) return select(i);
+  tabs.push({ t: INTERNAL_TITLE[page], u: INTERNAL_URL[page], l: page === "settings" ? "⚙" : page === "history" ? "◷" : "★", c: "#8e8e93", kind: "internal", page, mem: 40 });
+  select(tabs.length - 1);
+}
+function toggleStar() {
+  const tab = tabs[active]; if (!tab || tab.kind === "internal") return;
+  const i = bookmarks.findIndex(b => b.u === tab.u);
+  if (i >= 0) bookmarks.splice(i, 1); else bookmarks.push({ t: tab.t.split(" - ")[0], u: tab.u, l: tab.l, c: tab.c });
+  render();
+}
+const segHTML = (key, opts, cur) => `<div class="seg" role="group">${opts.map(([v, n]) => `<button data-pref="${key}" data-v="${v}" aria-pressed="${cur === v}">${n}</button>`).join("")}</div>`;
+const sw = (key, on, label) => `<button class="switch" role="switch" aria-checked="${on}" aria-label="${label}" data-toggle="${key}"></button>`;
+const INTERNAL = {
+  history() {
+    const q = historyQuery.toLowerCase(), rows = HISTORY.filter(h => !q || h[2].toLowerCase().includes(q) || h[3].includes(q));
+    let day = "", out = "";
+    for (const h of rows) {
+      if (h[0] !== day) { day = h[0]; out += `<div class="day">${esc(day)}</div>`; }
+      out += `<div class="row"><span class="time">${h[1]}</span><span class="fav" style="background:${h[5]}">${h[4]}</span><span class="t">${esc(h[2])}</span><span class="d">${esc(h[3])}</span><button class="tbtn rm" aria-label="Remover do histórico"><svg class="icon"><use href="#i-x"/></svg></button></div>`;
+    }
+    return `<div class="ip"><div class="ip-head"><h1>Histórico</h1>
+      <label class="search"><svg class="icon"><use href="#i-search"/></svg><input id="histQ" aria-label="Buscar no histórico" placeholder="Buscar no histórico" value="${esc(historyQuery)}"></label>
+      <button class="ghost danger" data-act="clearhist">Apagar histórico…</button></div>
+      ${out || '<div class="empty">Nada encontrado.</div>'}
+      <p class="note" style="margin-top:var(--space-6)">O histórico fica só neste Mac, por perfil. Nada vai para servidor nenhum.</p></div>`;
+  },
+  bookmarks() {
+    const groups = {}; for (const b of bookmarks) (groups[b.f || "Barra de favoritos"] ||= []).push(b);
+    return `<div class="ip"><div class="ip-head"><h1>Favoritos</h1>
+      <label class="search"><svg class="icon"><use href="#i-search"/></svg><input aria-label="Buscar nos favoritos" placeholder="Buscar nos favoritos"></label>
+      <button class="ghost">Nova pasta</button></div>
+      ${Object.entries(groups).map(([f, list]) => `<div class="folder"><svg class="icon" style="color:var(--text-2)"><use href="#i-folder"/></svg>${esc(f)}</div>`
+        + list.map(b => `<div class="row" data-open="${esc(b.u)}">${fav(b)}<span class="t">${esc(b.t)}</span><span class="d">${esc(b.u)}</span><button class="tbtn rm" aria-label="Remover ${esc(b.t)}" data-unbm="${esc(b.u)}"><svg class="icon"><use href="#i-x"/></svg></button></div>`).join("")).join("")}
+      <p class="note" style="margin-top:var(--space-6)">Arraste para reordenar ou mover entre pastas. Importar do Brave, Chrome ou Safari: Configurações › Perfis.</p></div>`;
+  },
+  settings() {
+    const S = { aparencia: "Aparência", abas: "Abas que dormem", perfis: "Perfis", busca: "Busca", privacidade: "Privacidade", sobre: "Sobre" };
+    const layout = win.classList.contains("layout-side") ? "side" : "top";
+    const theme = $('[data-group="theme"] [aria-pressed="true"]').dataset.v;
+    const pane = {
+      aparencia: `<h2>Aparência</h2><div class="group">
+        <div class="opt"><span class="lbl">Posição das abas<small>Troca na hora, sem reiniciar. Atalho ⌘⇧S.</small></span>${segHTML("layout", [["top", "Em cima"], ["side", "Na lateral"]], layout)}</div>
+        <div class="opt"><span class="lbl">Tema</span>${segHTML("theme", [["system", "Sistema"], ["light", "Claro"], ["dark", "Escuro"]], theme)}</div>
+        <div class="opt"><span class="lbl">Densidade<small>Compacta deixa a barra e as abas mais baixas.</small></span>${segHTML("dense", [["0", "Normal"], ["1", "Compacta"]], prefs.dense ? "1" : "0")}</div>
+        <div class="opt"><span class="lbl">Barra de favoritos<small>Atalho ⌘⇧B.</small></span>${sw("bmbar", prefs.bmbar, "Mostrar barra de favoritos")}</div>
+        <div class="opt"><span class="lbl">Cor do perfil<small>Tinge a janela e os destaques.</small></span><div class="swatches">${["#3b82f6", "#f59e0b", "#10b981", "#a855f7", "#e11d48", "#64748b"].map(col => `<button class="sw" style="background:${col}" aria-label="Cor ${col}" aria-pressed="${PROFILES[profile].color === col}" data-color="${col}"></button>`).join("")}</div></div>
+      </div>`,
+      abas: `<h2>Abas que dormem</h2><div class="group">
+        <div class="opt"><span class="lbl">Pôr abas para dormir<small>A aba escondida fecha o processo e guarda o estado. Ao voltar, recarrega.</small></span>${sw("sleepOn", prefs.sleepOn, "Pôr abas para dormir")}</div>
+        <div class="opt"><span class="lbl">Dormir depois de</span><select class="sel" data-sel="sleepAfter" aria-label="Dormir depois de">${["1", "2", "5", "15", "30", "60"].map(m => `<option value="${m}" ${prefs.sleepAfter === m ? "selected" : ""}>${m} min escondida</option>`).join("")}</select></div>
+      </div><p class="note">Nunca dormem: aba tocando som, usando câmera ou microfone, com formulário preenchido, enviando arquivo, fixada ou em Picture-in-Picture.</p>
+      <div class="group"><div class="opt"><span class="lbl">Sites que nunca dormem<small>twitch.tv/gaules</small></span><button class="ghost">Adicionar…</button></div></div>`,
+      perfis: `<h2>Perfis</h2><div class="group">${PROFILES.map((p, i) => `<div class="opt"><span class="avatar" style="background:${p.color}">${p.letter}</span><span class="lbl">${esc(p.name)}<small>${i === profile ? "Em uso" : p.asleep ? "Dormindo · 0 MB" : "Aberto"} · cookies, logins, extensões e histórico separados</small></span><button class="ghost">Editar</button></div>`).join("")}</div>
+        <div class="group"><div class="opt"><span class="lbl">Perfis fora de uso dormem<small>Só o perfil em uso fica carregado.</small></span>${sw("x", true, "Perfis fora de uso dormem")}</div>
+        <div class="opt"><span class="lbl">Importar favoritos e senhas<small>Do Brave, Chrome ou Safari, para o perfil em uso.</small></span><button class="ghost">Importar…</button></div></div>`,
+      busca: `<h2>Busca</h2><div class="group"><div class="opt"><span class="lbl">Buscador da barra de endereço</span><select class="sel" data-sel="search" aria-label="Buscador">${["DuckDuckGo", "Google", "Bing", "Brave Search", "Kagi"].map(o => `<option ${prefs.search === o ? "selected" : ""}>${o}</option>`).join("")}</select></div>
+        <div class="opt"><span class="lbl">Sugestões enquanto digita<small>Vêm do histórico e dos favoritos deste Mac. Não pergunta nada ao buscador.</small></span>${sw("x2", true, "Sugestões locais")}</div></div>`,
+      privacidade: `<h2>Privacidade</h2><div class="group">
+        <div class="opt"><span class="lbl">Telemetria<small>Não existe. O navegador parado faz zero conexões (medido, docs/sem-telemetria.md).</small></span><span style="color:var(--text-2)">Desligada sempre</span></div>
+        <div class="opt"><span class="lbl">Bloquear cookies de terceiros</span>${sw("x3", true, "Bloquear cookies de terceiros")}</div>
+        <div class="opt"><span class="lbl">Ao fechar, apagar<small>Histórico, cookies e cache, por perfil.</small></span><button class="ghost">Escolher…</button></div>
+        <div class="opt"><span class="lbl">Apagar dados de navegação</span><button class="ghost danger" data-act="clearhist">Apagar…</button></div></div>`,
+      sobre: `<h2>Sobre</h2><div class="group"><div class="opt"><span class="lbl">Navegador (nome provisório)<small>Chromium 156.0.8078.79 · base ungoogled-chromium · SugiyamaLabs</small></span><span style="color:var(--text-2)">Atualizado</span></div>
+        <div class="opt"><span class="lbl">Memória agora<small>${$("#memTotal").textContent} com ${tabs.length} abas</small></span></div></div>`,
+    }[settingsSection];
+    return `<div class="settings"><nav class="snav" aria-label="Seções"><h1>Configurações</h1>${Object.entries(S).map(([k, n]) => `<button data-section="${k}" aria-current="${settingsSection === k ? "page" : "false"}">${n}</button>`).join("")}</nav><div class="spane">${pane}</div></div>`;
+  },
+};
+function openMainMenu(anchor) {
+  const m = $("#menu");
+  m.innerHTML = [["newtab", "Nova aba", "⌘T"], ["bookmarks", "Favoritos", "⌘⌥B"], ["history", "Histórico", "⌘Y"], ["settings", "Configurações", "⌘,"]].map(([a, n, k]) => `<button class="mi" role="menuitem" data-menu="${a}">${n}<span class="k">${k}</span></button>`).join("")
+    + `<hr><button class="mi" role="menuitemcheckbox" aria-checked="${prefs.bmbar}" data-menu="bmbar">${prefs.bmbar ? "Ocultar" : "Mostrar"} barra de favoritos<span class="k">⌘⇧B</span></button>`;
+  const r = anchor.getBoundingClientRect();
+  m.style.top = r.bottom + 6 + "px"; m.style.left = Math.max(8, r.right - 260) + "px";
+  m.classList.add("open"); m.querySelector(".mi").focus();
+}
+function folderMenu(anchor, f) {
+  const m = $("#menu");
+  m.innerHTML = bookmarks.filter(b => b.f === f).map(b => `<button class="mi" role="menuitem" data-open="${esc(b.u)}">${fav(b)}${esc(b.t)}</button>`).join("");
+  const r = anchor.getBoundingClientRect(); m.style.top = r.bottom + 4 + "px"; m.style.left = r.left + "px"; m.classList.add("open");
+}
+function applyPref(key, v) {
+  if (key === "layout" || key === "theme") { syncSeg(key, v); set[key](v); }
+  if (key === "dense") prefs.dense = v === "1";
   render();
 }
 function closeTab(i) { tabs.splice(i, 1); if (active >= tabs.length) active = tabs.length - 1; if (active < 0) active = null; render(); }
@@ -437,6 +639,18 @@ document.addEventListener("click", e => {
   const p = e.target.closest("[data-p]"); if (p) { setProfile(+p.dataset.p); return; }
   const act = e.target.closest("[data-act]")?.dataset.act;
   if (act === "newtab") return newTab();
+  if (act === "star") { e.preventDefault(); return toggleStar(); }
+  if (act === "mainmenu") return openMainMenu(e.target.closest("[data-act]"));
+  if (act === "clearhist") { HISTORY.length = 0; return render(); }
+  const mi = e.target.closest("[data-menu]")?.dataset.menu;
+  if (mi) { $("#menu").classList.remove("open"); if (mi === "newtab") return newTab(); if (mi === "bmbar") { prefs.bmbar = !prefs.bmbar; return render(); } return openInternal(mi); }
+  const fo = e.target.closest("[data-folder]"); if (fo) return folderMenu(fo, fo.dataset.folder);
+  const ub = e.target.closest("[data-unbm]"); if (ub) { e.stopPropagation(); bookmarks = bookmarks.filter(b => b.u !== ub.dataset.unbm); return render(); }
+  const op = e.target.closest("[data-open]"); if (op) { $("#menu").classList.remove("open"); return openUrl(op.dataset.open); }
+  const sec = e.target.closest("[data-section]"); if (sec) { settingsSection = sec.dataset.section; return render(); }
+  const pr = e.target.closest("[data-pref]"); if (pr) return applyPref(pr.dataset.pref, pr.dataset.v);
+  const tg = e.target.closest("[data-toggle]"); if (tg) { const k = tg.dataset.toggle; if (k in prefs) prefs[k] = !prefs[k]; else tg.setAttribute("aria-checked", tg.getAttribute("aria-checked") !== "true"); return render(); }
+  const col = e.target.closest("[data-color]"); if (col) { PROFILES[profile].color = col.dataset.color; return render(); }
   if (act === "profiles") return openProfiles(e.target.closest("[data-act]"));
   if (act === "toggle-side") { const c = !win.classList.contains("collapsed"); syncSeg("collapse", c ? "collapsed" : "open"); return set.collapse(c ? "collapsed" : "open"); }
   if (act === "reload") { state = state === "loading" ? "normal" : "loading"; syncSeg("state", state); render(); return; }
@@ -451,12 +665,22 @@ document.addEventListener("keydown", e => {
   const k = e.key.toLowerCase();
   if (e.metaKey && k === "l") { input.focus(); e.preventDefault(); }
   else if (e.metaKey && k === "t") { newTab(); e.preventDefault(); }
+  else if (e.metaKey && k === "d") { toggleStar(); e.preventDefault(); }
+  else if (e.metaKey && k === "y") { openInternal("history"); e.preventDefault(); }
+  else if (e.metaKey && e.key === ",") { openInternal("settings"); e.preventDefault(); }
+  else if (e.metaKey && e.altKey && k === "b") { openInternal("bookmarks"); e.preventDefault(); }
+  else if (e.metaKey && e.shiftKey && k === "b") { prefs.bmbar = !prefs.bmbar; render(); e.preventDefault(); }
   else if (e.metaKey && e.shiftKey && k === "s") { const side = !win.classList.contains("layout-side"); syncSeg("layout", side ? "side" : "top"); set.layout(side ? "side" : "top"); e.preventDefault(); }
   else if (e.metaKey && e.shiftKey && k === "p") { openProfiles($("#win.layout-side") ? $(".side-profile") : $("#profileChip")); e.preventDefault(); }
   else if (e.metaKey && e.shiftKey && /^[1-4]$/.test(e.key)) { setProfile(+e.key - 1); e.preventDefault(); }
   else if (e.metaKey && /^[1-9]$/.test(e.key)) { select(e.key === "9" ? tabs.length - 1 : +e.key - 1); e.preventDefault(); }
   else if (e.ctrlKey && e.key === "Tab") { select(((active ?? -1) + (e.shiftKey ? -1 : 1) + tabs.length) % tabs.length); e.preventDefault(); }
 });
+
+document.addEventListener("input", e => {
+  if (e.target.id === "histQ") { historyQuery = e.target.value; const pos = e.target.selectionStart; render(); const q = $("#histQ"); q.focus(); q.setSelectionRange(pos, pos); }
+});
+document.addEventListener("change", e => { const k = e.target.dataset.sel; if (k) { prefs[k] = e.target.value; render(); } });
 
 set.theme("system");
 render();
