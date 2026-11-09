@@ -1,0 +1,2 @@
+# Our GN args, appended after ungoogled-chromium's flags.gn and flags.macos.gn.
+cc_wrapper = "ccache"
