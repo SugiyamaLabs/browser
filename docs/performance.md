@@ -8,7 +8,19 @@
 
 **Em número (09/11/2026):** o Brave usa 3.866 MB com as 20 abas, então a meta é **no máximo 1.933 MB**. Hoje o nosso usa 3.817 MB (99% do Brave): faltam **~1.880 MB** (−49%).
 
-As metas por área (por aba, por processo, perfil dormindo, UI nativa) saem da quebra por tipo de processo (renderer, GPU, rede, navegador), que é o próximo passo da #5.
+### Onde está a memória hoje (09/11/2026, 1 rodada de 3.674 MB, o nosso build oficial)
+
+| Tipo de processo | Hoje | % | Meta | Alavanca |
+|---|---|---|---|---|
+| Abas (renderers) | 3.178 MB | 86% | **≤ 1.450 MB** | abas que dormem (#8), teto de processos (#10), V8 (#11) |
+| GPU | 257 MB | 7% | ≤ 230 MB | menos vídeo decodificando em aba que não aparece (#8) |
+| Navegador (processo principal + UI) | 152 MB | 4% | ≤ 150 MB | a UI nativa não pode crescer isso (#6) |
+| Serviços (rede, armazenamento, áudio, captura de vídeo) | 127 MB | 3% | ≤ 100 MB | enxugar (#7): a captura de vídeo (27 MB) não devia estar viva sem câmera em uso |
+| **Total** | **3.674 MB** | | **≤ 1.930 MB** | |
+
+- Quase tudo está nas abas. A meta inteira depende de as abas em segundo plano (16 das 20 são vídeo ou live) dormirem.
+- A medição é feita 5 min depois de abrir as abas. Se a regra de dormir agir depois disso, a medição precisa de uma variante longa (por exemplo, 30 min), definida na #8.
+- Os números por tipo somam a memória de cada processo e podem contar duas vezes a memória compartilhada. Por isso a soma (3.714 MB) passa um pouco do total (3.674 MB).
 
 ## Alavancas
 

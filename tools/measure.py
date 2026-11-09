@@ -69,14 +69,27 @@ def descendants(root):
     return found
 
 
+def kind(pid):
+    """Process kind from its Chromium command line: browser, renderer, gpu-process, utility:<service>..."""
+    cmd = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout
+    t = next((a.split("=", 1)[1] for a in cmd.split() if a.startswith("--type=")), "browser")
+    sub = next((a.split("=", 1)[1] for a in cmd.split() if a.startswith("--utility-sub-type=")), "")
+    return f"{t}:{sub.split('.')[0]}" if sub else t
+
+
 def footprint(pids):
+    kinds = {p: kind(p) for p in pids}
     with tempfile.NamedTemporaryFile(suffix=".json") as f:
         args = ["footprint", "-j", f.name, "--noCategories"]
         for p in pids:
             args += ["-p", str(p)]
         subprocess.run(args, capture_output=True, check=True)
         d = json.load(open(f.name))
-    return d["total footprint"], len(d["processes"])
+    by_kind = {}
+    for proc in d["processes"]:  # per-process footprints; shared memory may be counted in more than one
+        k = kinds.get(proc["pid"], "?")
+        by_kind[k] = by_kind.get(k, 0) + proc["auxiliary"]["phys_footprint"] / 2**20
+    return d["total footprint"], len(d["processes"]), by_kind
 
 
 def cdp(path, method="GET"):
@@ -126,7 +139,8 @@ def one_run(exe, profile, urls, settle):
             urllib.request.urlopen(f"http://127.0.0.1:{PORT}/json/close/{t}", timeout=5).read()
         time.sleep(settle)
         pages = sum(1 for t in cdp("/json/list") if t["type"] == "page")
-        total, nproc = footprint(descendants(proc.pid))
+        total, nproc, by_kind = footprint(descendants(proc.pid))
+        print("by process kind (MB): " + json.dumps({k: round(v) for k, v in sorted(by_kind.items(), key=lambda x: -x[1])}), file=sys.stderr)
         return {"launch_s": launch_s, "total_mb": total / 2**20, "pages": pages, "processes": nproc}
     finally:
         quit_browser(proc)

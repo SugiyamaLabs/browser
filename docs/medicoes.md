@@ -14,3 +14,4 @@ Método em [performance.md](performance.md#método-de-medição). Cada linha é 
 - Rodadas do nosso: 3.817 / 3.937 / 3.734 MB.
 - O Brave bloqueia anúncios por padrão, e o nosso ainda não. Mesmo assim, os dois ficam praticamente iguais.
 - Speedometer 3 e bateria ainda não foram medidos.
+- Quebra por tipo de processo do nosso build (1 rodada, `tools/measure.py` imprime `by process kind`): abas 3.178 MB, GPU 257 MB, navegador 152 MB, rede 53 MB, captura de vídeo 27 MB, armazenamento 24 MB, áudio 23 MB. As metas por área estão em [performance.md](performance.md#onde-está-a-memória-hoje-09112026-1-rodada-de-3674-mb-o-nosso-build-oficial).
