@@ -1,9 +1,9 @@
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
 new file mode 100644
-index 0000000000..858411a1b7
+index 0000000000..edd467643e
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embed.h
-@@ -0,0 +1,317 @@
+@@ -0,0 +1,336 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The boundary between the engine and any interface (the browser's own chrome today, the Agens
 +// app later). Plain C on purpose: no Chromium or C++ types cross it, Swift imports it as is, and
@@ -34,6 +34,8 @@ index 0000000000..858411a1b7
 +  int muted;       // sound turned off by the person
 +  int error;               // the page failed to load: Chromium's net error (e.g. -106), else 0
 +  const char* error_name;  // e.g. "ERR_INTERNET_DISCONNECTED", "" when none
++  int camera;      // the page is using the camera now
++  int microphone;  // the page is using the microphone now
 +} AgensTab;
 +
 +// Things the window's menu opens (Chromium's own pages for now).
@@ -270,6 +272,21 @@ index 0000000000..858411a1b7
 +// Cookies and storage of the active page's site only.
 +void agens_site_clear_data(AgensWindow* window, AgensDoneFn done, void* context);
 +
++// The extensions button (toolbar): this ato's enabled extensions, with their icons. Called now
++// and on every change; `installed` is the id of one that was just installed, else "".
++typedef struct {
++  const char* id;
++  const char* name;
++  const unsigned char* icon_png;  // 32x32, null until loaded
++  int icon_png_size;
++} AgensExtensionButton;
++typedef void (*AgensExtensionButtonsChanged)(void* context, const AgensExtensionButton* list, int count,
++                                             const char* installed);
++void agens_window_set_extension_buttons_observer(AgensWindow* window, AgensExtensionButtonsChanged observer,
++                                                 void* context);
++// Runs the extension's action on the active page; its popup opens under agens_ui_extensions_anchor.
++void agens_extension_click(AgensWindow* window, const char* id);
++
 +// Histórico of this window's ato, newest first, one entry per page per day, at most 300.
 +// `text` filters by title and address ("" for all). Calls `fn` later, once.
 +typedef struct {
@@ -310,6 +327,8 @@ index 0000000000..858411a1b7
 +void agens_ui_colors(void* chrome, unsigned* window, unsigned* page, unsigned* line);
 +// The page card's corner radius (the theme's roundness) and the titlebar height (the traffic
 +// lights center on it; it follows the density).
++// Where the extensions button is (extension popups hang from it).
++AgensRect agens_ui_extensions_anchor(void* chrome);
 +float agens_ui_card_radius(void* chrome);
 +float agens_ui_titlebar_height(void* chrome);
 +void agens_ui_permission_prompt(void* chrome, const char* site, const char* const* asks, int count);
@@ -323,10 +342,10 @@ index 0000000000..858411a1b7
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EMBED_H_
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
 new file mode 100644
-index 0000000000..f7a51ac64b
+index 0000000000..ee2f209a38
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_window.h
-@@ -0,0 +1,560 @@
+@@ -0,0 +1,638 @@
 +// Copyright 2026 SugiyamaLabs.
 +// One browser window as the embed API sees it (agens_embed.h): tabs, suggestions, atos, search
 +// default, bookmarks. Platform-neutral; each platform's shell (native_shell_mac.mm, later
@@ -334,6 +353,8 @@ index 0000000000..f7a51ac64b
 +#ifndef CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
 +#define CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
 +
++#include <map>
++#include <set>
 +#include <string>
 +#include <vector>
 +#include "base/memory/raw_ptr.h"
@@ -359,6 +380,13 @@ index 0000000000..f7a51ac64b
 +#include "base/scoped_observation.h"
 +#include "components/find_in_page/find_result_observer.h"
 +#include "components/permissions/permission_prompt.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/browser/extension_registry_observer.h"
++#include "extensions/browser/image_loader.h"
++#include "extensions/common/extension.h"
++#include "extensions/common/manifest_handlers/icons_handler.h"
++#include "ui/gfx/image/image.h"
++#include "ui/views/view.h"
 +#include "components/find_in_page/find_tab_helper.h"
 +#include "components/find_in_page/find_types.h"
 +#include "components/bookmarks/browser/bookmark_utils.h"
@@ -393,6 +421,8 @@ index 0000000000..f7a51ac64b
 +#include "content/public/browser/web_contents_user_data.h"
 +#include "net/base/net_errors.h"
 +#include "chrome/common/chrome_isolated_world_ids.h"
++#include "chrome/browser/media/webrtc/media_capture_devices_dispatcher.h"
++#include "chrome/browser/media/webrtc/media_stream_capture_indicator.h"
 +#include "content/public/browser/render_frame_host.h"
 +#include "extensions/common/extension_urls.h"
 +#include "chrome/browser/ui/status_bubble.h"
@@ -497,7 +527,8 @@ index 0000000000..f7a51ac64b
 +                     public content::DownloadManager::Observer,
 +                     public download::DownloadItem::Observer,
 +                     public bookmarks::BaseBookmarkModelObserver,
-+                     public find_in_page::FindResultObserver {
++                     public find_in_page::FindResultObserver,
++                     public extensions::ExtensionRegistryObserver {
 +  explicit AgensWindow(BrowserWindowInterface* browser) : browser(browser) {
 +    browser->GetTabStripModel()->AddObserver(this);
 +    Storage().AddObserver(this);
@@ -693,6 +724,8 @@ index 0000000000..f7a51ac64b
 +    std::vector<std::string> titles(count), urls(count), errors(count);
 +    std::vector<std::vector<uint8_t>> icons(count);
 +    std::vector<AgensTab> tabs(count);
++    scoped_refptr<MediaStreamCaptureIndicator> capture =
++        MediaCaptureDevicesDispatcher::GetInstance()->GetMediaStreamCaptureIndicator();
 +    for (int i = 0; i < count; ++i) {
 +      content::WebContents* contents = model()->GetWebContentsAt(i);
 +      AgensPageError::CreateForWebContents(contents);  // starts watching; the page in it now loaded fine
@@ -714,7 +747,8 @@ index 0000000000..f7a51ac64b
 +                 contents->GetController().CanGoBack(), contents->GetController().CanGoForward(),
 +                 bookmarks && bookmarks->IsBookmarked(contents->GetVisibleURL()),
 +                 model()->IsTabPinned(i), contents->IsCurrentlyAudible(),
-+                 contents->IsAudioMuted(), error, errors[i].c_str()};
++                 contents->IsAudioMuted(), error, errors[i].c_str(),
++                 capture && capture->IsCapturingVideo(contents), capture && capture->IsCapturingAudio(contents)};
 +    }
 +    observer(context, tabs.data(), static_cast<int>(tabs.size()));
 +  }
@@ -807,6 +841,69 @@ index 0000000000..f7a51ac64b
 +  base::CallbackListSubscription search_loaded_;
 +  base::CancelableTaskTracker history_tracker;
 +  raw_ptr<void> ui = nullptr;  // the chrome (agens_ui_*), set by the platform shell
++  raw_ptr<views::View> extensions_anchor = nullptr;  // under the UI's extensions button
++  AgensExtensionButtonsChanged extension_buttons_observer = nullptr;
++  raw_ptr<void> extension_buttons_context = nullptr;
++  std::map<std::string, std::vector<uint8_t>> extension_icons;
++  std::set<std::string> extension_icons_loading;
++  base::ScopedObservation<extensions::ExtensionRegistry, extensions::ExtensionRegistryObserver>
++      extensions_observation{this};
++
++  void WatchExtensions() {
++    if (!extensions_observation.IsObserving()) {
++      extensions_observation.Observe(extensions::ExtensionRegistry::Get(browser->GetProfile()));
++    }
++  }
++  void NotifyExtensionButtons(const std::string& installed = std::string()) {
++    if (!extension_buttons_observer) return;
++    std::vector<scoped_refptr<const extensions::Extension>> shown;
++    for (const auto& e : extensions::ExtensionRegistry::Get(browser->GetProfile())->enabled_extensions()) {
++      if (e->is_extension() && !extensions::Manifest::IsComponentLocation(e->location())) shown.push_back(e);
++    }
++    std::vector<AgensExtensionButton> out;
++    for (const auto& e : shown) {
++      auto icon = extension_icons.find(e->id());
++      if (icon == extension_icons.end()) LoadExtensionIcon(e.get());
++      const bool has = icon != extension_icons.end() && !icon->second.empty();
++      out.push_back({e->id().c_str(), e->name().c_str(), has ? icon->second.data() : nullptr,
++                     has ? static_cast<int>(icon->second.size()) : 0});
++    }
++    extension_buttons_observer(extension_buttons_context, out.data(), static_cast<int>(out.size()),
++                               installed.c_str());
++  }
++  void LoadExtensionIcon(const extensions::Extension* e) {
++    if (!extension_icons_loading.insert(e->id()).second) return;
++    extensions::ImageLoader::Get(browser->GetProfile())
++        ->LoadImageAsync(e, extensions::IconsInfo::GetIconResource(e, 32, ExtensionIconSet::Match::kBigger),
++                         gfx::Size(32, 32),
++                         base::BindOnce(
++                             [](base::WeakPtr<AgensWindow> self, std::string id, const gfx::Image& image) {
++                               if (!self) return;
++                               std::vector<uint8_t> png;
++                               if (!image.IsEmpty()) {
++                                 png = gfx::PNGCodec::EncodeBGRASkBitmap(*image.ToSkBitmap(), false)
++                                           .value_or(std::vector<uint8_t>());
++                               }
++                               self->extension_icons[id] = std::move(png);
++                               self->NotifyExtensionButtons();
++                             },
++                             weak.GetWeakPtr(), e->id()));
++  }
++  // extensions::ExtensionRegistryObserver:
++  void OnExtensionLoaded(content::BrowserContext*, const extensions::Extension*) override {
++    NotifyExtensionButtons();
++  }
++  void OnExtensionUnloaded(content::BrowserContext*, const extensions::Extension*,
++                           extensions::UnloadedExtensionReason) override {
++    NotifyExtensionButtons();
++  }
++  void OnExtensionInstalled(content::BrowserContext*, const extensions::Extension* e, bool is_update) override {
++    if (!is_update && e->is_extension()) {
++      // Loaded right after this; tell the UI once it's in the list.
++      base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++          FROM_HERE, base::BindOnce(&AgensWindow::NotifyExtensionButtons, weak.GetWeakPtr(), e->id()));
++    }
++  }
 +  base::WeakPtr<permissions::PermissionPrompt::Delegate> permission_delegate;
 +  AgensFindChanged find_observer = nullptr;
 +  raw_ptr<void> find_context = nullptr;
@@ -889,10 +986,10 @@ index 0000000000..f7a51ac64b
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
 new file mode 100644
-index 0000000000..c470c966d4
+index 0000000000..4fd9c04664
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.cc
-@@ -0,0 +1,726 @@
+@@ -0,0 +1,759 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The embed API (agens_embed.h) on top of AgensWindow. Same code on every platform.
 +
@@ -907,6 +1004,14 @@ index 0000000000..c470c966d4
 +#include "base/memory/scoped_refptr.h"
 +#include "base/supports_user_data.h"
 +#include "chrome/browser/history/history_service_factory.h"
++#include "chrome/browser/extensions/extension_action_runner.h"
++#include "chrome/browser/extensions/extension_tab_util.h"
++#include "chrome/browser/extensions/extension_view_host.h"
++#include "chrome/browser/extensions/extension_view_host_factory.h"
++#include "chrome/browser/ui/extensions/extension_popup_types.h"
++#include "chrome/browser/ui/views/extensions/extension_popup.h"
++#include "extensions/browser/extension_action.h"
++#include "extensions/browser/extension_action_manager.h"
 +#include "content/public/browser/navigation_entry.h"
 +#include "content/public/browser/ssl_status.h"
 +#include "net/base/registry_controlled_domains/registry_controlled_domain.h"
@@ -1383,6 +1488,31 @@ index 0000000000..c470c966d4
 +                                    content::BrowsingDataRemover::ORIGIN_TYPE_UNPROTECTED_WEB,
 +                                    std::move(filter), new ClearDone(remover, done, context));
 +}
++void agens_window_set_extension_buttons_observer(AgensWindow* w, AgensExtensionButtonsChanged observer,
++                                                 void* context) {
++  w->extension_buttons_observer = observer;
++  w->extension_buttons_context = context;
++  w->WatchExtensions();
++  w->NotifyExtensionButtons();
++}
++void agens_extension_click(AgensWindow* w, const char* id) {
++  Profile* profile = w->browser->GetProfile();
++  const extensions::Extension* extension =
++      extensions::ExtensionRegistry::Get(profile)->enabled_extensions().GetByID(id ? id : "");
++  content::WebContents* active = w->model()->GetActiveWebContents();
++  auto* runner = active ? extensions::ExtensionActionRunner::GetForWebContents(active) : nullptr;
++  if (!extension || !runner) return;
++  if (runner->RunAction(extension, /*grant_tab_permissions=*/true) != extensions::ExtensionAction::ShowAction::kShowPopup) {
++    return;  // the extension handled the click itself (or has no action)
++  }
++  extensions::ExtensionAction* action = extensions::ExtensionActionManager::Get(profile)->GetExtensionAction(*extension);
++  if (!action || !w->extensions_anchor) return;
++  const GURL popup = action->GetPopupUrl(extensions::ExtensionTabUtil::GetTabId(active));
++  ExtensionPopup::ShowPopup(w->browser.get(),
++                            extensions::ExtensionViewHostFactory::CreatePopupHost(*extension, popup, w->browser.get()),
++                            views::BubbleAnchor(w->extensions_anchor.get()), views::BubbleBorder::TOP_RIGHT, PopupShowAction::kShow,
++                            base::DoNothing());
++}
 +void agens_window_set_find_observer(AgensWindow* w, AgensFindChanged observer, void* context) {
 +  w->find_observer = observer;
 +  w->find_context = context;
@@ -1673,10 +1803,10 @@ index 0000000000..9b81aa73ae
 +#endif  // CHROME_BROWSER_AGENS_EMBED_NATIVE_SHELL_H_
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
 new file mode 100644
-index 0000000000..af382d65b2
+index 0000000000..8b6190d29a
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
-@@ -0,0 +1,266 @@
+@@ -0,0 +1,271 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The macOS host: the views::View that fills the Webium window, puts the UI's chrome (an NSView)
 +// over it and the active tab in the page card. Everything else is shared (agens_window.h,
@@ -1724,6 +1854,7 @@ index 0000000000..af382d65b2
 +    // Views toolbar).
 +    site_icon_ = AddChildView(std::make_unique<views::View>());
 +    site_icon_->SetProperty(views::kElementIdentifierKey, kLocationIconElementId);
++    extensions_anchor_ = AddChildView(std::make_unique<views::View>());  // where extension popups hang
 +    contents_ = AddChildView(std::make_unique<views::WebView>(browser->GetProfile()));
 +    // Webium sizes new tabs from this element (GetContentsBoundsInScreen).
 +    contents_->SetProperty(views::kElementIdentifierKey, kContentsContainerViewElementId);
@@ -1736,6 +1867,7 @@ index 0000000000..af382d65b2
 +        base::Unretained(this));
 +    chrome_ = (__bridge_transfer NSView*)agens_ui_create_chrome(window_.get());
 +    window_->ui = (__bridge void*)chrome_;
++    window_->extensions_anchor = extensions_anchor_;
 +  }
 +  ~NativeShellView() override {
 +    agens_ui_destroy_chrome((__bridge void*)chrome_);
@@ -1788,6 +1920,8 @@ index 0000000000..af382d65b2
 +    AgensRect page = agens_ui_layout((__bridge void*)chrome_, width(), height());
 +    AgensRect icon = agens_ui_site_icon_rect((__bridge void*)chrome_);
 +    site_icon_->SetBounds(icon.x, icon.y, icon.width, icon.height);
++    AgensRect ext = agens_ui_extensions_anchor((__bridge void*)chrome_);
++    extensions_anchor_->SetBounds(ext.x, ext.y, ext.width, ext.height);
 +    gfx::Rect card(page.x, page.y, page.width, page.height);
 +    card_->SetBoundsRect(card);
 +    card.Inset(1);
@@ -1822,6 +1956,7 @@ index 0000000000..af382d65b2
 +  base::WeakPtrFactory<NativeShellView> weak_{this};
 +  raw_ptr<views::View> card_;
 +  raw_ptr<views::View> site_icon_;
++  raw_ptr<views::View> extensions_anchor_;
 +  raw_ptr<views::WebView> contents_;
 +  NSView* __strong chrome_;
 +};
@@ -1945,10 +2080,10 @@ index 0000000000..af382d65b2
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..757dbff48c
+index 0000000000..ec98eabee4
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,4422 @@
+@@ -0,0 +1,4573 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -2338,6 +2473,7 @@ index 0000000000..757dbff48c
 +- (instancetype)initWithSymbol:(NSString*)symbol label:(NSString*)label size:(CGFloat)size;
 +- (void)setSymbol:(NSString*)symbol;
 +- (void)setTint:(const Token&)token;
++- (void)setColor:(NSColor*)color;
 +- (void)setImage:(NSImage*)image;
 +@end
 +@implementation AgensToolButton {
@@ -2377,6 +2513,9 @@ index 0000000000..757dbff48c
 +- (void)setTint:(const Token&)token {
 +  _icon.contentTintColor = token.color();
 +}
++- (void)setColor:(NSColor*)color {
++  _icon.contentTintColor = color;
++}
 +- (void)mouseDown:(NSEvent*)event {
 +  if (_enabled) [super mouseDown:event];
 +}
@@ -2404,6 +2543,7 @@ index 0000000000..757dbff48c
 +  BOOL _dragging;
 +  BOOL _muted;
 +  BOOL _audible;
++  BOOL _capturing;
 +  NSImageView* _favicon;
 +  NSProgressIndicator* _spinner;
 +  NSTextField* _title;
@@ -2510,10 +2650,18 @@ index 0000000000..757dbff48c
 +  _pinned = tab.pinned;
 +  _muted = tab.muted;
 +  _audible = tab.audible;
-+  _sound.image = Symbol(_muted ? @"speaker.slash.fill" : @"speaker.wave.2.fill", 10);
-+  _sound.toolTip = _muted ? @"Ativar o som da aba" : @"Silenciar a aba";
++  _capturing = tab.camera || tab.microphone;
++  if (_capturing) {  // camera or microphone in use outranks sound: it's what you'd want to know
++    _sound.image = Symbol(tab.camera ? @"video.fill" : @"mic.fill", 10);
++    _sound.toolTip = tab.camera && tab.microphone ? @"Usando a câmera e o microfone"
++                     : tab.camera                 ? @"Usando a câmera"
++                                                  : @"Usando o microfone";
++  } else {
++    _sound.image = Symbol(_muted ? @"speaker.slash.fill" : @"speaker.wave.2.fill", 10);
++    _sound.toolTip = _muted ? @"Ativar o som da aba" : @"Silenciar a aba";
++  }
 +  _sound.accessibilityLabel = _sound.toolTip;
-+  _sound.hidden = !(_audible || _muted);
++  _sound.hidden = !(_audible || _muted || _capturing);
 +  self.selected = tab.active;
 +  self.needsLayout = YES;
 +}
@@ -2521,7 +2669,7 @@ index 0000000000..757dbff48c
 +  [super refresh];
 +  _title.textColor = (self.selected || self.hovered) ? kInk.color() : kMute.color();
 +  _close.hidden = self.compact || !(self.selected || self.hovered);
-+  _sound.contentTintColor = _muted ? kLight3.color() : kDim.color();
++  _sound.contentTintColor = _capturing ? NSColor.systemRedColor : _muted ? kLight3.color() : kDim.color();
 +  // Pinned tiles always have the line; top pills only when selected.
 +  const BOOL border = _look == kLookPin || (_look == kLookTop && self.selected);
 +  self.layer.borderWidth = border ? 1 : 0;
@@ -2545,6 +2693,7 @@ index 0000000000..757dbff48c
 +  if (_onPin) _onPin();
 +}
 +- (void)mute:(id)sender {
++  if (_capturing) return;  // the badge only tells; the site panel changes permissions
 +  if (_onMute) _onMute();
 +}
 +@end
@@ -2702,6 +2851,7 @@ index 0000000000..757dbff48c
 +// One item of our menus (prototype .menu .mi): icon, label, shortcut on the right in mono.
 +@interface AgensMenuRow : AgensHoverView
 +- (instancetype)initWithIcon:(NSString*)icon title:(NSString*)title key:(NSString*)key;
++- (void)setIconImage:(NSImage*)image;
 +@end
 +@implementation AgensMenuRow {
 +  NSImageView* _icon;
@@ -2736,7 +2886,12 @@ index 0000000000..757dbff48c
 +}
 +- (void)refresh {
 +  self.layer.backgroundColor = self.hovered ? CG(kRaise, self) : NSColor.clearColor.CGColor;
++  self.layer.cornerRadius = self.radius * Round();
 +  _title.textColor = self.hovered ? kInk.color() : kMute.color();
++}
++- (void)setIconImage:(NSImage*)image {  // a picture of its own (an extension's icon), not tinted
++  _icon.image = image;
++  _icon.contentTintColor = nil;
 +}
 +@end
 +
@@ -2856,6 +3011,7 @@ index 0000000000..757dbff48c
 +- (BOOL)tabsOnTop;
 +- (void)toggleTabsPosition;
 +- (NSArray<NSString*>*)atoNamesForSettings;
++- (NSImage*)extensionIcon:(NSString*)extensionId;
 +@end
 +
 +@interface AgensSettings : NSWindowController <NSWindowDelegate, NSTextFieldDelegate>
@@ -3062,6 +3218,10 @@ index 0000000000..757dbff48c
 +  return [self option:label detail:detail control:n y:y];
 +}
 +- (CGFloat)option:(NSString*)label detail:(NSString*)detail control:(NSView*)control y:(CGFloat)y {
++  return [self option:label detail:detail control:control icon:nil y:y];
++}
++// The same row with an icon before the text (extensions).
++- (CGFloat)option:(NSString*)label detail:(NSString*)detail control:(NSView*)control icon:(NSImage*)icon y:(CGFloat)y {
 +  CGFloat w = NSWidth(_pane.bounds) - 64;
 +  NSView* group = [[NSView alloc] initWithFrame:NSMakeRect(32, y, w, 56)];
 +  group.wantsLayer = YES;
@@ -3076,13 +3236,20 @@ index 0000000000..757dbff48c
 +  const CGFloat textW = w - 16 - cs.width - 24;
 +  NSTextField* l = Label(13, NSFontWeightRegular, kInk);
 +  l.stringValue = label;
-+  l.frame = NSMakeRect(16, detail ? 30 : 19, textW, 18);
++  const CGFloat textX = icon ? 16 + 24 + 12 : 16;
++  if (icon) {
++    NSImageView* iv = [NSImageView imageViewWithImage:icon];
++    iv.imageScaling = NSImageScaleProportionallyUpOrDown;
++    iv.frame = NSMakeRect(16, (56 - 24) / 2, 24, 24);
++    [group addSubview:iv];
++  }
++  l.frame = NSMakeRect(textX, detail ? 30 : 19, textW - (textX - 16), 18);
 +  [group addSubview:l];
 +  if (detail) {
 +    NSTextField* d = Label(11.5, NSFontWeightRegular, kDim);
 +    d.stringValue = detail;
 +    d.toolTip = detail;
-+    d.frame = NSMakeRect(16, 12, textW, 15);
++    d.frame = NSMakeRect(textX, 12, textW - (textX - 16), 15);
 +    [group addSubview:d];
 +  }
 +  if (!control.accessibilityLabel.length) control.accessibilityLabel = label;  // VoiceOver reads the row's name
@@ -3805,7 +3972,8 @@ index 0000000000..757dbff48c
 +    sw.frame = NSMakeRect(NSMaxX(box.frame) + 10, (NSHeight(both.frame) - NSHeight(sw.frame)) / 2, NSWidth(sw.frame), NSHeight(sw.frame));
 +    [both addSubview:box];
 +    [both addSubview:sw];
-+    y = [self option:@(name.c_str()) detail:[@"Versão " stringByAppendingString:@(version.c_str())] control:both y:y];
++    y = [self option:@(name.c_str()) detail:[@"Versão " stringByAppendingString:@(version.c_str())] control:both
++                icon:[_chrome extensionIcon:@(id.c_str())] y:y];
 +  }
 +  return y;
 +}
@@ -4842,6 +5010,12 @@ index 0000000000..757dbff48c
 +static void DownloadsChanged(void* context, const AgensDownload* downloads, int count, int started) {
 +  [(__bridge AgensChrome*)context setDownloads:downloads count:count started:started];
 +}
++@interface AgensChrome (Extensions)
++- (void)setExtensions:(const AgensExtensionButton*)list count:(int)count installed:(const char*)installed;
++@end
++static void ExtensionButtonsChanged(void* context, const AgensExtensionButton* list, int count, const char* installed) {
++  [(__bridge AgensChrome*)context setExtensions:list count:count installed:installed];
++}
 +@interface AgensChrome (Bookmarks)
 +- (void)setBookmarks:(const AgensBookmark*)bookmarks count:(int)count bar:(long long)bar;
 +@end
@@ -4883,6 +5057,7 @@ index 0000000000..757dbff48c
 +  AgensToolButton* _toggle;
 +  AgensToolButton* _star;  // in the address, right side (prototype .star)
 +  AgensToolButton* _sound;  // in the address, left of the star, while the page plays or is muted
++  AgensToolButton* _capture;  // in the address: camera/microphone in use (opens the site panel)
 +  AgensToolButton* _newTabTop;  // "+" at the end of the top strip
 +  BOOL _top;                    // tabs on top instead of the column
 +  int _pinnedCount;             // Chromium keeps pinned tabs first: rows [0, _pinnedCount)
@@ -4916,6 +5091,8 @@ index 0000000000..757dbff48c
 +  std::vector<BookmarkItem> _bookmarks;
 +  long long _barId;
 +  AgensFindBar* _find;
++  AgensToolButton* _extButton;  // extensions, before downloads and the menu
++  NSMutableArray<NSDictionary*>* _extensions;  // id, name, icon (NSImage, optional)
 +  AgensErrorView* _error;
 +  BOOL _passwordAsked;  // our "save password?" panel is open and not answered yet
 +  BOOL _permissionAsked;  // a site's permission request is open and not answered yet
@@ -4971,6 +5148,12 @@ index 0000000000..757dbff48c
 +    [_omni addSubview:_omniIcon];
 +    [_omni addSubview:_address];
 +    [_omni addSubview:_sound];
++    _capture = [[AgensToolButton alloc] initWithSymbol:@"video.fill" label:@"Usando a câmera" size:12];
++    _capture.radius = 7;
++    _capture.hidden = YES;
++    [_capture setTint:kDim];
++    _capture.onPress = ^{ [weak showSiteInfo]; };
++    [_omni addSubview:_capture];
 +    [_omni addSubview:_star];
 +    _siteButton = [[AgensHoverView alloc] init];
 +    _siteButton.radius = 7;
@@ -4978,6 +5161,11 @@ index 0000000000..757dbff48c
 +    _siteButton.accessibilityLabel = @"Informações do site";
 +    _siteButton.onPress = ^{ [weak showSiteInfo]; };
 +    [_omni addSubview:_siteButton positioned:NSWindowBelow relativeTo:_omniIcon];
++    _extensions = [NSMutableArray array];
++    _extButton = [[AgensToolButton alloc] initWithSymbol:@"puzzlepiece" label:@"Extensões"];
++    [_extButton setImage:AgensIcon(kIconExtensions)];
++    _extButton.hidden = YES;
++    _extButton.onPress = ^{ [weak toggleExtensions:nil]; };
 +    _downloadsButton = [[AgensToolButton alloc] initWithSymbol:@"arrow.down" label:@"Downloads"];
 +    [_downloadsButton setImage:AgensIcon(kIconDown)];
 +    _downloadsButton.hidden = YES;
@@ -5125,7 +5313,7 @@ index 0000000000..757dbff48c
 +    _ntp.field.action = @selector(go:);
 +    _ntp.field.delegate = self;
 +
-+    for (NSView* v in @[ _toggle, _back, _forward, _reload, _omni, _downloadsButton, _menu, _tabsScroll, _moreAtos, _atoTile, _atoName, _separator, _newTab, _newTabTop,
++    for (NSView* v in @[ _toggle, _back, _forward, _reload, _omni, _extButton, _downloadsButton, _menu, _tabsScroll, _moreAtos, _atoTile, _atoName, _separator, _newTab, _newTabTop,
 +                         _atosLine, _addAto, _atoDot, _bar, _history, _bookmarksPage, _ntp, _error, _find, _loadbar, _statusPill, _suggest ]) {
 +      [self addSubview:v];
 +    }
@@ -5138,6 +5326,7 @@ index 0000000000..757dbff48c
 +    agens_window_set_status_observer(_window, StatusChanged, (__bridge void*)self);
 +    agens_window_set_downloads_observer(_window, DownloadsChanged, (__bridge void*)self);
 +    agens_window_set_bookmarks_observer(_window, BookmarksChanged, (__bridge void*)self);
++    agens_window_set_extension_buttons_observer(_window, ExtensionButtonsChanged, (__bridge void*)self);
 +    [NSNotificationCenter.defaultCenter addObserver:self
 +                                           selector:@selector(themeChanged:)
 +                                               name:kThemeChanged
@@ -5308,6 +5497,10 @@ index 0000000000..757dbff48c
 +    _downloadsButton.frame = NSMakeRect(NSMinX(_menu.frame) - 30, btnY, 28, 28);
 +    omniEnd = NSMinX(_downloadsButton.frame) - 4;
 +  }
++  if (!_extButton.hidden) {
++    _extButton.frame = NSMakeRect(omniEnd + 4 - 30, btnY, 28, 28);
++    omniEnd = NSMinX(_extButton.frame) - 4;
++  }
 +
 +  // Atos: only what fits (6 in the open column, 5 collapsed, 4 on the bar); past that the last
 +  // slot is "⋯" with the full list, and the current ato always stays in view.
@@ -5339,7 +5532,9 @@ index 0000000000..757dbff48c
 +  _siteButton.frame = NSInsetRect(_omniIcon.frame, -6, -6);
 +  _star.frame = NSMakeRect(NSWidth(_omni.frame) - 4 - 26, (omniH - 26) / 2, 26, 26);
 +  _sound.frame = NSMakeRect(NSMinX(_star.frame) - 26, (omniH - 26) / 2, 26, 26);
-+  const CGFloat addressEnd = _sound.hidden ? NSMinX(_star.frame) : NSMinX(_sound.frame);
++  const CGFloat afterSound = _sound.hidden ? NSMinX(_star.frame) : NSMinX(_sound.frame);
++  _capture.frame = NSMakeRect(afterSound - 26, (omniH - 26) / 2, 26, 26);
++  const CGFloat addressEnd = _capture.hidden ? afterSound : NSMinX(_capture.frame);
 +  _address.frame = NSMakeRect(33, (omniH - 18) / 2, addressEnd - 6 - 33, 18);
 +
 +  NSMutableArray<AgensTabRow*>* pins = [NSMutableArray array];
@@ -5470,6 +5665,10 @@ index 0000000000..757dbff48c
 +  }
 +  return {(int)NSMinX(_page), (int)NSMinY(_page), (int)NSWidth(_page), (int)NSHeight(_page)};
 +}
++- (AgensRect)extensionsAnchor {
++  NSRect r = _extButton.hidden ? _menu.frame : _extButton.frame;
++  return {(int)NSMinX(r), (int)NSMinY(r), (int)NSWidth(r), (int)NSHeight(r)};
++}
 +- (AgensRect)siteIconRect {
 +  NSRect r = [_omni convertRect:_omniIcon.frame toView:self];
 +  return {(int)NSMinX(r), (int)NSMinY(r), (int)NSWidth(r), (int)NSHeight(r)};
@@ -5517,6 +5716,13 @@ index 0000000000..757dbff48c
 +    [_sound setTint:tabs[i].muted ? kLight3 : kDim];
 +    _sound.accessibilityLabel = tabs[i].muted ? @"Ativar o som da aba" : @"Silenciar a aba";
 +    _sound.toolTip = _sound.accessibilityLabel;
++    _capture.hidden = !(tabs[i].camera || tabs[i].microphone);
++    [_capture setSymbol:tabs[i].camera ? @"video.fill" : @"mic.fill"];
++    [_capture setColor:NSColor.systemRedColor];  // like the system's own camera/mic dot
++    _capture.accessibilityLabel = tabs[i].camera && tabs[i].microphone ? @"Usando a câmera e o microfone"
++                                  : tabs[i].camera                     ? @"Usando a câmera"
++                                                                       : @"Usando o microfone";
++    _capture.toolTip = _capture.accessibilityLabel;
 +    // Our error page over Chromium's, while the tab shows one (not while it retries).
 +    _error.hidden = !tabs[i].error || tabs[i].loading || !tabs[i].url[0];
 +    if (!_error.hidden) [_error showError:tabs[i].error name:@(tabs[i].error_name)];
@@ -5986,9 +6192,86 @@ index 0000000000..757dbff48c
 +    agens_window_set_downloads_observer(_window, nullptr, nullptr);
 +    agens_window_set_bookmarks_observer(_window, nullptr, nullptr);
 +    agens_window_set_find_observer(_window, nullptr, nullptr);
++    agens_window_set_extension_buttons_observer(_window, nullptr, nullptr);
 +  }
 +  _window = nullptr;
 +}
++// --- Extensions: the button, its panel (one row per extension; a click runs its action, whose
++// popup hangs from the button), and the "installed" notice.
++- (void)setExtensions:(const AgensExtensionButton*)list count:(int)count installed:(const char*)installed {
++  [_extensions removeAllObjects];
++  NSString* installedName = nil;
++  for (int i = 0; i < count; ++i) {
++    NSMutableDictionary* e = [@{@"id" : @(list[i].id), @"name" : @(list[i].name)} mutableCopy];
++    if (list[i].icon_png) {
++      NSImage* icon = [[NSImage alloc] initWithData:[NSData dataWithBytes:list[i].icon_png length:list[i].icon_png_size]];
++      icon.size = NSMakeSize(16, 16);
++      if (icon) e[@"icon"] = icon;
++    }
++    if (installed && !strcmp(installed, list[i].id)) installedName = e[@"name"];
++    [_extensions addObject:e];
++  }
++  _extButton.hidden = count == 0;
++  [self relayout];
++  if (_window) agens_window_relayout(_window);  // the popup anchor moves with the button
++  if (installedName) {
++    [self showExtensions:[installedName stringByAppendingString:@" foi instalada"]];
++  }
++}
++- (NSImage*)extensionIcon:(NSString*)extensionId {
++  for (NSDictionary* e in _extensions) {
++    if ([e[@"id"] isEqualToString:extensionId]) return e[@"icon"];
++  }
++  return nil;
++}
++- (void)toggleExtensions:(id)sender {
++  if (_menuView && _popoverAnchor == _extButton) {
++    [self closeMenu];
++  } else {
++    [self showExtensions:nil];
++  }
++}
++- (void)showExtensions:(NSString*)notice {
++  const CGFloat w = 280, rowH = 32, noticeH = notice ? 30 : 0;
++  const CGFloat h = 5 + noticeH + (_extensions.count + 1) * rowH + 5;
++  NSView* panel = [self popoverWidth:w height:h under:_extButton];
++  panel.accessibilityRole = NSAccessibilityMenuRole;
++  panel.accessibilityLabel = @"Extensões";
++  CGFloat y = h - 5;
++  if (notice) {
++    NSTextField* note = Label(12.5, NSFontWeightSemibold, kInk);
++    note.stringValue = notice;
++    note.frame = NSMakeRect(14, y - 24, w - 28, 18);
++    [panel addSubview:note];
++    y -= noticeH;
++  }
++  __weak AgensChrome* weak = self;
++  for (NSDictionary* e in _extensions) {
++    y -= rowH;
++    AgensMenuRow* row = [[AgensMenuRow alloc] initWithIcon:kIconExtensions title:e[@"name"] key:@""];
++    if (e[@"icon"]) [row setIconImage:e[@"icon"]];
++    row.frame = NSMakeRect(5, y, w - 10, rowH);
++    NSString* extensionId = e[@"id"];
++    row.onPress = ^{
++      AgensChrome* strong = weak;
++      [strong closeMenu];
++      if (strong && strong->_window) agens_extension_click(strong->_window, extensionId.UTF8String);
++    };
++    [panel addSubview:row];
++  }
++  y -= rowH;
++  AgensMenuRow* manage = [[AgensMenuRow alloc] initWithIcon:kIconSettings title:@"Gerenciar extensões" key:@""];
++  manage.frame = NSMakeRect(5, y, w - 10, rowH);
++  manage.onPress = ^{
++    AgensChrome* strong = weak;
++    [strong closeMenu];
++    [strong menuSettings:nil];
++    [g_settings showSection:@"extensoes"];
++  };
++  [panel addSubview:manage];
++  [self presentPopover:panel anchor:_extButton];
++}
++
 +// --- Favoritos: the page, the bar and its menus.
 +- (void)setBookmarks:(const AgensBookmark*)bookmarks count:(int)count bar:(long long)bar {
 +  _bookmarks.clear();
@@ -6357,6 +6640,9 @@ index 0000000000..757dbff48c
 +void agens_ui_permission_prompt_close(void* chrome) {
 +  [(__bridge AgensChrome*)chrome permissionGone];
 +}
++AgensRect agens_ui_extensions_anchor(void* chrome) {
++  return [(__bridge AgensChrome*)chrome extensionsAnchor];
++}
 +float agens_ui_card_radius(void*) {
 +  return 12 * Round();
 +}
@@ -6406,6 +6692,20 @@ index 8277fe0aba..e496cb7ab4 100644
      chrome::ShowSettings(browser);
    } else {
      chrome::OpenOptionsWindow(profile);
+diff --git a/chrome/browser/profiles/profile_impl.cc b/chrome/browser/profiles/profile_impl.cc
+index 6f5c220aae..5f70397a82 100644
+--- a/chrome/browser/profiles/profile_impl.cc
++++ b/chrome/browser/profiles/profile_impl.cc
+@@ -432,7 +432,8 @@ void ProfileImpl::RegisterProfilePrefs(
+ #if BUILDFLAG(ENABLE_OOP_PRINTING)
+   registry->RegisterBooleanPref(prefs::kOopPrintDriversAllowedByPolicy, true);
+ #endif
+-  registry->RegisterBooleanPref(prefs::kPrintPreviewDisabled, false);
++  // agens: print with the macOS dialog (Chromium's basic printing), not the print preview page.
++  registry->RegisterBooleanPref(prefs::kPrintPreviewDisabled, true);
+   registry->RegisterStringPref(
+       prefs::kPrintPreviewDefaultDestinationSelectionRules, std::string());
+ #if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
 diff --git a/chrome/browser/ui/browser_command_controller.cc b/chrome/browser/ui/browser_command_controller.cc
 index d2224772cc..cd3d1c68d9 100644
 --- a/chrome/browser/ui/browser_command_controller.cc
@@ -6468,6 +6768,30 @@ index 3bc40bcc91..9e4154d594 100644
      StatusBubbleViews* status_bubble_views =
          static_cast<StatusBubbleViews*>(status_bubble);
      ContentsWebView* anchor =
+diff --git a/chrome/browser/ui/extensions/extension_install_ui_desktop.cc b/chrome/browser/ui/extensions/extension_install_ui_desktop.cc
+index c9e2a59c3e..59a138dd94 100644
+--- a/chrome/browser/ui/extensions/extension_install_ui_desktop.cc
++++ b/chrome/browser/ui/extensions/extension_install_ui_desktop.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "chrome/browser/ui/extensions/extension_install_ui_desktop.h"
+ 
++#include "chrome/browser/agens/embed/native_shell.h"
++
+ #include <string>
+ #include <utility>
+ 
+@@ -122,6 +124,10 @@ void ExtensionInstallUIDesktop::OnInstallSuccess(
+   if (IsUiDisabled() || skip_post_install_ui() || extension->is_theme()) {
+     return;
+   }
++  // agens: our extensions button says it was installed; no extra window or Views bubble.
++  if (agens::IsNativeShellEnabled()) {
++    return;
++  }
+ 
+   if (!profile()) {
+     // TODO(zelidrag): Figure out what exact conditions cause crash
 diff --git a/chrome/browser/ui/passwords/manage_passwords_ui_controller.cc b/chrome/browser/ui/passwords/manage_passwords_ui_controller.cc
 index 0d2c0bbb5b..a28a885d1a 100644
 --- a/chrome/browser/ui/passwords/manage_passwords_ui_controller.cc
@@ -6569,8 +6893,38 @@ index db2aba2a32..09328bfc13 100644
    }
  
    deps = [
+diff --git a/chrome/browser/ui/webui_browser/webui_browser_exclusive_access_context.cc b/chrome/browser/ui/webui_browser/webui_browser_exclusive_access_context.cc
+index 1dc8329849..103a27ea84 100644
+--- a/chrome/browser/ui/webui_browser/webui_browser_exclusive_access_context.cc
++++ b/chrome/browser/ui/webui_browser/webui_browser_exclusive_access_context.cc
+@@ -140,6 +140,12 @@ void WebUIBrowserExclusiveAccessContext::UpdateExclusiveAccessBubble(
+       this, params, std::move(first_hide_callback));
+ }
+ 
++void WebUIBrowserExclusiveAccessContext::RepositionBubble() {
++  if (exclusive_access_bubble_) {
++    exclusive_access_bubble_->RepositionIfVisible();
++  }
++}
++
+ bool WebUIBrowserExclusiveAccessContext::IsExclusiveAccessBubbleDisplayed()
+     const {
+   return exclusive_access_bubble_ && (exclusive_access_bubble_->IsShowing() ||
+diff --git a/chrome/browser/ui/webui_browser/webui_browser_exclusive_access_context.h b/chrome/browser/ui/webui_browser/webui_browser_exclusive_access_context.h
+index 2018474821..e0e0a8581e 100644
+--- a/chrome/browser/ui/webui_browser/webui_browser_exclusive_access_context.h
++++ b/chrome/browser/ui/webui_browser/webui_browser_exclusive_access_context.h
+@@ -52,6 +52,8 @@ class WebUIBrowserExclusiveAccessContext
+   // Called when the widget's show state changes (e.g., entering/exiting
+   // fullscreen).
+   void OnWidgetShowStateChanged();
++  // agens: keeps the "press Esc" bubble centered while the window grows into full screen.
++  void RepositionBubble();
+ 
+   // ExclusiveAccessContext:
+   Profile* GetProfile() override;
 diff --git a/chrome/browser/ui/webui_browser/webui_browser_window.cc b/chrome/browser/ui/webui_browser/webui_browser_window.cc
-index f83d197409..5199edb952 100644
+index f83d197409..7d927f2cd4 100644
 --- a/chrome/browser/ui/webui_browser/webui_browser_window.cc
 +++ b/chrome/browser/ui/webui_browser/webui_browser_window.cc
 @@ -40,6 +40,7 @@
@@ -6657,7 +7011,17 @@ index f83d197409..5199edb952 100644
    return web_contents_delegate_->web_contents()
        ->GetWebUI()
        ->GetDeviceScaleFactor();
-@@ -655,7 +675,7 @@ void WebUIBrowserWindow::ProcessFullscreen(bool fullscreen) {
+@@ -625,6 +645,9 @@ void WebUIBrowserWindow::OnWidgetBoundsChanged(views::Widget* widget,
+   if (modal_dialog_host_) {
+     modal_dialog_host_->NotifyPositionRequiresUpdate();
+   }
++  if (auto* context = WebUIBrowserExclusiveAccessContext::From(browser_)) {
++    context->RepositionBubble();  // agens
++  }
+ }
+ 
+ gfx::Rect WebUIBrowserWindow::GetContentsBoundsInScreen() const {
+@@ -655,7 +678,7 @@ void WebUIBrowserWindow::ProcessFullscreen(bool fullscreen) {
    }
  
    // Notify the WebUI about the fullscreen mode.
@@ -6666,7 +7030,7 @@ index f83d197409..5199edb952 100644
      page->OnFullscreenModeChanged(fullscreen, context);
    }
  
-@@ -754,6 +774,9 @@ void WebUIBrowserWindow::SetTopControlsGestureScrollInProgress(
+@@ -754,6 +777,9 @@ void WebUIBrowserWindow::SetTopControlsGestureScrollInProgress(
  }
  
  std::vector<StatusBubble*> WebUIBrowserWindow::GetStatusBubbles() {
@@ -6676,7 +7040,7 @@ index f83d197409..5199edb952 100644
    NOTIMPLEMENTED_LOG_ONCE();
    return {};
  }
-@@ -765,7 +788,9 @@ void WebUIBrowserWindow::UpdateTitleBar() {
+@@ -765,7 +791,9 @@ void WebUIBrowserWindow::UpdateTitleBar() {
  
  void WebUIBrowserWindow::OnBookmarkBarStateChanged(
      BookmarkBar::AnimateChangeType change_type) {
@@ -6687,7 +7051,7 @@ index f83d197409..5199edb952 100644
  }
  
  void WebUIBrowserWindow::UpdateLoadingAnimations(bool is_visible) {
-@@ -868,13 +893,17 @@ PinnedToolbarActions* WebUIBrowserWindow::GetPinnedToolbarActions() {
+@@ -868,13 +896,17 @@ PinnedToolbarActions* WebUIBrowserWindow::GetPinnedToolbarActions() {
  }
  
  void WebUIBrowserWindow::SetFocusToLocationBar(bool is_user_initiated) {
@@ -6707,7 +7071,7 @@ index f83d197409..5199edb952 100644
      page->SetReloadStopState(is_loading);
    }
  }
-@@ -990,6 +1019,10 @@ void WebUIBrowserWindow::ConfirmBrowserCloseWithPendingDownloads(
+@@ -990,6 +1022,10 @@ void WebUIBrowserWindow::ConfirmBrowserCloseWithPendingDownloads(
      int download_count,
      UnloadController::DownloadCloseType dialog_type,
      base::OnceCallback<void(bool)> callback) {
@@ -6718,7 +7082,7 @@ index f83d197409..5199edb952 100644
    NOTIMPLEMENTED_LOG_ONCE();
  }
  
-@@ -1347,6 +1380,9 @@ bool WebUIBrowserWindow::WidgetDelegate::ShouldDescendIntoChildForEventHandling(
+@@ -1347,6 +1383,9 @@ bool WebUIBrowserWindow::WidgetDelegate::ShouldDescendIntoChildForEventHandling(
  }
  
  WebUIBrowserUI* WebUIBrowserWindow::GetWebUIBrowserUI() const {
@@ -6728,7 +7092,7 @@ index f83d197409..5199edb952 100644
    return web_contents_delegate_->web_contents()
        ->GetWebUI()
        ->GetController()
-@@ -1354,11 +1390,15 @@ WebUIBrowserUI* WebUIBrowserWindow::GetWebUIBrowserUI() const {
+@@ -1354,11 +1393,15 @@ WebUIBrowserUI* WebUIBrowserWindow::GetWebUIBrowserUI() const {
  }
  
  void WebUIBrowserWindow::ShowSidePanel(SidePanelEntryKey side_panel_entry_key) {
