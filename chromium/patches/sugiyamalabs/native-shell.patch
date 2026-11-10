@@ -1463,10 +1463,10 @@ index 0000000000..fb231e798b
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..77e3d58cad
+index 0000000000..62e0e1497b
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,3516 @@
+@@ -0,0 +1,3572 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -1512,6 +1512,17 @@ index 0000000000..77e3d58cad
 +}
 +static BOOL SeeThrough() {
 +  return Theme() == 2 || Theme() == 3;
++}
++// Light, dark or system for pages (the engine) and for our own windows (the app's appearance,
++// which the chrome, settings and native controls follow).
++static void ApplyAppearance(AgensColorMode mode) {
++  NSApp.appearance = mode == kAgensModeLight  ? [NSAppearance appearanceNamed:NSAppearanceNameAqua]
++                     : mode == kAgensModeDark ? [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua]
++                                              : nil;
++}
++static void SetMode(AgensWindow* window, AgensColorMode mode) {
++  agens_window_set_color_mode(window, mode);
++  ApplyAppearance(mode);
 +}
 +static NSColor* HexA(unsigned argb) {
 +  return Hex(argb & 0xFFFFFF, ((argb >> 24) & 255) / 255.0);
@@ -2484,6 +2495,8 @@ index 0000000000..77e3d58cad
 +      y += 36;
 +    }
 +    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(themeChanged:) name:kThemeChanged object:nil];
++    // Light/dark (ours or the system's): layers keep the old colors unless repainted.
++    [NSApp addObserver:self forKeyPath:@"effectiveAppearance" options:0 context:nullptr];
 +    [self layout];
 +  }
 +  return self;
@@ -2491,6 +2504,10 @@ index 0000000000..77e3d58cad
 +- (void)themeChanged:(NSNotification*)note {
 +  [self paint];
 +  [self showSection:_section];
++}
++- (void)observeValueForKeyPath:(NSString*)path ofObject:(id)object change:(NSDictionary*)change context:(void*)context {
++  __weak AgensSettings* weak = self;
++  dispatch_async(dispatch_get_main_queue(), ^{ [weak themeChanged:nil]; });
 +}
 +- (void)paint {
 +  NSView* root = self.window.contentView;
@@ -2976,12 +2993,12 @@ index 0000000000..77e3d58cad
 +- (void)setTheme:(NSSegmentedControl*)seg {
 +  g_theme = kThemeOrder[seg.selectedSegment];
 +  [NSUserDefaults.standardUserDefaults setInteger:g_theme forKey:kThemeKey];
-+  if (g_theme == 1 && _browser) agens_window_set_color_mode(_browser, kAgensModeDark);  // Brasa is dark only
++  if (g_theme == 1 && _browser) SetMode(_browser, kAgensModeDark);  // Brasa is dark only
 +
 +  [NSNotificationCenter.defaultCenter postNotificationName:kThemeChanged object:nil];
 +}
 +- (void)setMode:(NSSegmentedControl*)seg {
-+  if (_browser) agens_window_set_color_mode(_browser, (AgensColorMode)seg.selectedSegment);
++  if (_browser) SetMode(_browser, (AgensColorMode)seg.selectedSegment);
 +}
 +- (void)setTabsPosition:(NSSegmentedControl*)seg {
 +  if ((seg.selectedSegment == 1) != [_chrome tabsOnTop]) [_chrome toggleTabsPosition];
@@ -3125,7 +3142,7 @@ index 0000000000..77e3d58cad
 +  _resetStatus = @"Restaurando…";
 +  [self showSection:@"restaurar"];
 +  agens_reset_settings(_browser, ResetFinished, (__bridge void*)self);
-+  agens_window_set_color_mode(_browser, kAgensModeSystem);
++  SetMode(_browser, kAgensModeSystem);
 +  NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
 +  for (NSString* k in @[ kThemeKey, kTintKey, kOpacityKey, kBlurKey, kImageKey, kTabsOnTopKey ]) [d removeObjectForKey:k];
 +  g_theme = -1;
@@ -3615,12 +3632,12 @@ index 0000000000..77e3d58cad
 +- (void)setTheme:(NSSegmentedControl*)seg {
 +  g_theme = (int)seg.selectedSegment;
 +  [NSUserDefaults.standardUserDefaults setInteger:g_theme forKey:kThemeKey];
-+  if (g_theme == 1 && _browser) agens_window_set_color_mode(_browser, kAgensModeDark);
++  if (g_theme == 1 && _browser) SetMode(_browser, kAgensModeDark);
 +  [NSNotificationCenter.defaultCenter postNotificationName:kThemeChanged object:nil];
 +  [self showStep:_step];
 +}
 +- (void)setMode:(NSSegmentedControl*)seg {
-+  if (_browser) agens_window_set_color_mode(_browser, (AgensColorMode)seg.selectedSegment);
++  if (_browser) SetMode(_browser, (AgensColorMode)seg.selectedSegment);
 +}
 +- (void)makeDefault:(id)sender {
 +  if (_browser) agens_window_set_default_browser(_browser);
@@ -3947,6 +3964,9 @@ index 0000000000..77e3d58cad
 +  NSView* _downloadsPanel;            // the open downloads panel, refreshed live
 +  std::vector<AgensDownload> _downloads;
 +  std::vector<std::string> _downloadNames;
++  NSView* _loadbar;  // prototype .loadbar: a warm glow running over a 2 pt line while the page loads
++  CAGradientLayer* _loadGlow;
++  CGFloat _loadW;
 +  NSView* _statusPill;  // link URL, bottom-left of the page (Chromium's status bubble)
 +  NSTextField* _statusText;
 +  BOOL _bookmarked;
@@ -4022,6 +4042,15 @@ index 0000000000..77e3d58cad
 +    [_downloadsButton setImage:AgensIcon(kIconDown)];
 +    _downloadsButton.hidden = YES;
 +    _downloadsButton.onPress = ^{ [weak toggleDownloads]; };
++    _loadbar = [[AgensPassThroughView alloc] init];
++    _loadbar.wantsLayer = YES;
++    _loadbar.layer.masksToBounds = YES;
++    _loadbar.hidden = YES;
++    _loadGlow = [CAGradientLayer layer];
++    _loadGlow.startPoint = CGPointMake(0, 0.5);
++    _loadGlow.endPoint = CGPointMake(1, 0.5);
++    _loadGlow.cornerRadius = 1;
++    [_loadbar.layer addSublayer:_loadGlow];
 +    _statusPill = [[AgensPassThroughView alloc] init];
 +    _statusPill.wantsLayer = YES;
 +    _statusPill.layer.cornerRadius = 7;
@@ -4144,10 +4173,11 @@ index 0000000000..77e3d58cad
 +    _ntp.field.delegate = self;
 +
 +    for (NSView* v in @[ _toggle, _back, _forward, _reload, _omni, _downloadsButton, _menu, _tabsScroll, _moreAtos, _atoTile, _atoName, _separator, _newTab, _newTabTop,
-+                         _atosLine, _addAto, _atoDot, _history, _ntp, _statusPill, _suggest ]) {
++                         _atosLine, _addAto, _atoDot, _history, _ntp, _loadbar, _statusPill, _suggest ]) {
 +      [self addSubview:v];
 +    }
 +    [self refreshTheme];
++    ApplyAppearance(agens_window_color_mode(_window));  // the saved choice, from the first window on
 +    agens_window_set_tabs_observer(_window, TabsChanged, (__bridge void*)self);
 +    agens_window_set_atos_observer(_window, AtosChanged, (__bridge void*)self);
 +    AgensWindow* opened = _window;
@@ -4177,6 +4207,7 @@ index 0000000000..77e3d58cad
 +  _atoDot.layer.backgroundColor = CG(kLight3, self);
 +  _statusPill.layer.backgroundColor = CG(kFloat, self);
 +  _statusPill.layer.borderColor = CG(kLine, self);
++  [self runLoadbar];  // the glow's color
 +}
 +- (void)viewDidChangeEffectiveAppearance {
 +  [super viewDidChangeEffectiveAppearance];
@@ -4223,6 +4254,25 @@ index 0000000000..77e3d58cad
 +    glass.state = NSVisualEffectStateFollowsWindowActiveState;
 +    [_backdrop addSubview:glass];
 +  }
++}
++// .loadbar::after: 35% of the line, from fully left of it to past its end, 1.1 s, again and again.
++// With "Reduzir movimento" it stays still in the middle.
++- (void)runLoadbar {
++  const CGFloat w = NSWidth(_loadbar.frame);
++  _loadW = NSWidth(_page);
++  [_loadGlow removeAllAnimations];
++  __block NSColor* warm;
++  [self.effectiveAppearance performAsCurrentDrawingAppearance:^{ warm = [kLight3.color() colorUsingColorSpace:NSColorSpace.sRGBColorSpace]; }];
++  _loadGlow.colors = @[ (id)[warm colorWithAlphaComponent:0].CGColor, (id)warm.CGColor, (id)[warm colorWithAlphaComponent:0].CGColor ];
++  _loadGlow.frame = CGRectMake((w - w * 0.35) / 2, 0, w * 0.35, 2);
++  if (_loadbar.hidden || w <= 0 || NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) return;
++  CABasicAnimation* sweep = [CABasicAnimation animationWithKeyPath:@"position.x"];
++  sweep.fromValue = @(-w * 0.35 / 2);
++  sweep.toValue = @(w * 0.35 * 3.5);
++  sweep.duration = 1.1;
++  sweep.repeatCount = HUGE_VALF;
++  sweep.timingFunction = [CAMediaTimingFunction functionWithControlPoints:0.2 :0.8 :0.2 :1];  // --ease
++  [_loadGlow addAnimation:sweep forKey:@"sweep"];
 +}
 +- (void)tintChanged:(NSNotification*)note {
 +  if (_window) agens_window_relayout(_window);  // the engine asks agens_ui_colors again
@@ -4440,6 +4490,8 @@ index 0000000000..77e3d58cad
 +  _page = page;
 +  _ntp.frame = NSInsetRect(_page, 1, 1);
 +  _history.frame = _ntp.frame;
++  _loadbar.frame = NSMakeRect(NSMinX(_page), NSMinY(_page) - 5, NSWidth(_page), 2);
++  if (NSWidth(_page) != _loadW) [self runLoadbar];  // the sweep is sized to the line
 +  CGFloat statusW = MIN(ceil(_statusText.fittingSize.width) + 24, NSWidth(_page) / 2);
 +  _statusPill.frame = NSMakeRect(NSMinX(_page) + 8, NSMaxY(_page) - 8 - 22, statusW, 22);
 +  _statusText.frame = NSMakeRect(10, 3, statusW - 20, 16);
@@ -4504,6 +4556,10 @@ index 0000000000..77e3d58cad
 +    _bookmarked = tabs[i].bookmarked;
 +    _back.enabled = tabs[i].can_go_back;
 +    _forward.enabled = tabs[i].can_go_forward;
++  }
++  if (_loadbar.hidden == _loading) {
++    _loadbar.hidden = !_loading;
++    [self runLoadbar];
 +  }
 +  [_reload setSymbol:_loading ? @"xmark" : @"arrow.clockwise"];
 +  [_star setSymbol:_bookmarked ? @"star.fill" : @"star"];
