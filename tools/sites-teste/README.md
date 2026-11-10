@@ -14,3 +14,5 @@ tools/sites-teste/serve.py [PORTA]   # padrão 8765
 | `/logout` | Apaga os cookies e volta para `/login` (para testar `session.lost` e `needs_login`). |
 | `/form` | Para o controle: campo de texto, campo de senha, checkbox, select, botão "Show" que escreve o digitado em `#out`, e link para `/other`. O `type` no campo de senha deve ser recusado. |
 | `/other` | Destino do link, para testar `tab.navigate` e o clique em link. |
+
+`/login?auto=1` entra sozinho (grava os cookies e vai para `/app/`), para os gates que não podem digitar.

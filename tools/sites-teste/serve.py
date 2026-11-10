@@ -39,15 +39,20 @@ class H(http.server.BaseHTTPRequestHandler):
             auth = self.headers.get("Authorization", "")
             return self.reply(200, ('{"ok": true, "bearer": %s}' % str(auth == "Bearer test-bearer-123").lower()).encode(),
                               ctype="application/json")
+        if self.path == "/login?auto=1":  # logs in by itself, for gates that cannot type
+            return self.login()
         if path in PAGES:
             return self.reply(200, (HERE / PAGES[path]).read_bytes())
         self.reply(404, b"not found")
+
+    def login(self):
+        self.redirect("/app/", [f"sid={SID}; Path=/; HttpOnly", "d=fake-d-cookie-456; Path=/"])
 
     def do_POST(self):
         if self.path != "/login":
             return self.reply(404, b"not found")
         self.rfile.read(int(self.headers.get("Content-Length") or 0))  # any credentials work: they are fake
-        self.redirect("/app/", [f"sid={SID}; Path=/; HttpOnly", "d=fake-d-cookie-456; Path=/"])
+        self.login()
 
     def log_message(self, *a):
         pass
