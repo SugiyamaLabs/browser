@@ -1,9 +1,9 @@
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
 new file mode 100644
-index 0000000000..b2719f8b46
+index 0000000000..61a82a2209
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embed.h
-@@ -0,0 +1,230 @@
+@@ -0,0 +1,242 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The boundary between the engine and any interface (the browser's own chrome today, the Agens
 +// app later). Plain C on purpose: no Chromium or C++ types cross it, Swift imports it as is, and
@@ -213,6 +213,18 @@ index 0000000000..b2719f8b46
 +int agens_password_get(AgensWindow* window, int index, char* out, int size);
 +void agens_password_remove(AgensWindow* window, int index);
 +
++// Histórico of this window's ato, newest first, one entry per page per day, at most 300.
++// `text` filters by title and address ("" for all). Calls `fn` later, once.
++typedef struct {
++  const char* url;
++  const char* title;
++  double time;  // seconds since 1970
++} AgensVisit;
++typedef void (*AgensHistoryFn)(void* context, const AgensVisit* visits, int count);
++void agens_history(AgensWindow* window, const char* text, AgensHistoryFn fn, void* context);
++// Removes every visit to that page.
++void agens_history_remove(AgensWindow* window, const char* url);
++
 +// Asks the system to make this browser the default for links (macOS shows its own prompt).
 +void agens_window_set_default_browser(AgensWindow* window);
 +
@@ -236,10 +248,10 @@ index 0000000000..b2719f8b46
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EMBED_H_
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
 new file mode 100644
-index 0000000000..cdcefd2ace
+index 0000000000..f4387816ff
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_window.h
-@@ -0,0 +1,410 @@
+@@ -0,0 +1,412 @@
 +// Copyright 2026 SugiyamaLabs.
 +// One browser window as the embed API sees it (agens_embed.h): tabs, suggestions, atos, search
 +// default, bookmarks. Platform-neutral; each platform's shell (native_shell_mac.mm, later
@@ -251,6 +263,7 @@ index 0000000000..cdcefd2ace
 +#include <vector>
 +#include "base/memory/raw_ptr.h"
 +#include "base/memory/weak_ptr.h"
++#include "base/task/cancelable_task_tracker.h"
 +#include "base/task/sequenced_task_runner.h"
 +#include "base/strings/utf_string_conversions.h"
 +#include "chrome/app/chrome_command_ids.h"
@@ -646,16 +659,17 @@ index 0000000000..cdcefd2ace
 +  AgensDownloadsChanged downloads_observer = nullptr;
 +  raw_ptr<void> downloads_context = nullptr;
 +  base::CallbackListSubscription search_loaded_;
++  base::CancelableTaskTracker history_tracker;
 +  base::WeakPtrFactory<AgensWindow> weak{this};
 +};
 +
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
 new file mode 100644
-index 0000000000..8e5aea74fc
+index 0000000000..09c52bf05c
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.cc
-@@ -0,0 +1,545 @@
+@@ -0,0 +1,585 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The embed API (agens_embed.h) on top of AgensWindow. Same code on every platform.
 +
@@ -669,6 +683,9 @@ index 0000000000..8e5aea74fc
 +#include "components/prefs/pref_service.h"
 +#include "base/memory/scoped_refptr.h"
 +#include "base/supports_user_data.h"
++#include "chrome/browser/history/history_service_factory.h"
++#include "components/history/core/browser/history_service.h"
++#include "components/history/core/browser/history_types.h"
 +#include "chrome/browser/browsing_data/chrome_browsing_data_remover_constants.h"
 +#include "chrome/browser/password_manager/factories/profile_password_store_factory.h"
 +#include "chrome/browser/profile_resetter/brandcoded_default_settings.h"
@@ -1083,6 +1100,43 @@ index 0000000000..8e5aea74fc
 +  saved->logins.erase(saved->logins.begin() + index);
 +}
 +
++void agens_history(AgensWindow* w, const char* text, AgensHistoryFn fn, void* context) {
++  history::HistoryService* history = HistoryServiceFactory::GetForProfile(
++      w->browser->GetProfile(), ServiceAccessType::EXPLICIT_ACCESS);
++  if (!history) {
++    fn(context, nullptr, 0);
++    return;
++  }
++  history::QueryOptions options;
++  options.max_count = 300;
++  options.duplicate_policy = history::QueryOptions::REMOVE_DUPLICATES_PER_DAY;
++  w->history_tracker.TryCancelAll();  // only the latest search answers
++  history->QueryHistory(
++      base::UTF8ToUTF16(text ? text : ""), options,
++      base::BindOnce(
++          [](AgensHistoryFn fn, void* context, history::QueryResults results) {
++            std::vector<std::string> urls, titles;
++            for (const history::URLResult& r : results) {
++              urls.push_back(r.url().spec());
++              titles.push_back(base::UTF16ToUTF8(r.title()));
++            }
++            std::vector<AgensVisit> out;
++            for (size_t i = 0; i < results.size(); ++i) {
++              out.push_back({urls[i].c_str(), titles[i].c_str(),
++                             results[i].visit_time().InSecondsFSinceUnixEpoch()});
++            }
++            fn(context, out.data(), static_cast<int>(out.size()));
++          },
++          fn, context),
++      &w->history_tracker);
++}
++void agens_history_remove(AgensWindow* w, const char* url) {
++  history::HistoryService* history = HistoryServiceFactory::GetForProfile(
++      w->browser->GetProfile(), ServiceAccessType::EXPLICIT_ACCESS);
++  GURL page(url ? url : "");
++  if (history && page.is_valid()) history->DeleteURLs({page});
++}
++
 +void agens_window_set_default_browser(AgensWindow*) {
 +  shell_integration::SetAsDefaultBrowser();
 +}
@@ -1409,10 +1463,10 @@ index 0000000000..fb231e798b
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..56c86444c5
+index 0000000000..77e3d58cad
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,3245 @@
+@@ -0,0 +1,3516 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -1493,6 +1547,9 @@ index 0000000000..56c86444c5
 +    kFloat{0x1A1A1F, 0xFFFFFF, 0x241B15, 0xE61E1E24, 0xF2FFFFFF},
 +    kRaise2{0x26262D, 0xE2E2E7, 0x2A2018, 0x24FFFFFF, 0xE6FFFFFF}, kLight3{0xFFC98A, 0xE8893A, 0xFFC98A};
 +static NSString* const kThemeChanged = @"AgensThemeChanged";
++// Only the window color (Seu's tint and transparency): the engine repaints, nothing is rebuilt.
++// Sliders send it on every step while dragged.
++static NSString* const kTintChanged = @"AgensTintChanged";
 +
 +// Layers take a CGColor, which doesn't follow the appearance by itself.
 +static CGColorRef CG(const Token& t, NSView* v) {
@@ -2279,6 +2336,7 @@ index 0000000000..56c86444c5
 +@interface AgensSettings : NSWindowController <NSWindowDelegate, NSTextFieldDelegate>
 ++ (void)showFor:(AgensWindow*)window collapsed:(BOOL)collapsed chrome:(id<AgensSettingsHost>)chrome;
 ++ (void)forget:(AgensWindow*)window;
++- (void)showSection:(NSString*)key;
 +@end
 +
 +@interface AgensFlippedView : NSView
@@ -2891,11 +2949,11 @@ index 0000000000..56c86444c5
 +  unsigned rgb = ((unsigned)lround(c.redComponent * 255) << 16) | ((unsigned)lround(c.greenComponent * 255) << 8) |
 +                 (unsigned)lround(c.blueComponent * 255);
 +  [NSUserDefaults.standardUserDefaults setInteger:rgb forKey:kTintKey];
-+  [self themeDidChange];
++  [NSNotificationCenter.defaultCenter postNotificationName:kTintChanged object:nil];
 +}
 +- (void)setCover:(NSSlider*)slider {
 +  [NSUserDefaults.standardUserDefaults setDouble:slider.doubleValue forKey:kOpacityKey];
-+  [self themeDidChange];
++  [NSNotificationCenter.defaultCenter postNotificationName:kTintChanged object:nil];
 +}
 +- (void)setBlur:(NSSwitch*)sw {
 +  [NSUserDefaults.standardUserDefaults setBool:sw.state == NSControlStateValueOn forKey:kBlurKey];
@@ -3572,6 +3630,246 @@ index 0000000000..56c86444c5
 +@end
 +
 +// ---------------------------------------------------------------------------------------------
++// Histórico (prototype INTERNAL.history): our own page over the card while the tab is on
++// chrome://history. Search, "Apagar histórico…", days with a line under them, and rows with the
++// time, a monogram, the title, the site and "x" on hover.
++
++@interface AgensHistoryRow : AgensHoverView
++@property(nonatomic, copy) void (^onRemove)(void);
++- (void)setTime:(NSString*)time title:(NSString*)title site:(NSString*)site;
++@end
++@implementation AgensHistoryRow {
++  NSTextField* _time;
++  AgensAtoTile* _tile;
++  NSTextField* _title;
++  NSTextField* _site;
++  NSButton* _remove;
++}
++@synthesize onRemove = _onRemove;
++- (instancetype)initWithFrame:(NSRect)frame {
++  if ((self = [super initWithFrame:frame])) {
++    _time = Label(12, NSFontWeightRegular, kDim);
++    _time.font = [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightRegular];
++    _tile = AtoTile(16);
++    _title = Label(13.5, NSFontWeightRegular, kInk);
++    _site = Label(12, NSFontWeightRegular, kDim);
++    _site.alignment = NSTextAlignmentRight;
++    _remove = [NSButton buttonWithImage:Symbol(@"xmark", 10) target:self action:@selector(remove:)];
++    _remove.bordered = NO;
++    _remove.contentTintColor = kDim.color();
++    _remove.toolTip = @"Remover do histórico";
++    _remove.accessibilityLabel = @"Remover do histórico";
++    for (NSView* v in @[ _time, _tile, _title, _site, _remove ]) [self addSubview:v];
++  }
++  return self;
++}
++- (void)setTime:(NSString*)time title:(NSString*)title site:(NSString*)site {
++  _time.stringValue = time;
++  _title.stringValue = title;
++  _site.stringValue = site;
++  _tile.stringValue = site.length ? [site substringToIndex:1].uppercaseString : @"?";
++  _tile.layer.backgroundColor = AtoColor((int)(site.hash % 5)).CGColor;
++  self.toolTip = title;
++  self.accessibilityLabel = [NSString stringWithFormat:@"%@, %@, %@", title, site, time];
++}
++- (void)layout {
++  [super layout];
++  const CGFloat w = NSWidth(self.bounds);
++  [_site sizeToFit];
++  const CGFloat siteW = MIN(NSWidth(_site.frame), w * 0.35);
++  _time.frame = NSMakeRect(10, 8, 44, 16);
++  _tile.frame = NSMakeRect(66, 8, 16, 16);
++  _remove.frame = NSMakeRect(w - 30, 4, 24, 24);
++  _site.frame = NSMakeRect(NSMinX(_remove.frame) - 8 - siteW, 8, siteW, 16);
++  _title.frame = NSMakeRect(94, 7, NSMinX(_site.frame) - 12 - 94, 18);
++  [self refresh];
++}
++- (void)refresh {
++  [super refresh];
++  _remove.alphaValue = self.hovered ? 1 : 0;  // hidden views drop out of VoiceOver
++}
++- (void)remove:(id)sender {
++  if (_onRemove) _onRemove();
++}
++@end
++
++@interface AgensHistoryView : NSView <NSSearchFieldDelegate>
++@property(nonatomic) AgensWindow* engine;
++@property(nonatomic, copy) void (^onOpen)(NSString* url);
++@property(nonatomic, copy) void (^onClear)(void);
++- (void)reload;
++- (void)refreshTheme;
++- (void)setVisits:(const AgensVisit*)visits count:(int)count;
++@end
++
++static void VisitsListed(void* context, const AgensVisit* visits, int count) {
++  [(__bridge AgensHistoryView*)context setVisits:visits count:count];
++}
++
++@implementation AgensHistoryView {
++  NSScrollView* _scroll;
++  AgensFlippedView* _doc;
++  NSTextField* _heading;
++  NSSearchField* _search;
++  NSButton* _clear;
++  NSMutableArray<NSView*>* _items;  // day labels, lines and rows
++  NSTextField* _note;
++  std::vector<std::tuple<std::string, std::string, double>> _visits;  // url, title, time
++}
++@synthesize engine = _engine;
++@synthesize onOpen = _onOpen;
++@synthesize onClear = _onClear;
++- (instancetype)initWithFrame:(NSRect)frame {
++  if ((self = [super initWithFrame:frame])) {
++    self.wantsLayer = YES;
++    self.layer.cornerRadius = 11;
++    self.layer.masksToBounds = YES;
++    _items = [NSMutableArray array];
++    _scroll = [[NSScrollView alloc] init];
++    _scroll.drawsBackground = NO;
++    _scroll.contentView.drawsBackground = NO;
++    _scroll.hasVerticalScroller = YES;
++    _scroll.autohidesScrollers = YES;
++    _scroll.verticalScroller = [[AgensScroller alloc] init];
++    _scroll.scrollerStyle = NSScrollerStyleOverlay;
++    _doc = [[AgensFlippedView alloc] init];
++    _scroll.documentView = _doc;
++    [self addSubview:_scroll];
++    _heading = Label(22, NSFontWeightSemibold, kInk);
++    _heading.stringValue = @"Histórico";
++    _search = [[NSSearchField alloc] init];
++    _search.placeholderString = @"Buscar no histórico";
++    _search.accessibilityLabel = @"Buscar no histórico";
++    _search.sendsSearchStringImmediately = NO;  // waits for a pause in typing
++    _search.target = self;
++    _search.action = @selector(searchChanged:);
++    _clear = [NSButton buttonWithTitle:@"Apagar histórico…" target:self action:@selector(clear:)];
++    _clear.controlSize = NSControlSizeSmall;
++    _note = Label(12, NSFontWeightRegular, kDim);
++    _note.stringValue = @"O histórico fica só neste Mac, por ato. Nada vai para servidor nenhum.";
++    for (NSView* v in @[ _heading, _search, _clear, _note ]) [_doc addSubview:v];
++    [self refreshTheme];
++  }
++  return self;
++}
++- (BOOL)isFlipped {
++  return YES;
++}
++- (void)refreshTheme {
++  self.layer.backgroundColor = CG(kBg, self);
++  for (NSView* v in _items) {
++    if (!v.subviews.count && v.layer) v.layer.backgroundColor = CG(kLine, self);  // the day lines
++  }
++}
++- (void)viewDidChangeEffectiveAppearance {
++  [super viewDidChangeEffectiveAppearance];
++  [self refreshTheme];
++}
++- (void)reload {
++  if (_engine) agens_history(_engine, _search.stringValue.UTF8String, VisitsListed, (__bridge void*)self);
++}
++- (void)searchChanged:(id)sender {
++  [self reload];
++}
++- (void)clear:(id)sender {
++  if (_onClear) _onClear();
++}
++- (void)setVisits:(const AgensVisit*)visits count:(int)count {
++  _visits.clear();
++  for (int i = 0; i < count; ++i) _visits.emplace_back(visits[i].url, visits[i].title, visits[i].time);
++  [self build];
++}
++static NSString* DayName(NSDate* date) {
++  NSCalendar* cal = NSCalendar.currentCalendar;
++  if ([cal isDateInToday:date]) return @"Hoje";
++  if ([cal isDateInYesterday:date]) return @"Ontem";
++  static NSDateFormatter* f;
++  if (!f) {
++    f = [[NSDateFormatter alloc] init];
++    f.locale = [NSLocale localeWithLocaleIdentifier:@"pt_BR"];
++    f.dateFormat = @"EEEE, d 'de' MMMM";
++  }
++  NSString* s = [f stringFromDate:date];
++  return [[s substringToIndex:1].uppercaseString stringByAppendingString:[s substringFromIndex:1]];
++}
++- (void)build {
++  for (NSView* v in _items) [v removeFromSuperview];
++  [_items removeAllObjects];
++  NSDateFormatter* hm = [[NSDateFormatter alloc] init];
++  hm.dateFormat = @"HH:mm";
++  NSString* day = nil;
++  __weak AgensHistoryView* weak = self;
++  for (const auto& [url, title, time] : _visits) {
++    NSDate* date = [NSDate dateWithTimeIntervalSince1970:time];
++    NSString* name = DayName(date);
++    if (![name isEqualToString:day]) {
++      day = name;
++      NSTextField* label = Label(12.5, NSFontWeightSemibold, kMute);
++      label.stringValue = name;
++      NSView* line = [[NSView alloc] init];
++      line.wantsLayer = YES;
++      line.layer.backgroundColor = CG(kLine, self);
++      [_items addObject:label];
++      [_items addObject:line];
++    }
++    NSURL* u = [NSURL URLWithString:@(url.c_str())];
++    NSString* site = u.host ?: @(url.c_str());
++    if ([site hasPrefix:@"www."]) site = [site substringFromIndex:4];
++    AgensHistoryRow* row = [[AgensHistoryRow alloc] initWithFrame:NSZeroRect];
++    [row setTime:[hm stringFromDate:date] title:title.empty() ? site : @(title.c_str()) site:site];
++    NSString* address = @(url.c_str());
++    row.onPress = ^{
++      AgensHistoryView* strong = weak;
++      if (strong && strong->_onOpen) strong->_onOpen(address);
++    };
++    row.onRemove = ^{
++      AgensHistoryView* strong = weak;
++      if (!strong || !strong->_engine) return;
++      agens_history_remove(strong->_engine, address.UTF8String);
++      [strong reload];
++    };
++    [_items addObject:row];
++  }
++  if (_visits.empty()) {
++    NSTextField* empty = Label(13, NSFontWeightRegular, kDim);
++    empty.stringValue = _search.stringValue.length ? @"Nada encontrado." : @"Nada por aqui ainda.";
++    [_items addObject:empty];
++  }
++  for (NSView* v in _items) [_doc addSubview:v];
++  self.needsLayout = YES;
++}
++// Prototype .ip: at most 820 pt wide, centered, 36 pt from the top, 28 pt on the sides.
++- (void)layout {
++  [super layout];
++  _scroll.frame = self.bounds;
++  const CGFloat W = NSWidth(self.bounds), cw = MIN(820, W) - 56, x0 = (W - cw) / 2;
++  CGFloat y = 36;
++  [_clear sizeToFit];
++  _clear.frame = NSMakeRect(x0 + cw - NSWidth(_clear.frame), y + 4, NSWidth(_clear.frame), NSHeight(_clear.frame));
++  _search.frame = NSMakeRect(NSMinX(_clear.frame) - 12 - 240, y + 2, 240, 24);
++  _heading.frame = NSMakeRect(x0, y, NSMinX(_search.frame) - 12 - x0, 28);
++  y += 28 + 20;
++  for (NSView* v in _items) {
++    if ([v isKindOfClass:AgensHistoryRow.class]) {
++      v.frame = NSMakeRect(x0 - 10, y, cw + 20, 32);  // the hover box reaches past the text, like .row's padding
++      y += 33;
++    } else if ([v isKindOfClass:NSTextField.class]) {
++      y += 22;
++      v.frame = NSMakeRect(x0, y, cw, 18);
++      y += 24;
++    } else {  // the line under a day
++      v.frame = NSMakeRect(x0, y, cw, 1);
++      y += 7;
++    }
++  }
++  y += 24;
++  _note.frame = NSMakeRect(x0, y, cw, 16);
++  y += 16 + 48;
++  _doc.frame = NSMakeRect(0, 0, W, MAX(y, NSHeight(self.bounds)));
++}
++@end
++
++// ---------------------------------------------------------------------------------------------
 +// The chrome.
 +
 +@interface AgensChrome : AgensDragView <NSTextFieldDelegate, AgensSettingsHost>
@@ -3660,6 +3958,8 @@ index 0000000000..56c86444c5
 +  id _keyMonitor;
 +  id _menuMonitor;  // right click on a tab (Chromium's window would send it to its content view)
 +  AgensNewTabView* _ntp;
++  // shortcut: Chromium's history page still loads under ours (one renderer more); serve a blank page for chrome://history if memory needs it.
++  AgensHistoryView* _history;
 +  NSView* _backdrop;  // under the whole window, for Vidro and Seu (glass, blur, image)
 +  NSString* _url;
 +  BOOL _loading;
@@ -3824,6 +4124,19 @@ index 0000000000..56c86444c5
 +    _atoDot.wantsLayer = YES;
 +    _atoDot.layer.cornerRadius = 2;
 +
++    _history = [[AgensHistoryView alloc] init];
++    _history.hidden = YES;
++    _history.engine = window;
++    _history.onOpen = ^(NSString* url) {
++      AgensChrome* strong = weak;
++      if (strong && strong->_window) agens_window_navigate(strong->_window, url.UTF8String);
++    };
++    _history.onClear = ^{
++      AgensChrome* strong = weak;
++      if (!strong || !strong->_window) return;
++      [strong menuSettings:nil];
++      [g_settings showSection:@"apagar"];
++    };
 +    _ntp = [[AgensNewTabView alloc] init];
 +    _ntp.hidden = YES;
 +    _ntp.field.target = self;
@@ -3831,7 +4144,7 @@ index 0000000000..56c86444c5
 +    _ntp.field.delegate = self;
 +
 +    for (NSView* v in @[ _toggle, _back, _forward, _reload, _omni, _downloadsButton, _menu, _tabsScroll, _moreAtos, _atoTile, _atoName, _separator, _newTab, _newTabTop,
-+                         _atosLine, _addAto, _atoDot, _ntp, _statusPill, _suggest ]) {
++                         _atosLine, _addAto, _atoDot, _history, _ntp, _statusPill, _suggest ]) {
 +      [self addSubview:v];
 +    }
 +    [self refreshTheme];
@@ -3844,6 +4157,10 @@ index 0000000000..56c86444c5
 +    [NSNotificationCenter.defaultCenter addObserver:self
 +                                           selector:@selector(themeChanged:)
 +                                               name:kThemeChanged
++                                             object:nil];
++    [NSNotificationCenter.defaultCenter addObserver:self
++                                           selector:@selector(tintChanged:)
++                                               name:kTintChanged
 +                                             object:nil];
 +    agens_window_set_suggestions_observer(_window, SuggestionsChanged, (__bridge void*)self);
 +  }
@@ -3906,6 +4223,9 @@ index 0000000000..56c86444c5
 +    glass.state = NSVisualEffectStateFollowsWindowActiveState;
 +    [_backdrop addSubview:glass];
 +  }
++}
++- (void)tintChanged:(NSNotification*)note {
++  if (_window) agens_window_relayout(_window);  // the engine asks agens_ui_colors again
 +}
 +- (void)themeChanged:(NSNotification*)note {
 +  [self setTop:[NSUserDefaults.standardUserDefaults boolForKey:kTabsOnTopKey]];
@@ -4119,6 +4439,7 @@ index 0000000000..56c86444c5
 +
 +  _page = page;
 +  _ntp.frame = NSInsetRect(_page, 1, 1);
++  _history.frame = _ntp.frame;
 +  CGFloat statusW = MIN(ceil(_statusText.fittingSize.width) + 24, NSWidth(_page) / 2);
 +  _statusPill.frame = NSMakeRect(NSMinX(_page) + 8, NSMaxY(_page) - 8 - 22, statusW, 22);
 +  _statusText.frame = NSMakeRect(10, 3, statusW - 20, 16);
@@ -4188,13 +4509,16 @@ index 0000000000..56c86444c5
 +  [_star setSymbol:_bookmarked ? @"star.fill" : @"star"];
 +  [_star setTint:_bookmarked ? kLight3 : kDim];
 +  _star.accessibilityLabel = _bookmarked ? @"Tirar dos favoritos" : @"Adicionar aos favoritos";
-+  _star.hidden = _url.length == 0;
++  _star.hidden = _url.length == 0 || [_url hasPrefix:@"chrome://"];
 +  _siteButton.hidden = _url.length == 0;
 +  _reload.accessibilityLabel = _loading ? @"Parar" : @"Recarregar";
 +  BOOL secure = [_url hasPrefix:@"https://"];
 +  _omniIcon.image = Symbol(_url.length == 0 ? @"magnifyingglass" : secure ? @"lock.fill" : @"globe", 12);
 +  // Don't overwrite what the person is typing.
 +  if (_address.currentEditor == nil) _address.stringValue = [self displayURL];
++  const BOOL wasHistory = !_history.hidden;
++  _history.hidden = ![_url hasPrefix:@"chrome://history"];
++  if (!_history.hidden && !wasHistory) [_history reload];
 +  BOOL wasNTP = !_ntp.hidden;
 +  _ntp.hidden = _url.length > 0;
 +  if (!_ntp.hidden && !wasNTP) _ntp.field.stringValue = @"";
@@ -4204,6 +4528,7 @@ index 0000000000..56c86444c5
 +
 +// The address as the prototype shows it: no https:// or www., no lone trailing slash.
 +- (NSString*)displayURL {
++  if ([_url hasPrefix:@"chrome://history"]) return @"Histórico";
 +  NSString* s = _url;
 +  for (NSString* p in @[ @"https://", @"www." ]) {
 +    if ([s hasPrefix:p]) s = [s substringFromIndex:p.length];

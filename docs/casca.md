@@ -44,7 +44,8 @@ janela do Chromium            WebUIBrowserWindow (Webium), sem a página HTML
 - **Som:** aba tocando mostra o alto-falante na aba e no endereço; clicar silencia (fica laranja e cortado) ou devolve o som. Também pelo botão direito na aba.
 - **Sem o seletor de perfis do Chromium:** com mais de um ato, o navegador abre direto no último usado; trocar de ato é pela coluna.
 - **Muitas abas e atos:** a lista de abas rola entre "Nova aba" e o pé, com uma barra fina (some na lateral recolhida). O pé mostra até 6 atos (5 recolhida); além disso, "⋯" abre a lista completa, e o ato atual nunca sai do pé.
-- **Barra:** estrela de favoritar dentro do endereço e menu "⋯" (Nova aba, Favoritos, Histórico, Configurações); por enquanto essas três abrem as páginas do Chromium.
+- **Barra:** estrela de favoritar dentro do endereço e menu "⋯" (Nova aba, Favoritos, Histórico, Configurações). Favoritos ainda abre a página do Chromium.
+- **Histórico nativo** (⌘Y ou "⋯" › Histórico): busca, dias, abrir, remover um item e "Apagar histórico…" (vai para Configurações › Apagar dados). A página do Chromium ainda carrega por baixo (um processo a mais).
 - **Configurações nativas, sem abrir página do Chromium:** apagar dados de navegação (período e o que apagar), restaurar as configurações (volta buscador DuckDuckGo, início, permissões, idiomas e visual; logins, senhas, favoritos, histórico e extensões ficam), exceções por site (mudar ou tirar), extensões do ato (ligar, desligar, remover) e senhas salvas (busca, ver e copiar com Touch ID ou a senha do Mac, apagar). Tudo vale para o ato da janela. Só os avisos de código aberto ainda abrem `chrome://credits`.
 
 ## O que o Agens embute (e o que não)
