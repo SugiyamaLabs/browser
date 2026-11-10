@@ -772,36 +772,125 @@ index 0000000000..4f5200a085
 +}  // namespace agens::bridge
 diff --git a/chrome/browser/agens/bridge/control_ops.cc b/chrome/browser/agens/bridge/control_ops.cc
 new file mode 100644
-index 0000000000..a262a8e13a
+index 0000000000..dd57881b49
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_ops.cc
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,362 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The control session (docs/protocolo.md, "control, tab, page"): an app, after the person's OK,
 +// drives tabs of one ato. It belongs to the connection and ends on control.stop, when the
 +// connection closes, or when the person presses "Parar" on a controlled tab.
++// - It only ever sees the tabs it opened: ids are its own, valid for this session only.
++// - Controlled tabs are marked (AgensControlled): the shell shows it; saved passwords, autofill
++//   and downloads stay out of them.
 +
 +#include "chrome/browser/agens/bridge/control_ops.h"
 +
++#include <algorithm>
 +#include <map>
++#include <memory>
 +#include <set>
 +#include <utility>
++#include <vector>
 +
++#include "base/functional/callback_helpers.h"
 +#include "base/no_destructor.h"
++#include "base/strings/string_number_conversions.h"
 +#include "base/strings/string_util.h"
++#include "base/timer/timer.h"
 +#include "chrome/browser/agens/bridge/approval.h"
++#include "chrome/browser/agens/embed/agens_controlled.h"
 +#include "chrome/browser/agens/embed/agens_window.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
++#include "chrome/browser/ui/navigator/browser_navigator.h"
++#include "chrome/browser/ui/navigator/browser_navigator_params.h"
++#include "content/public/browser/invalidate_type.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/web_contents_observer.h"
 +
 +namespace agens::bridge::control {
 +
 +namespace {
 +
++constexpr char kFailed[] = "failed";
 +constexpr size_t kMaxReasonChars = 1024;
++// tab.open and tab.navigate answer when the navigation commits or fails, or after this.
++constexpr base::TimeDelta kNavigationWait = base::Seconds(30);
++
++void StopByUser(uint64_t connection);
++
++// A tab the session opened. Marks it while it lives, and unmarks it when the session lets go.
++class Tab : public content::WebContentsObserver {
++ public:
++  Tab(uint64_t connection, std::string id, content::WebContents* contents, const std::string& client)
++      : content::WebContentsObserver(contents), id(std::move(id)), connection_(connection) {
++    AgensControlled::CreateForWebContents(contents);
++    AgensControlled* mark = AgensControlled::FromWebContents(contents);
++    mark->by = client;
++    mark->stop = base::BindRepeating(&StopByUser, connection);
++    // Keeps rendering while in the background: input, screenshots and the accessibility tree work
++    // on a tab that isn't the active one.
++    capture_ = contents->IncrementCapturerCount(gfx::Size(), /*stay_hidden=*/true, /*stay_awake=*/false,
++                                                /*is_activity=*/false);
++    contents->NotifyNavigationStateChanged(content::INVALIDATE_TYPE_TAB);  // the shell redraws it
++  }
++  ~Tab() override {
++    Answer(ErrorReply(&waiting_id_, kFailed, "the tab is no longer controlled"));
++    if (content::WebContents* contents = web_contents()) {
++      contents->RemoveUserData(AgensControlled::UserDataKey());
++      contents->NotifyNavigationStateChanged(content::INVALIDATE_TYPE_TAB);
++    }
++  }
++
++  const std::string id;  // "t1", "t2"… for this session
++
++  // Answers `request_id` with {tab} once `navigation_id` finishes (or kNavigationWait passes).
++  void WaitFor(int64_t navigation_id, base::Value request_id, ReplyCallback reply) {
++    AnswerOk();  // an earlier wait: its navigation was replaced by this one
++    waiting_navigation_ = navigation_id;
++    waiting_id_ = std::move(request_id);
++    waiting_reply_ = std::move(reply);
++    waiting_timer_.Start(FROM_HERE, kNavigationWait, base::BindOnce(&Tab::AnswerOk, base::Unretained(this)));
++  }
++  void AnswerOk() {
++    base::DictValue result;
++    result.Set("tab", id);
++    Answer(OkReply(waiting_id_, std::move(result)));
++  }
++
++  // content::WebContentsObserver:
++  void DidFinishNavigation(content::NavigationHandle* handle) override {
++    if (waiting_reply_ && handle->GetNavigationId() == waiting_navigation_) AnswerOk();  // a failed load is ok too
++  }
++  void WebContentsDestroyed() override;
++
++ private:
++  void Answer(std::string line) {
++    waiting_timer_.Stop();
++    if (waiting_reply_) std::move(waiting_reply_).Run(std::move(line));
++  }
++
++  const uint64_t connection_;
++  base::ScopedClosureRunner capture_;
++  int64_t waiting_navigation_ = 0;
++  base::Value waiting_id_;
++  ReplyCallback waiting_reply_;
++  base::OneShotTimer waiting_timer_;
++};
 +
 +// One app's control of one ato.
 +struct Session {
 +  std::string client;  // the app's name, shown on its tabs
 +  base::FilePath ato;  // the ato's profile folder
++  std::vector<std::unique_ptr<Tab>> tabs;
++  int next_tab = 1;
++
++  Tab* Find(const std::string& id) {
++    for (auto& tab : tabs) {
++      if (tab->id == id) return tab.get();
++    }
++    return nullptr;
++  }
 +};
 +std::map<uint64_t, Session>& Sessions() {
 +  static base::NoDestructor<std::map<uint64_t, Session>> sessions;
@@ -813,6 +902,15 @@ index 0000000000..a262a8e13a
 +  return *asking;
 +}
 +
++void Tab::WebContentsDestroyed() {
++  // The person closed it: forget it (this deletes `this`).
++  capture_.ReplaceClosure(base::OnceClosure());
++  Observe(nullptr);
++  auto it = Sessions().find(connection_);
++  if (it == Sessions().end()) return;
++  std::erase_if(it->second.tabs, [this](const std::unique_ptr<Tab>& tab) { return tab.get() == this; });
++}
++
 +ProfileAttributesEntry* FindAto(const std::string& id) {
 +  for (ProfileAttributesEntry* entry : AgensWindow::Atos()) {
 +    if (entry->GetPath().BaseName().AsUTF8Unsafe() == id) return entry;
@@ -820,8 +918,35 @@ index 0000000000..a262a8e13a
 +  return nullptr;
 +}
 +
-+void End(uint64_t connection) {
-+  Sessions().erase(connection);
++// Ends the session. Its tabs stay open and are no longer controlled, unless `close_tabs`.
++void End(uint64_t connection, bool close_tabs) {
++  auto it = Sessions().find(connection);
++  if (it == Sessions().end()) return;
++  std::vector<std::unique_ptr<Tab>> tabs = std::move(it->second.tabs);
++  Sessions().erase(it);
++  std::vector<content::WebContents*> to_close;
++  for (auto& tab : tabs) {
++    if (close_tabs && tab->web_contents()) to_close.push_back(tab->web_contents());
++  }
++  tabs.clear();  // unmarks them
++  for (content::WebContents* contents : to_close) contents->Close();
++}
++
++void StopByUser(uint64_t connection) {
++  if (!Sessions().contains(connection)) return;
++  End(connection, /*close_tabs=*/false);
++  base::DictValue fields;
++  fields.Set("reason", "user");
++  SendEventTo(connection, "control.stopped", std::move(fields));
++}
++
++std::optional<GURL> WebURL(const Request& request) {
++  std::optional<std::string> text = StringParam(request.body, "url");
++  if (!text) return std::nullopt;
++  GURL url(*text);
++  // Only web pages: never chrome://, file:, javascript: or data:.
++  if (!url.is_valid() || !url.SchemeIsHTTPOrHTTPS()) return std::nullopt;
++  return url;
 +}
 +
 +void Start(const Client& client, Request request, ReplyCallback reply) {
@@ -857,10 +982,116 @@ index 0000000000..a262a8e13a
 +                      std::move(reply).Run(ErrorReply(&request.id, kNotFound, "the ato is gone"));
 +                      return;
 +                    }
-+                    Sessions()[connection] = {std::move(name), std::move(ato)};
++                    Session& session = Sessions()[connection];
++                    session.client = std::move(name);
++                    session.ato = std::move(ato);
 +                    std::move(reply).Run(OkReply(request.id));
 +                  },
 +                  connection, name, entry->GetPath(), std::move(request), std::move(reply)));
++}
++
++// A new foreground tab in `browser` (the ato's window), controlled by the session.
++void OpenIn(uint64_t connection, GURL url, Request request, ReplyCallback reply, BrowserWindowInterface* browser) {
++  auto it = Sessions().find(connection);
++  if (it == Sessions().end()) {
++    std::move(reply).Run(ErrorReply(&request.id, kUnauthorized, "control ended"));
++    return;
++  }
++  Session& session = it->second;
++  if (!browser || browser->GetProfile()->GetPath() != session.ato) {
++    std::move(reply).Run(ErrorReply(&request.id, kFailed, "could not open the ato's window"));
++    return;
++  }
++  NavigateParams params(browser, url, ui::PAGE_TRANSITION_AUTO_TOPLEVEL);
++  params.disposition = WindowOpenDisposition::NEW_FOREGROUND_TAB;
++  base::WeakPtr<content::NavigationHandle> handle = Navigate(&params);
++  content::WebContents* contents = params.navigated_or_inserted_contents;
++  if (!contents) {
++    std::move(reply).Run(ErrorReply(&request.id, kFailed, "could not open the tab"));
++    return;
++  }
++  auto tab = std::make_unique<Tab>(connection, "t" + base::NumberToString(session.next_tab++), contents,
++                                   session.client);
++  if (handle) {
++    tab->WaitFor(handle->GetNavigationId(), std::move(request.id), std::move(reply));
++  } else {
++    base::DictValue result;
++    result.Set("tab", tab->id);
++    std::move(reply).Run(OkReply(request.id, std::move(result)));
++  }
++  session.tabs.push_back(std::move(tab));
++}
++
++void TabOpen(const Client& client, Request request, ReplyCallback reply) {
++  const Session& session = Sessions().at(client.connection);
++  std::optional<std::string> ato = StringParam(request.body, "ato");
++  std::optional<GURL> url = WebURL(request);
++  if (!ato || !url) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs ato and an http or https url"));
++    return;
++  }
++  if (*ato != session.ato.BaseName().AsUTF8Unsafe()) {
++    std::move(reply).Run(ErrorReply(&request.id, kDenied, "control was approved for another ato"));
++    return;
++  }
++  // The ato's window when it has one (left where it is); otherwise open it.
++  Profile* profile = g_browser_process->profile_manager()->GetProfileByPath(session.ato);
++  BrowserWindowInterface* browser = nullptr;
++  if (profile) {
++    ForEachCurrentBrowserWindowInterfaceOrderedByActivation([&](BrowserWindowInterface* b) {
++      if (b->GetProfile() != profile || b->GetType() != BrowserWindowInterface::TYPE_NORMAL ||
++          b->IsDeleteScheduled() || b->GetTabStripModel()->closing_all()) {
++        return true;
++      }
++      browser = b;
++      return false;
++    });
++  }
++  if (browser) {
++    OpenIn(client.connection, *url, std::move(request), std::move(reply), browser);
++    return;
++  }
++  profiles::SwitchToProfile(session.ato, /*always_create=*/false,
++                            base::BindOnce(&OpenIn, client.connection, *url, std::move(request), std::move(reply)));
++}
++
++void TabNavigate(Session& session, Request request, ReplyCallback reply) {
++  std::optional<std::string> id = StringParam(request.body, "tab");
++  std::optional<GURL> url = WebURL(request);
++  if (!id || !url) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs tab and an http or https url"));
++    return;
++  }
++  Tab* tab = session.Find(*id);
++  if (!tab) {
++    std::move(reply).Run(ErrorReply(&request.id, kNotFound, *id));
++    return;
++  }
++  content::NavigationController::LoadURLParams params(*url);
++  params.transition_type = ui::PAGE_TRANSITION_AUTO_TOPLEVEL;
++  base::WeakPtr<content::NavigationHandle> handle = tab->web_contents()->GetController().LoadURLWithParams(params);
++  if (!handle) {
++    std::move(reply).Run(ErrorReply(&request.id, kFailed, "the navigation did not start"));
++    return;
++  }
++  tab->WaitFor(handle->GetNavigationId(), std::move(request.id), std::move(reply));
++}
++
++void TabClose(Session& session, const Request& request, ReplyCallback reply) {
++  std::optional<std::string> id = StringParam(request.body, "tab");
++  if (!id) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs tab"));
++    return;
++  }
++  auto it = std::find_if(session.tabs.begin(), session.tabs.end(), [&](auto& tab) { return tab->id == *id; });
++  if (it == session.tabs.end()) {
++    std::move(reply).Run(ErrorReply(&request.id, kNotFound, *id));
++    return;
++  }
++  content::WebContents* contents = (*it)->web_contents();
++  session.tabs.erase(it);  // unmarks it first
++  if (contents) contents->Close();
++  std::move(reply).Run(OkReply(request.id));
 +}
 +
 +}  // namespace
@@ -873,21 +1104,37 @@ index 0000000000..a262a8e13a
 +  const std::string& op = request.op;
 +  if (op == "control.start") {
 +    Start(client, std::move(request), std::move(reply));
-+  } else if (op == "control.stop") {
-+    End(client.connection);
++    return;
++  }
++  if (op == "control.stop") {
++    End(client.connection, /*close_tabs=*/true);
 +    std::move(reply).Run(OkReply(request.id));
-+  } else if (op.starts_with("control.")) {
++    return;
++  }
++  if (op.starts_with("control.")) {
 +    std::move(reply).Run(ErrorReply(&request.id, kUnknownOp, op));
-+  } else if (!Sessions().contains(client.connection)) {
++    return;
++  }
++  auto it = Sessions().find(client.connection);
++  if (it == Sessions().end()) {
 +    std::move(reply).Run(ErrorReply(&request.id, kUnauthorized, "needs control.start on this connection"));
++    return;
++  }
++  Session& session = it->second;
++  if (op == "tab.open") {
++    TabOpen(client, std::move(request), std::move(reply));
++  } else if (op == "tab.navigate") {
++    TabNavigate(session, std::move(request), std::move(reply));
++  } else if (op == "tab.close") {
++    TabClose(session, request, std::move(reply));
 +  } else {
-+    std::move(reply).Run(ErrorReply(&request.id, kUnknownOp, op));  // tab.* and page.* come next
++    std::move(reply).Run(ErrorReply(&request.id, kUnknownOp, op));  // page.* comes next
 +  }
 +}
 +
 +void OnConnectionClosed(uint64_t connection) {
 +  Asking().erase(connection);
-+  End(connection);
++  End(connection, /*close_tabs=*/false);
 +}
 +
 +}  // namespace agens::bridge::control
