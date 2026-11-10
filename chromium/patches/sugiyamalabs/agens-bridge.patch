@@ -826,10 +826,10 @@ index 0000000000..eda9e71d52
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_CONTROL_OPS_H_
 diff --git a/chrome/browser/agens/bridge/ops.cc b/chrome/browser/agens/bridge/ops.cc
 new file mode 100644
-index 0000000000..94e45b098e
+index 0000000000..335cc66a55
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ops.cc
-@@ -0,0 +1,205 @@
+@@ -0,0 +1,206 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/ops.h"
@@ -885,6 +885,7 @@ index 0000000000..94e45b098e
 +    ato.Set("name", AgensWindow::AtoName(entries[i]));
 +    ato.Set("color", AgensWindow::kAtoColors[AgensWindow::AtoColor(entries[i], static_cast<int>(i))]);
 +    ato.Set("tag", AgensWindow::AtoTag(entries[i]));
++    ato.Set("shared", AgensWindow::AtoSharesCookies(entries[i]->GetPath()));  // read-only here
 +    ato.Set("asleep", !g_browser_process->profile_manager()->GetProfileByPath(entries[i]->GetPath()));
 +    atos.Append(std::move(ato));
 +  }
@@ -1895,18 +1896,24 @@ index 0000000000..2a1a874d47
 +
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_SESSION_OPS_H_
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
-index 9d0bf4646d..1e7d19edac 100644
+index 9d0bf4646d..ffbec8e7a3 100644
 --- a/chrome/browser/agens/embed/agens_embed.h
 +++ b/chrome/browser/agens/embed/agens_embed.h
-@@ -109,6 +109,7 @@ typedef struct {
+@@ -109,9 +109,13 @@ typedef struct {
    const char* name;  // UTF-8
    int active;        // this window's ato
    int asleep;        // not loaded in memory right now
 +  int color;         // index in the UI's ato palette (0-4)
++  int shared;        // "Compartilhar cookies" on: shares cookies with the other atos that have it on
  } AgensAto;
  typedef void (*AgensAtosChanged)(void* context, const AgensAto* atos, int count);
  void agens_window_set_atos_observer(AgensWindow* window, AgensAtosChanged observer, void* context);
-@@ -279,6 +280,16 @@ typedef enum {
++// Only the person turns this on (the UI asks first); no socket op changes it.
++void agens_window_set_ato_shared(AgensWindow* window, int index, int shared);
+ // Opens that ato's window over this one (each ato keeps its own window and tabs).
+ void agens_window_switch_ato(AgensWindow* window, int index);
+ void agens_window_new_ato(AgensWindow* window);
+@@ -279,6 +283,16 @@ typedef enum {
  } AgensPermissionAnswer;
  void agens_window_permission_answer(AgensWindow* window, AgensPermissionAnswer answer);
  
@@ -1923,7 +1930,7 @@ index 9d0bf4646d..1e7d19edac 100644
  // The site of the active page, for the panel behind the site icon. `pattern` is what
  // agens_site_exception_set takes for this site. Strings valid until the next call.
  typedef struct {
-@@ -358,6 +369,9 @@ float agens_ui_card_radius(void* chrome);
+@@ -358,6 +372,9 @@ float agens_ui_card_radius(void* chrome);
  float agens_ui_titlebar_height(void* chrome);
  void agens_ui_permission_prompt(void* chrome, const char* site, const char* const* asks, int count);
  void agens_ui_permission_prompt_close(void* chrome);
@@ -1934,7 +1941,7 @@ index 9d0bf4646d..1e7d19edac 100644
  
  #ifdef __cplusplus
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
-index 268d4dc7bd..2aaa010953 100644
+index 268d4dc7bd..666c179c4c 100644
 --- a/chrome/browser/agens/embed/agens_window.h
 +++ b/chrome/browser/agens/embed/agens_window.h
 @@ -48,7 +48,9 @@
@@ -1968,13 +1975,13 @@ index 268d4dc7bd..2aaa010953 100644
      if (bookmark_model) bookmark_model->RemoveObserver(this);
      Storage().RemoveObserver(this);
      for (download::DownloadItem* item : downloads) item->RemoveObserver(this);
-@@ -284,7 +293,62 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -284,7 +293,79 @@ struct AgensWindow : public TabStripModelObserver,
      return g_browser_process->profile_manager()->GetProfileAttributesStorage();
    }
  
 -  std::vector<ProfileAttributesEntry*> Atos() {
 +  // Local State: per ato folder, what the profile attributes don't hold, {"color": "blue",
-+  // "tag": "..."} (registered in BrowserProcessImpl::RegisterPrefs).
++  // "tag": "...", "shared": true} (registered in BrowserProcessImpl::RegisterPrefs).
 +  static constexpr char kAtosPref[] = "agens.atos";
 +  // The palette (AtoColor in ui/chrome_mac.mm), by the names the socket uses.
 +  static constexpr const char* kAtoColors[] = {"orange", "blue", "pink", "purple", "teal"};
@@ -1993,6 +2000,23 @@ index 268d4dc7bd..2aaa010953 100644
 +    const std::string* color = extras ? extras->FindString("color") : nullptr;
 +    const int chosen = color ? AtoColorIndex(*color) : -1;
 +    return chosen >= 0 ? chosen : index % static_cast<int>(std::size(kAtoColors));
++  }
++  // "Compartilhar cookies" (off by default): the atos with it on form one cookie pool
++  // (AgensCookiePool). Such an ato is not isolated; ops that hand out sessions or control tabs
++  // refuse it (isolation_off, docs/agens.md). `dir` is the profile folder.
++  static bool AtoSharesCookies(const base::FilePath& dir) {
++    const base::DictValue* extras =
++        g_browser_process->local_state()->GetDict(kAtosPref).FindDict(dir.BaseName().AsUTF8Unsafe());
++    return extras && extras->FindBool("shared").value_or(false);
++  }
++  static void SetAtoSharesCookies(const base::FilePath& dir, bool shared) {
++    ScopedDictPrefUpdate update(g_browser_process->local_state(), kAtosPref);
++    base::DictValue* extras = update->EnsureDict(dir.BaseName().AsUTF8Unsafe());
++    if (shared) {
++      extras->Set("shared", true);
++    } else {
++      extras->Remove("shared");
++    }
 +  }
 +  static std::string AtoTag(const ProfileAttributesEntry* entry) {
 +    const base::DictValue* extras = AtoExtras(entry);
@@ -2032,7 +2056,7 @@ index 268d4dc7bd..2aaa010953 100644
      // Creation order, so an ato keeps its place and color: Chromium names profile folders
      // "Default", then "Profile 1", "Profile 2"…
      std::vector<ProfileAttributesEntry*> atos;
-@@ -307,16 +371,11 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -307,16 +388,11 @@ struct AgensWindow : public TabStripModelObserver,
      std::vector<std::string> names;
      std::vector<AgensAto> atos;
      const base::FilePath current = browser->GetProfile()->GetOriginalProfile()->GetPath();
@@ -2048,11 +2072,11 @@ index 268d4dc7bd..2aaa010953 100644
        atos.push_back({names[i].c_str(), entries[i]->GetPath() == current,
 -                      !g_browser_process->profile_manager()->GetProfileByPath(entries[i]->GetPath())});
 +                      !g_browser_process->profile_manager()->GetProfileByPath(entries[i]->GetPath()),
-+                      AtoColor(entries[i], static_cast<int>(i))});
++                      AtoColor(entries[i], static_cast<int>(i)), AtoSharesCookies(entries[i]->GetPath())});
      }
      atos_observer(atos_context, atos.data(), static_cast<int>(atos.size()));
    }
-@@ -330,14 +389,9 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -330,14 +406,9 @@ struct AgensWindow : public TabStripModelObserver,
    }
  
    void NewAto() {
@@ -2069,7 +2093,7 @@ index 268d4dc7bd..2aaa010953 100644
      const gfx::Rect bounds = browser->GetWindow()->GetBounds();
      const std::u16string name = base::UTF8ToUTF16(base::StringPrintf("Ato %zu", Atos().size() + 1));
      manager->CreateProfileAsync(
-@@ -362,7 +416,10 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -362,7 +433,10 @@ struct AgensWindow : public TabStripModelObserver,
  
    // ProfileAttributesStorage::Observer:
    void OnProfileAdded(const base::FilePath&) override { NotifyAtos(); }
@@ -2081,7 +2105,7 @@ index 268d4dc7bd..2aaa010953 100644
    void OnProfileNameChanged(const base::FilePath&, const std::u16string&) override { NotifyAtos(); }
  
    TabStripModel* model() { return browser->GetTabStripModel(); }
-@@ -582,6 +639,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -582,6 +656,7 @@ struct AgensWindow : public TabStripModelObserver,
    raw_ptr<void> downloads_context = nullptr;
    base::CallbackListSubscription search_loaded_;
    base::CancelableTaskTracker history_tracker;
@@ -2089,7 +2113,7 @@ index 268d4dc7bd..2aaa010953 100644
    raw_ptr<void> ui = nullptr;  // the chrome (agens_ui_*), set by the platform shell
    raw_ptr<views::View> extensions_anchor = nullptr;  // under the UI's extensions button
    AgensExtensionButtonsChanged extension_buttons_observer = nullptr;
-@@ -647,6 +705,8 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -647,6 +722,8 @@ struct AgensWindow : public TabStripModelObserver,
      }
    }
    base::WeakPtr<permissions::PermissionPrompt::Delegate> permission_delegate;
@@ -2099,10 +2123,23 @@ index 268d4dc7bd..2aaa010953 100644
    raw_ptr<void> find_context = nullptr;
    base::ScopedObservation<find_in_page::FindTabHelper, find_in_page::FindResultObserver> find_observation{this};
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
-index cfdc014cf4..656d274759 100644
+index cfdc014cf4..0753d7c048 100644
 --- a/chrome/browser/agens/embed/native_shell.cc
 +++ b/chrome/browser/agens/embed/native_shell.cc
-@@ -473,6 +473,9 @@ void agens_password_remove(AgensWindow* w, int index) {
+@@ -93,6 +93,12 @@ void agens_window_set_atos_observer(AgensWindow* w, AgensAtosChanged observer, v
+   w->atos_context = context;
+   w->NotifyAtos();
+ }
++void agens_window_set_ato_shared(AgensWindow* w, int index, int shared) {
++  std::vector<ProfileAttributesEntry*> atos = w->Atos();
++  if (index >= 0 && static_cast<size_t>(index) < atos.size()) {
++    AgensWindow::SetAtoSharesCookies(atos[index]->GetPath(), shared);  // the pool follows the pref
++  }
++}
+ void agens_window_switch_ato(AgensWindow* w, int index) {
+   w->SwitchAto(index);
+ }
+@@ -473,6 +479,9 @@ void agens_password_remove(AgensWindow* w, int index) {
    saved->logins.erase(saved->logins.begin() + index);
  }
  
@@ -2112,7 +2149,7 @@ index cfdc014cf4..656d274759 100644
  void agens_window_permission_answer(AgensWindow* w, AgensPermissionAnswer answer) {
    base::WeakPtr<permissions::PermissionPrompt::Delegate> delegate = std::move(w->permission_delegate);
    if (!delegate) return;
-@@ -814,6 +817,9 @@ void NativeTabStateChanged(views::Widget*) {}
+@@ -814,6 +823,9 @@ void NativeTabStateChanged(views::Widget*) {}
  void ConfirmCloseWithDownloads(views::Widget*, int, base::OnceCallback<void(bool)> callback) {
    std::move(callback).Run(true);
  }
@@ -2195,10 +2232,10 @@ index 5d7ca90415..3d238795f6 100644
    if (!IsNativeShellEnabled() || !browser->GetWindow()) return false;
    views::Widget* widget = views::Widget::GetWidgetForNativeWindow(browser->GetWindow()->GetNativeWindow());
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
-index 3c18c4eab1..6f44ec0271 100644
+index 3c18c4eab1..b43e05a7ea 100644
 --- a/chrome/browser/agens/ui/chrome_mac.mm
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -766,7 +766,7 @@ - (void)layout {
+@@ -766,9 +766,10 @@ - (void)layout {
  - (void)updateWith:(const AgensAto&)ato index:(int)index {
    NSString* name = @(ato.name);
    _tile.stringValue = Monogram(name);
@@ -2206,8 +2243,19 @@ index 3c18c4eab1..6f44ec0271 100644
 +  _tile.layer.backgroundColor = AtoColor(ato.color).CGColor;
    _tile.alphaValue = ato.asleep && !ato.active ? 0.4 : 1;
    self.toolTip = ato.asleep && !ato.active ? [name stringByAppendingString:@" · dormindo"] : name;
++  if (ato.shared) self.toolTip = [self.toolTip stringByAppendingString:@" · cookies compartilhados"];
    self.accessibilityLabel = self.toolTip;
-@@ -1432,6 +1432,7 @@ - (void)showSection:(NSString*)key {
+   self.selected = ato.active;
+ }
+@@ -1015,6 +1016,7 @@ - (void)toggleSidebar;
+ - (BOOL)tabsOnTop;
+ - (void)toggleTabsPosition;
+ - (NSArray<NSString*>*)atoNamesForSettings;
++- (NSArray<NSNumber*>*)atoSharedForSettings;  // "Compartilhar cookies", per ato, same order
+ - (NSImage*)extensionIcon:(NSString*)extensionId;
+ @end
+ 
+@@ -1432,6 +1434,7 @@ - (void)showSection:(NSString*)key {
      NSButton* proxy = [NSButton buttonWithTitle:@"Abrir…" target:self action:@selector(openProxy:)];
      y = [self option:@"Configurações de proxy" detail:@"Usa as do macOS." control:proxy y:y];
      y = [self option:@"Restaurar as configurações originais" detail:nil control:[self subButton:@"Restaurar…" key:@"restaurar"] y:y];
@@ -2215,7 +2263,116 @@ index 3c18c4eab1..6f44ec0271 100644
    } else if ([key isEqualToString:@"sobre"]) {
      NSString* version = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"";
      y = [self info:product detail:[NSString stringWithFormat:@"Versão %@ · SugiyamaLabs", version] note:@"" y:y];
-@@ -4546,7 +4547,7 @@ - (void)setAtos:(const AgensAto*)atos count:(int)count {
+@@ -1602,6 +1605,7 @@ static void EnginesListed(void* context, const AgensSearchEngine* engines, int c
+ - (CGFloat)fillAtos:(CGFloat)y {
+   // The atos list comes from the chrome (it already observes them); rename in place.
+   NSArray<NSString*>* names = [_chrome atoNamesForSettings];
++  NSArray<NSNumber*>* shares = [_chrome atoSharedForSettings];
+   for (NSUInteger i = 0; i < names.count; ++i) {
+     NSTextField* field = [NSTextField textFieldWithString:names[i]];
+     field.tag = i;
+@@ -1610,12 +1614,18 @@ - (CGFloat)fillAtos:(CGFloat)y {
+     field.action = @selector(renameAto:);
+     field.frame = NSMakeRect(0, 0, 220, 24);
+     y = [self option:[NSString stringWithFormat:@"Ato %lu", (unsigned long)i + 1] detail:nil control:field y:y];
++    NSSwitch* shared = [[NSSwitch alloc] init];
++    shared.state = i < shares.count && shares[i].boolValue ? NSControlStateValueOn : NSControlStateValueOff;
++    shared.tag = i;
++    shared.target = self;
++    shared.action = @selector(toggleAtoShared:);
++    y = [self option:@"Compartilhar cookies" detail:@"Os logins valem nos outros atos que também ligaram." control:shared y:y];
+   }
+   NSButton* add = [NSButton buttonWithTitle:@"Novo ato" target:self action:@selector(newAto:)];
+   add.frame = NSMakeRect(32, y + 4, 110, 28);
+   [_pane addSubview:add];
+   NSTextField* note = Label(12, NSFontWeightRegular, kDim);
+-  note.stringValue = @"Cada ato tem abas, logins e cookies próprios. Compartilhar cookies entre atos: desligado.";
++  note.stringValue = @"Cada ato tem abas, logins e cookies próprios. \"Compartilhar cookies\" vem desligado em cada ato.";
+   note.frame = NSMakeRect(32, y + 44, NSWidth(_pane.bounds) - 64, 16);
+   [_pane addSubview:note];
+   return y + 70;
+@@ -1818,6 +1828,46 @@ - (void)setEngine:(NSPopUpButton*)popup {
+ - (void)renameAto:(NSTextField*)field {
+   if (_browser && field.stringValue.length) agens_window_rename_ato(_browser, (int)field.tag, field.stringValue.UTF8String);
+ }
++// Turning it off only isolates the ato again; turning it on asks first.
++- (void)toggleAtoShared:(NSSwitch*)sw {
++  const int index = (int)sw.tag;
++  if (!_browser) return;
++  if (sw.state == NSControlStateValueOff) {
++    agens_window_set_ato_shared(_browser, index, 0);
++    return;
++  }
++  sw.state = NSControlStateValueOff;  // until confirmed
++  NSArray<NSString*>* names = [_chrome atoNamesForSettings];
++  NSArray<NSNumber*>* shares = [_chrome atoSharedForSettings];
++  if (index < 0 || index >= (int)names.count) return;
++  NSMutableArray<NSString*>* others = [NSMutableArray array];
++  for (NSUInteger i = 0; i < names.count && i < shares.count; ++i) {
++    if ((int)i != index && shares[i].boolValue) [others addObject:names[i]];
++  }
++  NSString* name = names[index];
++  NSString* list = others.count < 2
++                       ? others.firstObject
++                       : [NSString stringWithFormat:@"%@ e %@",
++                                                    [[others subarrayWithRange:NSMakeRange(0, others.count - 1)]
++                                                        componentsJoinedByString:@", "],
++                                                    others.lastObject];
++  NSAlert* alert = [[NSAlert alloc] init];
++  alert.messageText = [NSString stringWithFormat:@"Compartilhar os cookies de %@?", name];
++  NSString* what = others.count
++                       ? [NSString stringWithFormat:@"Os logins de %@ passam a valer também em %@, e os deles em %@.", name, list, name]
++                       : [NSString stringWithFormat:@"Por enquanto nada é compartilhado: os logins de %@ só passam a valer em outro ato quando ele também ligar esta opção.", name];
++  alert.informativeText = [what stringByAppendingString:
++      @" Só cookies: senhas, histórico e dados dos sites continuam separados. Enquanto estiver ligado, apps conectados ao navegador não recebem sessões nem controlam abas deste ato."];
++  [alert addButtonWithTitle:@"Compartilhar"];
++  [alert addButtonWithTitle:@"Cancelar"];
++  __weak AgensSettings* weak = self;
++  [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
++    AgensSettings* strong = weak;
++    if (r != NSAlertFirstButtonReturn || !strong || !strong->_browser) return;
++    agens_window_set_ato_shared(strong->_browser, index, 1);
++    sw.state = NSControlStateValueOn;
++  }];
++}
+ - (void)newAto:(id)sender {
+   if (_browser) agens_window_new_ato(_browser);
+ }
+@@ -2634,7 +2684,7 @@ - (void)showStep:(int)step {
+       _atoName = [NSTextField textFieldWithString:@"Pessoal"];
+       _atoName.frame = NSMakeRect(170, y + 30, 300, 26);
+       NSTextField* cookies = Label(12, NSFontWeightRegular, kDim);
+-      cookies.stringValue = @"Compartilhar cookies entre atos: desligado. Dá para mudar em Configurações › Atos.";
++      cookies.stringValue = @"Os atos não compartilham cookies. Dá para ligar por ato em Configurações › Atos.";
+       cookies.frame = NSMakeRect(90, y + 76, 460, 16);
+       cookies.alignment = NSTextAlignmentCenter;
+       for (NSView* v in @[ label, _atoName, cookies ]) [_body addSubview:v];
+@@ -3625,6 +3675,7 @@ @implementation AgensChrome {
+   AgensDragView* _tabsDoc;
+   AgensToolButton* _moreAtos;  // "⋯" when the atos don't fit
+   NSMutableArray<NSString*>* _atoNames;
++  NSMutableArray<NSNumber*>* _atoShared;
+   int _activeAto;
+   NSView* _atosLine;
+   NSMutableArray<AgensAtoButton*>* _atoButtons;
+@@ -3859,6 +3910,7 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+     _tabsDoc = [[AgensDragView alloc] init];
+     _tabsScroll.documentView = _tabsDoc;
+     _atoNames = [NSMutableArray array];
++    _atoShared = [NSMutableArray array];
+     _moreAtos = [[AgensToolButton alloc] initWithSymbol:@"ellipsis" label:@"Todos os atos" size:13];
+     _moreAtos.onPress = ^{ [weak showAtosMenu]; };
+     _addAto = [[AgensToolButton alloc] initWithSymbol:@"plus" label:@"Novo ato"];
+@@ -4539,14 +4591,16 @@ - (void)setAtos:(const AgensAto*)atos count:(int)count {
+     [_atoButtons removeLastObject];
+   }
+   [_atoNames removeAllObjects];
++  [_atoShared removeAllObjects];
+   for (int i = 0; i < count; ++i) {
+     [_atoButtons[i] updateWith:atos[i] index:i];
+     [_atoNames addObject:@(atos[i].name)];
++    [_atoShared addObject:@(atos[i].shared != 0)];
+     if (!atos[i].active) continue;
      _activeAto = i;
      _atoName.stringValue = @(atos[i].name);
      _atoTile.stringValue = Monogram(_atoName.stringValue);
@@ -2224,7 +2381,17 @@ index 3c18c4eab1..6f44ec0271 100644
    }
    [self relayout];
  }
-@@ -5204,6 +5205,31 @@ - (void)answerPermission:(NSButton*)button {
+@@ -4854,6 +4908,9 @@ - (BOOL)collapsed {
+ - (NSArray<NSString*>*)atoNamesForSettings {
+   return [_atoNames copy];
+ }
++- (NSArray<NSNumber*>*)atoSharedForSettings {
++  return [_atoShared copy];
++}
+ - (void)toggleSidebar {
+   _collapsed = !_collapsed;
+   [NSUserDefaults.standardUserDefaults setBool:_collapsed forKey:kCollapsedKey];
+@@ -5204,6 +5261,31 @@ - (void)answerPermission:(NSButton*)button {
    if (_window) agens_window_permission_answer(_window, (AgensPermissionAnswer)button.tag);
    [self closeMenu];
  }
@@ -2256,7 +2423,7 @@ index 3c18c4eab1..6f44ec0271 100644
  - (void)permissionGone {
    if (!_permissionAsked) return;
    _permissionAsked = NO;  // nothing to answer any more
-@@ -5412,6 +5438,9 @@ void agens_ui_permission_prompt(void* chrome, const char* site, const char* cons
+@@ -5412,6 +5494,9 @@ void agens_ui_permission_prompt(void* chrome, const char* site, const char* cons
    for (int i = 0; i < count; ++i) [list addObject:@(asks[i])];
    [(__bridge AgensChrome*)chrome askPermission:@(site) asks:list];
  }
