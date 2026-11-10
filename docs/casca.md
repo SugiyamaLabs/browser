@@ -1,23 +1,72 @@
 # A casca (interface) do navegador
 
+![A casca hoje](casca.png)
+
+| Nova aba (escuro) | Modo claro |
+|---|---|
+| ![](casca-nova-aba.png) | ![](casca-claro.png) |
+
 Decisão de 09/11 (issue #44): a interface é **nativa**. AppKit hoje e SwiftUI depois no Mac, WinUI no Windows. Não é HTML. O PoC está em `docs/poc/c1.md`.
 
 ## As três camadas
 
 ```
-interface (AppKit/Swift)      chrome/browser/agens/ui/       a lateral do navegador; amanhã, o Agens
+interface (AppKit/Swift)      chrome/browser/agens/ui/       barra, abas e cartão da página; amanhã, o Agens
         │  só enxerga ↓
 API em C (embed/)             chrome/browser/agens/embed/agens_embed.h
         │
-cola com o Chromium (C++)     chrome/browser/agens/embed/native_shell_mac.mm
+cola comum (C++)              chrome/browser/agens/embed/agens_window.h, native_shell.cc
+        │
+hospedeiro por sistema        chrome/browser/agens/embed/native_shell_mac.mm (Windows: _win.cc)
         │
 janela do Chromium            WebUIBrowserWindow (Webium), sem a página HTML
 ```
 
-- **Interface:** `ui/sidebar_mac.mm` só importa AppKit e `agens_embed.h`. Não usa nenhum tipo do Chromium, então pode ir para o `BrowserKit` (Swift) sem mudar nada.
-- **API (`agens_embed.h`):** C puro, para o Swift importar direto. Tem a lista de abas (título, URL, ativa, carregando) com observador, e as ações: nova aba, ativar, fechar, navegar (endereço ou busca), voltar, avançar e recarregar. A interface entra pelos ganchos `agens_ui_create_sidebar`, `agens_ui_focus_address` e `agens_ui_destroy_sidebar`.
-- **Cola:** implementa a API sobre o `TabStripModel` e põe a lateral e a aba ativa dentro da janela.
+- **Interface:** `ui/chrome_mac.mm` só importa AppKit e `agens_embed.h`. Segue o protótipo `prototipos/janela.html` com abas na lateral e o Grafite escuro: barra de 52 pt (voltar, avançar, recarregar/parar, endereço num poço com cadeado e sugestões), abas com favicon, carregando e dormindo, o ato atual no topo da coluna e a fileira de atos no pé, a página num cartão de 12 pt e a nossa nova aba (logo, saudação e busca). Claro e escuro seguem o sistema; os tokens ficam em `Token` no topo do arquivo. Não usa nenhum tipo do Chromium, então pode ir para o `BrowserKit` (Swift) sem mudar nada.
+- **API (`agens_embed.h`):** C puro, para o Swift importar direto. Tem:
+  - abas, com observador (título, URL, favicon, ativa, carregando, dormindo, voltar/avançar possíveis) e as ações nova aba, ativar, fechar, navegar (endereço ou busca), voltar, avançar, recarregar e parar;
+  - sugestões do endereço, só de fontes locais (histórico, favoritos, atalhos e a busca do que foi digitado). As sugestões remotas de busca seguem desligadas, como o ungoogled deixa;
+  - atos (um perfil do Chromium cada): lista com observador, trocar e criar. Trocar abre a janela do outro ato no lugar desta;
+  - os ganchos da interface: `agens_ui_create_chrome`, `agens_ui_layout` (diz onde fica a página), `agens_ui_colors` (as cores que o motor pinta atrás), `agens_ui_focus_address` e `agens_ui_destroy_chrome`; e `agens_window_relayout` para a interface pedir nova pintura ao trocar claro/escuro.
+- **Cola comum** (`agens_window.h`, `native_shell.cc`): implementa a API sobre o Chromium (abas, sugestões, atos, buscador padrão, favoritos). Não tem nada de Mac: o Windows usa a mesma.
+- **Hospedeiro por sistema** (`native_shell_mac.mm`): põe a interface por cima da janela, a aba ativa onde a interface mandar e a âncora dos balões do Chromium (o ícone do site).
 - **Janela:** a da Webium. O Chromium já reconhece essa "janela sem Views" em uns 20 pontos do núcleo, e uma cópia nossa obrigaria a mexer em todos eles. O nosso patch nela tem umas 20 linhas, atrás de `agens::IsNativeShellEnabled()`.
+
+## Comportamentos
+
+- **Buscador:** texto que não é endereço vai para o buscador padrão. Cada ato começa com o **DuckDuckGo**, mas só enquanto ninguém escolheu um buscador: depois da primeira escolha (a nossa ou a da pessoa em Configurações › Buscador), ela vale e não é mais trocada.
+- **Lateral aberta ou recolhida:** o botão na barra e **⌘S** (como no Arc) alternam entre a coluna aberta (236 pt) e a faixa de ícones (40 pt). A escolha fica salva. O ⌘S deixa de ser "Salvar página como", que continua no menu Arquivo. No Windows o atalho será **Ctrl+S**, junto com a casca WinUI (ainda não existe).
+
+![Lateral recolhida](casca-recolhida.png)
+
+- **Abas em cima ou na lateral:** **⌘⇧S** ou Configurações › Aparência › Abas. Em cima: as abas viram pílulas numa faixa ao lado dos semáforos, com o "+" no fim, e os atos vão para a barra, antes do menu. A escolha vale para todas as janelas e fica salva.
+- **Abas fixadas:** botão direito na aba › Fixar aba. Na lateral aberta, viram ladrilhos de 4 por linha acima da nova aba; recolhida, ícones; em cima, pílulas só com o ícone. Ficam sempre no começo (regra do Chromium) e não se arrastam.
+- **Som:** aba tocando mostra o alto-falante na aba e no endereço; clicar silencia (fica laranja e cortado) ou devolve o som. Também pelo botão direito na aba.
+- **Telas nossas no lugar das do Chromium:** ⌘, e o item Ajustes do menu do Mac abrem as nossas Configurações; Favoritos (página e barra, ⌘⇧B); busca na página (⌘F, ⌘G, ⌘⇧G); página de erro (sem internet, site não encontrado, não respondeu, bloqueado); pergunta de salvar ou atualizar senha; pedidos de permissão dos sites; e o painel do cadeado (conexão, permissões do site, apagar dados do site). Imprimir e os alertas das páginas (`alert`, login HTTP) continuam do Chromium.
+- **Cantos e densidade:** os cantos seguem o tema (Grafite e Seu 1×, Vidro 1,3× e Brasa 1,45× com abas em pílula em cima). Densidade compacta (Configurações › Aparência) baixa a barra para 44 pt, a faixa de abas para 40 pt e as abas para 28 pt; os semáforos acompanham.
+- **Sem o seletor de perfis do Chromium:** com mais de um ato, o navegador abre direto no último usado; trocar de ato é pela coluna.
+- **Muitas abas e atos:** a lista de abas rola entre "Nova aba" e o pé, com uma barra fina (some na lateral recolhida). O pé mostra até 6 atos (5 recolhida); além disso, "⋯" abre a lista completa, e o ato atual nunca sai do pé.
+- **Barra:** estrela de favoritar dentro do endereço e menu "⋯" (Nova aba, Favoritos, Histórico, Configurações). Favoritos ainda abre a página do Chromium.
+- **Histórico nativo** (⌘Y ou "⋯" › Histórico): busca, dias, abrir, remover um item e "Apagar histórico…" (vai para Configurações › Apagar dados). A página do Chromium ainda carrega por baixo (um processo a mais).
+- **Configurações nativas, sem abrir página do Chromium:** apagar dados de navegação (período e o que apagar), restaurar as configurações (volta buscador DuckDuckGo, início, permissões, idiomas e visual; logins, senhas, favoritos, histórico e extensões ficam), exceções por site (mudar ou tirar), extensões do ato (ligar, desligar, remover) e senhas salvas (busca, ver e copiar com Touch ID ou a senha do Mac, apagar). Tudo vale para o ato da janela. Só os avisos de código aberto ainda abrem `chrome://credits`.
+
+## O que o Agens embute (e o que não)
+
+O instalador do Agens instala o navegador junto, como app próprio, e o Agens o usa por fora (issues #58, #59). O kit cobre só o miolo: **abas, a página e os atos**. Configurações, temas, menu, nova aba, primeira instalação e bloqueador são do navegador e não entram no kit.
+
+## Windows (issue #61)
+
+O que já está pronto para ele:
+- a API em C e a cola comum compilam em qualquer sistema e não usam nada de Mac;
+- `IsNativeShellEnabled()` só liga no Mac, e a Webium só vem ligada por padrão no Mac. No Windows, até existir o hospedeiro, a janela continua a Views do Chromium;
+- `CreateNativeShellView` e `FocusNativeLocationBar` têm versões vazias fora do Mac, para o build fechar.
+
+O que o Windows precisa escrever:
+1. `native_shell_win.cc`: o mesmo papel do `native_shell_mac.mm`, com a interface num HWND filho por cima da janela da Webium.
+2. `chrome/browser/agens/ui/chrome_win.cc`: a interface em WinUI (Mica/Fluent), implementando os mesmos ganchos `agens_ui_*`.
+3. Atalhos com Ctrl no lugar de ⌘ (Ctrl+S lateral, Ctrl+L endereço).
+
+Depende do Chromium compilando no Windows (#3), que precisa de uma máquina Windows. **Isso não foi compilado no Windows ainda**: as versões vazias e os `#if` foram escritos, mas só testados no Mac.
 
 ## Flags
 
@@ -27,12 +76,13 @@ janela do Chromium            WebUIBrowserWindow (Webium), sem a página HTML
 
 Patch: `chromium/patches/sugiyamalabs/native-shell.patch`.
 
-## Por que a lateral fica fora da área de conteúdo
+## Por que a interface fica fora da área de conteúdo
 
-No Mac, a área de conteúdo de uma janela do Chromium é *layer-hosting* e não desenha NSView filha. Por isso a lateral é irmã dela, no frame da janela, abaixo dos semáforos.
+No Mac, a área de conteúdo de uma janela do Chromium é *layer-hosting* e não desenha NSView filha. Por isso a interface é uma NSView irmã dela, do tamanho da janela, abaixo dos semáforos. Onde fica a página, ela deixa o clique passar (`hitTest:` devolve `nil`).
 
 ## Próximos passos
 
 1. Testar o embed fora do processo: um app Swift de exemplo mostrando uma aba do navegador via `remote_cocoa`. É o caminho para o Agens.
 2. Atualizar a ADR 0014 do Agens com esta casca e o caminho do embed.
-3. Portar o protótipo para a lateral: favicon, estado de carregando, atos, nova aba e temas.
+3. Continuar o protótipo: recolher a lateral, temas (Vidro, Seu), escolher claro/escuro/sistema nas configurações, atalhos na nova aba, favoritos, menu, configurar e apagar ato, e cookies compartilhados entre atos (desligado).
+4. A nova aba de verdade ainda carrega a do Chromium por baixo da nossa (um renderer a mais). Trocar por uma página vazia é um ganho de memória fácil.

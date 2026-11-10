@@ -24,6 +24,7 @@ python3 "$main/utils/domain_substitution.py" apply -r "$main/domain_regex.list" 
 # ad blocker filter lists, built into the app by adblock.patch; copied after domain substitution so it never rewrites them
 mkdir -p "$SRC_DIR/third_party/sugiyamalabs_adblock/lists"
 cp "$CHROMIUM_DIR/adblock/lists/"*.txt "$SRC_DIR/third_party/sugiyamalabs_adblock/lists/"
+python3 "$CHROMIUM_DIR/webstore.py" "$SRC_DIR"   # the Chrome Web Store's addresses, after the renaming
 
 mkdir -p "$SRC_DIR/third_party/llvm-build/Release+Asserts" "$SRC_DIR/third_party/rust-toolchain/bin"
 "$UC_DIR/retrieve_and_unpack_resource.py" -p "$arch"   # prebuilt clang and rust toolchains
