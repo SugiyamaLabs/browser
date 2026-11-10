@@ -4296,10 +4296,10 @@ index 0000000000..b405374ce1
 +}
 diff --git a/chrome/browser/agens/bridge/view_ops.cc b/chrome/browser/agens/bridge/view_ops.cc
 new file mode 100644
-index 0000000000..8e41d8ee5f
+index 0000000000..e4a1e68f4e
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_ops.cc
-@@ -0,0 +1,696 @@
+@@ -0,0 +1,694 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The host draws the interface; the engine hands it the pages (docs/protocolo.md, "host e view").
 +// - One host: the connection that sent host.attach (the app that launched the engine).
@@ -4483,14 +4483,14 @@ index 0000000000..8e41d8ee5f
 +  return nullptr;
 +}
 +
-+// seam: the control work adds title, detail and a paused state to AgensControlled (and take/give,
-+// see ViewControl). Fill them from there when it lands; today a controlled tab is always working.
++// What the host needs to draw the agent's indicator: the two lines the shell's own pill shows
++// (control.status, or the defaults control_ops fills in) and whether the person took over.
 +base::DictValue ControlFields(const AgensControlled& controlled) {
 +  base::DictValue control;
 +  control.Set("agent", controlled.by);
-+  control.Set("title", "");
-+  control.Set("detail", "");
-+  control.Set("state", "working");
++  control.Set("title", controlled.title);
++  control.Set("detail", controlled.detail);
++  control.Set("state", controlled.paused ? "paused" : "working");
 +  return control;
 +}
 +
@@ -4820,13 +4820,11 @@ index 0000000000..8e41d8ee5f
 +    std::move(reply).Run(ErrorReply(&request.id, kNotFound, "no agent controls this tab"));
 +    return;
 +  }
-+  if (*action != "end") {
-+    // seam: take/give land with the control work (pausing the agent's input); until then they fail.
-+    std::move(reply).Run(ErrorReply(&request.id, kFailed, "not available yet"));
-+    return;
-+  }
-+  // "Parar": ends the agent's whole session. Posted, as the shell does: it removes the mark.
-+  if (controlled->stop) base::SequencedTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE, controlled->stop);
++  // take pauses the agent ("Assumir"), give resumes it ("Devolver"), end ends its whole session.
++  // Posted, as the shell does: end removes the mark.
++  const base::RepeatingClosure& run =
++      *action == "take" ? controlled->take_over : *action == "give" ? controlled->hand_back : controlled->stop;
++  if (run) base::SequencedTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE, run);
 +  std::move(reply).Run(OkReply(request.id));
 +}
 +
