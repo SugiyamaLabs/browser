@@ -245,10 +245,10 @@ index 0000000000..1184ce2d94
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_BRIDGE_H_
 diff --git a/chrome/browser/agens/bridge/bridge_mac.mm b/chrome/browser/agens/bridge/bridge_mac.mm
 new file mode 100644
-index 0000000000..ac8013e4eb
+index 0000000000..c3e6f478e6
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/bridge_mac.mm
-@@ -0,0 +1,547 @@
+@@ -0,0 +1,554 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The socket server on macOS: a Unix socket in the user data dir, the peer's code signature read
 +// from its audit token, and the approval of the person before a signed client gets in.
@@ -326,6 +326,8 @@ index 0000000000..ac8013e4eb
 +struct Peer {
 +  bool ours = false;     // signed with kTeamId
 +  std::string identity;  // "<team id>/<signing identifier>", only when ours
++  std::string identifier;  // the signing identifier, only when ours
++  pid_t pid = 0;           // from the audit token (Connection::Checked)
 +  std::string name;      // the app's name, for the approval sheet
 +};
 +
@@ -386,6 +388,7 @@ index 0000000000..ac8013e4eb
 +      !identifier.empty()) {
 +    peer.ours = true;
 +    peer.identity = std::string(kTeamId) + "/" + identifier;
++    peer.identifier = identifier;
 +  }
 +  return peer;
 +}
@@ -404,10 +407,13 @@ index 0000000000..ac8013e4eb
 +    std::move(done).Run(kDenied);
 +    return;
 +  }
-+  // Embedded, the product is the host itself (docs/protocolo.md, "Quem pode conectar"): our
-+  // signature gets in without the sheet, and nothing else does, but the development switch.
++  // Embedded (docs/protocolo.md, "Quem pode conectar"), never a sheet: the app that launched the
++  // engine; apps with our signature that it listed (--agens-allowed-clients); unsigned ones only
++  // with the development switch. Nobody else.
 +  if (IsEmbedded()) {
-+    std::move(done).Run(peer.ours || AcceptUnsignedClients() ? nullptr : kUnauthorized);
++    const bool in = (peer.pid > 0 && peer.pid == EmbeddedParent()) ||
++                    (peer.ours && EmbeddedClientAllowed(peer.identifier)) || (!peer.ours && AcceptUnsignedClients());
++    std::move(done).Run(in ? nullptr : kUnauthorized);
 +    return;
 +  }
 +  if (!peer.ours) {
@@ -573,6 +579,7 @@ index 0000000000..ac8013e4eb
 +void Connection::Checked(Peer peer) {
 +  client_.name = peer.name;
 +  client_.identity = peer.identity;
++  peer.pid = client_.pid;
 +  content::GetUIThreadTaskRunner({})->PostTask(
 +      FROM_HERE, base::BindOnce(&Decide, std::move(peer), client_.connection,
 +                                base::BindPostTask(content::GetIOThreadTaskRunner({}),
@@ -3059,10 +3066,10 @@ index 0000000000..2ba6052c1e
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_OPS_H_
 diff --git a/chrome/browser/agens/bridge/protocol.cc b/chrome/browser/agens/bridge/protocol.cc
 new file mode 100644
-index 0000000000..e9608caa6e
+index 0000000000..78dde9601e
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/protocol.cc
-@@ -0,0 +1,95 @@
+@@ -0,0 +1,104 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/protocol.h"
@@ -3108,7 +3115,6 @@ index 0000000000..e9608caa6e
 +    return std::nullopt;
 +  }
 +  base::DictValue& dict = value->GetDict();
-+  // No id: nothing is answered (the view.* input ops).
 +  const base::Value* id = dict.Find("id");
 +  if (id && !(id->is_int() || id->is_double() || id->is_string())) {
 +    error_reply = ErrorReply(nullptr, kBadRequest, "id must be a number or a string");
@@ -3117,6 +3123,11 @@ index 0000000000..e9608caa6e
 +  const std::string* op = dict.FindString("op");
 +  if (!op || op->empty()) {
 +    error_reply = ErrorReply(id, kBadRequest, "missing op");
++    return std::nullopt;
++  }
++  // Only the view input ops go without an id (and are never answered).
++  if (!id && !IsViewInputOp(*op)) {
++    error_reply = ErrorReply(nullptr, kBadRequest, "missing id");
 +    return std::nullopt;
 +  }
 +  Request request{id ? id->Clone() : base::Value(), *op, {}};
@@ -3144,6 +3155,11 @@ index 0000000000..e9608caa6e
 +  return Line(std::move(fields));
 +}
 +
++bool IsViewInputOp(std::string_view op) {
++  return op == "view.mouse" || op == "view.wheel" || op == "view.mouse.leave" || op == "view.focus" ||
++         op == "view.key" || op == "view.edit";
++}
++
 +bool AtMostChars(std::string_view utf8, size_t max) {
 +  size_t count = 0;
 +  for (unsigned char c : utf8) {
@@ -3160,10 +3176,10 @@ index 0000000000..e9608caa6e
 +}  // namespace agens::bridge
 diff --git a/chrome/browser/agens/bridge/protocol.h b/chrome/browser/agens/bridge/protocol.h
 new file mode 100644
-index 0000000000..a3127abf5e
+index 0000000000..aa8a7e7704
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/protocol.h
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,69 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The socket's wire format (docs/agens.md, "O socket"): one JSON object per line. Pure logic, no
 +// sockets or threads, so protocol_selfcheck.cc can exercise it with only //base.
@@ -3206,10 +3222,14 @@ index 0000000000..a3127abf5e
 +};
 +
 +struct Request {
-+  base::Value id;          // a number or a string, echoed back as is; none: no reply is sent
++  base::Value id;          // a number or a string, echoed back as is; none only for a view input op (no reply)
 +  std::string op;
 +  base::DictValue body;  // the whole object, so ops read their params from it
 +};
++
++// view.focus, view.mouse, view.mouse.leave, view.wheel, view.key, view.edit: the only requests
++// that come without an id, never answered.
++bool IsViewInputOp(std::string_view op);
 +
 +// Parses one line. On failure returns nullopt and fills `error_reply` with the line to send back
 +// (bad_request, carrying the id when one could be read).
@@ -3231,10 +3251,10 @@ index 0000000000..a3127abf5e
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_PROTOCOL_H_
 diff --git a/chrome/browser/agens/bridge/protocol_selfcheck.cc b/chrome/browser/agens/bridge/protocol_selfcheck.cc
 new file mode 100644
-index 0000000000..47feb9b11a
+index 0000000000..adcf57f422
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/protocol_selfcheck.cc
-@@ -0,0 +1,218 @@
+@@ -0,0 +1,222 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Assert-based check of the wire format (protocol.h). Build and run:
 +//   ninja -C out/Dev agens_bridge_selfcheck && out/Dev/agens_bridge_selfcheck
@@ -3311,6 +3331,10 @@ index 0000000000..47feb9b11a
 +    // No id: a request nobody waits for (view.* input).
 +    std::optional<Request> no_id = ParseRequest(R"({"op":"view.mouse","tab":"v1"})", error);
 +    CHECK_TRUE(no_id && no_id->id.is_none() && no_id->op == "view.mouse");
++    CHECK_TRUE(!ParseRequest(R"({"op":"hello"})", error));  // any other op still needs an id
++    CHECK_TRUE(*Parse(error).FindString("error") == kBadRequest);
++    CHECK_TRUE(!ParseRequest(R"({"op":"view.attach","tab":"v1"})", error));
++    CHECK_TRUE(ParseRequest(R"({"op":"view.edit"})", error) && ParseRequest(R"({"op":"view.mouse.leave"})", error));
 +    CHECK_TRUE(!ParseRequest(R"({"op":""})", error));
 +    CHECK_TRUE(*Parse(error).FindString("error") == kBadRequest);
 +
@@ -4003,10 +4027,10 @@ index 0000000000..2a1a874d47
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_SESSION_OPS_H_
 diff --git a/chrome/browser/agens/bridge/view_input.cc b/chrome/browser/agens/bridge/view_input.cc
 new file mode 100644
-index 0000000000..6e8c7bb3a2
+index 0000000000..52311ab789
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_input.cc
-@@ -0,0 +1,107 @@
+@@ -0,0 +1,137 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/view_input.h"
@@ -4070,6 +4094,17 @@ index 0000000000..6e8c7bb3a2
 +  return true;
 +}
 +
++bool IsSelectorName(std::string_view name) {
++  // ^[a-z][A-Za-z]*:$ : what -doCommandBySelector: sends; anything else would be interned forever.
++  if (name.size() < 2 || name.size() > kMaxCommandChars || name.back() != ':' || name[0] < 'a' || name[0] > 'z') {
++    return false;
++  }
++  for (char c : name.substr(1, name.size() - 2)) {
++    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) return false;
++  }
++  return true;
++}
++
 +bool ReadViewKey(const base::DictValue& body, ViewKey& key) {
 +  for (auto [name, field] : {std::pair{"text", &key.text}, std::pair{"marked", &key.marked}}) {
 +    const base::Value* value = body.Find(name);
@@ -4080,7 +4115,7 @@ index 0000000000..6e8c7bb3a2
 +  if (const base::Value* value = body.Find("commands")) {
 +    if (!value->is_list() || value->GetList().size() > kMaxKeyCommands) return false;
 +    for (const base::Value& command : value->GetList()) {
-+      if (!command.is_string() || command.GetString().size() > kMaxCommandChars) return false;
++      if (!command.is_string() || !IsSelectorName(command.GetString())) return false;
 +      key.commands.push_back(command.GetString());
 +    }
 +  }
@@ -4106,6 +4141,25 @@ index 0000000000..6e8c7bb3a2
 +  return false;
 +}
 +
++std::vector<std::string> ParseAllowedClients(std::string_view value) {
++  std::vector<std::string> ids;
++  if (value.empty()) return ids;
++  size_t start = 0;
++  for (;;) {
++    const size_t end = value.find(',', start);
++    const std::string_view id = value.substr(start, end == std::string_view::npos ? std::string_view::npos : end - start);
++    if (id.empty() || id.size() > 128 || ids.size() == 16) return {};
++    for (char c : id) {
++      if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-')) {
++        return {};
++      }
++    }
++    ids.emplace_back(id);
++    if (end == std::string_view::npos) return ids;
++    start = end + 1;
++  }
++}
++
 +std::optional<int> ParseApprovalAnswer(std::string_view answer) {
 +  if (answer == "allow") return 0;
 +  if (answer == "always") return 1;
@@ -4116,10 +4170,10 @@ index 0000000000..6e8c7bb3a2
 +}  // namespace agens::bridge
 diff --git a/chrome/browser/agens/bridge/view_input.h b/chrome/browser/agens/bridge/view_input.h
 new file mode 100644
-index 0000000000..dd99e6652d
+index 0000000000..b7c2381fc0
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_input.h
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,69 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The params of view.* (docs/protocolo.md, "host e view") that need checking before they reach
 +// the page. Pure logic, so view_input_selfcheck.cc runs it with only //base. The input ops come
@@ -4139,8 +4193,8 @@ index 0000000000..dd99e6652d
 +inline constexpr size_t kMaxEventDataChars = 64 * 1024;  // "data": one NSEvent, base64
 +inline constexpr size_t kMaxInputTextBytes = 64 * 1024;  // view.key "text" and "marked"
 +inline constexpr size_t kMaxKeyCommands = 32;            // view.key "commands"
-+inline constexpr size_t kMaxCommandChars = 128;
-+inline constexpr int kMaxViewSide = 16384;  // points
++inline constexpr size_t kMaxCommandChars = 64;
++inline constexpr int kMaxViewSide = 8192;  // points
 +inline constexpr double kMaxViewScale = 8;
 +
 +// "v12" → 12. nullopt for anything else: no sign, no leading zero, more than 0, fits an int.
@@ -4169,11 +4223,19 @@ index 0000000000..dd99e6652d
 +  bool had_marked = false;
 +  bool unmarked = false;
 +};
-+// False when a field has the wrong type or passes its limit. Missing fields keep their defaults.
++// False when a field has the wrong type or passes its limit, or a command is not a selector name
++// (IsSelectorName). Missing fields keep their defaults.
 +bool ReadViewKey(const base::DictValue& body, ViewKey& key);
++
++// A selector name as -doCommandBySelector: gives it: ^[a-z][A-Za-z]*:$, at most kMaxCommandChars.
++bool IsSelectorName(std::string_view name);
 +
 +// view.edit: cut, copy, paste, selectAll, undo, redo.
 +bool IsEditCommand(std::string_view command);
++
++// --agens-allowed-clients=<id>,<id>: exact signing identifiers, at most 16, each 1 to 128 chars of
++// [A-Za-z0-9.-]. Anything malformed gives an empty list (nobody but the host gets in).
++std::vector<std::string> ParseAllowedClients(std::string_view value);
 +
 +// approval.answer: allow, always, deny → 0, 1, 2 (AgensApprovalAnswer's order); nullopt otherwise.
 +std::optional<int> ParseApprovalAnswer(std::string_view answer);
@@ -4183,10 +4245,10 @@ index 0000000000..dd99e6652d
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_VIEW_INPUT_H_
 diff --git a/chrome/browser/agens/bridge/view_input_selfcheck.cc b/chrome/browser/agens/bridge/view_input_selfcheck.cc
 new file mode 100644
-index 0000000000..b405374ce1
+index 0000000000..7d67567ae2
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_input_selfcheck.cc
-@@ -0,0 +1,107 @@
+@@ -0,0 +1,130 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Assert-based check of view_input.h, run by agens_bridge_selfcheck (protocol_selfcheck.cc).
 +
@@ -4226,10 +4288,10 @@ index 0000000000..b405374ce1
 +  int w = 0, h = 0;
 +  double s = 0;
 +  VIEW_CHECK(ReadViewSize(Body(R"({"width":1000,"height":640,"scale":2})"), w, h, s) && w == 1000 && h == 640 && s == 2);
-+  VIEW_CHECK(ReadViewSize(Body(R"({"width":1,"height":16384})"), w, h, s) && s == 1);
++  VIEW_CHECK(ReadViewSize(Body(R"({"width":1,"height":8192})"), w, h, s) && s == 1);
 +  VIEW_CHECK(ReadViewSize(Body(R"({"width":10,"height":10,"scale":1.5})"), w, h, s) && s == 1.5);
 +  VIEW_CHECK(!ReadViewSize(Body(R"({"width":0,"height":10})"), w, h, s));
-+  VIEW_CHECK(!ReadViewSize(Body(R"({"width":10,"height":16385})"), w, h, s));
++  VIEW_CHECK(!ReadViewSize(Body(R"({"width":10,"height":8193})"), w, h, s));
 +  VIEW_CHECK(!ReadViewSize(Body(R"({"width":10.5,"height":10})"), w, h, s));
 +  VIEW_CHECK(!ReadViewSize(Body(R"({"width":"10","height":10})"), w, h, s));
 +  VIEW_CHECK(!ReadViewSize(Body(R"({"height":10})"), w, h, s));
@@ -4275,6 +4337,8 @@ index 0000000000..b405374ce1
 +    VIEW_CHECK(!ReadViewKey(Body(R"({"text":1})"), key));
 +    VIEW_CHECK(!ReadViewKey(Body(R"({"commands":"deleteBackward:"})"), key));
 +    VIEW_CHECK(!ReadViewKey(Body(R"({"commands":[1]})"), key));
++    VIEW_CHECK(!ReadViewKey(Body(R"({"commands":[""]})"), key));
++    VIEW_CHECK(!ReadViewKey(Body(R"({"commands":["deleteBackward:","x"]})"), key));
 +    VIEW_CHECK(!ReadViewKey(Body(R"({"sel_start":"1"})"), key));
 +    VIEW_CHECK(!ReadViewKey(Body(R"({"had_marked":1})"), key));
 +  }
@@ -4287,6 +4351,27 @@ index 0000000000..b405374ce1
 +    VIEW_CHECK(!ReadViewKey(Body("{\"commands\":" + many + "]}"), key));
 +  }
 +
++  // Selector names.
++  VIEW_CHECK(IsSelectorName("deleteBackward:") && IsSelectorName("noop:") && IsSelectorName("a:"));
++  VIEW_CHECK(!IsSelectorName("") && !IsSelectorName(":") && !IsSelectorName("DeleteBackward:"));
++  VIEW_CHECK(!IsSelectorName("insertText") && !IsSelectorName("do:it:") && !IsSelectorName("foo_bar:"));
++  VIEW_CHECK(!IsSelectorName("a1:") && IsSelectorName("a" + std::string(62, 'b') + ":") &&
++             !IsSelectorName("a" + std::string(63, 'b') + ":"));
++
++  // --agens-allowed-clients.
++  VIEW_CHECK(ParseAllowedClients("").empty());
++  VIEW_CHECK((ParseAllowedClients("ai.agens.engine") == std::vector<std::string>{"ai.agens.engine"}));
++  VIEW_CHECK((ParseAllowedClients("a.b,c-d,E9") == std::vector<std::string>{"a.b", "c-d", "E9"}));
++  VIEW_CHECK(ParseAllowedClients("a,,b").empty() && ParseAllowedClients("a,").empty() && ParseAllowedClients(",a").empty());
++  VIEW_CHECK(ParseAllowedClients("a b").empty() && ParseAllowedClients("a/b").empty() && ParseAllowedClients("a_b").empty());
++  VIEW_CHECK(ParseAllowedClients(std::string(128, 'a')).size() == 1 && ParseAllowedClients(std::string(129, 'a')).empty());
++  {
++    std::string sixteen, seventeen;
++    for (int i = 0; i < 16; ++i) sixteen += std::string(i ? "," : "") + "x" + std::to_string(i);
++    seventeen = sixteen + ",y";
++    VIEW_CHECK(ParseAllowedClients(sixteen).size() == 16 && ParseAllowedClients(seventeen).empty());
++  }
++
 +  // Edit commands and approval answers.
 +  VIEW_CHECK(IsEditCommand("selectAll") && IsEditCommand("paste") && !IsEditCommand("delete") && !IsEditCommand(""));
 +  VIEW_CHECK(ParseApprovalAnswer("allow") == 0 && ParseApprovalAnswer("always") == 1 && ParseApprovalAnswer("deny") == 2);
@@ -4296,10 +4381,10 @@ index 0000000000..b405374ce1
 +}
 diff --git a/chrome/browser/agens/bridge/view_ops.cc b/chrome/browser/agens/bridge/view_ops.cc
 new file mode 100644
-index 0000000000..e4a1e68f4e
+index 0000000000..08f410faf0
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_ops.cc
-@@ -0,0 +1,694 @@
+@@ -0,0 +1,741 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The host draws the interface; the engine hands it the pages (docs/protocolo.md, "host e view").
 +// - One host: the connection that sent host.attach (the app that launched the engine).
@@ -4309,6 +4394,8 @@ index 0000000000..e4a1e68f4e
 +//   embedded, native_shell_mac.mm), and its CAContext id goes out as view.layer. Several at once.
 +
 +#include "chrome/browser/agens/bridge/view_ops.h"
++
++#include <unistd.h>
 +
 +#include <algorithm>
 +#include <cmath>
@@ -4371,6 +4458,21 @@ index 0000000000..e4a1e68f4e
 +  if (!TabNumber::FromWebContents(contents)) TabNumber::CreateForWebContents(contents, ++next);
 +  return TabNumber::FromWebContents(contents)->n;
 +}
++
++// The last layer a tab drew by itself, kept from every frame: a tab that is already drawn and idle
++// sends no new frame when the host attaches it.
++class LastLayer : public content::WebContentsUserData<LastLayer> {
++ public:
++  uint32_t context = 0;
++  gfx::Size pixels;
++  float scale = 1;
++
++ private:
++  explicit LastLayer(content::WebContents* contents) : content::WebContentsUserData<LastLayer>(*contents) {}
++  friend class content::WebContentsUserData<LastLayer>;
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++WEB_CONTENTS_USER_DATA_KEY_IMPL(LastLayer);
 +
 +// A tab the host shows: kept visible at the host's size, drawing by itself.
 +class Shown : public content::WebContentsObserver {
@@ -4586,6 +4688,11 @@ index 0000000000..e4a1e68f4e
 +
 +// Every frame of a tab drawing by itself: a new layer (process or size changed) goes to the host.
 +void OnLayer(content::WebContents* contents, uint32_t context, const gfx::Size& pixels, float scale) {
++  LastLayer::CreateForWebContents(contents);  // no-op once it exists
++  LastLayer* last = LastLayer::FromWebContents(contents);
++  last->context = context;
++  last->pixels = pixels;
++  last->scale = scale > 0 ? scale : 1;
 +  for (auto& shown : S().shown) {
 +    if (shown->web_contents() != contents) continue;
 +    if (shown->context == context && shown->pixels == pixels) return;
@@ -4599,17 +4706,33 @@ index 0000000000..e4a1e68f4e
 +  }
 +}
 +
++void WatchLayers() {
++  static bool watching = false;
++  if (watching) return;
++  watching = true;
++  content::SetAgensEmbedLayerCallback(base::BindRepeating(&OnLayer));
++}
++
++// Just attached: the layer it already has, when it is at that size; else a frame is asked for.
++void SendCurrentLayer(Shown& shown) {
++  const LastLayer* last = LastLayer::FromWebContents(shown.web_contents());
++  if (last && last->context && std::lround(last->pixels.width() / last->scale) == shown.size.width() &&
++      std::lround(last->pixels.height() / last->scale) == shown.size.height()) {
++    shown.context = last->context;
++    shown.pixels = last->pixels;
++    shown.scale = last->scale;
++    SendLayer(shown);
++    return;
++  }
++  content::AgensEmbedRedraw(shown.web_contents());
++}
++
 +std::optional<int> TabParam(const Request& request) {
 +  const std::string* tab = request.body.FindString("tab");
 +  return tab ? ParseViewTab(*tab) : std::nullopt;
 +}
 +
 +// --- Input: no reply, malformed messages dropped, only to attached tabs.
-+
-+bool IsInputOp(std::string_view op) {
-+  return op == "view.mouse" || op == "view.wheel" || op == "view.mouse.leave" || op == "view.focus" ||
-+         op == "view.key" || op == "view.edit";
-+}
 +
 +void Input(const Client& client, const Request& request) {
 +  State& s = S();
@@ -4634,6 +4757,13 @@ index 0000000000..e4a1e68f4e
 +    std::optional<bool> on = request.body.FindBool("on");
 +    if (!on) return;
 +    if (*on) {
++      // One focused tab at a time.
++      for (auto& other : s.shown) {
++        if (other.get() != shown && other->focused && other->web_contents()) {
++          other->focused = false;
++          content::AgensEmbedSetFocus(other->web_contents(), false);
++        }
++      }
 +      // The tab with the keyboard is its window's active tab (find, permission prompts…).
 +      for (AgensWindow* window : s.windows) {
 +        const int index = window->model()->GetIndexOfWebContents(contents);
@@ -4670,7 +4800,8 @@ index 0000000000..e4a1e68f4e
 +
 +void HostAttach(const Client& client, const Request& request, ReplyCallback reply) {
 +  State& s = S();
-+  if (client.pid <= 0 || client.pid != EmbeddedParent()) {
++  // The parent that launched the engine, and still its parent (not reparented after it died).
++  if (client.pid <= 0 || client.pid != EmbeddedParent() || getppid() != EmbeddedParent()) {
 +    std::move(reply).Run(ErrorReply(&request.id, kUnauthorized, "only the app that started the engine is its host"));
 +    return;
 +  }
@@ -4681,11 +4812,7 @@ index 0000000000..e4a1e68f4e
 +    return;
 +  }
 +  s.host = client.connection;
-+  static bool layers = false;
-+  if (!layers) {
-+    layers = true;
-+    content::SetAgensEmbedLayerCallback(base::BindRepeating(&OnLayer));
-+  }
++  WatchLayers();
 +  std::move(reply).Run(OkReply(request.id));
 +  s.Schedule();  // the tabs that exist already
 +}
@@ -4867,7 +4994,7 @@ index 0000000000..e4a1e68f4e
 +    double scale = 1;
 +    if (!ReadViewSize(request.body, width, height, scale)) {
 +      std::move(reply).Run(ErrorReply(&request.id, kBadRequest,
-+                                      "needs tab, width and height (whole points, 1 to 16384) and scale (up to 8)"));
++                                      "needs tab, width and height (whole points, 1 to 8192) and scale (up to 8)"));
 +      return;
 +    }
 +    // shortcut: `scale` is read but the tab draws at its screen's scale (the layer says which);
@@ -4877,13 +5004,13 @@ index 0000000000..e4a1e68f4e
 +      std::move(reply).Run(ErrorReply(&request.id, kNotFound, "the tab is not attached"));
 +      return;
 +    }
++    const bool attaching = op == "view.attach";
 +    if (!shown) {
 +      s.shown.push_back(std::make_unique<Shown>(contents, *n));
 +      shown = s.shown.back().get();
-+    } else if (op == "view.attach" && shown->size == gfx::Size(width, height) && shown->context) {
-+      SendLayer(*shown);  // attached again at the same size: no new frame will come
 +    }
 +    shown->Resize(gfx::Size(width, height));
++    if (attaching) SendCurrentLayer(*shown);  // a new size draws anew; the same one may not
 +  } else if (op == "view.detach") {
 +    std::erase_if(s.shown, [&](const std::unique_ptr<Shown>& shown) { return shown->n == *n; });
 +  } else if (op == "view.close") {
@@ -4925,7 +5052,7 @@ index 0000000000..e4a1e68f4e
 +    std::move(reply).Run(ErrorReply(&request.id, kUnknownOp, op));
 +    return;
 +  }
-+  if (IsInputOp(op)) {
++  if (IsViewInputOp(op)) {
 +    Input(client, request);  // never answered, as the spec says
 +    return;
 +  }
@@ -4962,8 +5089,13 @@ index 0000000000..e4a1e68f4e
 +  if (ApprovalCallback done = std::move(s.answer)) std::move(done).Run(kAgensApprovalDeny);
 +}
 +
++void HostGone() {
++  if (S().host) OnConnectionClosed(S().host);
++}
++
 +void AddWindow(AgensWindow* window) {
 +  if (!IsEmbedded()) return;
++  WatchLayers();  // from the first window: every tab's last layer is known when it is attached
 +  S().windows.push_back(window);
 +  window->model()->AddObserver(&S());
 +  S().Schedule();
@@ -4996,10 +5128,10 @@ index 0000000000..e4a1e68f4e
 +}  // namespace agens::bridge::view
 diff --git a/chrome/browser/agens/bridge/view_ops.h b/chrome/browser/agens/bridge/view_ops.h
 new file mode 100644
-index 0000000000..7d791e90d7
+index 0000000000..fbce4eeb52
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_ops.h
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,37 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The page inside another app (docs/protocolo.md, "host e view"): host.attach, view.* and
 +// approval.answer. Only when the engine runs embedded (agens_embedded.h); otherwise every op here
@@ -5021,6 +5153,9 @@ index 0000000000..7d791e90d7
 +bool Handles(std::string_view op);
 +void HandleOp(const Client& client, Request request, ReplyCallback reply);
 +void OnConnectionClosed(uint64_t connection);
++
++// The engine's parent died (agens_embedded_mac.mm): nobody is the host any more.
++void HostGone();
 +
 +// The shell's windows (native_shell_mac.mm): their tabs are the ones the host sees.
 +void AddWindow(AgensWindow* window);
@@ -5600,10 +5735,10 @@ index 9d0bf4646d..2329299532 100644
  #ifdef __cplusplus
 diff --git a/chrome/browser/agens/embed/agens_embedded.h b/chrome/browser/agens/embed/agens_embedded.h
 new file mode 100644
-index 0000000000..c55c694d5a
+index 0000000000..809ce9cf33
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embedded.h
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,37 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The engine as another app's hidden helper (docs/agens.md, "Um código, dois produtos";
 +// docs/protocolo.md, "host e view"). With --agens-embedded the app that launched the engine draws
@@ -5613,6 +5748,8 @@ index 0000000000..c55c694d5a
 +#define CHROME_BROWSER_AGENS_EMBED_AGENS_EMBEDDED_H_
 +
 +#include <sys/types.h>
++
++#include <string>
 +
 +namespace agens {
 +
@@ -5626,6 +5763,10 @@ index 0000000000..c55c694d5a
 +pid_t EmbeddedParent();
 +// Embedded and started with kAcceptUnsignedSwitch in a non-official build.
 +bool AcceptUnsignedClients();
++// Besides the parent, which always gets in: an app signed with our Team ID whose signing
++// identifier the host listed in --agens-allowed-clients. Embedded only.
++inline constexpr char kAllowedClientsSwitch[] = "agens-allowed-clients";
++bool EmbeddedClientAllowed(const std::string& signing_identifier);
 +
 +// From ChromeBrowserMainPartsMac::PreEarlyInitialization, before any window exists: no Dock
 +// icon, no startup window, no first run, and the watch on the parent. Exits right away when the
@@ -5637,10 +5778,10 @@ index 0000000000..c55c694d5a
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EMBEDDED_H_
 diff --git a/chrome/browser/agens/embed/agens_embedded_mac.mm b/chrome/browser/agens/embed/agens_embedded_mac.mm
 new file mode 100644
-index 0000000000..b454014634
+index 0000000000..2830b0793f
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embedded_mac.mm
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,96 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/embed/agens_embedded.h"
@@ -5649,7 +5790,13 @@ index 0000000000..b454014634
 +#include <dispatch/dispatch.h>
 +#include <unistd.h>
 +
++#include <algorithm>
++#include <vector>
++
 +#include "base/command_line.h"
++#include "base/no_destructor.h"
++#include "chrome/browser/agens/bridge/view_input.h"
++#include "chrome/browser/agens/bridge/view_ops.h"
 +#include "chrome/browser/lifetime/application_lifetime.h"
 +#include "chrome/common/chrome_switches.h"
 +
@@ -5664,6 +5811,7 @@ index 0000000000..b454014634
 +  static bool quitting = false;
 +  if (quitting) return;
 +  quitting = true;
++  bridge::view::HostGone();  // its connection may linger, but it is no longer the host
 +  // Nobody is left to answer a "leave this page?" dialog.
 +  chrome::ExitIgnoreUnloadHandlers();
 +  // shortcut: a shutdown stuck for 10 s ends hard (no clean exit); find out why if it shows up.
@@ -5690,6 +5838,12 @@ index 0000000000..b454014634
 +#else
 +  return IsEmbedded() && base::CommandLine::ForCurrentProcess()->HasSwitch(kAcceptUnsignedSwitch);
 +#endif
++}
++
++bool EmbeddedClientAllowed(const std::string& signing_identifier) {
++  static const base::NoDestructor<std::vector<std::string>> allowed(bridge::ParseAllowedClients(
++      base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(kAllowedClientsSwitch)));
++  return IsEmbedded() && !signing_identifier.empty() && std::ranges::contains(*allowed, signing_identifier);
 +}
 +
 +void StartEmbedded() {
@@ -6089,7 +6243,7 @@ index d81488f053..28c38bd394 100644
  void ConfirmCloseWithDownloads(views::Widget* widget, int count, base::OnceCallback<void(bool)> callback);
  
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
-index 5d7ca90415..c4dfaa4d35 100644
+index 5d7ca90415..8f83909180 100644
 --- a/chrome/browser/agens/embed/native_shell_mac.mm
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
 @@ -8,6 +8,8 @@
@@ -6133,7 +6287,20 @@ index 5d7ca90415..c4dfaa4d35 100644
      // Chromium keeps every tab but the active one hidden (no painting); a split shows two.
      for (views::WebView* pane : {contents_.get(), contents2_.get()}) {
        content::WebContents* was = pane->GetWebContents();
-@@ -360,6 +371,34 @@ bool HandleNativeCommand(BrowserWindowInterface* browser, int command_id) {
+@@ -328,6 +339,12 @@ void NativeTabStateChanged(views::Widget* widget) {
+ }
+ 
+ void ConfirmCloseWithDownloads(views::Widget* widget, int count, base::OnceCallback<void(bool)> callback) {
++  if (IsEmbedded()) {
++    // No sheet may show and nobody would answer it: close, cancelling the downloads.
++    // shortcut: relay this question to the host later.
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE, base::BindOnce(std::move(callback), true));
++    return;
++  }
+   NSAlert* alert = [[NSAlert alloc] init];
+   alert.messageText = count == 1 ? @"Há um download em andamento" : [NSString stringWithFormat:@"Há %d downloads em andamento", count];
+   alert.informativeText = count == 1 ? @"Se fechar agora, ele é cancelado." : @"Se fechar agora, eles são cancelados.";
+@@ -360,6 +377,34 @@ bool HandleNativeCommand(BrowserWindowInterface* browser, int command_id) {
    return shell && shell->Command(*command);
  }
  
@@ -6168,7 +6335,68 @@ index 5d7ca90415..c4dfaa4d35 100644
  bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
    if (!IsNativeShellEnabled() || !browser->GetWindow()) return false;
    views::Widget* widget = views::Widget::GetWidgetForNativeWindow(browser->GetWindow()->GetNativeWindow());
-@@ -520,6 +559,13 @@ void CloseDialog() override {
+@@ -377,6 +422,20 @@ bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
+  public:
+   NativePermissionPrompt(AgensWindow* window, Delegate* delegate) : window_(window->weak.GetWeakPtr()) {
+     window->permission_delegate = delegate->GetWeakPtr();
++    if (IsEmbedded()) {
++      // The window is never on screen, so nobody would answer: denied at once (posted, the
++      // delegate is still setting this prompt up).
++      // shortcut: relay permission requests to the host later.
++      delegate->SetPromptShown();
++      base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++          FROM_HERE, base::BindOnce(
++                         [](base::WeakPtr<AgensWindow> window) {
++                           if (window) agens_window_permission_answer(window.get(), kAgensPermissionDeny);
++                         },
++                         window_));
++      return;
++    }
++    shown_ = true;
+     const GURL origin = delegate->GetRequestingOrigin();
+     const std::string site = origin.is_valid() ? std::string(origin.host()) : std::string();
+     std::vector<std::string> asks;
+@@ -389,7 +448,7 @@ bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
+     agens_ui_permission_prompt(window->ui, site.c_str(), pointers.data(), static_cast<int>(pointers.size()));
+   }
+   ~NativePermissionPrompt() override {
+-    if (window_ && window_->ui) agens_ui_permission_prompt_close(window_->ui);
++    if (shown_ && window_ && window_->ui) agens_ui_permission_prompt_close(window_->ui);
+   }
+   // permissions::PermissionPrompt:
+   bool UpdateAnchor() override { return true; }
+@@ -408,6 +467,7 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
+ 
+  private:
+   base::WeakPtr<AgensWindow> window_;
++  bool shown_ = false;  // agens_ui_permission_prompt ran
+ };
+ 
+ std::unique_ptr<permissions::PermissionPrompt> CreateNativePermissionPrompt(
+@@ -428,6 +488,12 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
+ void ShowNativeInstallDialog(std::unique_ptr<ExtensionInstallPromptShowParams> params,
+                              ExtensionInstallPrompt::DoneCallback done,
+                              std::unique_ptr<extensions::InstallPromptData> prompt) {
++  if (IsEmbedded()) {
++    // runModal would put the alert on screen: the install is cancelled.
++    // shortcut: relay extension installs to the host later.
++    std::move(done).Run(ExtensionInstallPrompt::DoneCallbackPayload(ExtensionInstallPrompt::Result::USER_CANCELED));
++    return;
++  }
+   NSAlert* alert = [[NSAlert alloc] init];
+   alert.messageText = base::SysUTF16ToNSString(prompt->GetDialogTitle());
+   NSMutableArray<NSString*>* asks = [NSMutableArray array];
+@@ -466,6 +532,9 @@ void ShowNativeInstallDialog(std::unique_ptr<ExtensionInstallPromptShowParams> p
+   bool BuildViewImpl(const std::u16string& authority,
+                      const std::u16string& explanation,
+                      LoginModelData*) override {
++    // Embedded, no sheet may show: false makes LoginHandler cancel the auth (no credentials).
++    // shortcut: relay HTTP auth to the host later.
++    if (IsEmbedded()) return false;
+     NSWindow* window = web_contents() ? web_contents()->GetTopLevelNativeWindow().GetNativeNSWindow() : nil;
+     if (!window) return false;
+     alert_ = [[NSAlert alloc] init];
+@@ -520,6 +589,13 @@ void CloseDialog() override {
                   content::JavaScriptDialogManager::DialogClosedCallback callback,
                   base::OnceClosure force_closed)
        : callback_(std::move(callback)), force_closed_(std::move(force_closed)) {
@@ -6182,7 +6410,7 @@ index 5d7ca90415..c4dfaa4d35 100644
      alert_ = [[NSAlert alloc] init];
      alert_.messageText = base::SysUTF16ToNSString(title);
      alert_.informativeText = base::SysUTF16ToNSString(message);
-@@ -558,6 +604,8 @@ void CloseDialogWithoutCallback() override {
+@@ -558,6 +634,8 @@ void CloseDialogWithoutCallback() override {
  
   private:
    void Finish(bool ok) {
@@ -6191,7 +6419,7 @@ index 5d7ca90415..c4dfaa4d35 100644
      force_closed_.Reset();
      if (callback_) std::move(callback_).Run(ok, ok ? GetUserInput() : std::u16string());
      base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE, this);
-@@ -567,6 +615,7 @@ void Finish(bool ok) {
+@@ -567,6 +645,7 @@ void Finish(bool ok) {
    NSAlert* __strong alert_;
    NSTextField* __strong field_ = nil;
    NSWindow* __strong window_ = nil;
@@ -6916,6 +7144,32 @@ index 9e4154d594..ae63a83685 100644
    return javascript_dialogs::TabModalDialogManager::FromWebContents(source);
  }
  
+diff --git a/chrome/browser/ui/select_file_policy/chrome_select_file_policy.cc b/chrome/browser/ui/select_file_policy/chrome_select_file_policy.cc
+index be4b9162d1..8b463d745e 100644
+--- a/chrome/browser/ui/select_file_policy/chrome_select_file_policy.cc
++++ b/chrome/browser/ui/select_file_policy/chrome_select_file_policy.cc
+@@ -7,6 +7,9 @@
+ #include "base/check.h"
+ #include "build/build_config.h"
+ #include "chrome/browser/browser_process.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/agens/embed/agens_embedded.h"  // SugiyamaLabs
++#endif
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/common/pref_names.h"
+ #include "chrome/grit/generated_resources.h"
+@@ -29,6 +32,11 @@ ChromeSelectFilePolicy::ChromeSelectFilePolicy(
+ ChromeSelectFilePolicy::~ChromeSelectFilePolicy() = default;
+ 
+ bool ChromeSelectFilePolicy::CanOpenSelectFileDialog() {
++#if BUILDFLAG(IS_MAC)
++  // agens: embedded, no panel may go on screen; the chooser is cancelled at once.
++  // shortcut: file choosers and save panels should be relayed to the host later.
++  if (agens::IsEmbedded()) return false;
++#endif
+   if (source_contents_) {
+     Profile* profile =
+         Profile::FromBrowserContext(source_contents_->GetBrowserContext());
 diff --git a/chrome/browser/ui/webui_browser/BUILD.gn b/chrome/browser/ui/webui_browser/BUILD.gn
 index 98ada3ff32..8002af248b 100644
 --- a/chrome/browser/ui/webui_browser/BUILD.gn
@@ -7064,6 +7318,21 @@ index 67c962e1dd..d607336567 100644
    widget_->Restore();
  }
  
+diff --git a/content/app_shim_remote_cocoa/render_widget_host_ns_view_bridge.mm b/content/app_shim_remote_cocoa/render_widget_host_ns_view_bridge.mm
+index 2eda2e79d7..f78ad1fbcf 100644
+--- a/content/app_shim_remote_cocoa/render_widget_host_ns_view_bridge.mm
++++ b/content/app_shim_remote_cocoa/render_widget_host_ns_view_bridge.mm
+@@ -435,7 +435,9 @@ void Hide() override {
+   // `NativeWidgetMacNSWindow`, so this doesn't use a strict cast.
+   NativeWidgetMacNSWindow* ns_window =
+       base::apple::ObjCCast<NativeWidgetMacNSWindow>(cocoa_view_.window);
+-  if (ns_window && ns_window.isHeadless) {
++  // agens: nor for a view in no window (a tab another app shows): nothing to anchor it to, and
++  // its nested loop would run on a screen nobody looks at. Nothing chosen.
++  if ((ns_window && ns_window.isHeadless) || !cocoa_view_.window) {
+     std::move(callback).Run(std::nullopt);
+     return;
+   }
 diff --git a/content/browser/BUILD.gn b/content/browser/BUILD.gn
 index 901df80d0d..ecbb202f98 100644
 --- a/content/browser/BUILD.gn
@@ -7103,10 +7372,10 @@ index 0000000000..e2781f696f
 +#endif  // CONTENT_BROWSER_RENDERER_HOST_AGENS_EMBED_INTERNAL_MAC_H_
 diff --git a/content/browser/renderer_host/agens_embed_mac.mm b/content/browser/renderer_host/agens_embed_mac.mm
 new file mode 100644
-index 0000000000..5a505b7272
+index 0000000000..464f4c4951
 --- /dev/null
 +++ b/content/browser/renderer_host/agens_embed_mac.mm
-@@ -0,0 +1,206 @@
+@@ -0,0 +1,232 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "content/public/browser/agens_embed_mac.h"
@@ -7169,6 +7438,14 @@ index 0000000000..5a505b7272
 +  }
 +}
 +
++void AgensEmbedRedraw(WebContents* contents) {
++  RenderWidgetHostViewMac* view = ViewFor(contents);
++  RenderWidgetHostImpl* host = view ? RenderWidgetHostImpl::From(view->GetRenderWidgetHost()) : nullptr;
++  // The renderer's widget must be live: ForceRedrawForTesting CHECKs it is bound. Despite its
++  // name it is the plain "draw a full frame now" request.
++  if (host && host->renderer_initialized()) host->ForceRedrawForTesting();
++}
++
 +void AgensEmbedSetFocus(WebContents* contents, bool focused) {
 +  RenderWidgetHostViewMac* view = ViewFor(contents);
 +  if (!view) return;
@@ -7189,6 +7466,24 @@ index 0000000000..5a505b7272
 +  RenderWidgetHostViewMac* view = ViewFor(contents);
 +  NSEvent* event = ui::EventFromData(native_event);
 +  if (!view || !event) return;
++  // Only mouse events: the builder reads mouse-only properties, which raise on other types.
++  switch (event.type) {
++    case NSEventTypeLeftMouseDown:
++    case NSEventTypeLeftMouseUp:
++    case NSEventTypeLeftMouseDragged:
++    case NSEventTypeRightMouseDown:
++    case NSEventTypeRightMouseUp:
++    case NSEventTypeRightMouseDragged:
++    case NSEventTypeOtherMouseDown:
++    case NSEventTypeOtherMouseUp:
++    case NSEventTypeOtherMouseDragged:
++    case NSEventTypeMouseMoved:
++    case NSEventTypeMouseEntered:
++    case NSEventTypeMouseExited:
++      break;
++    default:
++      return;
++  }
 +  blink::WebMouseEvent mouse =
 +      input::WebMouseEventBuilder::Build(event, view->GetNativeView().GetNativeNSView());
 +  // The event's own location belongs to the other app's window.
@@ -7348,10 +7643,10 @@ index 790d665707..19074293c5 100644
        "native_event_processor_observer_mac.h",
 diff --git a/content/public/browser/agens_embed_mac.h b/content/public/browser/agens_embed_mac.h
 new file mode 100644
-index 0000000000..a1599b2b23
+index 0000000000..fdfe0692b8
 --- /dev/null
 +++ b/content/public/browser/agens_embed_mac.h
-@@ -0,0 +1,64 @@
+@@ -0,0 +1,68 @@
 +// Copyright 2026 SugiyamaLabs.
 +// A tab shown by another app (docs/poc/embed.md). The tab is not in any window here: its
 +// compositor draws into a CAContext, the other app hosts that context in a CALayerHost and sends
@@ -7380,6 +7675,10 @@ index 0000000000..a1599b2b23
 +using AgensEmbedLayerCallback = base::RepeatingCallback<
 +    void(WebContents*, uint32_t ca_context_id, const gfx::Size& pixel_size, float scale)>;
 +CONTENT_EXPORT void SetAgensEmbedLayerCallback(AgensEmbedLayerCallback callback);
++
++// Asks the tab for a new frame (and so a layer callback), for a host that attaches a tab already
++// drawn and idle. Does nothing while the tab has no live renderer.
++CONTENT_EXPORT void AgensEmbedRedraw(WebContents* contents);
 +
 +// The other app's view became (or stopped being) the first responder of its key window.
 +CONTENT_EXPORT void AgensEmbedSetFocus(WebContents* contents, bool focused);
