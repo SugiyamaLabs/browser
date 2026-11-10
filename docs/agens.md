@@ -29,7 +29,7 @@ Os dois saem do mesmo repositório e do mesmo build, empacotados de dois jeitos,
 - **Só o que foi pedido, e só com o OK da pessoa.** A sessão entrega exatamente os itens do `Need`, nunca o cookie jar inteiro. O controle por agente pede aprovação por ato e deixa um aviso visível enquanto dura.
 - **Segredo não vai para disco nem para log.** O valor de um cookie ou header só passa pelo socket. Quem guarda é a Engine, no Keychain.
 - **O controle não toca em senha.** Ele não lê nem digita em campo de senha, e cookies e senhas salvas ficam fora do alcance dele.
-- **Isolamento entre times.** Cada ato é um perfil do Chromium (cookies, logins, extensões, histórico e cache próprios). Se a pessoa ligar "Compartilhar cookies entre atos", o isolamento acaba: enquanto ele estiver ligado, `session` e `control` respondem erro (`isolation_off`) e a interface explica o motivo.
+- **Isolamento entre times.** Cada ato é um perfil do Chromium (cookies, logins, extensões, histórico e cache próprios). Cada ato tem o interruptor "Compartilhar cookies", que vem desligado. Os atos com ele ligado dividem os cookies entre si; os outros seguem isolados. Um ato que compartilha cookies não está isolado: para ele, `session`, `renew` e `control.start` respondem erro (`isolation_off`) e a interface explica o motivo. Só a pessoa liga ou desliga, pela interface; o socket não muda isso.
 
 ## O socket
 
@@ -58,7 +58,7 @@ Os dois saem do mesmo repositório e do mesmo build, empacotados de dois jeitos,
 | Operação | O que faz |
 |---|---|
 | `hello {client}` | Versão do protocolo e do navegador. |
-| `atos.list` | `{atos: [{id, name, color, tag, asleep}]}`. O `id` é estável (a pasta do perfil). |
+| `atos.list` | `{atos: [{id, name, color, tag, asleep, shared}]}`. `shared` diz se o ato compartilha cookies. O `id` é estável (a pasta do perfil). |
 | `atos.create {name, color, tag}` | Cria o ato e devolve `{ato}`, o id dele (o campo `id` da mensagem já é o da correlação). `tag` é uma etiqueta opaca do cliente (o Agens põe o id do time): o navegador só guarda e devolve. Assim o Agens acha o ato do time mesmo se a pessoa o renomear. |
 | `atos.rename {ato, name}` / `atos.color {ato, color}` | Renomeia e troca a cor. |
 | `atos.open {ato, url?}` | Abre o ato, opcionalmente numa URL. No Agens, num painel. No AgensBrowser, na janela dele. |

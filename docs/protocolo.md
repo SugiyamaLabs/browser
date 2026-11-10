@@ -72,7 +72,7 @@ Um pedido para um ato dormindo acorda o ato. `tag` é uma etiqueta opaca do clie
 ← {"id": 2, "ok": true, "ato": "Profile 1"}
 
 → {"id": 3, "op": "atos.list"}
-← {"id": 3, "ok": true, "atos": [{"id": "Profile 1", "name": "Cliente A", "color": "blue", "tag": "time-123", "asleep": false}]}
+← {"id": 3, "ok": true, "atos": [{"id": "Profile 1", "name": "Cliente A", "color": "blue", "tag": "time-123", "asleep": false, "shared": false}]}
 
 → {"id": 4, "op": "atos.rename", "ato": "Profile 1", "name": "Cliente B"}
 → {"id": 5, "op": "atos.color", "ato": "Profile 1", "color": "teal"}
@@ -149,7 +149,7 @@ O controle vale **para a conexão**: quando o cliente desconecta, o controle aca
 | `failed` | O navegador não conseguiu criar ou abrir o ato, ou está fechando. |
 | `cancelled` | `login`: a pessoa fechou a aba antes do fim. |
 | `needs_login` | `renew`: o site pediu login; use `login`. |
-| `isolation_off` | "Compartilhar cookies entre atos" está ligado: `session` e `control` são recusados até desligar. |
+| `isolation_off` | Este ato está com "Compartilhar cookies" ligado: `session`, `renew` e `control.start` são recusados para ele. Os atos com o interruptor desligado seguem funcionando. |
 
 ## Eventos
 
@@ -167,7 +167,7 @@ Quando a pessoa toca em "Parar" na faixa, o controle acaba e o cliente é avisad
 - **Controle só vê as abas que ele abriu**, no ato aprovado. As abas da pessoa não aparecem.
 - **Senha é recusada.** O snapshot traz campo de senha sem valor, e `page.type` nele dá `denied`. Cookies e senhas salvas ficam fora do controle.
 - **Faixa visível** nas abas controladas: "Controlado pelo Agens · Parar".
-- **`isolation_off`.** Com "Compartilhar cookies entre atos" ligado o isolamento entre times acabou, então `session` e `control` respondem erro. Mostre o motivo à pessoa.
+- **`isolation_off`.** Cada ato tem o interruptor "Compartilhar cookies". Os atos com ele ligado dividem os cookies entre si, então não estão isolados, e `session`, `renew` e `control.start` respondem erro para eles. `atos.list` traz `shared` em cada ato. Só a pessoa muda isso, pela interface. Mostre o motivo a ela.
 
 ## Testando com agensctl
 
