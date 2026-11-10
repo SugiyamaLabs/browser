@@ -143,7 +143,7 @@ O controle vale **para a conexão**: quando o cliente desconecta, o controle aca
 → {"id": 10, "op": "control.stop"}
 ```
 
-- **`control.start {ato, reason}`**: a pessoa vê a folha "O <app> quer usar abas do ato <ato>" com o `reason` (até 1024 caracteres). Uma sessão por conexão, para um ato; um segundo `control.start` na mesma conexão dá `bad_request`.
+- **`control.start {ato, reason}`**: a pessoa vê a folha "O <app> quer usar abas do ato <ato>" com o `reason` (até 1024 caracteres), e pode escolher **Permitir sempre** (só vale para app assinado). Uma sessão por conexão, para um ato; um segundo `control.start` na mesma conexão dá `bad_request`.
 - **Fim do controle**: `control.stop` fecha as abas da sessão. Ao desconectar, as abas ficam abertas, sem controle. Se a pessoa tocar em "Parar", chega o evento `control.stopped` e `tab.*` e `page.*` passam a dar `unauthorized`.
 - **`tab.open` e `tab.navigate`**: só `http` e `https`, só no ato da sessão (outro ato dá `denied`). Respondem quando a navegação termina, com teto de 30 s; página que falhou ao carregar ainda é `ok`. O `tab` vale só nesta sessão: fora dela, ou depois de fechada, dá `not_found`.
 - **`page.snapshot`**: lista plana, na ordem do documento, de controles, links, títulos, imagens com nome e texto. Cada nó tem `ref`, `role`, `name`, `value` e `depth`, e, quando vale, `focused`, `disabled`, `checked` e `password`. Os papéis são os nomes do Chromium (`textField`, `button`, `link`, `checkBox`, `comboBoxSelect`, `staticText`, `heading`, `image`). Teto de 2000 nós (`truncated: true`). O `ref` vale até a próxima navegação da aba; depois dá `not_found`.
@@ -166,14 +166,13 @@ O controle vale **para a conexão**: quando o cliente desconecta, o controle aca
 | `failed` | O navegador não conseguiu criar ou abrir o ato, ou está fechando. |
 | `cancelled` | `login`: a pessoa fechou a aba antes do fim. |
 | `needs_login` | `renew`: o site pediu login; use `login`. |
-| `isolation_off` | Este ato está com "Compartilhar cookies" ligado: `session`, `renew` e `control.start` são recusados para ele. Os atos com o interruptor desligado seguem funcionando. |
 
 ## Eventos
 
 | Evento | Campos | Quando |
 |---|---|---|
 | `session.lost` | `ato`, `from`, `name` | Um item de sessão vigiado sumiu ou expirou no cookie store do ato. |
-| `control.stopped` | `reason` (`"user"`) | A pessoa tocou em "Parar" na faixa: o controle desta conexão acabou. |
+| `control.stopped` | `reason` | O controle desta conexão acabou: `"user"` (a pessoa tocou em "Parar") ou `"sharing_changed"` (mudou o grupo de atos que compartilham cookies com este). |
 
 ## Regras de segurança que o cliente sente
 
@@ -183,7 +182,7 @@ O controle vale **para a conexão**: quando o cliente desconecta, o controle aca
 - **Controle só vê as abas que ele abriu**, no ato aprovado. As abas da pessoa não aparecem.
 - **Senha é recusada.** O snapshot traz campo de senha sem valor, e `page.type` nele dá `denied`. Cookies e senhas salvas ficam fora do controle.
 - **Faixa visível** nas abas controladas: "Controlado pelo Agens · Parar".
-- **`isolation_off`.** Cada ato tem o interruptor "Compartilhar cookies". Os atos com ele ligado dividem os cookies entre si, então não estão isolados, e `session`, `renew` e `control.start` respondem erro para eles. `atos.list` traz `shared` em cada ato. Só a pessoa muda isso, pela interface. Mostre o motivo a ela.
+- **Cookies compartilhados.** Cada ato tem o interruptor "Compartilhar cookies"; os atos com ele ligado dividem os cookies entre si, e `atos.list` traz `shared` em cada ato. Um ato que compartilha funciona normalmente com `login`, `session` e `control`: a folha de aprovação avisa com quais atos ele divide os cookies. Se esse grupo mudar durante um controle, o controle acaba com `control.stopped` e `reason` `"sharing_changed"`. Só a pessoa muda o interruptor, pela interface.
 
 ## Testando com agensctl
 

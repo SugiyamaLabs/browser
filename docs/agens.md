@@ -29,7 +29,7 @@ Os dois saem do mesmo repositório e do mesmo build, empacotados de dois jeitos,
 - **Só o que foi pedido, e só com o OK da pessoa.** A sessão entrega exatamente os itens do `Need`, nunca o cookie jar inteiro. O controle por agente pede aprovação por ato e deixa um aviso visível enquanto dura.
 - **Segredo não vai para disco nem para log.** O valor de um cookie ou header só passa pelo socket. Quem guarda é a Engine, no Keychain.
 - **O controle não toca em senha.** Ele não lê nem digita em campo de senha, e cookies e senhas salvas ficam fora do alcance dele.
-- **Isolamento entre times.** Cada ato é um perfil do Chromium (cookies, logins, extensões, histórico e cache próprios). Cada ato tem o interruptor "Compartilhar cookies", que vem desligado. Os atos com ele ligado dividem os cookies entre si; os outros seguem isolados. Um ato que compartilha cookies não está isolado: para ele, `session`, `renew` e `control.start` respondem erro (`isolation_off`) e a interface explica o motivo. Só a pessoa liga ou desliga, pela interface; o socket não muda isso.
+- **Isolamento entre times.** Cada ato é um perfil do Chromium (cookies, logins, extensões, histórico e cache próprios). Cada ato tem o interruptor "Compartilhar cookies", que vem desligado. Os atos com ele ligado dividem os cookies entre si; os outros seguem isolados. Um ato que compartilha continua com pontes e agente: a folha de aprovação diz com quais atos ele divide os cookies, e a pessoa é perguntada de novo quando esse grupo muda. Só a pessoa liga ou desliga, pela interface; o socket não muda isso.
 
 ## O socket
 
@@ -86,7 +86,7 @@ Os tipos de item seguem o `SessionItem` do Agens:
 
 | Operação | O que faz |
 |---|---|
-| `control.start {ato, reason}` | Pede aprovação ("O Agens quer usar abas do ato Cliente A: reason"). Aprovado, as abas controladas ganham borda e faixa "Controlado pelo Agens · Parar". |
+| `control.start {ato, reason}` | Pede aprovação ("O Agens quer usar abas do ato Cliente A: reason"), com **Permitir sempre** para app assinado. Aprovado, as abas controladas ganham borda e faixa "Controlado pelo Agens · Parar". |
 | `tab.open {ato, url}` / `tab.navigate` / `tab.close` | Abas do ato, só as abertas pelo controle. |
 | `page.snapshot {tab}` | A página como árvore de acessibilidade simplificada, com `ref` em cada elemento: papel, nome, valor. Campo de senha aparece sem valor. |
 | `page.click {tab, ref}` / `page.type {tab, ref, text}` / `page.key {tab, key}` | Ação num elemento do snapshot. `type` em campo de senha é recusado. |
@@ -115,7 +115,7 @@ O agente nunca vê as abas que a pessoa abriu, só as que ele abriu, e só no at
 |---|---|---|---|
 | 0 | Este plano e o protocolo aprovados | Willian aprova | — |
 | 1 | Socket, autenticação do cliente, `hello`, atos com `tag`, `agensctl`, `protocolo.md` | `agensctl atos create "Cliente A" --cor blue --tag t1` cria o ato, e ele aparece na lateral | ~1 dia |
-| 2 | `login`, `session`, `renew`, `session.lost`, folhas de aprovação, recusa com cookies compartilhados | Login num Slack de teste por `agensctl login`, depois `session` entrega o cookie `d` só depois do OK. Um header Bearer capturado de um site de teste | 1–2 dias |
+| 2 | `login`, `session`, `renew`, `session.lost`, folhas de aprovação, aviso quando o ato compartilha cookies | Login num Slack de teste por `agensctl login`, depois `session` entrega o cookie `d` só depois do OK. Um header Bearer capturado de um site de teste | 1–2 dias |
 | 3 | Controle: `control.*`, `tab.*`, `page.*`, aviso visível, recusa em senha | `agensctl` abre um site, lê o snapshot, clica e digita; a faixa aparece; digitar em senha é recusado | 2–3 dias |
 | 4 | Prova do embed: um app Swift de exemplo mostra uma aba do motor auxiliar | A aba aparece e responde a clique e teclado dentro do app de exemplo, com o motor em outro processo | ~1 semana, a parte mais incerta |
 | 5 | `BrowserKit` e o empacotamento dentro do `Agens.app` | O Agens importa o kit, abre o motor auxiliar sem ícone no Dock e mostra uma aba do ato do time num painel | ~1 semana |
