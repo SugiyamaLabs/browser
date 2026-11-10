@@ -30,10 +30,10 @@ index 0000000000..dcb05ac877
 +#endif  // CHROME_BROWSER_AGENS_EMBED_EMBED_HOST_H_
 diff --git a/chrome/browser/agens/embed/embed_host_mac.cc b/chrome/browser/agens/embed/embed_host_mac.cc
 new file mode 100644
-index 0000000000..58146a8110
+index 0000000000..d1655bcf66
 --- /dev/null
 +++ b/chrome/browser/agens/embed/embed_host_mac.cc
-@@ -0,0 +1,320 @@
+@@ -0,0 +1,328 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Proof of the embed (docs/poc/embed.md): one client on a Unix socket, one JSON message per
 +// line. The client attaches to a window, gets the CAContext id of its active tab ("layer"
@@ -70,6 +70,9 @@ index 0000000000..58146a8110
 +namespace {
 +
 +const char kSocketSwitch[] = "agens-embed-socket";
++// Takes the engine's own window off the screen once a client shows the page (the product has no
++// engine window at all; this is the closest the proof gets).
++const char kHideWindowSwitch[] = "agens-embed-hide-window";
 +constexpr size_t kMaxLine = 1 << 20;  // a client that sends more without a newline is dropped
 +
 +class EmbedHost : public TabStripModelObserver {
@@ -286,6 +289,9 @@ index 0000000000..58146a8110
 +    if (context == sent_context_ && pixels == sent_pixels_) return;  // this runs every frame
 +    sent_context_ = context;
 +    sent_pixels_ = pixels;
++    if (attached_ && base::CommandLine::ForCurrentProcess()->HasSwitch(kHideWindowSwitch)) {
++      attached_->browser->GetWindow()->Hide();
++    }
 +    Send(base::DictValue()
 +             .Set("event", "layer")
 +             .Set("context", static_cast<double>(context))  // 32 bits unsigned: past an int
@@ -321,8 +327,10 @@ index 0000000000..58146a8110
 +  }
 +
 +  // TabStripModelObserver (the attached window):
-+  void OnTabStripModelChanged(TabStripModel*, const TabStripModelChange&,
-+                              const TabStripSelectionChange&) override {
++  void OnTabStripModelChanged(TabStripModel* model, const TabStripModelChange&,
++                              const TabStripSelectionChange& selection) override {
++    // Not left to the shell's layout: a window that is off screen does not lay out.
++    if (selection.active_tab_changed()) ShowTab(model->GetActiveWebContents());
 +    SendTabs();
 +  }
 +  void OnTabChangedAt(tabs::TabInterface*, TabChangeType) override { SendTabs(); }

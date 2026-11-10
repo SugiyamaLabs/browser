@@ -5,6 +5,9 @@
 //
 //   exemplo <socket>      run against an engine started with --agens-embed-socket=<socket>
 //   exemplo --selftest    checks what can be checked without a window or an engine
+//   exemplo --autotest <socket> <page url> <folder>
+//                         drives its own view with synthetic events against teste.html and
+//                         prints PASS/FAIL per step (autoteste.sh runs it)
 
 import AppKit
 import QuartzCore
@@ -149,9 +152,9 @@ final class TabView: NSView, NSTextInputClient {
   // Mouse. Points go in the page's coordinates: from the top left.
   // shortcut: the right button is not sent. The engine would open its own context menu, in a
   // process with no window to anchor it; the menu has to come here as data first.
-  private func mouse(_ event: NSEvent, op: String = "mouse") {
+  func mouse(_ event: NSEvent, op: String = "mouse", at: NSPoint? = nil) {
     guard let data = encoded(event) else { return }
-    let point = convert(event.locationInWindow, from: nil)
+    let point = at ?? convert(event.locationInWindow, from: nil)
     engine.send(["op": op, "data": data, "x": point.x, "y": bounds.height - point.y])
   }
   override func mouseDown(with event: NSEvent) {
@@ -236,10 +239,15 @@ final class Controller: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
   private let address = NSTextField()
   private let tabs = NSSegmentedControl()
-  private let page: TabView
+  let page: TabView
+  let autotest: (url: String, folder: String)?
+  // What the engine said last (the autotest reads these).
+  var layers: [(context: UInt32, width: Int, height: Int)] = []
+  var tabList: [[String: Any]] = []
 
-  init(engine: Engine) {
+  init(engine: Engine, autotest: (url: String, folder: String)? = nil) {
     self.engine = engine
+    self.autotest = autotest
     page = TabView(engine: engine)
   }
 
@@ -282,9 +290,15 @@ final class Controller: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
 
     window.title = "Exemplo do embed"
     window.center()
-    window.makeKeyAndOrderFront(nil)
     window.makeFirstResponder(page)
-    NSApp.activate(ignoringOtherApps: true)
+    if autotest != nil {
+      // Behind everything and never active: the person at this Mac keeps typing where they were.
+      window.orderBack(nil)
+      Task { @MainActor in await runAutotest() }
+    } else {
+      window.makeKeyAndOrderFront(nil)
+      NSApp.activate(ignoringOtherApps: true)
+    }
   }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
@@ -294,9 +308,13 @@ final class Controller: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     case "layer":
       // The line to look for on the first run: the engine is drawing the tab for us.
       print("layer context=\(event["context"] ?? "?") \(event["width"] ?? "?")x\(event["height"] ?? "?") scale=\(event["scale"] ?? "?")")
-      if let context = (event["context"] as? NSNumber)?.uint32Value { page.show(context: context) }
+      if let context = (event["context"] as? NSNumber)?.uint32Value {
+        page.show(context: context)
+        layers.append((context, event["width"] as? Int ?? 0, event["height"] as? Int ?? 0))
+      }
     case "tabs":
       let list = event["tabs"] as? [[String: Any]] ?? []
+      tabList = list
       print("tabs \(list.map { ($0["active"] as? Bool == true ? "*" : "") + ($0["title"] as? String ?? "") })")
       tabs.segmentCount = list.count
       for (index, tab) in list.enumerated() {
@@ -321,6 +339,153 @@ final class Controller: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
   @objc private func activate() {
     engine.send(["op": "tab.activate", "index": tabs.selectedSegment])
     window.makeFirstResponder(page)
+  }
+}
+
+// MARK: - Autotest
+
+@MainActor extension Controller {
+  /// What teste.html reports in its title: {"c":clicks,"h":hovered,"y":scrollY,"v":input,"k":key,"w":width}.
+  private var state: [String: Any] {
+    guard let title = tabList.first(where: { $0["active"] as? Bool == true })?["title"] as? String,
+      title.hasPrefix("T "),
+      let object = try? JSONSerialization.jsonObject(with: Data(title.dropFirst(2).utf8)) as? [String: Any]
+    else { return [:] }
+    return object
+  }
+
+  private func until(_ seconds: Double = 5, _ condition: () -> Bool) async -> Bool {
+    let end = Date().addingTimeInterval(seconds)
+    while Date() < end {
+      if condition() { return true }
+      try? await Task.sleep(nanoseconds: 50_000_000)
+    }
+    return condition()
+  }
+
+  private func check(_ name: String, _ ok: Bool, _ detail: String = "") {
+    print("\(ok ? "PASS" : "FAIL") \(name) \(detail)")
+  }
+
+  /// Our own window only, by its id: nothing else on screen gets into the picture.
+  private func capture(_ name: String) async {
+    try? await Task.sleep(nanoseconds: 700_000_000)  // let the window server show the new frame
+    let shot = Process()
+    shot.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+    shot.arguments = ["-x", "-o", "-l", String(window.windowNumber), "\(autotest!.folder)/\(name).png"]
+    try? shot.run()
+    shot.waitUntilExit()
+    print("capture \(name).png window=\(window.windowNumber)")
+  }
+
+  /// `at` is in the page's coordinates (from the top left), as in teste.html's CSS.
+  private func mouseEvent(_ type: NSEvent.EventType, at: NSPoint, clicks: Int = 1) -> NSEvent {
+    let inWindow = page.convert(NSPoint(x: at.x, y: page.bounds.height - at.y), to: nil)
+    return NSEvent.mouseEvent(
+      with: type, location: inWindow, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+      windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: clicks, pressure: 1)!
+  }
+  private func click(_ at: NSPoint) {
+    page.mouseMoved(with: mouseEvent(.mouseMoved, at: at, clicks: 0))
+    page.mouseDown(with: mouseEvent(.leftMouseDown, at: at))
+    page.mouseUp(with: mouseEvent(.leftMouseUp, at: at))
+  }
+  private func keyEvent(_ type: NSEvent.EventType, _ characters: String, _ code: UInt16, _ flags: NSEvent.ModifierFlags = []) -> NSEvent {
+    NSEvent.keyEvent(
+      with: type, location: .zero, modifierFlags: flags, timestamp: ProcessInfo.processInfo.systemUptime,
+      windowNumber: window.windowNumber, context: nil, characters: characters,
+      charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code)!
+  }
+  /// Through the view's real handlers, so the text input system here takes part.
+  private func press(_ characters: String, _ code: UInt16, _ flags: NSEvent.ModifierFlags = []) async {
+    page.keyDown(with: keyEvent(.keyDown, characters, code, flags))
+    page.keyUp(with: keyEvent(.keyUp, characters, code, flags))
+    try? await Task.sleep(nanoseconds: 80_000_000)
+  }
+  private func value() -> String { state["v"] as? String ?? "" }
+
+  func runAutotest() async {
+    let url = autotest!.url
+    // 1. The engine draws the tab for us.
+    check("1 layer", await until(10) { !self.layers.isEmpty }, "\(layers.last.map { "\($0)" } ?? "none")")
+
+    // 5a. Navigate by address.
+    engine.send(["op": "navigate", "text": url])
+    check("5a navigate", await until(10) { !self.state.isEmpty }, "\(state)")
+    // 2. Does it show here? Only the picture answers.
+    await capture("1-pagina")
+
+    // 3. Click, hover, wheel.
+    click(NSPoint(x: 80, y: 40))
+    check("3a click", await until { self.state["c"] as? Int == 1 }, "c=\(state["c"] ?? "?")")
+    page.mouseMoved(with: mouseEvent(.mouseMoved, at: NSPoint(x: 260, y: 40), clicks: 0))
+    check("3b hover", await until { self.state["h"] as? Int == 1 }, "h=\(state["h"] ?? "?")")
+    await capture("2-hover")
+    check("3b hover stays", state["o"] == nil, "mouseout=\(state["o"] ?? 0)")
+    if let scroll = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: -120, wheel2: 0, wheel3: 0),
+      let event = NSEvent(cgEvent: scroll)
+    {
+      page.mouse(event, op: "wheel", at: NSPoint(x: 400, y: 300))
+    }
+    check("3c wheel", await until { (self.state["y"] as? Int ?? 0) > 0 }, "y=\(state["y"] ?? "?")")
+    if let scroll = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: 2000, wheel2: 0, wheel3: 0),
+      let event = NSEvent(cgEvent: scroll)
+    {
+      page.mouse(event, op: "wheel", at: NSPoint(x: 400, y: 300))
+    }
+    _ = await until { self.state["y"] as? Int == 0 }
+
+    // 4. Typing: click the field, then keys through the view's keyDown.
+    window.makeFirstResponder(nil)
+    window.makeFirstResponder(page)
+    click(NSPoint(x: 100, y: 115))
+    await press("a", 0)
+    await press("b", 11)
+    await press("c", 8)
+    check("4a letters", await until { self.value() == "abc" }, "v=\(value())")
+    await press("\u{F702}", 123, [.numericPad, .function])  // left arrow
+    await press("x", 7)
+    check("4b arrow", await until { self.value() == "abxc" }, "v=\(value())")
+    await press("\u{7F}", 51)  // delete (Backspace)
+    check("4c backspace", await until { self.value() == "abc" }, "v=\(value())")
+    // A dead key and its letter, as the text input system reports them (´ then a = á). Sent as
+    // the messages TabView would send: a synthetic NSEvent cannot make the system compose.
+    if let dead = encoded(keyEvent(.keyDown, "", 39)), let letter = encoded(keyEvent(.keyDown, "a", 0)) {
+      engine.send(["op": "key", "data": dead, "text": "", "commands": [String](), "marked": "´", "sel_start": 1, "sel_end": 1, "had_marked": false, "unmarked": false])
+      _ = await until(1) { self.value() == "ab´c" }
+      let during = value()
+      engine.send(["op": "key", "data": letter, "text": "á", "commands": [String](), "marked": "", "sel_start": 0, "sel_end": 0, "had_marked": true, "unmarked": false])
+      check("4d accent", await until { self.value() == "abác" }, "composing=\(during) v=\(value())")
+    }
+    await press("\r", 36)
+    check("4e enter", await until { self.state["k"] as? String == "Enter" }, "k=\(state["k"] ?? "?")")
+    await capture("3-digitado")
+
+    // 6. Resize.
+    let before = layers.count
+    window.setContentSize(NSSize(width: 800, height: 566))
+    check("6 resize", await until { self.state["w"] as? Int == 800 }, "w=\(state["w"] ?? "?") layer=\(layers.last.map { "\($0)" } ?? "") new layers=\(layers.count - before)")
+    await capture("4-menor")
+
+    // 5b. A second tab, then back to the first.
+    engine.send(["op": "tab.new"])
+    check("5b new tab", await until { self.tabList.count == 2 && self.tabList[1]["active"] as? Bool == true }, "tabs=\(tabList.count)")
+    engine.send(["op": "navigate", "text": url + "?segunda"])
+    _ = await until(10) { !self.state.isEmpty }
+    click(NSPoint(x: 80, y: 40))
+    click(NSPoint(x: 80, y: 40))
+    check("5c second tab takes input", await until { self.state["c"] as? Int == 2 }, "c=\(state["c"] ?? "?")")
+    await capture("5-segunda-aba")
+    let contexts = Set(layers.map { $0.context }).count
+    engine.send(["op": "tab.activate", "index": 0])
+    check("5d switch back", await until { self.tabList.first?["active"] as? Bool == true && self.value() == "abác" }, "v=\(value()) contexts seen=\(contexts)")
+    await capture("6-primeira-aba")
+
+    // For the memory numbers: autoteste.sh measures while this line is the last one printed.
+    print("MEASURE")
+    try? await Task.sleep(nanoseconds: 4_000_000_000)
+    print("DONE")
+    NSApp.terminate(nil)
   }
 }
 
@@ -365,14 +530,18 @@ func selftest() {
 let arguments = CommandLine.arguments
 if arguments.count == 2, arguments[1] == "--selftest" {
   selftest()
-} else if arguments.count == 2, let engine = Engine(path: arguments[1]) {
+} else if arguments.count == 2 || (arguments.count == 5 && arguments[1] == "--autotest"),
+  let engine = Engine(path: arguments[arguments.count == 2 ? 1 : 2])
+{
+  setvbuf(stdout, nil, _IOLBF, 0)  // lines reach a log file as they happen
   let app = NSApplication.shared
-  let controller = Controller(engine: engine)
+  let controller = Controller(engine: engine, autotest: arguments.count == 5 ? (arguments[3], arguments[4]) : nil)
   app.delegate = controller
-  app.setActivationPolicy(.regular)
+  // The autotest never becomes the active app (no Dock icon either).
+  app.setActivationPolicy(controller.autotest == nil ? .regular : .accessory)
   app.mainMenu = makeMenu()
   app.run()
 } else {
-  FileHandle.standardError.write(Data("usage: exemplo <socket> | --selftest (is the engine running with --agens-embed-socket?)\n".utf8))
+  FileHandle.standardError.write(Data("usage: exemplo <socket> | --autotest <socket> <page url> <folder> | --selftest (is the engine running with --agens-embed-socket?)\n".utf8))
   exit(1)
 }

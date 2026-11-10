@@ -4,5 +4,6 @@ set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p build
 swiftc -O -swift-version 5 main.swift -o build/exemplo
+swiftc -O janelas.swift -o build/janelas
 build/exemplo --selftest
 echo "ok: $PWD/build/exemplo"

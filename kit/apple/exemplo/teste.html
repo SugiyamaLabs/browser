@@ -1,0 +1,32 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>T</title>
+<!-- The page autoteste.sh drives: it reports what happened to it in its title, which comes back
+     to the sample app in the "tabs" event. Positions are fixed so the test knows where to click. -->
+<style>
+  body { margin: 0; height: 3000px; font: 16px system-ui; }
+  #b { position: absolute; left: 20px; top: 20px; width: 120px; height: 40px; }
+  #h { position: absolute; left: 200px; top: 20px; width: 120px; height: 40px; background: #ccc; }
+  #h:hover { background: #f80; }
+  #i { position: absolute; left: 20px; top: 100px; width: 300px; height: 30px; font-size: 18px; }
+  #band { position: absolute; left: 0; right: 0; top: 200px; height: 80px;
+          background: linear-gradient(90deg, red, lime, blue); }
+  #corner { position: fixed; right: 0; bottom: 0; width: 40px; height: 40px; background: magenta; }
+</style>
+<button id="b">Clique</button>
+<div id="h">hover</div>
+<input id="i">
+<div id="band"></div>
+<div id="corner"></div>
+<script>
+  const s = { c: 0, h: 0, y: 0, v: '', k: '', w: innerWidth };
+  const show = () => { document.title = 'T ' + JSON.stringify(s); };
+  b.onclick = () => { s.c++; b.textContent = 'Clique ' + s.c; show(); };
+  h.onmouseover = () => { s.h = 1; show(); };
+  h.onmouseout = () => { s.o = (s.o || 0) + 1; show(); };  // something took the pointer away
+  onscroll = () => { s.y = Math.round(scrollY); show(); };
+  i.oninput = () => { s.v = i.value; show(); };
+  i.onkeydown = (e) => { s.k = e.key; show(); };
+  onresize = () => { s.w = innerWidth; show(); };
+  show();
+</script>
