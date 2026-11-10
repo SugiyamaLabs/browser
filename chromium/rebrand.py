@@ -7,7 +7,7 @@ Strings: replaces "Chromium" in the message text of the .grd/.grdp files below a
 translations (.xtb). Translations are keyed by a hash of the English text, so changing the text
 changes the id: we compute old and new ids with grit itself and rename them in every .xtb, or every
 non-English locale would fall back to English.
-Icon: copies design/logo/exportados/agens-navegador-escuro.{icns,car} over the Chromium ones
+Icons: copies design/logo/exportados/agens-navegador-escuro.{icns,car} and the mark PNGs over the Chromium ones
 (binary files can't go in a .patch).
 """
 import re, shutil, sys
@@ -26,8 +26,10 @@ GRDS = ["chrome/app/chromium_strings.grd", "chrome/app/generated_resources.grd",
 # English first; the copyright holder is the company, not "The Agens Authors".
 # ", ungoogled-chromium" comes from an ungoogled patch to chrome://version; dropping it restores the upstream
 # text, whose translations are still in the .xtb.
-GRD_SUBS = [(", ungoogled-chromium", ""), ("The Chromium Authors", "SugiyamaLabs"), ("Chromium", "Agens")]
-XTB_SUBS = [(re.compile(r"Autores do Chromium"), "SugiyamaLabs"), (re.compile(r"Chromium"), "Agens")]
+# The About credit line keeps naming the Chromium project (the link to it), as its license asks.
+CHROMIUM = re.compile(r'Chromium(?!<ph name="END_LINK_CHROMIUM")')
+GRD_SUBS = [(re.compile(", ungoogled-chromium"), ""), (re.compile("The Chromium Authors"), "SugiyamaLabs"), (CHROMIUM, "Agens")]
+XTB_SUBS = [(re.compile("Autores do Chromium"), "SugiyamaLabs"), (CHROMIUM, "Agens")]
 
 
 def message_ids(grd: Path) -> list[str]:
@@ -52,7 +54,7 @@ def rebrand_grd(grd: Path):
     for f in parts(grd):
         text = f.read_text()
         for old, new in GRD_SUBS:
-            text = text.replace(old, new)
+            text = old.sub(new, text)
         write_if_changed(f, text)
     after = message_ids(grd)
     assert len(before) == len(after), grd  # same messages, same order: only the text changed
@@ -73,7 +75,14 @@ def main():
     mac = SRC / "chrome/app/theme/chromium/mac"
     shutil.copyfile(icons / "agens-navegador-escuro.icns", mac / "app.icns")
     shutil.copyfile(icons / "agens-navegador-escuro.car", mac / "Assets.car")
-    print("ok: app icon")
+    # product logo inside the UI (About, settings, omnibox chip): the bare mark, no plate
+    theme = SRC / "chrome/app/theme"
+    for size in (16, 24, 48, 64, 128, 256):
+        shutil.copyfile(icons / f"windows-escuro-{size}.png", theme / f"chromium/product_logo_{size}.png")
+    for scale, mult in (("100", 1), ("200", 2)):
+        for size in (16, 32):
+            shutil.copyfile(icons / f"windows-escuro-{size * mult}.png", theme / f"default_{scale}_percent/chromium/product_logo_{size}.png")
+    print("ok: app icon and product logos")
 
 
 if __name__ == "__main__":
