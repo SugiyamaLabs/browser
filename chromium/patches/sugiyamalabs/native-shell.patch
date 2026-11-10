@@ -2080,10 +2080,10 @@ index 0000000000..8b6190d29a
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..ec98eabee4
+index 0000000000..11615a0a28
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,4573 @@
+@@ -0,0 +1,4618 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -2376,6 +2376,18 @@ index 0000000000..ec98eabee4
 +  } else {
 +    [self.window performWindowDragWithEvent:event];
 +  }
++}
++@end
++
++// The top tab strip: clips the tabs and scrolls sideways (wheel or trackpad) when they don't fit.
++@interface AgensStripView : AgensDragView
++@property(nonatomic, copy) void (^onScroll)(CGFloat delta);
++@end
++@implementation AgensStripView
++@synthesize onScroll = _onScroll;
++- (void)scrollWheel:(NSEvent*)event {
++  const CGFloat d = fabs(event.scrollingDeltaX) > fabs(event.scrollingDeltaY) ? event.scrollingDeltaX : event.scrollingDeltaY;
++  if (_onScroll) _onScroll(-d * (event.hasPreciseScrollingDeltas ? 1 : 10));
 +}
 +@end
 +
@@ -5059,6 +5071,9 @@ index 0000000000..ec98eabee4
 +  AgensToolButton* _sound;  // in the address, left of the star, while the page plays or is muted
 +  AgensToolButton* _capture;  // in the address: camera/microphone in use (opens the site panel)
 +  AgensToolButton* _newTabTop;  // "+" at the end of the top strip
++  AgensStripView* _strip;       // holds the tabs on top; scrolls when they don't fit
++  CGFloat _stripOffset;
++  BOOL _stripFollowActive;      // bring the active tab into view on the next layout
 +  BOOL _top;                    // tabs on top instead of the column
 +  int _pinnedCount;             // Chromium keeps pinned tabs first: rows [0, _pinnedCount)
 +  int _activeIndex;
@@ -5213,6 +5228,15 @@ index 0000000000..ec98eabee4
 +    _newTab.onPress = ^{ [weak run:agens_window_new_tab]; };
 +    _newTabTop = [[AgensToolButton alloc] initWithSymbol:@"plus" label:@"Nova aba (⌘T)"];
 +    _newTabTop.onPress = ^{ [weak run:agens_window_new_tab]; };
++    _strip = [[AgensStripView alloc] init];
++    _strip.wantsLayer = YES;
++    _strip.layer.masksToBounds = YES;
++    _strip.onScroll = ^(CGFloat delta) {
++      AgensChrome* strong = weak;
++      if (!strong) return;
++      strong->_stripOffset += delta;
++      [strong relayout];
++    };
 +    _top = [NSUserDefaults.standardUserDefaults boolForKey:kTabsOnTopKey];
 +
 +    _tabsScroll = [[NSScrollView alloc] init];
@@ -5314,7 +5338,7 @@ index 0000000000..ec98eabee4
 +    _ntp.field.delegate = self;
 +
 +    for (NSView* v in @[ _toggle, _back, _forward, _reload, _omni, _extButton, _downloadsButton, _menu, _tabsScroll, _moreAtos, _atoTile, _atoName, _separator, _newTab, _newTabTop,
-+                         _atosLine, _addAto, _atoDot, _bar, _history, _bookmarksPage, _ntp, _error, _find, _loadbar, _statusPill, _suggest ]) {
++                         _atosLine, _addAto, _atoDot, _strip, _bar, _history, _bookmarksPage, _ntp, _error, _find, _loadbar, _statusPill, _suggest ]) {
 +      [self addSubview:v];
 +    }
 +    [self refreshTheme];
@@ -5469,8 +5493,9 @@ index 0000000000..ec98eabee4
 +  const BOOL narrow = side < (kRail + kSide) / 2;
 +  for (NSView* v in @[ _toggle, _atoTile, _atoName, _separator, _newTab, _tabsScroll, _atosLine ]) v.hidden = top;
 +  _newTabTop.hidden = !top;
++  _strip.hidden = !top;
 +  for (AgensTabRow* row in _rows) {
-+    NSView* parent = top || row.pinned ? self : _tabsDoc;
++    NSView* parent = top ? _strip : row.pinned ? self : _tabsDoc;
 +    if (row.superview != parent) {
 +      if (parent == self) {
 +        [self addSubview:row positioned:NSWindowBelow relativeTo:_ntp];
@@ -5545,15 +5570,33 @@ index 0000000000..ec98eabee4
 +    // The strip: pinned tabs as 44 pt icons, the rest share what's left (prototype .ttab: up to
 +    // 220 pt, at least 44). The "+" stays at the right end.
 +    _newTabTop.frame = NSMakeRect(width - kPad - 28, (strip - 28) / 2, 28, 28);
-+    const CGFloat x0 = kLightsEnd, end = NSMinX(_newTabTop.frame) - 6;
++    const CGFloat x0 = kLightsEnd, end = NSMinX(_newTabTop.frame) - 6, stripW = MAX(0, end - x0);
++    _strip.frame = NSMakeRect(x0, 0, stripW, strip);  // tabs are laid out inside it
 +    const CGFloat pinsW = pins.count * 48;
-+    const CGFloat w = list.count ? MAX(44, MIN(220, (end - x0 - pinsW + 4) / list.count - 4)) : 0;
++    const CGFloat w = list.count ? MAX(44, MIN(220, (stripW - pinsW + 4) / list.count - 4)) : 0;
++    // Too many to fit at 44 pt: the strip scrolls; the active tab is brought into view.
++    const CGFloat total = pinsW + list.count * (w + 4) - 4;
++    if (_stripFollowActive) {
++      _stripFollowActive = NO;
++      CGFloat ax = 0, aw = 0, cx = 0;
++      for (AgensTabRow* row in pins) {
++        if (row.selected) ax = cx, aw = 44;
++        cx += 48;
++      }
++      for (AgensTabRow* row in list) {
++        if (row.selected) ax = cx, aw = w;
++        cx += w + 4;
++      }
++      if (ax < _stripOffset) _stripOffset = ax;
++      if (ax + aw > _stripOffset + stripW) _stripOffset = ax + aw - stripW;
++    }
++    _stripOffset = MAX(0, MIN(_stripOffset, MAX(0, total - stripW)));
 +    _tabStep = w + 4;
-+    _listX = x0 + pinsW;
-+    CGFloat x = x0;
++    _listX = pinsW - _stripOffset;
++    CGFloat x = -_stripOffset;
 +    for (AgensTabRow* row in pins) {
 +      row.frame = NSMakeRect(x, (strip - rowH) / 2, 44, rowH);
-+      row.hidden = x + 44 > end;
++      row.hidden = NO;
 +      x += 48;
 +    }
 +    int slot = 0;
@@ -5561,8 +5604,7 @@ index 0000000000..ec98eabee4
 +      if (row == _dragged) continue;  // it follows the pointer (dragRow:by:)
 +      if (_dragged && slot == _dropIndex - _pinnedCount) x += w + 4;  // where it will land
 +      row.frame = NSMakeRect(x, (strip - rowH) / 2, w, rowH);
-+      // shortcut: tabs past the end are hidden, not scrolled; add strip scrolling if people keep 30+ tabs on top.
-+      row.hidden = x + w > end;
++      row.hidden = NO;
 +      x += w + 4;
 +      ++slot;
 +    }
@@ -5709,7 +5751,10 @@ index 0000000000..ec98eabee4
 +    if (tabs[i].pinned) ++_pinnedCount;
 +    if (tabs[i].active) activeTab = i;
 +    if (!tabs[i].active) continue;
-+    if (_activeIndex != i) [_find close];  // a find belongs to the page it ran on
++    if (_activeIndex != i) {
++      [_find close];  // a find belongs to the page it ran on
++      _stripFollowActive = YES;
++    }
 +    _activeIndex = i;
 +    _sound.hidden = !(tabs[i].audible || tabs[i].muted);
 +    [_sound setSymbol:tabs[i].muted ? @"speaker.slash.fill" : @"speaker.wave.2.fill"];
