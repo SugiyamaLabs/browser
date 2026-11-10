@@ -1891,10 +1891,10 @@ index 0000000000..ebd1215130
 +#endif  // CHROME_BROWSER_AGENS_EMBED_NATIVE_SHELL_H_
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
 new file mode 100644
-index 0000000000..59b5e3fbbd
+index 0000000000..8d10fddb69
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
-@@ -0,0 +1,534 @@
+@@ -0,0 +1,593 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The macOS host: the views::View that fills the Webium window, puts the UI's chrome (an NSView)
 +// over it and the active tab in the page card. Everything else is shared (agens_window.h,
@@ -1907,6 +1907,8 @@ index 0000000000..59b5e3fbbd
 +#include "chrome/browser/agens/embed/agens_window.h"
 +#include "components/split_tabs/split_tab_visual_data.h"
 +#include "components/tabs/public/split_tab_data.h"
++#include "ui/base/cursor/cursor.h"
++#include "ui/base/cursor/mojom/cursor_type.mojom-shared.h"
 +#include "base/strings/sys_string_conversions.h"
 +#include "chrome/browser/extensions/extension_install_prompt_show_params.h"
 +#include "extensions/browser/install_prompt_data.h"
@@ -1943,6 +1945,34 @@ index 0000000000..59b5e3fbbd
 +  base::RepeatingCallback<void(content::WebContents*)> on_focus_;
 +};
 +
++// The gap between a split's two cards: drag it to change how much each tab gets.
++class SplitHandle : public views::View {
++  METADATA_HEADER(SplitHandle, views::View)
++
++ public:
++  explicit SplitHandle(base::RepeatingCallback<void(const gfx::Point&, bool done)> on_drag)
++      : on_drag_(std::move(on_drag)) {}
++  void SetStacked(bool stacked) { stacked_ = stacked; }
++  ui::Cursor GetCursor(const ui::MouseEvent&) override {
++    return ui::Cursor(stacked_ ? ui::mojom::CursorType::kRowResize : ui::mojom::CursorType::kColumnResize);
++  }
++  bool OnMousePressed(const ui::MouseEvent&) override { return true; }
++  bool OnMouseDragged(const ui::MouseEvent& event) override {
++    on_drag_.Run(InParent(event), false);
++    return true;
++  }
++  void OnMouseReleased(const ui::MouseEvent& event) override { on_drag_.Run(InParent(event), true); }
++
++ private:
++  gfx::Point InParent(const ui::MouseEvent& event) {
++    gfx::Point p = event.location();
++    views::View::ConvertPointToTarget(this, parent(), &p);
++    return p;
++  }
++  base::RepeatingCallback<void(const gfx::Point&, bool)> on_drag_;
++  bool stacked_ = false;
++};
++
 +class NativeShellView : public views::View,
 +                        public TabStripModelObserver,
 +                        public content::WebContentsObserver {
@@ -1972,6 +2002,9 @@ index 0000000000..59b5e3fbbd
 +          if (index != TabStripModel::kNoTab && index != model->active_index()) model->ActivateTabAt(index);
 +        },
 +        base::Unretained(browser));
++    handle_ = AddChildView(std::make_unique<SplitHandle>(
++        base::BindRepeating(&NativeShellView::DragSplit, base::Unretained(this))));
++    handle_->SetVisible(false);
 +    pane1_ = std::make_unique<PaneWatcher>(activate);
 +    pane2_ = std::make_unique<PaneWatcher>(activate);
 +    // Webium sizes new tabs from this element (GetContentsBoundsInScreen).
@@ -2048,6 +2081,7 @@ index 0000000000..59b5e3fbbd
 +    }
 +    contents2_->SetVisible(second);
 +    card2_->SetVisible(second);
++    handle_->SetVisible(second);
 +    pane1_->Watch(first);
 +    pane2_->Watch(second);
 +    if (page_fullscreen) {
@@ -2079,17 +2113,22 @@ index 0000000000..59b5e3fbbd
 +    extensions_anchor_->SetBounds(ext.x, ext.y, ext.width, ext.height);
 +    gfx::Rect card(page.x, page.y, page.width, page.height);
 +    gfx::Rect card2;
++    split_page_ = card;
 +    if (split) {  // two cards with the window's gap between them, split by the ratio
 +      constexpr int kGap = 8;
 +      const double ratio = split->visual_data()->split_ratio();
-+      if (split->visual_data()->split_layout() == split_tabs::SplitTabLayout::kStacked) {
++      const bool stacked = split->visual_data()->split_layout() == split_tabs::SplitTabLayout::kStacked;
++      handle_->SetStacked(stacked);
++      if (stacked) {
 +        const int h1 = static_cast<int>((page.height - kGap) * ratio);
 +        card2 = gfx::Rect(page.x, page.y + h1 + kGap, page.width, page.height - h1 - kGap);
 +        card.set_height(h1);
++        handle_->SetBounds(page.x, page.y + h1, page.width, kGap);
 +      } else {
 +        const int w1 = static_cast<int>((page.width - kGap) * ratio);
 +        card2 = gfx::Rect(page.x + w1 + kGap, page.y, page.width - w1 - kGap, page.height);
 +        card.set_width(w1);
++        handle_->SetBounds(page.x + w1, page.y, kGap, page.height);
 +      }
 +    }
 +    card_->SetBoundsRect(card);
@@ -2102,6 +2141,21 @@ index 0000000000..59b5e3fbbd
 +      contents2_->SetBoundsRect(card2);
 +      contents2_->holder()->SetNativeViewCornerRadii(gfx::RoundedCornersF(radius_ - 1));
 +    }
++  }
++
++  // The handle moved to `p` (in this view): the first tab gets what's before it, 20%–80%.
++  void DragSplit(const gfx::Point& p, bool done) {
++    TabStripModel* model = window_->model();
++    const int active = model->active_index();
++    std::optional<split_tabs::SplitTabId> id =
++        model->ContainsIndex(active) ? model->GetSplitForTab(active) : std::nullopt;
++    split_tabs::SplitTabData* split = id ? model->GetSplitData(*id) : nullptr;
++    if (!split || split_page_.IsEmpty()) return;
++    const bool stacked = split->visual_data()->split_layout() == split_tabs::SplitTabLayout::kStacked;
++    // The handle's middle follows the pointer: the first card ends half the 8 pt gap before it.
++    const double ratio = stacked ? double(p.y() - split_page_.y() - 4) / (split_page_.height() - 8)
++                                 : double(p.x() - split_page_.x() - 4) / (split_page_.width() - 8);
++    model->UpdateSplitRatio(*id, std::clamp(ratio, 0.2, 0.8), /*is_intermediate=*/!done);
 +  }
 +
 +  void OnSplitTabChanged(const SplitTabChange&) override {
@@ -2140,8 +2194,13 @@ index 0000000000..59b5e3fbbd
 +  raw_ptr<views::View> card2_;
 +  raw_ptr<views::WebView> contents2_;
 +  std::unique_ptr<PaneWatcher> pane1_, pane2_;
++  raw_ptr<SplitHandle> handle_;
++  gfx::Rect split_page_;  // the whole page area the split shares
 +  NSView* __strong chrome_;
 +};
++
++BEGIN_METADATA(SplitHandle)
++END_METADATA
 +
 +BEGIN_METADATA(NativeShellView)
 +END_METADATA
@@ -2431,10 +2490,10 @@ index 0000000000..59b5e3fbbd
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..5c17b7fe93
+index 0000000000..b06fd503b0
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,4710 @@
+@@ -0,0 +1,4746 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -5511,6 +5570,9 @@ index 0000000000..5c17b7fe93
 +  AgensErrorView* _error;
 +  BOOL _stopPage;  // the active tab shows a security stop page
 +  int _split;            // the active tab's split (0 none, 1 side by side, 2 stacked)
++  int _partner;          // the other tab of that split, or -1
++  AgensNewTabView* _ntp2;  // our new tab page over the other pane, when that tab is a new tab
++  NSButton* _ntp2Click;    // a click there makes that tab the active one
 +  BOOL _splitFirst;
 +  double _splitRatio;
 +  BOOL _passwordAsked;  // our "save password?" panel is open and not answered yet
@@ -5747,6 +5809,13 @@ index 0000000000..5c17b7fe93
 +    _bar.accessibilityRole = NSAccessibilityToolbarRole;
 +    _bar.accessibilityLabel = @"Barra de favoritos";
 +    _barShown = [NSUserDefaults.standardUserDefaults boolForKey:kBookmarkBarKey];
++    _ntp2 = [[AgensNewTabView alloc] init];
++    _ntp2.hidden = YES;
++    _ntp2.field.editable = NO;
++    _ntp2Click = [NSButton buttonWithTitle:@"" target:self action:@selector(activatePartner:)];
++    _ntp2Click.transparent = YES;
++    _ntp2Click.hidden = YES;
++    _ntp2Click.accessibilityLabel = @"Nova aba";
 +    _ntp = [[AgensNewTabView alloc] init];
 +    _ntp.hidden = YES;
 +    _ntp.field.target = self;
@@ -5754,7 +5823,7 @@ index 0000000000..5c17b7fe93
 +    _ntp.field.delegate = self;
 +
 +    for (NSView* v in @[ _toggle, _back, _forward, _reload, _omni, _extButton, _downloadsButton, _menu, _tabsScroll, _moreAtos, _atoTile, _atoName, _separator, _newTab, _newTabTop,
-+                         _atosLine, _addAto, _atoDot, _strip, _bar, _history, _bookmarksPage, _ntp, _error, _find, _loadbar, _statusPill, _suggest ]) {
++                         _atosLine, _addAto, _atoDot, _strip, _bar, _history, _bookmarksPage, _ntp2, _ntp2Click, _ntp, _error, _find, _loadbar, _statusPill, _suggest ]) {
 +      [self addSubview:v];
 +    }
 +    [self refreshTheme];
@@ -6119,6 +6188,18 @@ index 0000000000..5c17b7fe93
 +    }
 +  }
 +  _ntp.frame = NSInsetRect(pane, 1, 1);
++  if (_split) {  // the other pane: what's left of the page besides ours and the 8 pt gap
++    NSRect other = _page;
++    if (_split == 2) {
++      other = _splitFirst ? NSMakeRect(NSMinX(_page), NSMaxY(pane) + 8, NSWidth(_page), NSMaxY(_page) - NSMaxY(pane) - 8)
++                          : NSMakeRect(NSMinX(_page), NSMinY(_page), NSWidth(_page), NSMinY(pane) - 8 - NSMinY(_page));
++    } else {
++      other = _splitFirst ? NSMakeRect(NSMaxX(pane) + 8, NSMinY(_page), NSMaxX(_page) - NSMaxX(pane) - 8, NSHeight(_page))
++                          : NSMakeRect(NSMinX(_page), NSMinY(_page), NSMinX(pane) - 8 - NSMinX(_page), NSHeight(_page));
++    }
++    _ntp2.frame = NSInsetRect(other, 1, 1);
++    _ntp2Click.frame = _ntp2.frame;
++  }
 +  _history.frame = _ntp.frame;
 +  _bookmarksPage.frame = _ntp.frame;
 +  _error.frame = _ntp.frame;
@@ -6184,6 +6265,16 @@ index 0000000000..5c17b7fe93
 +  }
 +  int activeTab = -1;
 +  _pinnedCount = 0;
++  _partner = -1;
++  BOOL partnerIsNewTab = NO;
++  for (int i = 0; i < count; ++i) {  // a split's tabs sit next to each other
++    if (!tabs[i].active || !tabs[i].split) continue;
++    const int j = tabs[i].split_first ? i + 1 : i - 1;
++    if (j >= 0 && j < count && tabs[j].split) {
++      _partner = j;
++      partnerIsNewTab = !tabs[j].url[0];
++    }
++  }
 +  for (int i = 0; i < count; ++i) {
 +    _rows[i].index = i;
 +    [_rows[i] updateWith:tabs[i]];
@@ -6239,6 +6330,7 @@ index 0000000000..5c17b7fe93
 +  _history.hidden = ![_url hasPrefix:@"chrome://history"];
 +  if (!_history.hidden && !wasHistory) [_history reload];
 +  _bookmarksPage.hidden = ![_url hasPrefix:@"chrome://bookmarks"];
++  _ntp2.hidden = _ntp2Click.hidden = !partnerIsNewTab;
 +  BOOL wasNTP = !_ntp.hidden;
 +  _ntp.hidden = _url.length > 0;
 +  if (!_ntp.hidden && !wasNTP) _ntp.field.stringValue = @"";
@@ -6650,6 +6742,9 @@ index 0000000000..5c17b7fe93
 +  [_sideTimer invalidate];
 +  _sideW = _collapsed ? kRail : kSide;
 +  _top = top;
++}
++- (void)activatePartner:(id)sender {
++  if (_partner >= 0) [self activate:_partner];
 +}
 +- (void)activate:(int)index {
 +  if (_window) agens_window_activate_tab(_window, index);
@@ -7215,6 +7310,31 @@ index d2224772cc..cd3d1c68d9 100644
    if (!SupportsCommand(id) || !IsCommandEnabled(id)) {
      return false;
    }
+diff --git a/chrome/browser/ui/browser_commands.cc b/chrome/browser/ui/browser_commands.cc
+index f4d3a23454..d11e4aadac 100644
+--- a/chrome/browser/ui/browser_commands.cc
++++ b/chrome/browser/ui/browser_commands.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "chrome/browser/ui/browser_commands.h"
+ 
++#include "chrome/browser/agens/embed/native_shell.h"
++
+ #include <algorithm>
+ #include <memory>
+ #include <numeric>
+@@ -1811,8 +1813,10 @@ void NewSplitTab(BrowserWindowInterface* browser,
+   const int active_index = tab_strip_model->active_index();
+   // In Incognito or Enterprise Isolated modes, we can't show the regular Split
+   // View NTP so default to the regular NTP which renders special content.
++  // agens: our new tab page in the new pane, not Chromium's tab picker.
+   const GURL new_tab_url =
+-      !browser->GetProfile()->IsPrimaryOTRProfileWithRegularParent() &&
++      !agens::IsNativeShellEnabled() &&
++              !browser->GetProfile()->IsPrimaryOTRProfileWithRegularParent() &&
+               tab_strip_model->count() > 1
+           ? GURL(chrome::kChromeUISplitViewNewTabPageURL)
+           : chrome::ChromeUINewTabURLAsGURL();
 diff --git a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc b/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
 index 3bc40bcc91..9e4154d594 100644
 --- a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
