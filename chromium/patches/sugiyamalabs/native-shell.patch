@@ -1,9 +1,135 @@
+diff --git a/chrome/browser/agens/embed/agens_credits.cc b/chrome/browser/agens/embed/agens_credits.cc
+new file mode 100644
+index 0000000000..111a386ad0
+--- /dev/null
++++ b/chrome/browser/agens/embed/agens_credits.cc
+@@ -0,0 +1,81 @@
++#include "chrome/browser/agens/embed/agens_credits.h"
++
++#include <string>
++#include <string_view>
++#include <utility>
++#include <vector>
++
++#include "components/webui/about/credit_utils.h"
++
++namespace {
++
++// licenses.py escapes every field with Python's html.escape.
++std::string Unescape(std::string_view s) {
++  static constexpr std::pair<std::string_view, char> kEntities[] = {
++      {"&lt;", '<'}, {"&gt;", '>'}, {"&quot;", '"'}, {"&#x27;", '\''}, {"&amp;", '&'}};
++  std::string out;
++  out.reserve(s.size());
++  for (size_t i = 0; i < s.size();) {
++    bool matched = false;
++    if (s[i] == '&') {
++      for (const auto& [entity, ch] : kEntities) {
++        if (s.compare(i, entity.size(), entity) == 0) {
++          out += ch;
++          i += entity.size();
++          matched = true;
++          break;
++        }
++      }
++    }
++    if (!matched) out += s[i++];
++  }
++  return out;
++}
++
++// The text between `open` and `close`, searching from `*pos` and not past `end`.
++bool Between(std::string_view html, size_t* pos, size_t end, std::string_view open,
++             std::string_view close, std::string_view* out) {
++  size_t a = html.find(open, *pos);
++  if (a == std::string_view::npos || a >= end) return false;
++  a += open.size();
++  size_t b = html.find(close, a);
++  if (b == std::string_view::npos || b > end) return false;
++  *out = html.substr(a, b - a);
++  *pos = b + close.size();
++  return true;
++}
++
++}  // namespace
++
++extern "C" void agens_credits_parse(const char* html_data, size_t length,
++                                    AgensCreditsCallback callback, void* context) {
++  const std::string_view html(html_data, length);
++  struct Entry {
++    std::string name, homepage, license;
++  };
++  std::vector<Entry> entries;
++  constexpr std::string_view kProduct = "<div class=\"product\">";
++  for (size_t p = html.find(kProduct); p != std::string_view::npos;) {
++    size_t next = html.find(kProduct, p + kProduct.size());
++    const size_t end = next == std::string_view::npos ? html.size() : next;
++    size_t pos = p;
++    std::string_view name, homepage, license;
++    if (Between(html, &pos, end, "<span class=\"title\">", "</span>", &name)) {
++      Between(html, &pos, end, "<a href=\"", "\"", &homepage);
++      Between(html, &pos, end, "<pre>", "</pre>", &license);
++      entries.push_back({Unescape(name), Unescape(homepage), Unescape(license)});
++    }
++    p = next;
++  }
++  std::vector<AgensCreditEntry> c_entries;
++  c_entries.reserve(entries.size());
++  for (const Entry& e : entries) {
++    c_entries.push_back({e.name.c_str(), e.homepage.c_str(), e.license.c_str()});
++  }
++  callback(context, c_entries.data(), static_cast<int>(c_entries.size()));
++}
++
++extern "C" void agens_credits_list(AgensCreditsCallback callback, void* context) {
++  const std::string html = about_ui::GetCredits(/*include_scripts=*/false);
++  agens_credits_parse(html.data(), html.size(), callback, context);
++}
+diff --git a/chrome/browser/agens/embed/agens_credits.h b/chrome/browser/agens/embed/agens_credits.h
+new file mode 100644
+index 0000000000..2d34d88232
+--- /dev/null
++++ b/chrome/browser/agens/embed/agens_credits.h
+@@ -0,0 +1,33 @@
++// Open-source credits for the native Settings page, as a plain C API (no Chromium types).
++#ifndef CHROME_BROWSER_AGENS_EMBED_AGENS_CREDITS_H_
++#define CHROME_BROWSER_AGENS_EMBED_AGENS_CREDITS_H_
++
++#include <stddef.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++// One component. UTF-8, NUL-terminated, valid only during the callback; homepage may be "".
++typedef struct {
++  const char* name;
++  const char* homepage;
++  const char* license;  // the full license text
++} AgensCreditEntry;
++
++typedef void (*AgensCreditsCallback)(void* context, const AgensCreditEntry* entries, int count);
++
++// Parses the credits Chromium generates at build time (about_credits.html, in the resource
++// bundle) so the list follows every dependency update with no copy to maintain. Call on the
++// UI thread. Calls `callback` once; count is 0 when the build did not generate the real page
++// (generate_about_credits=false is the default outside official builds).
++void agens_credits_list(AgensCreditsCallback callback, void* context);
++
++// Same, for a given about_credits.html (tests).
++void agens_credits_parse(const char* html, size_t length, AgensCreditsCallback callback, void* context);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_CREDITS_H_
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
 new file mode 100644
-index 0000000000..d69d159bce
+index 0000000000..eb7e1852a5
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embed.h
-@@ -0,0 +1,346 @@
+@@ -0,0 +1,350 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The boundary between the engine and any interface (the browser's own chrome today, the Agens
 +// app later). Plain C on purpose: no Chromium or C++ types cross it, Swift imports it as is, and
@@ -164,6 +290,10 @@ index 0000000000..d69d159bce
 +void agens_pref_set_bool(AgensWindow* window, AgensPrefStore store, const char* name, int value);
 +void agens_pref_set_int(AgensWindow* window, AgensPrefStore store, const char* name, int value);
 +void agens_pref_set_string(AgensWindow* window, AgensPrefStore store, const char* name, const char* value);
++// List-of-strings prefs (e.g. sites that never sleep). get calls `fn` now with the items.
++typedef void (*AgensStringsFn)(void* context, const char* const* items, int count);
++int agens_pref_get_list(AgensWindow* window, AgensPrefStore store, const char* name, AgensStringsFn fn, void* context);
++void agens_pref_set_list(AgensWindow* window, AgensPrefStore store, const char* name, const char* const* items, int count);
 +
 +// Site permissions by default, for every site of this ato. `kind`: "camera", "microphone",
 +// "location", "notifications", "popups", "sound", "clipboard", "downloads", "javascript", "cookies".
@@ -1018,10 +1148,10 @@ index 0000000000..91603c7c4d
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
 new file mode 100644
-index 0000000000..58380fd42f
+index 0000000000..204b5147c0
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.cc
-@@ -0,0 +1,795 @@
+@@ -0,0 +1,815 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The embed API (agens_embed.h) on top of AgensWindow. Same code on every platform.
 +
@@ -1224,6 +1354,26 @@ index 0000000000..58380fd42f
 +}
 +void agens_pref_set_string(AgensWindow* w, AgensPrefStore store, const char* name, const char* value) {
 +  if (value && Find(w, store, name, base::Value::Type::STRING)) Store(w, store)->SetString(name, value);
++}
++int agens_pref_get_list(AgensWindow* w, AgensPrefStore store, const char* name, AgensStringsFn fn, void* context) {
++  const PrefService::Preference* p = Find(w, store, name, base::Value::Type::LIST);
++  if (!p) return 0;
++  std::vector<std::string> items;
++  for (const base::Value& v : p->GetValue()->GetList()) {
++    if (v.is_string()) items.push_back(v.GetString());
++  }
++  std::vector<const char*> out;
++  for (const std::string& s : items) out.push_back(s.c_str());
++  fn(context, out.data(), static_cast<int>(out.size()));
++  return 1;
++}
++void agens_pref_set_list(AgensWindow* w, AgensPrefStore store, const char* name, const char* const* items, int count) {
++  if (!Find(w, store, name, base::Value::Type::LIST)) return;
++  base::ListValue list;
++  for (int i = 0; i < count; ++i) {
++    if (items[i] && *items[i]) list.Append(items[i]);
++  }
++  Store(w, store)->SetList(name, std::move(list));
 +}
 +
 +static std::optional<ContentSettingsType> KindOf(const char* kind) {
@@ -2490,10 +2640,10 @@ index 0000000000..8d10fddb69
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..b06fd503b0
+index 0000000000..34cab5a42a
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,4746 @@
+@@ -0,0 +1,4891 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -2501,6 +2651,7 @@ index 0000000000..b06fd503b0
 +// the system. Only AppKit and agens_embed.h here, so it can move to the Swift app unchanged.
 +
 +#import <AppKit/AppKit.h>
++#import <objc/runtime.h>
 +#import <LocalAuthentication/LocalAuthentication.h>
 +#import <QuartzCore/QuartzCore.h>
 +#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
@@ -2615,6 +2766,47 @@ index 0000000000..b06fd503b0
 +static CGFloat OmniH() { return Dense() ? 30 : 34; }   // the address well
 +// Roundness follows the theme (prototype --round, --pill): Grafite and Seu 1×, Vidro 1.3× and
 +// Brasa 1.45× with pill-shaped tabs on top.
++// Vidro on macOS 26+: the system's Liquid Glass (NSGlassEffectView); older systems keep the blur.
++static BOOL LiquidGlass() {
++  if (@available(macOS 26.0, *)) return Theme() == 2;
++  return NO;
++}
++// A glass layer behind a floating panel's content (menus, suggestions, find): fills it, rounded.
++// Glass behind, then a veil of the panel's own color so our text keeps its contrast over any page.
++static void AddGlass(NSView* panel, CGFloat radius) {
++  if (@available(macOS 26.0, *)) {
++    NSGlassEffectView* glass = [[NSGlassEffectView alloc] initWithFrame:panel.bounds];
++    glass.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
++    glass.cornerRadius = radius;
++    glass.style = NSGlassEffectViewStyleRegular;
++    NSView* veil = [[NSView alloc] initWithFrame:panel.bounds];
++    veil.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
++    veil.wantsLayer = YES;
++    veil.identifier = @"glass-veil";
++    veil.layer.cornerRadius = radius;
++    __block CGColorRef color;
++    [panel.effectiveAppearance performAsCurrentDrawingAppearance:^{
++      color = [kFloat.color() colorWithAlphaComponent:0.8].CGColor;
++    }];
++    veil.layer.backgroundColor = color;
++    [panel addSubview:veil positioned:NSWindowBelow relativeTo:nil];
++    [panel addSubview:glass positioned:NSWindowBelow relativeTo:nil];
++    panel.layer.backgroundColor = NSColor.clearColor.CGColor;
++    panel.layer.borderWidth = 0;
++  }
++}
++// Panels that live on (suggestions, find): glass on in Vidro, off otherwise. Call after setting
++// their normal background and border.
++static void SyncGlass(NSView* panel, CGFloat radius) {
++  if (@available(macOS 26.0, *)) {
++    for (NSView* v in [panel.subviews copy]) {
++      if ([v isKindOfClass:NSGlassEffectView.class] || [v.identifier isEqualToString:@"glass-veil"]) {
++        [v removeFromSuperview];
++      }
++    }
++    if (LiquidGlass()) AddGlass(panel, radius);  // rebuilt: the veil takes the current light/dark color
++  }
++}
 +static CGFloat Round() { return Theme() == 1 ? 1.45 : Theme() == 2 ? 1.3 : 1; }
 +static BOOL Pill() { return Theme() == 1 || Theme() == 2; }
 +
@@ -3542,8 +3734,10 @@ index 0000000000..b06fd503b0
 +    {@"excecoes", @"Exceções por site", @"permissoes"},
 +    {@"senhas-salvas", @"Senhas salvas", @"senhas"},
 +    {@"restaurar", @"Restaurar as configurações originais", @"sistema"},
++    {@"avisos", @"Avisos de código aberto", @"sobre"},
 +};
 +static void ClearFinished(void* context);
++NSView* AgensCreditsPage(CGFloat width, BOOL withHeading);  // credits_mac.mm
 +static void ResetFinished(void* context);
 +static void LoginsListed(void* context, const AgensLogin* logins, int count);
 +
@@ -3772,9 +3966,17 @@ index 0000000000..b06fd503b0
 +  } else if ([key isEqualToString:@"aparencia"]) {
 +    y = [self appearanceAt:y];
 +  } else if ([key isEqualToString:@"abas"]) {
-+    y = [self info:@"Pôr abas para dormir" detail:@"A aba escondida fecha o processo e guarda o estado. Ao voltar, recarrega." note:@"Ligado" y:y];
-+    y = [self info:@"Dormir depois de" detail:@"Áudio, câmera, upload e formulário não dormem." note:@"5 minutos" y:y];
-+    y = [self info:@"Sites que nunca dormem" detail:nil note:@"Ainda não existe" y:y];
++    // Chromium's Memory Saver: state 2 on, 0 off (Local State); our minutes (memory_saver_mode_policy.cc).
++    y = [self option:@"Pôr abas para dormir" detail:@"A aba escondida fecha o processo e guarda o estado. Ao voltar, recarrega."
++             control:[self intSwitch:"performance_tuning.high_efficiency_mode.state" on:2 off:0] y:y];
++    int minutes = 5;
++    if (_browser) agens_pref_get_int(_browser, kAgensLocal, "performance_tuning.high_efficiency_mode.time_before_discard_in_minutes", &minutes);
++    NSPopUpButton* after = [self intPopup:"performance_tuning.high_efficiency_mode.time_before_discard_in_minutes"
++                                   labels:@[ @"1 minuto", @"2 minutos", @"5 minutos", @"15 minutos", @"30 minutos", @"1 hora", @"2 horas" ]
++                                   values:{1, 2, 5, 15, 30, 60, 120}];
++    if (minutes == 120 && ![self sleepTimeChosen]) [after selectItemWithTag:5];  // never chosen: our 5 minutes apply
++    y = [self option:@"Dormir depois de" detail:@"Áudio, câmera, upload, formulário e abas fixadas não dormem." control:after y:y];
++    y = [self neverSleepList:y];
 +  } else if ([key isEqualToString:@"atos"]) {
 +    y = [self fillAtos:y];
 +  } else if ([key isEqualToString:@"busca"]) {
@@ -3855,7 +4057,7 @@ index 0000000000..b06fd503b0
 +  } else if ([key isEqualToString:@"sobre"]) {
 +    NSString* version = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"";
 +    y = [self info:product detail:[NSString stringWithFormat:@"Versão %@ · SugiyamaLabs", version] note:@"" y:y];
-+    y = [self option:@"Avisos de código aberto" detail:@"Chromium, ungoogled-chromium e as listas do bloqueador." control:[self linkButton:@"Ver…" url:@"chrome://credits"] y:y];
++    y = [self option:@"Avisos de código aberto" detail:@"Chromium, ungoogled-chromium e as listas do bloqueador." control:[self subButton:@"Ver…" key:@"avisos"] y:y];
 +  }
 +  NSRect f = _pane.frame;
 +  f.size.height = MAX(y + 40, NSHeight(_paneScroll.frame));
@@ -3891,7 +4093,7 @@ index 0000000000..b06fd503b0
 +- (NSSwitch*)intSwitch:(const char*)name on:(int)onValue off:(int)offValue {
 +  NSSwitch* sw = [[NSSwitch alloc] init];
 +  int v = offValue;
-+  if (_browser) agens_pref_get_int(_browser, kAgensProfile, name, &v);
++  if (_browser) agens_pref_get_int(_browser, [self storeFor:name], name, &v);
 +  sw.state = v == onValue ? NSControlStateValueOn : NSControlStateValueOff;
 +  sw.identifier = [NSString stringWithFormat:@"%s|%d|%d", name, onValue, offValue];
 +  sw.target = self;
@@ -3901,12 +4103,12 @@ index 0000000000..b06fd503b0
 +- (void)toggleInt:(NSSwitch*)sw {
 +  NSArray<NSString*>* parts = [sw.identifier componentsSeparatedByString:@"|"];
 +  int v = sw.state == NSControlStateValueOn ? parts[1].intValue : parts[2].intValue;
-+  if (_browser) agens_pref_set_int(_browser, kAgensProfile, parts[0].UTF8String, v);
++  if (_browser) agens_pref_set_int(_browser, [self storeFor:parts[0].UTF8String], parts[0].UTF8String, v);
 +}
 +- (NSPopUpButton*)intPopup:(const char*)name labels:(NSArray<NSString*>*)labels values:(std::vector<int>)values {
 +  NSPopUpButton* popup = [[NSPopUpButton alloc] init];
 +  int v = values[0];
-+  if (_browser) agens_pref_get_int(_browser, kAgensProfile, name, &v);
++  if (_browser) agens_pref_get_int(_browser, [self storeFor:name], name, &v);
 +  for (NSUInteger i = 0; i < labels.count; ++i) {
 +    [popup addItemWithTitle:labels[i]];
 +    popup.lastItem.tag = values[i];
@@ -3918,7 +4120,10 @@ index 0000000000..b06fd503b0
 +  return popup;
 +}
 +- (void)pickInt:(NSPopUpButton*)popup {
-+  if (_browser) agens_pref_set_int(_browser, kAgensProfile, popup.identifier.UTF8String, (int)popup.selectedItem.tag);
++  if (_browser) {
++    agens_pref_set_int(_browser, [self storeFor:popup.identifier.UTF8String], popup.identifier.UTF8String,
++                       (int)popup.selectedItem.tag);
++  }
 +}
 +// GPC and Do Not Track go together.
 +- (NSSwitch*)dntSwitch {
@@ -4142,6 +4347,72 @@ index 0000000000..b06fd503b0
 +- (void)setMode:(NSSegmentedControl*)seg {
 +  if (_browser) SetMode(_browser, (AgensColorMode)seg.selectedSegment);
 +}
++// Chromium's default (120) means nobody picked a time: our 5 minutes apply then.
++- (BOOL)sleepTimeChosen {
++  int minutes = 120;
++  if (_browser) agens_pref_get_int(_browser, kAgensLocal, "performance_tuning.high_efficiency_mode.time_before_discard_in_minutes", &minutes);
++  return minutes != 120;
++}
++// Sites que nunca dormem: Chromium's tab discarding exceptions (patterns like "twitch.tv").
++static void StringsListed(void* context, const char* const* items, int count) {
++  auto* out = static_cast<std::vector<std::string>*>(context);
++  for (int i = 0; i < count; ++i) out->push_back(items[i]);
++}
++- (std::vector<std::string>)neverSleepSites {
++  std::vector<std::string> sites;
++  if (_browser) agens_pref_get_list(_browser, kAgensProfile, "performance_tuning.tab_discarding.exceptions", StringsListed, &sites);
++  return sites;
++}
++- (void)saveNeverSleepSites:(const std::vector<std::string>&)sites {
++  std::vector<const char*> items;
++  for (const std::string& s : sites) items.push_back(s.c_str());
++  if (_browser) agens_pref_set_list(_browser, kAgensProfile, "performance_tuning.tab_discarding.exceptions", items.data(), (int)items.size());
++}
++- (CGFloat)neverSleepList:(CGFloat)y {
++  NSTextField* field = [NSTextField textFieldWithString:@""];
++  field.placeholderString = @"twitch.tv";
++  field.frame = NSMakeRect(0, 0, 180, 24);
++  field.target = self;
++  field.action = @selector(addNeverSleep:);
++  NSButton* add = [self small:@"Adicionar" action:@selector(addNeverSleepButton:) tag:0];
++  add.identifier = @"never-sleep-add";
++  objc_setAssociatedObject(add, "field", field, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
++  NSView* box = [self buttons:@[ add ]];
++  NSView* both = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 180 + 8 + NSWidth(box.frame), 24)];
++  field.frame = NSMakeRect(0, 0, 180, 24);
++  box.frame = NSMakeRect(188, (24 - NSHeight(box.frame)) / 2, NSWidth(box.frame), NSHeight(box.frame));
++  [both addSubview:field];
++  [both addSubview:box];
++  y = [self option:@"Sites que nunca dormem" detail:@"As abas desses sites ficam sempre acordadas." control:both y:y];
++  const std::vector<std::string> sites = [self neverSleepSites];
++  for (size_t i = 0; i < sites.size(); ++i) {
++    y = [self option:@(sites[i].c_str()) detail:nil
++             control:[self buttons:@[ [self small:@"Tirar" action:@selector(removeNeverSleep:) tag:(NSInteger)i] ]]
++                   y:y];
++  }
++  return y;
++}
++- (void)addNeverSleepButton:(NSButton*)button {
++  [self addNeverSleep:objc_getAssociatedObject(button, "field")];
++}
++- (void)addNeverSleep:(NSTextField*)field {
++  NSString* site = [field.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet].lowercaseString;
++  for (NSString* p in @[ @"https://", @"http://", @"www." ]) {
++    if ([site hasPrefix:p]) site = [site substringFromIndex:p.length];
++  }
++  site = [site componentsSeparatedByString:@"/"].firstObject;
++  if (!site.length) return;
++  std::vector<std::string> sites = [self neverSleepSites];
++  if (std::find(sites.begin(), sites.end(), site.UTF8String) == sites.end()) sites.push_back(site.UTF8String);
++  [self saveNeverSleepSites:sites];
++  [self showSection:@"abas"];
++}
++- (void)removeNeverSleep:(NSButton*)button {
++  std::vector<std::string> sites = [self neverSleepSites];
++  if ((size_t)button.tag < sites.size()) sites.erase(sites.begin() + button.tag);
++  [self saveNeverSleepSites:sites];
++  [self showSection:@"abas"];
++}
 +- (void)setDense:(NSSegmentedControl*)seg {
 +  [NSUserDefaults.standardUserDefaults setBool:seg.selectedSegment == 1 forKey:kDenseKey];
 +  g_dense = -1;
@@ -4208,6 +4479,12 @@ index 0000000000..b06fd503b0
 +- (CGFloat)subPage:(NSString*)key y:(CGFloat)y {
 +  if ([key isEqualToString:@"apagar"]) return [self clearPage:y];
 +  if ([key isEqualToString:@"restaurar"]) return [self resetPage:y];
++  if ([key isEqualToString:@"avisos"]) {  // credits_mac.mm: searchable, resizes _pane as rows open
++    NSView* credits = AgensCreditsPage(NSWidth(_pane.bounds), NO);
++    credits.frame = NSMakeRect(0, y, NSWidth(credits.frame), NSHeight(credits.frame));
++    [_pane addSubview:credits];
++    return y + NSHeight(credits.frame);
++  }
 +  if ([key isEqualToString:@"excecoes"]) return [self exceptionsPage:y];
 +  if ([key isEqualToString:@"senhas-salvas"]) return [self passwordsPage:y];
 +  return y;
@@ -5386,6 +5663,8 @@ index 0000000000..b06fd503b0
 +  self.layer.cornerRadius = 10 * Round();
 +  self.layer.backgroundColor = CG(kFloat, self);
 +  self.layer.borderColor = CG(kLineStrong, self);
++  self.layer.borderWidth = 1;
++  SyncGlass(self, 10 * Round());
 +}
 +- (void)viewDidChangeEffectiveAppearance {
 +  [super viewDidChangeEffectiveAppearance];
@@ -5612,7 +5891,7 @@ index 0000000000..b06fd503b0
 +    _address.delegate = self;
 +    ((AgensAddressField*)_address).onFocus = ^{
 +      AgensChrome* strong = weak;
-+      if (strong && strong->_url.length) strong->_address.stringValue = strong->_url;  // the full address while editing
++      if (strong && strong->_url.length) strong->_address.stringValue = AgensScheme(strong->_url);  // the full address while editing
 +    };
 +    _address.target = self;
 +    _address.action = @selector(go:);
@@ -5856,12 +6135,14 @@ index 0000000000..b06fd503b0
 +  _omni.layer.backgroundColor = CG(kSunk, self);
 +  _omni.layer.borderColor = CG(_address.currentEditor ? kLineStrong : kLine, self);
 +  _suggest.layer.backgroundColor = CG(kFloat, self);
++  _suggest.layer.borderWidth = 1;
 +  _suggest.layer.borderColor = CG(kLineStrong, self);
 +  _separator.layer.backgroundColor = CG(kLine, self);
 +  _atosLine.layer.backgroundColor = CG(kLine, self);
 +  _atoDot.layer.backgroundColor = CG(kLight3, self);
 +  _statusPill.layer.backgroundColor = CG(kFloat, self);
 +  _statusPill.layer.borderColor = CG(kLine, self);
++  SyncGlass(_suggest, 12 * Round());
 +  [self runLoadbar];  // the glow's color
 +}
 +- (void)viewDidChangeEffectiveAppearance {
@@ -5901,6 +6182,15 @@ index 0000000000..b06fd503b0
 +    [_backdrop addSubview:picture];
 +  }
 +  // Vidro always blurs; Seu blurs if asked (without blur and without image, the desktop shows).
++  if (LiquidGlass()) {
++    if (@available(macOS 26.0, *)) {
++      NSGlassEffectView* glass = [[NSGlassEffectView alloc] initWithFrame:_backdrop.bounds];
++      glass.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
++      glass.style = NSGlassEffectViewStyleRegular;
++      [_backdrop addSubview:glass];
++      return;
++    }
++  }
 +  if (Theme() == 2 || [d boolForKey:kBlurKey]) {
 +    NSVisualEffectView* glass = [[NSVisualEffectView alloc] initWithFrame:_backdrop.bounds];
 +    glass.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
@@ -6338,11 +6628,15 @@ index 0000000000..b06fd503b0
 +  if (activeTab >= 0 && _rows[activeTab].superview == _tabsDoc) [_tabsDoc scrollRectToVisible:_rows[activeTab].frame];
 +}
 +
++// Chromium's internal pages show as agens:// (typing agens:// opens them: url_fixer, agens-scheme.patch).
++static NSString* AgensScheme(NSString* url) {
++  return [url hasPrefix:@"chrome://"] ? [@"agens://" stringByAppendingString:[url substringFromIndex:9]] : url;
++}
 +// The address as the prototype shows it: no https:// or www., no lone trailing slash.
 +- (NSString*)displayURL {
 +  if ([_url hasPrefix:@"chrome://history"]) return @"Histórico";
 +  if ([_url hasPrefix:@"chrome://bookmarks"]) return @"Favoritos";
-+  NSString* s = _url;
++  NSString* s = AgensScheme(_url);
 +  for (NSString* p in @[ @"https://", @"www." ]) {
 +    if ([s hasPrefix:p]) s = [s substringFromIndex:p.length];
 +  }
@@ -6497,7 +6791,7 @@ index 0000000000..b06fd503b0
 +      {kIconStar, _barShown ? @"Ocultar barra de favoritos" : @"Mostrar barra de favoritos", @"⌘⇧B", ^{ [weak toggleBookmarkBar]; }},
 +      {kIconSettings, @"Configurações", @"⌘,", ^{ [weak menuSettings:nil]; }},
 +  };
-+  const CGFloat w = 260, rowH = 33;
++  const CGFloat w = 280, rowH = 33;
 +  NSView* panel = [self popoverWidth:w height:std::size(items) * rowH + 10 under:_menu];
 +  panel.accessibilityRole = NSAccessibilityMenuRole;
 +  panel.accessibilityLabel = @"Menu";
@@ -6524,6 +6818,7 @@ index 0000000000..b06fd503b0
 +  panel.layer.borderWidth = 1;
 +  panel.layer.backgroundColor = CG(kFloat, self);
 +  panel.layer.borderColor = CG(kLineStrong, self);
++  if (LiquidGlass()) AddGlass(panel, 12 * Round());
 +  return panel;
 +}
 +- (void)presentPopover:(NSView*)panel anchor:(NSView*)anchor {
@@ -7193,7 +7488,7 @@ index 0000000000..b06fd503b0
 +    [self.window makeFirstResponder:_ntp.field];
 +    return;
 +  }
-+  _address.stringValue = _url;  // the full address while editing
++  _address.stringValue = AgensScheme(_url);  // the full address while editing
 +  [self.window makeFirstResponder:_address];
 +}
 +@end
@@ -7240,6 +7535,426 @@ index 0000000000..b06fd503b0
 +}
 +
 +}  // extern "C"
+diff --git a/chrome/browser/agens/ui/credits_mac.mm b/chrome/browser/agens/ui/credits_mac.mm
+new file mode 100644
+index 0000000000..cdf609f027
+--- /dev/null
++++ b/chrome/browser/agens/ui/credits_mac.mm
+@@ -0,0 +1,414 @@
++// Settings › Sobre › Avisos de código aberto: every open-source component the app ships with, its
++// license, searchable, each row expandable to the license text. Native AppKit, matching
++// chrome_mac.mm (colors are copied from its Token table, light and dark).
++//
++// Entry point for the Settings code:
++//   NSView* AgensCreditsPage(CGFloat width, BOOL withHeading);
++// Returns a flipped view `width` wide (content inset 32 pt like the other rows). Put it at
++// (0, y) in the pane; it resizes the pane (its superview) when rows expand or the search
++// filters, so the pane's scroll view keeps working.
++
++#import <Cocoa/Cocoa.h>
++
++#include <string>
++
++#include "chrome/browser/agens/embed/agens_credits.h"
++
++namespace {
++
++struct Tok {
++  unsigned dark, light;
++  NSColor* color() const {
++    const Tok t = *this;
++    return [NSColor colorWithName:nil
++                  dynamicProvider:^NSColor*(NSAppearance* a) {
++      const BOOL isDark = [[a bestMatchFromAppearancesWithNames:@[ NSAppearanceNameAqua, NSAppearanceNameDarkAqua ]]
++          isEqualToString:NSAppearanceNameDarkAqua];
++      const unsigned v = isDark ? t.dark : t.light;
++      return [NSColor colorWithSRGBRed:((v >> 16) & 255) / 255.0
++                                 green:((v >> 8) & 255) / 255.0
++                                  blue:(v & 255) / 255.0
++                                 alpha:1];
++    }];
++  }
++};
++// Same values as chrome_mac.mm (Grafite dark / light).
++const Tok kRaise{0x16161A, 0xFFFFFF}, kSunk{0x0F0F12, 0xE9E9ED}, kLine{0x24242A, 0xE0E0E5},
++    kInk{0xF2F2F4, 0x16161A}, kMute{0x9A9AA4, 0x5C5C66}, kDim{0x8A8A94, 0x71717B};
++
++CGColorRef CG(const Tok& t, NSView* v) {
++  __block CGColorRef c = nil;
++  [v.effectiveAppearance performAsCurrentDrawingAppearance:^{ c = t.color().CGColor; }];
++  return c;
++}
++
++NSTextField* Label(CGFloat size, NSFontWeight weight, const Tok& color) {
++  NSTextField* label = [NSTextField labelWithString:@""];
++  label.font = [NSFont systemFontOfSize:size weight:weight];
++  label.textColor = color.color();
++  label.lineBreakMode = NSLineBreakByTruncatingTail;
++  return label;
++}
++
++// shortcut: the license name is guessed from phrases in the text (earliest match wins); a
++// component with an unusual text shows "Ver texto". Upgrade if the build starts emitting SPDX ids.
++NSString* GuessLicense(NSString* text) {
++  static NSArray<NSArray<NSString*>*>* rules = @[
++    @[ @"apache license", @"Apache-2.0" ],
++    @[ @"mozilla public license", @"MPL" ],
++    @[ @"gnu lesser general public", @"LGPL" ],
++    @[ @"gnu general public license", @"GPL" ],
++    @[ @"permission is hereby granted, free of charge", @"MIT" ],
++    @[ @"permission to use, copy, modify, and/or distribute", @"ISC" ],
++    @[ @"redistribution and use in source and binary forms", @"BSD" ],
++    @[ @"boost software license", @"BSL-1.0" ],
++    @[ @"free and unencumbered software", @"Unlicense" ],
++    @[ @"creative commons", @"Creative Commons" ],
++    @[ @"altered source versions must be plainly marked", @"zlib" ],
++    @[ @"microsoft public license", @"MS-PL" ],
++    @[ @"unicode", @"Unicode" ],
++    @[ @"public domain", @"Domínio público" ],
++  ];
++  NSString* head = [text substringToIndex:MIN(text.length, (NSUInteger)6000)].lowercaseString;
++  NSUInteger best = NSNotFound;
++  NSString* name = @"Ver texto";
++  for (NSArray<NSString*>* r in rules) {
++    const NSUInteger at = [head rangeOfString:r[0]].location;
++    if (at != NSNotFound && (best == NSNotFound || at < best)) {
++      best = at;
++      name = r[1];
++    }
++  }
++  return name;
++}
++
++}  // namespace
++
++// --- A component: header (name, license) that toggles; body (homepage, license text) when open.
++@interface AgensCreditRow : NSView
++@property(nonatomic, readonly) NSString* searchKey;
++@property(nonatomic) BOOL expanded;
++@property(nonatomic, copy) void (^onToggle)(void);
++- (instancetype)initWithName:(NSString*)name
++                    homepage:(NSString*)homepage
++                     license:(NSString*)license
++                     summary:(NSString*)summary;
++- (CGFloat)layoutForWidth:(CGFloat)w;
++@end
++
++@implementation AgensCreditRow {
++  NSString* _homepage;
++  NSString* _license;
++  NSImageView* _chevron;
++  NSTextField* _name;
++  NSTextField* _summary;
++  NSButton* _link;
++  NSView* _well;
++  NSTextField* _text;
++}
++@synthesize expanded = _expanded;
++@synthesize onToggle = _onToggle;
++@synthesize searchKey = _searchKey;
++
++static const CGFloat kHead = 52;
++
++- (BOOL)isFlipped {
++  return YES;
++}
++- (instancetype)initWithName:(NSString*)name
++                    homepage:(NSString*)homepage
++                     license:(NSString*)license
++                     summary:(NSString*)summary {
++  if ((self = [super initWithFrame:NSZeroRect])) {
++    _homepage = homepage;
++    _license = license;
++    _searchKey = [[@[ name, summary, homepage ] componentsJoinedByString:@" "] lowercaseString];
++    self.wantsLayer = YES;
++    self.layer.cornerRadius = 10;
++    self.layer.borderWidth = 1;
++    _chevron = [NSImageView imageViewWithImage:[NSImage imageWithSystemSymbolName:@"chevron.right"
++                                                              accessibilityDescription:nil]];
++    _chevron.contentTintColor = kDim.color();
++    _name = Label(13, NSFontWeightRegular, kInk);
++    _name.stringValue = name;
++    _summary = Label(11.5, NSFontWeightRegular, kDim);
++    _summary.stringValue = summary;
++    for (NSView* v in @[ _chevron, _name, _summary ]) [self addSubview:v];
++    self.accessibilityRole = NSAccessibilityButtonRole;
++    self.accessibilityLabel = name;
++  }
++  return self;
++}
++- (void)paint {
++  self.layer.backgroundColor = CG(kRaise, self);
++  self.layer.borderColor = CG(kLine, self);
++  _well.layer.backgroundColor = CG(kSunk, self);
++}
++- (void)viewDidChangeEffectiveAppearance {
++  [super viewDidChangeEffectiveAppearance];
++  [self paint];
++}
++- (void)mouseDown:(NSEvent*)event {
++  if ([self convertPoint:event.locationInWindow fromView:nil].y < kHead && _onToggle) _onToggle();
++}
++- (BOOL)accessibilityPerformPress {
++  if (_onToggle) _onToggle();
++  return YES;
++}
++- (void)setExpanded:(BOOL)expanded {
++  _expanded = expanded;
++  _chevron.image = [NSImage imageWithSystemSymbolName:expanded ? @"chevron.down" : @"chevron.right"
++                              accessibilityDescription:nil];
++  self.accessibilityValue = expanded ? @"expandido" : @"recolhido";
++}
++- (void)openHomepage:(id)sender {
++  NSURL* url = [NSURL URLWithString:_homepage];
++  if ([url.scheme hasPrefix:@"http"]) [NSWorkspace.sharedWorkspace openURL:url];
++}
++- (CGFloat)layoutForWidth:(CGFloat)w {
++  [self paint];
++  _chevron.frame = NSMakeRect(16, 20, 12, 12);
++  _name.frame = NSMakeRect(40, 9, w - 56, 18);
++  _summary.frame = NSMakeRect(40, 28, w - 56, 15);
++  if (!_expanded) {
++    _link.hidden = YES;
++    _well.hidden = YES;
++    self.frame = NSMakeRect(NSMinX(self.frame), NSMinY(self.frame), w, kHead);
++    return kHead;
++  }
++  if (!_well) {  // built on first open: ~500 rows would otherwise lay out every license
++    if (_homepage.length) {
++      _link = [NSButton buttonWithTitle:_homepage target:self action:@selector(openHomepage:)];
++      _link.bordered = NO;
++      _link.contentTintColor = NSColor.linkColor;
++      _link.font = [NSFont systemFontOfSize:12];
++      _link.lineBreakMode = NSLineBreakByTruncatingMiddle;
++      _link.alignment = NSTextAlignmentLeft;
++      [self addSubview:_link];
++    }
++    _well = [[NSView alloc] init];
++    _well.wantsLayer = YES;
++    _well.layer.cornerRadius = 8;
++    _text = [NSTextField wrappingLabelWithString:_license.length ? _license : @"(sem texto de licença)"];
++    _text.selectable = YES;
++    _text.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
++    _text.textColor = kMute.color();
++    [_well addSubview:_text];
++    [self addSubview:_well];
++    [self paint];
++  }
++  _link.hidden = NO;
++  _well.hidden = NO;
++  CGFloat y = kHead;
++  if (_link) {
++    _link.frame = NSMakeRect(40, y - 4, w - 56, 18);
++    y += 22;
++  }
++  const CGFloat textW = w - 32 - 24;
++  const CGFloat textH = ceil([_text.cell cellSizeForBounds:NSMakeRect(0, 0, textW, CGFLOAT_MAX)].height);
++  _text.frame = NSMakeRect(12, 12, textW, textH);
++  _well.frame = NSMakeRect(16, y, w - 32, textH + 24);
++  y += textH + 24 + 16;
++  self.frame = NSMakeRect(NSMinX(self.frame), NSMinY(self.frame), w, y);
++  return y;
++}
++@end
++
++// --- The page: heading, search, count, the two groups.
++@interface AgensCreditsPageView : NSView <NSSearchFieldDelegate>
++@end
++
++@implementation AgensCreditsPageView {
++  CGFloat _width;
++  NSTextField* _heading;
++  NSSearchField* _search;
++  NSTextField* _count;
++  NSTextField* _extraTitle;
++  NSTextField* _chromiumTitle;
++  NSTextField* _empty;
++  NSMutableArray<AgensCreditRow*>* _extras;
++  NSMutableArray<AgensCreditRow*>* _chromium;
++}
++
++- (BOOL)isFlipped {
++  return YES;
++}
++
++- (AgensCreditRow*)row:(NSString*)name homepage:(NSString*)homepage license:(NSString*)license summary:(NSString*)summary {
++  AgensCreditRow* row = [[AgensCreditRow alloc] initWithName:name homepage:homepage license:license summary:summary];
++  __weak AgensCreditsPageView* weak = self;
++  __weak AgensCreditRow* weakRow = row;
++  row.onToggle = ^{
++    weakRow.expanded = !weakRow.expanded;
++    [weak relayout];
++  };
++  [self addSubview:row];
++  return row;
++}
++
++static void Collect(void* context, const AgensCreditEntry* entries, int count) {
++  AgensCreditsPageView* page = (__bridge AgensCreditsPageView*)context;
++  for (int i = 0; i < count; ++i) {
++    NSString* license = @(entries[i].license) ?: @"";
++    [page->_chromium addObject:[page row:@(entries[i].name) ?: @""
++                                homepage:@(entries[i].homepage) ?: @""
++                                 license:license
++                                 summary:GuessLicense(license)]];
++  }
++}
++
++- (instancetype)initWithWidth:(CGFloat)width heading:(BOOL)withHeading {
++  if ((self = [super initWithFrame:NSMakeRect(0, 0, width, 100)])) {
++    _width = width;
++    _extras = [NSMutableArray array];
++    _chromium = [NSMutableArray array];
++    if (withHeading) {
++      _heading = Label(17, NSFontWeightSemibold, kInk);
++      _heading.stringValue = @"Avisos de código aberto";
++      [self addSubview:_heading];
++    }
++    _search = [[NSSearchField alloc] init];
++    _search.placeholderString = @"Buscar componente ou licença";
++    _search.delegate = self;
++    _search.accessibilityLabel = @"Buscar componente ou licença";
++    [self addSubview:_search];
++    _count = Label(11.5, NSFontWeightRegular, kDim);
++    [self addSubview:_count];
++    _extraTitle = Label(11.5, NSFontWeightSemibold, kDim);
++    _extraTitle.stringValue = @"NOSSOS AVISOS";
++    _chromiumTitle = Label(11.5, NSFontWeightSemibold, kDim);
++    _empty = Label(12, NSFontWeightRegular, kDim);
++    _empty.lineBreakMode = NSLineBreakByWordWrapping;
++    for (NSView* v in @[ _extraTitle, _chromiumTitle, _empty ]) [self addSubview:v];
++
++    static NSString* const kBsd =
++        @"Copyright (c) The ungoogled-chromium Authors.\nAll rights reserved.\n\n"
++        @"Redistribution and use in source and binary forms, with or without modification, are "
++        @"permitted provided that the following conditions are met:\n\n"
++        @"1. Redistributions of source code must retain the above copyright notice, this list of "
++        @"conditions and the following disclaimer.\n\n"
++        @"2. Redistributions in binary form must reproduce the above copyright notice, this list of "
++        @"conditions and the following disclaimer in the documentation and/or other materials "
++        @"provided with the distribution.\n\n"
++        @"3. Neither the name of the copyright holder nor the names of its contributors may be used "
++        @"to endorse or promote products derived from this software without specific prior written "
++        @"permission.\n\n"
++        @"THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS \"AS IS\" AND ANY "
++        @"EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF "
++        @"MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE "
++        @"COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, "
++        @"EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF "
++        @"SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) "
++        @"HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR "
++        @"TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS "
++        @"SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.";
++    static NSString* const kEasy =
++        @"As listas do EasyList e do EasyPrivacy são licenciadas em dupla licença: "
++        @"Creative Commons Atribuição-CompartilhaIgual 3.0 Não Adaptada (CC BY-SA 3.0) e GNU General "
++        @"Public License versão 3 ou posterior (GPLv3), à sua escolha.\n\n"
++        @"Copyright (c) The EasyList authors.\n\n"
++        @"Texto completo:\nhttps://creativecommons.org/licenses/by-sa/3.0/legalcode\n"
++        @"https://www.gnu.org/licenses/gpl-3.0.html";
++    static NSString* const kUbo =
++        @"Os filtros do uBlock Origin são licenciados sob a GNU General Public License versão 3 "
++        @"(GPLv3).\n\n"
++        @"Copyright (c) Raymond Hill and the uBlock Origin contributors.\n\n"
++        @"Texto completo:\nhttps://www.gnu.org/licenses/gpl-3.0.html";
++    [_extras addObject:[self row:@"ungoogled-chromium"
++                        homepage:@"https://github.com/ungoogled-software/ungoogled-chromium"
++                         license:kBsd
++                         summary:@"BSD-3-Clause"]];
++    [_extras addObject:[self row:@"EasyList"
++                        homepage:@"https://easylist.to"
++                         license:kEasy
++                         summary:@"GPLv3 ou CC BY-SA 3.0"]];
++    [_extras addObject:[self row:@"EasyPrivacy"
++                        homepage:@"https://easylist.to"
++                         license:kEasy
++                         summary:@"GPLv3 ou CC BY-SA 3.0"]];
++    [_extras addObject:[self row:@"Filtros do uBlock Origin"
++                        homepage:@"https://github.com/uBlockOrigin/uAssets"
++                         license:kUbo
++                         summary:@"GPLv3"]];
++
++    agens_credits_list(Collect, (__bridge void*)self);
++    _chromiumTitle.stringValue = [NSString stringWithFormat:@"CHROMIUM E DEPENDÊNCIAS (%lu)", (unsigned long)_chromium.count];
++    [self relayout];
++  }
++  return self;
++}
++
++- (void)controlTextDidChange:(NSNotification*)note {
++  [self relayout];
++}
++- (void)searchFieldDidStartSearching:(NSSearchField*)sender {
++  [self relayout];
++}
++- (void)searchFieldDidEndSearching:(NSSearchField*)sender {
++  [self relayout];
++}
++
++// Shows the rows that match the search, stacks them, and sizes this view and the pane around it.
++- (void)relayout {
++  const CGFloat x = 32, w = _width - 64;
++  NSString* query = [_search.stringValue.lowercaseString stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
++  CGFloat y = 0;
++  if (_heading) {
++    _heading.frame = NSMakeRect(x, 0, w, 24);
++    y = 40;
++  }
++  _search.frame = NSMakeRect(x, y, w - 120, 28);  // the count sits to its right
++  y += 40;
++  __block NSUInteger shown = 0;
++  CGFloat (^stack)(NSArray<AgensCreditRow*>*, NSTextField*, CGFloat) =
++      ^CGFloat(NSArray<AgensCreditRow*>* rows, NSTextField* title, CGFloat at) {
++        NSMutableArray<AgensCreditRow*>* visible = [NSMutableArray array];
++        for (AgensCreditRow* r in rows) {
++          const BOOL match = !query.length || [r.searchKey containsString:query];
++          r.hidden = !match;
++          if (match) [visible addObject:r];
++        }
++        title.hidden = visible.count == 0;
++        if (!visible.count) return at;
++        title.frame = NSMakeRect(x, at, w, 15);
++        at += 22;
++        for (AgensCreditRow* r in visible) {
++          r.frame = NSMakeRect(x, at, w, 0);
++          at += [r layoutForWidth:w] + 8;
++        }
++        shown += visible.count;
++        return at + 12;
++      };
++  y = stack(_extras, _extraTitle, y);
++  y = stack(_chromium, _chromiumTitle, y);
++  NSString* note = nil;
++  if (shown == 0) {
++    note = @"Nenhum resultado.";
++  } else if (!_chromium.count && !query.length) {
++    note = @"A lista completa do Chromium só existe nos builds de lançamento.";
++  }
++  _empty.hidden = note == nil;
++  if (note) {
++    _empty.stringValue = note;
++    _empty.frame = NSMakeRect(x, y, w, 18);
++    y += 28;
++  }
++  _count.stringValue = [NSString stringWithFormat:@"%lu componente%s", (unsigned long)shown, shown == 1 ? "" : "s"];
++  [_count sizeToFit];
++  _count.frame = NSMakeRect(x + w - NSWidth(_count.frame), NSMinY(_search.frame) + 6, NSWidth(_count.frame), 16);
++
++  NSRect f = self.frame;
++  f.size.height = y;
++  self.frame = f;
++  NSView* pane = self.superview;
++  if (pane) {  // the pane is the scroll view's document: grow it with the list
++    NSRect pf = pane.frame;
++    pf.size.height = MAX(NSMinY(f) + y + 40, pane.enclosingScrollView ? NSHeight(pane.enclosingScrollView.frame) : 0);
++    pane.frame = pf;
++  }
++}
++@end
++
++NSView* AgensCreditsPage(CGFloat width, BOOL withHeading) {
++  return [[AgensCreditsPageView alloc] initWithWidth:width heading:withHeading];
++}
 diff --git a/chrome/browser/agens/ui/logo_svg.h b/chrome/browser/agens/ui/logo_svg.h
 new file mode 100644
 index 0000000000..9cfa56430c
@@ -7289,6 +8004,54 @@ index 6f5c220aae..5f70397a82 100644
    registry->RegisterStringPref(
        prefs::kPrintPreviewDefaultDestinationSelectionRules, std::string());
  #if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
+diff --git a/chrome/browser/renderer_context_menu/render_view_context_menu.cc b/chrome/browser/renderer_context_menu/render_view_context_menu.cc
+index 0750eb56c0..2ace27d0d9 100644
+--- a/chrome/browser/renderer_context_menu/render_view_context_menu.cc
++++ b/chrome/browser/renderer_context_menu/render_view_context_menu.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "chrome/browser/renderer_context_menu/render_view_context_menu.h"
+ 
++#include "chrome/browser/agens/embed/native_shell.h"
++
+ #include <stddef.h>
+ 
+ #include <algorithm>
+@@ -1550,6 +1552,34 @@ void RenderViewContextMenu::InitMenu() {
+     AppendPrintPreviewItems();
+   }
+ 
++  // agens: drop what needs Google services or Chrome panels we don't have (Gemini, Lens, QR,
++  // send to devices, Cast, reading list/mode, read aloud, notes). Inspect stays.
++  if (agens::IsNativeShellEnabled()) {
++    static constexpr int kDropped[] = {
++        IDC_CONTENT_CONTEXT_ADD_LINK_TO_READING_LIST, IDC_CONTENT_CONTEXT_ARCHIVE_GLIC,
++        IDC_CONTENT_CONTEXT_ASK_GOOGLE_ABOUT_THIS_PAGE, IDC_CONTENT_CONTEXT_AUTOFILL_FEEDBACK,
++        IDC_CONTENT_CONTEXT_CONTEXTUAL_TASKS_SUBMENU, IDC_CONTENT_CONTEXT_GENERATE_QR_CODE,
++        IDC_CONTENT_CONTEXT_GLIC, IDC_CONTENT_CONTEXT_GLICSHAREIMAGE, IDC_CONTENT_CONTEXT_LENS_REGION_SEARCH,
++        IDC_CONTENT_CONTEXT_LISTEN_TO_THIS_PAGE, IDC_CONTENT_CONTEXT_OPEN_IN_READING_MODE,
++        IDC_CONTENT_CONTEXT_RELOAD_GLIC, IDC_CONTENT_CONTEXT_SAVE_TO_MEMORY_BANKS,
++        IDC_CONTENT_CONTEXT_SEARCHLENSFORIMAGE, IDC_CONTENT_CONTEXT_SEARCHLENSFORVIDEOFRAME,
++        IDC_CONTENT_CONTEXT_SHARING_SUBMENU, IDC_CONTENT_CONTEXT_WEB_REGION_SEARCH,
++        IDC_CONTENT_CONTEXT_AUTOFILL_FALLBACK_AT_MEMORY, IDC_SEND_TAB_TO_SELF, IDC_ROUTE_MEDIA,
++    };
++    for (int id : kDropped) {
++      if (std::optional<size_t> index = menu_model_.GetIndexOfCommandId(id)) {
++        menu_model_.RemoveItemAt(*index);
++      }
++    }
++    // What was between them can leave separators side by side, or one first.
++    for (size_t i = menu_model_.GetItemCount(); i-- > 0;) {
++      const bool separator = menu_model_.GetTypeAt(i) == ui::MenuModel::TYPE_SEPARATOR;
++      if (separator && (i == 0 || menu_model_.GetTypeAt(i - 1) == ui::MenuModel::TYPE_SEPARATOR)) {
++        menu_model_.RemoveItemAt(i);
++      }
++    }
++  }
++
+   // Remove any redundant trailing separator.
+   size_t count = menu_model_.GetItemCount();
+   if (count > 0 &&
 diff --git a/chrome/browser/ui/browser_command_controller.cc b/chrome/browser/ui/browser_command_controller.cc
 index d2224772cc..cd3d1c68d9 100644
 --- a/chrome/browser/ui/browser_command_controller.cc
@@ -7544,15 +8307,17 @@ index 12bb0ac5fb..52735f7a84 100644
    if (ShouldIgnorePermissionRequest(web_contents, delegate)) {
      return nullptr;
 diff --git a/chrome/browser/ui/webui_browser/BUILD.gn b/chrome/browser/ui/webui_browser/BUILD.gn
-index db2aba2a32..09328bfc13 100644
+index db2aba2a32..60bdff1d4c 100644
 --- a/chrome/browser/ui/webui_browser/BUILD.gn
 +++ b/chrome/browser/ui/webui_browser/BUILD.gn
-@@ -77,10 +77,22 @@ source_set("impl") {
+@@ -77,10 +77,25 @@ source_set("impl") {
      "webui_browser_window.cc",
      "webui_stub_location_bar.cc",
      "zoom_bubble_manager_webui_browser.cc",
 +
 +    # agens: the embed API and its platform-neutral side (docs/casca.md).
++    "//chrome/browser/agens/embed/agens_credits.cc",
++    "//chrome/browser/agens/embed/agens_credits.h",
 +    "//chrome/browser/agens/embed/agens_embed.h",
 +    "//chrome/browser/agens/embed/agens_window.h",
 +    "//chrome/browser/agens/embed/native_shell.cc",
@@ -7564,6 +8329,7 @@ index db2aba2a32..09328bfc13 100644
 +    sources += [
 +      "//chrome/browser/agens/embed/native_shell_mac.mm",
 +      "//chrome/browser/agens/ui/chrome_mac.mm",
++      "//chrome/browser/agens/ui/credits_mac.mm",
 +      "//chrome/browser/agens/ui/logo_svg.h",
 +      "webui_browser_window_mac.mm",
 +    ]
@@ -7571,6 +8337,14 @@ index db2aba2a32..09328bfc13 100644
    }
  
    deps = [
+@@ -121,6 +136,7 @@ source_set("impl") {
+     "//chrome/browser/ui/tabs/tab_strip_api/controllers",
+     "//chrome/browser/ui/toolbar",
+     "//chrome/browser/ui/views:bubble_anchor_util_views",
++    "//components/webui/about",  # agens: the credits page parses its about_credits.html
+     "//chrome/browser/ui/views:find_bar_views",
+     "//chrome/browser/ui/views:tab_search_bubble_host",
+     "//chrome/browser/ui/views/exclusive_access",
 diff --git a/chrome/browser/ui/webui_browser/webui_browser_exclusive_access_context.cc b/chrome/browser/ui/webui_browser/webui_browser_exclusive_access_context.cc
 index 1dc8329849..103a27ea84 100644
 --- a/chrome/browser/ui/webui_browser/webui_browser_exclusive_access_context.cc
