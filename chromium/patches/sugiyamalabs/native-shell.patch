@@ -986,10 +986,10 @@ index 0000000000..ee2f209a38
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
 new file mode 100644
-index 0000000000..1253503078
+index 0000000000..b38bf3de03
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.cc
-@@ -0,0 +1,767 @@
+@@ -0,0 +1,771 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The embed API (agens_embed.h) on top of AgensWindow. Same code on every platform.
 +
@@ -1726,6 +1726,10 @@ index 0000000000..1253503078
 +ExtensionInstallPrompt::ShowDialogCallback NativeInstallDialogCallback() {
 +  return ExtensionInstallPrompt::ShowDialogCallback();
 +}
++std::unique_ptr<LoginHandler> CreateNativeLoginHandler(const net::AuthChallengeInfo&, content::WebContents*,
++                                                       content::LoginDelegate::LoginAuthRequiredCallback) {
++  NOTREACHED();
++}
 +base::WeakPtr<javascript_dialogs::TabModalDialogView> CreateNativeJsDialog(
 +    content::WebContents*, const std::u16string&, content::JavaScriptDialogType, const std::u16string&,
 +    const std::u16string&, content::JavaScriptDialogManager::DialogClosedCallback, base::OnceClosure) {
@@ -1759,10 +1763,10 @@ index 0000000000..1253503078
 +}  // namespace agens
 diff --git a/chrome/browser/agens/embed/native_shell.h b/chrome/browser/agens/embed/native_shell.h
 new file mode 100644
-index 0000000000..6cd4dc8781
+index 0000000000..ebd1215130
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.h
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,66 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Glue between Chromium's Webium window (WebUIBrowserWindow, without its HTML page) and the
 +// agens_embed.h interface.
@@ -1774,6 +1778,7 @@ index 0000000000..6cd4dc8781
 +#include "base/feature_list.h"
 +#include "base/functional/callback_forward.h"
 +#include "chrome/browser/extensions/extension_install_prompt.h"
++#include "chrome/browser/ui/login/login_handler.h"
 +#include "components/javascript_dialogs/tab_modal_dialog_view.h"
 +#include "components/permissions/permission_prompt.h"
 +#include "content/public/browser/javascript_dialog_manager.h"
@@ -1799,6 +1804,11 @@ index 0000000000..6cd4dc8781
 +    permissions::PermissionPrompt::Delegate* delegate);
 +// Where the window's traffic lights center (the shell's toolbar or tab strip height).
 +float NativeTitlebarHeight(views::Widget* widget);
++// A site's HTTP login (user and password) as a native sheet on its window.
++std::unique_ptr<LoginHandler> CreateNativeLoginHandler(
++    const net::AuthChallengeInfo& auth_info,
++    content::WebContents* contents,
++    content::LoginDelegate::LoginAuthRequiredCallback callback);
 +// A page's alert/confirm/prompt as a native sheet on its window.
 +base::WeakPtr<javascript_dialogs::TabModalDialogView> CreateNativeJsDialog(
 +    content::WebContents* contents,
@@ -1825,10 +1835,10 @@ index 0000000000..6cd4dc8781
 +#endif  // CHROME_BROWSER_AGENS_EMBED_NATIVE_SHELL_H_
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
 new file mode 100644
-index 0000000000..ad031393ed
+index 0000000000..48d670c7ba
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
-@@ -0,0 +1,382 @@
+@@ -0,0 +1,443 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The macOS host: the views::View that fills the Webium window, puts the UI's chrome (an NSView)
 +// over it and the active tab in the page card. Everything else is shared (agens_window.h,
@@ -2117,6 +2127,61 @@ index 0000000000..ad031393ed
 +}
 +}  // namespace
 +
++class NativeLoginHandler : public LoginHandler {
++ public:
++  NativeLoginHandler(const net::AuthChallengeInfo& auth_info,
++                     content::WebContents* contents,
++                     content::LoginDelegate::LoginAuthRequiredCallback callback)
++      : LoginHandler(auth_info, contents, std::move(callback)) {}
++  ~NativeLoginHandler() override { CloseDialog(); }
++
++ protected:
++  bool BuildViewImpl(const std::u16string& authority,
++                     const std::u16string& explanation,
++                     LoginModelData*) override {
++    NSWindow* window = web_contents() ? web_contents()->GetTopLevelNativeWindow().GetNativeNSWindow() : nil;
++    if (!window) return false;
++    alert_ = [[NSAlert alloc] init];
++    alert_.messageText = @"Entrar no site";
++    alert_.informativeText = base::SysUTF16ToNSString(explanation.empty() ? authority : explanation);
++    NSView* fields = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 260, 56)];
++    user_ = [NSTextField textFieldWithString:@""];
++    user_.placeholderString = @"Usuário";
++    user_.frame = NSMakeRect(0, 30, 260, 24);
++    password_ = [[NSSecureTextField alloc] initWithFrame:NSMakeRect(0, 0, 260, 24)];
++    password_.placeholderString = @"Senha";
++    [fields addSubview:user_];
++    [fields addSubview:password_];
++    alert_.accessoryView = fields;
++    alert_.window.initialFirstResponder = user_;
++    [alert_ addButtonWithTitle:@"Entrar"];
++    [alert_ addButtonWithTitle:@"Cancelar"];
++    window_ = window;
++    base::WeakPtr<LoginHandler> weak = GetWeakPtr();
++    NSTextField* user = user_;
++    NSSecureTextField* password = password_;
++    [alert_ beginSheetModalForWindow:window completionHandler:^(NSModalResponse response) {
++      if (!weak) return;
++      if (response == NSAlertFirstButtonReturn) {
++        weak->SetAuth(base::SysNSStringToUTF16(user.stringValue), base::SysNSStringToUTF16(password.stringValue));
++      } else if (response != NSModalResponseAbort) {
++        weak->CancelAuth(/*notify_others=*/true);
++      }
++    }];
++    return true;
++  }
++  void CloseDialog() override {
++    if (window_ && alert_.window.sheetParent) [window_ endSheet:alert_.window returnCode:NSModalResponseAbort];
++    alert_ = nil;
++  }
++
++ private:
++  NSAlert* __strong alert_ = nil;
++  NSTextField* __strong user_ = nil;
++  NSSecureTextField* __strong password_ = nil;
++  NSWindow* __strong window_ = nil;
++};
++
 +// Owns itself: deleted when its sheet ends.
 +class NativeJsDialog : public javascript_dialogs::TabModalDialogView {
 + public:
@@ -2177,6 +2242,12 @@ index 0000000000..ad031393ed
 +  NSWindow* __strong window_ = nil;
 +  base::WeakPtrFactory<NativeJsDialog> weak_{this};
 +};
++
++std::unique_ptr<LoginHandler> CreateNativeLoginHandler(const net::AuthChallengeInfo& auth_info,
++                                                       content::WebContents* contents,
++                                                       content::LoginDelegate::LoginAuthRequiredCallback callback) {
++  return std::make_unique<NativeLoginHandler>(auth_info, contents, std::move(callback));
++}
 +
 +base::WeakPtr<javascript_dialogs::TabModalDialogView> CreateNativeJsDialog(
 +    content::WebContents* contents,
@@ -7067,6 +7138,29 @@ index 7c39cff1a2..12aaf6ef38 100644
    return (new JavaScriptTabModalDialogViewViews(
                web_contents_, alerting_web_contents, title, dialog_type,
                message_text, default_prompt_text, std::move(dialog_callback),
+diff --git a/chrome/browser/ui/views/login_handler_views.cc b/chrome/browser/ui/views/login_handler_views.cc
+index 14a99f40f3..aba1304f22 100644
+--- a/chrome/browser/ui/views/login_handler_views.cc
++++ b/chrome/browser/ui/views/login_handler_views.cc
+@@ -4,6 +4,8 @@
+ 
+ #include <string>
+ 
++#include "chrome/browser/agens/embed/native_shell.h"
++
+ #include "base/memory/raw_ptr.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "chrome/browser/ui/blocked_content/popunder_preventer.h"
+@@ -231,6 +233,9 @@ std::unique_ptr<LoginHandler> LoginHandler::Create(
+     const net::AuthChallengeInfo& auth_info,
+     content::WebContents* web_contents,
+     content::LoginDelegate::LoginAuthRequiredCallback auth_required_callback) {
++  if (agens::IsNativeShellEnabled()) {  // agens: a native sheet
++    return agens::CreateNativeLoginHandler(auth_info, web_contents, std::move(auth_required_callback));
++  }
+   return std::make_unique<LoginHandlerViews>(auth_info, web_contents,
+                                              std::move(auth_required_callback));
+ }
 diff --git a/chrome/browser/ui/views/permissions/permission_prompt_factory.cc b/chrome/browser/ui/views/permissions/permission_prompt_factory.cc
 index 12bb0ac5fb..52735f7a84 100644
 --- a/chrome/browser/ui/views/permissions/permission_prompt_factory.cc
