@@ -1,0 +1,1124 @@
+diff --git a/chrome/browser/agens/bridge/BUILD.gn b/chrome/browser/agens/bridge/BUILD.gn
+new file mode 100644
+index 0000000000..d31857a1a6
+--- /dev/null
++++ b/chrome/browser/agens/bridge/BUILD.gn
+@@ -0,0 +1,20 @@
++# Copyright 2026 SugiyamaLabs.
++# The local control socket (docs/agens.md). The server and its ops build inside
++# //chrome/browser/ui/webui_browser:impl next to the embed glue they call; only the wire format
++# lives here, so the self-check below needs nothing but //base.
++
++source_set("protocol") {
++  sources = [
++    "protocol.cc",
++    "protocol.h",
++  ]
++  public_deps = [ "//base" ]
++}
++
++executable("agens_bridge_selfcheck") {
++  sources = [ "protocol_selfcheck.cc" ]
++  deps = [
++    ":protocol",
++    "//base",
++  ]
++}
+diff --git a/chrome/browser/agens/bridge/bridge.h b/chrome/browser/agens/bridge/bridge.h
+new file mode 100644
+index 0000000000..392ac29938
+--- /dev/null
++++ b/chrome/browser/agens/bridge/bridge.h
+@@ -0,0 +1,30 @@
++// Copyright 2026 SugiyamaLabs.
++// The local control socket, `<user data dir>/agens.sock` (docs/agens.md, "O socket"). Accepts and
++// reads on the IO thread, runs each operation on the UI thread (ops.cc) and writes the reply back.
++#ifndef CHROME_BROWSER_AGENS_BRIDGE_BRIDGE_H_
++#define CHROME_BROWSER_AGENS_BRIDGE_BRIDGE_H_
++
++#include <string_view>
++
++#include "base/functional/callback_forward.h"
++#include "base/values.h"
++
++class PrefRegistrySimple;
++
++namespace agens::bridge {
++
++// Local State. Dev setting (Configurações › Sistema): clients without our signature get in.
++inline constexpr char kAcceptUnsignedPref[] = "agens.bridge.accept_unsigned";
++// Clients answered "Permitir sempre": "<team id>/<signing identifier>".
++inline constexpr char kAllowedClientsPref[] = "agens.bridge.allowed_clients";
++
++void RegisterPrefs(PrefRegistrySimple* registry);
++// UI thread. Start once the threads run; Stop at teardown removes the socket file.
++void Start();
++void Stop();
++// UI thread. Sends `{"event": name, ...fields}` to every authorized client.
++void SendEvent(std::string_view name, base::DictValue fields);
++
++}  // namespace agens::bridge
++
++#endif  // CHROME_BROWSER_AGENS_BRIDGE_BRIDGE_H_
+diff --git a/chrome/browser/agens/bridge/bridge_mac.mm b/chrome/browser/agens/bridge/bridge_mac.mm
+new file mode 100644
+index 0000000000..dca941eddd
+--- /dev/null
++++ b/chrome/browser/agens/bridge/bridge_mac.mm
+@@ -0,0 +1,495 @@
++// Copyright 2026 SugiyamaLabs.
++// The socket server on macOS: a Unix socket in the user data dir, the peer's code signature read
++// from its audit token, and the approval of the person before a signed client gets in.
++
++#include "chrome/browser/agens/bridge/bridge.h"
++
++#import <Foundation/Foundation.h>
++#include <Security/Security.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <sys/un.h>
++#include <unistd.h>
++
++#include <algorithm>
++#include <deque>
++#include <map>
++#include <memory>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "base/apple/bridging.h"
++#include "base/apple/foundation_util.h"
++#include "base/apple/scoped_cftyperef.h"
++#include "base/files/file_path.h"
++#include "base/files/scoped_file.h"
++#include "base/functional/bind.h"
++#include "base/logging.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
++#include "base/message_loop/message_pump_for_io.h"
++#include "base/no_destructor.h"
++#include "base/path_service.h"
++#include "base/posix/eintr_wrapper.h"
++#include "base/strings/sys_string_conversions.h"
++#include "base/task/bind_post_task.h"
++#include "base/task/current_thread.h"
++#include "base/task/sequenced_task_runner.h"
++#include "base/task/thread_pool.h"
++#include "chrome/browser/agens/bridge/ops.h"
++#include "chrome/browser/agens/bridge/protocol.h"
++#include "chrome/browser/agens/embed/native_shell.h"
++#include "chrome/browser/browser_process.h"
++#include "chrome/common/chrome_paths.h"
++#include "components/prefs/pref_registry_simple.h"
++#include "components/prefs/pref_service.h"
++#include "components/prefs/scoped_user_pref_update.h"
++#include "content/public/browser/browser_task_traits.h"
++#include "content/public/browser/browser_thread.h"
++
++namespace agens::bridge {
++
++namespace {
++
++// PLACEHOLDER: our Apple Team ID (10 characters, from the Developer account). Not known yet: no
++// signing identity on the build machine. Until it is set no client passes the signature check, so
++// only "Aceitar apps sem assinatura" lets clients in.
++constexpr char kTeamId[] = "TEAM_ID_PLACEHOLDER";
++
++constexpr char kSocketName[] = "agens.sock";
++
++// --- Who is on the other side (thread pool: the Security calls may block).
++
++struct Peer {
++  bool ours = false;     // signed with kTeamId
++  std::string identity;  // "<team id>/<signing identifier>", only when ours
++  std::string name;      // the app's name, for the approval sheet
++};
++
++std::string AppName(SecCodeRef code, const std::string& fallback) {
++  CFURLRef url = nullptr;
++  if (SecCodeCopyPath(code, kSecCSDefaultFlags, &url) != errSecSuccess || !url) return fallback;
++  base::apple::ScopedCFTypeRef<CFURLRef> owned(url);
++  NSURL* path = base::apple::CFToNSPtrCast(url);
++  NSBundle* bundle = [NSBundle bundleWithURL:path];
++  NSString* name = [bundle objectForInfoDictionaryKey:@"CFBundleDisplayName"]
++                       ?: [bundle objectForInfoDictionaryKey:@"CFBundleName"];
++  if (![name isKindOfClass:NSString.class] || !name.length) {
++    name = path.lastPathComponent.stringByDeletingPathExtension;
++  }
++  return name.length ? base::SysNSStringToUTF8(name) : fallback;
++}
++
++Peer CheckPeer(audit_token_t token) {
++  Peer peer;
++  peer.name = "app";
++  base::apple::ScopedCFTypeRef<CFDataRef> data(
++      CFDataCreate(nullptr, reinterpret_cast<const UInt8*>(&token), sizeof(token)));
++  NSDictionary* attributes = @{
++    base::apple::CFToNSPtrCast(kSecGuestAttributeAudit) : base::apple::CFToNSPtrCast(data.get())
++  };
++  SecCodeRef raw_code = nullptr;
++  if (SecCodeCopyGuestWithAttributes(nullptr, base::apple::NSToCFPtrCast(attributes),
++                                     kSecCSDefaultFlags, &raw_code) != errSecSuccess ||
++      !raw_code) {
++    return peer;
++  }
++  base::apple::ScopedCFTypeRef<SecCodeRef> code(raw_code);
++
++  CFDictionaryRef raw_info = nullptr;
++  std::string identifier;
++  if (SecCodeCopySigningInformation(code.get(), kSecCSSigningInformation, &raw_info) ==
++          errSecSuccess &&
++      raw_info) {
++    base::apple::ScopedCFTypeRef<CFDictionaryRef> info(raw_info);
++    if (CFStringRef id = base::apple::GetValueFromDictionary<CFStringRef>(info.get(),
++                                                                          kSecCodeInfoIdentifier)) {
++      identifier = base::SysCFStringRefToUTF8(id);
++    }
++  }
++  peer.name = AppName(code.get(), identifier.empty() ? peer.name : identifier);
++
++  const std::string requirement_text =
++      std::string("anchor apple generic and certificate leaf[subject.OU] = \"") + kTeamId + "\"";
++  SecRequirementRef raw_requirement = nullptr;
++  if (SecRequirementCreateWithString(base::SysUTF8ToCFStringRef(requirement_text).get(),
++                                     kSecCSDefaultFlags, &raw_requirement) != errSecSuccess ||
++      !raw_requirement) {
++    return peer;
++  }
++  base::apple::ScopedCFTypeRef<SecRequirementRef> requirement(raw_requirement);
++  // Checks the running process (dynamic validity) against our Team ID.
++  if (SecCodeCheckValidity(code.get(), kSecCSDefaultFlags, requirement.get()) == errSecSuccess &&
++      !identifier.empty()) {
++    peer.ours = true;
++    peer.identity = std::string(kTeamId) + "/" + identifier;
++  }
++  return peer;
++}
++
++// --- The decision (UI thread). `done` gets nullptr to let the client in, else the error code.
++
++using Decision = base::OnceCallback<void(const char* error)>;
++
++struct Ask {
++  Peer peer;
++  Decision done;
++};
++std::deque<Ask>& Asks() {
++  static base::NoDestructor<std::deque<Ask>> asks;
++  return *asks;
++}
++bool g_asking = false;
++
++bool AlwaysAllowed(const std::string& identity) {
++  const base::ListValue& list = g_browser_process->local_state()->GetList(kAllowedClientsPref);
++  return std::ranges::contains(list, base::Value(identity));
++}
++
++void AskNext();
++
++void Answered(AgensClientAnswer answer) {
++  g_asking = false;
++  if (Asks().empty()) return;
++  Ask ask = std::move(Asks().front());
++  Asks().pop_front();
++  if (answer == kAgensClientAllowAlways && !AlwaysAllowed(ask.peer.identity)) {
++    ScopedListPrefUpdate(g_browser_process->local_state(), kAllowedClientsPref)
++        ->Append(ask.peer.identity);
++  }
++  std::move(ask.done).Run(answer == kAgensClientDeny ? kDenied : nullptr);
++  AskNext();
++}
++
++// One sheet at a time; a client answered "Permitir sempre" meanwhile skips its own.
++void AskNext() {
++  while (!g_asking && !Asks().empty()) {
++    if (AlwaysAllowed(Asks().front().peer.identity)) {
++      Ask ask = std::move(Asks().front());
++      Asks().pop_front();
++      std::move(ask.done).Run(nullptr);
++      continue;
++    }
++    g_asking = true;
++    // May answer right away (no window to ask on): Answered then pops this one.
++    agens::AskClientApproval(Asks().front().peer.name, base::BindOnce(&Answered));
++  }
++}
++
++void Decide(Peer peer, Decision done) {
++  if (!g_browser_process || g_browser_process->IsShuttingDown()) {
++    std::move(done).Run(kDenied);
++    return;
++  }
++  if (!peer.ours) {
++    const bool accept = g_browser_process->local_state()->GetBoolean(kAcceptUnsignedPref);
++    std::move(done).Run(accept ? nullptr : kUnauthorized);
++    return;
++  }
++  Asks().push_back({std::move(peer), std::move(done)});
++  AskNext();
++}
++
++// --- The server (IO thread).
++
++class Server;
++
++class Connection : public base::MessagePumpForIO::FdWatcher {
++ public:
++  Connection(Server* server, base::ScopedFD fd) : server_(server), fd_(std::move(fd)) {}
++
++  void Start();
++  void Send(std::string line);
++
++ private:
++  enum class State { kChecking, kAllowed, kClosing };
++
++  void Authorized(const char* error);
++  void Handle(std::string line);
++  void Flush();
++  void Close();
++
++  // base::MessagePumpForIO::FdWatcher:
++  void OnFileCanReadWithoutBlocking(int fd) override;
++  void OnFileCanWriteWithoutBlocking(int fd) override;
++
++  raw_ptr<Server> server_;
++  base::ScopedFD fd_;
++  State state_ = State::kChecking;
++  LineFramer framer_;
++  std::vector<std::string> waiting_;  // lines read before the client was let in
++  std::string out_;
++  base::MessagePumpForIO::FdWatchController read_watch_{FROM_HERE};
++  base::MessagePumpForIO::FdWatchController write_watch_{FROM_HERE};
++  bool writing_ = false;
++  base::WeakPtrFactory<Connection> weak_{this};
++
++  friend class Server;
++};
++
++class Server : public base::MessagePumpForIO::FdWatcher {
++ public:
++  explicit Server(base::ScopedFD fd) : fd_(std::move(fd)) {
++    base::CurrentIOThread::Get()->WatchFileDescriptor(fd_.get(), /*persistent=*/true,
++                                                      base::MessagePumpForIO::WATCH_READ,
++                                                      &watch_, this);
++  }
++
++  void Remove(Connection* connection) {
++    auto it = connections_.find(connection);
++    if (it == connections_.end()) return;
++    // Not now: we may be inside one of its watcher callbacks.
++    base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE, std::move(it->second));
++    connections_.erase(it);
++  }
++
++  void Broadcast(const std::string& line) {
++    for (auto& [connection, owned] : connections_) {
++      if (connection->state_ == Connection::State::kAllowed) connection->Send(line);
++    }
++  }
++
++ private:
++  // base::MessagePumpForIO::FdWatcher:
++  void OnFileCanReadWithoutBlocking(int) override {
++    for (;;) {
++      base::ScopedFD client(HANDLE_EINTR(accept(fd_.get(), nullptr, nullptr)));
++      if (!client.is_valid()) {
++        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != ECONNABORTED) {
++          PLOG(ERROR) << "agens bridge: accept";
++        }
++        return;
++      }
++      const int one = 1;
++      setsockopt(client.get(), SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
++      if (fcntl(client.get(), F_SETFL, fcntl(client.get(), F_GETFL) | O_NONBLOCK) != 0) continue;
++      auto connection = std::make_unique<Connection>(this, std::move(client));
++      Connection* raw = connection.get();
++      connections_[raw] = std::move(connection);
++      raw->Start();
++    }
++  }
++  void OnFileCanWriteWithoutBlocking(int) override {}
++
++  base::ScopedFD fd_;
++  base::MessagePumpForIO::FdWatchController watch_{FROM_HERE};
++  std::map<Connection*, std::unique_ptr<Connection>> connections_;
++};
++
++void Connection::Start() {
++  base::CurrentIOThread::Get()->WatchFileDescriptor(fd_.get(), /*persistent=*/true,
++                                                    base::MessagePumpForIO::WATCH_READ,
++                                                    &read_watch_, this);
++  audit_token_t token;
++  socklen_t size = sizeof(token);
++  if (getsockopt(fd_.get(), SOL_LOCAL, LOCAL_PEERTOKEN, &token, &size) != 0) {
++    PLOG(ERROR) << "agens bridge: LOCAL_PEERTOKEN";
++    Authorized(kUnauthorized);
++    return;
++  }
++  // Signature (thread pool) → decision (UI) → back here.
++  base::ThreadPool::PostTaskAndReplyWithResult(
++      FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_VISIBLE}, base::BindOnce(&CheckPeer, token),
++      base::BindOnce(
++          [](Decision done, Peer peer) {
++            content::GetUIThreadTaskRunner({})->PostTask(
++                FROM_HERE, base::BindOnce(&Decide, std::move(peer), std::move(done)));
++          },
++          base::BindPostTask(content::GetIOThreadTaskRunner({}),
++                             base::BindOnce(&Connection::Authorized, weak_.GetWeakPtr()))));
++}
++
++void Connection::Authorized(const char* error) {
++  if (state_ != State::kChecking) return;
++  if (error) {
++    // Each waiting request gets the refusal; a client that sent nothing gets one without id.
++    if (waiting_.empty()) out_ += ErrorReply(nullptr, error);
++    for (const std::string& line : waiting_) {
++      std::string reply;
++      if (std::optional<Request> request = ParseRequest(line, reply)) {
++        reply = ErrorReply(&request->id, error);
++      }
++      out_ += reply;
++    }
++    waiting_.clear();
++    state_ = State::kClosing;
++    Flush();
++    return;
++  }
++  state_ = State::kAllowed;
++  std::vector<std::string> lines = std::move(waiting_);
++  waiting_.clear();
++  for (std::string& line : lines) Handle(std::move(line));
++}
++
++void Connection::Handle(std::string line) {
++  std::string error;
++  std::optional<Request> request = ParseRequest(line, error);
++  if (!request) {
++    Send(std::move(error));
++    return;
++  }
++  content::GetUIThreadTaskRunner({})->PostTask(
++      FROM_HERE, base::BindOnce(&HandleOp, std::move(*request),
++                                base::BindPostTask(content::GetIOThreadTaskRunner({}),
++                                                   base::BindOnce(&Connection::Send, weak_.GetWeakPtr()))));
++}
++
++void Connection::Send(std::string line) {
++  if (state_ == State::kClosing) return;
++  out_ += line;
++  Flush();
++}
++
++void Connection::Flush() {
++  while (!out_.empty()) {
++    const ssize_t n = HANDLE_EINTR(write(fd_.get(), out_.data(), out_.size()));
++    if (n < 0) {
++      if (errno == EAGAIN || errno == EWOULDBLOCK) {
++        if (!writing_) {
++          writing_ = base::CurrentIOThread::Get()->WatchFileDescriptor(
++              fd_.get(), /*persistent=*/true, base::MessagePumpForIO::WATCH_WRITE, &write_watch_, this);
++        }
++        return;
++      }
++      out_.clear();
++      Close();
++      return;
++    }
++    out_.erase(0, n);
++  }
++  if (writing_) {
++    write_watch_.StopWatchingFileDescriptor();
++    writing_ = false;
++  }
++  if (state_ == State::kClosing) Close();
++}
++
++void Connection::Close() {
++  read_watch_.StopWatchingFileDescriptor();
++  write_watch_.StopWatchingFileDescriptor();
++  writing_ = false;
++  state_ = State::kClosing;
++  weak_.InvalidateWeakPtrs();
++  server_->Remove(this);
++}
++
++void Connection::OnFileCanReadWithoutBlocking(int) {
++  char buffer[64 * 1024];
++  for (;;) {
++    const ssize_t n = HANDLE_EINTR(read(fd_.get(), buffer, sizeof(buffer)));
++    if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
++      Close();
++      return;
++    }
++    if (n < 0) return;
++    std::vector<std::string> lines;
++    if (!framer_.Append(std::string_view(buffer, n), lines)) {
++      Close();  // a line past kMaxLineBytes
++      return;
++    }
++    for (std::string& line : lines) {
++      if (state_ == State::kChecking) {
++        waiting_.push_back(std::move(line));
++      } else if (state_ == State::kAllowed) {
++        Handle(std::move(line));
++      }
++    }
++    if (state_ == State::kClosing) return;
++    // shortcut: requests queued while the approval sheet is up are not capped beyond the line cap.
++  }
++}
++
++void Connection::OnFileCanWriteWithoutBlocking(int) {
++  Flush();
++}
++
++// --- Lifetime.
++
++Server* g_server = nullptr;  // IO thread only
++base::FilePath& SocketPath() {  // UI thread only
++  static base::NoDestructor<base::FilePath> path;
++  return *path;
++}
++
++void StartOnIO(base::ScopedFD fd) {
++  DCHECK(!g_server);
++  g_server = new Server(std::move(fd));
++}
++
++void StopOnIO() {
++  delete g_server;
++  g_server = nullptr;
++}
++
++base::ScopedFD Listen(const base::FilePath& path) {
++  sockaddr_un address = {};
++  address.sun_family = AF_UNIX;
++  if (path.value().size() >= sizeof(address.sun_path)) {
++    LOG(ERROR) << "agens bridge: socket path too long (" << path.value().size() << " bytes, max "
++               << sizeof(address.sun_path) - 1 << "): " << path.value() << "; the socket is off";
++    return {};
++  }
++  strlcpy(address.sun_path, path.value().c_str(), sizeof(address.sun_path));
++  // Only one browser runs per user data dir (the process singleton), so a socket left here is
++  // stale. Anything else at that path is not ours to delete.
++  struct stat info;
++  if (lstat(address.sun_path, &info) == 0) {
++    if (!S_ISSOCK(info.st_mode)) {
++      LOG(ERROR) << "agens bridge: " << path.value() << " exists and is not a socket; the socket is off";
++      return {};
++    }
++    unlink(address.sun_path);
++  }
++  base::ScopedFD fd(socket(AF_UNIX, SOCK_STREAM, 0));
++  if (!fd.is_valid() || fcntl(fd.get(), F_SETFL, fcntl(fd.get(), F_GETFL) | O_NONBLOCK) != 0 ||
++      bind(fd.get(), reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
++    PLOG(ERROR) << "agens bridge: bind " << path.value();
++    return {};
++  }
++  // Before listen(), so nobody connects while it is still wider than 0600.
++  if (chmod(address.sun_path, 0600) != 0 || listen(fd.get(), SOMAXCONN) != 0) {
++    PLOG(ERROR) << "agens bridge: listen " << path.value();
++    unlink(address.sun_path);
++    return {};
++  }
++  return fd;
++}
++
++}  // namespace
++
++void RegisterPrefs(PrefRegistrySimple* registry) {
++  registry->RegisterBooleanPref(kAcceptUnsignedPref, false);
++  registry->RegisterListPref(kAllowedClientsPref);
++}
++
++void Start() {
++  base::FilePath dir;
++  if (!SocketPath().empty() || !base::PathService::Get(chrome::DIR_USER_DATA, &dir)) return;
++  const base::FilePath path = dir.AppendASCII(kSocketName);
++  base::ScopedFD fd = Listen(path);
++  if (!fd.is_valid()) return;
++  SocketPath() = path;
++  content::GetIOThreadTaskRunner({})->PostTask(FROM_HERE, base::BindOnce(&StartOnIO, std::move(fd)));
++}
++
++void Stop() {
++  if (SocketPath().empty()) return;
++  unlink(SocketPath().value().c_str());
++  SocketPath().clear();
++  content::GetIOThreadTaskRunner({})->PostTask(FROM_HERE, base::BindOnce(&StopOnIO));
++}
++
++void SendEvent(std::string_view name, base::DictValue fields) {
++  content::GetIOThreadTaskRunner({})->PostTask(
++      FROM_HERE, base::BindOnce(
++                     [](std::string line) {
++                       if (g_server) g_server->Broadcast(line);
++                     },
++                     EventLine(name, std::move(fields))));
++}
++
++}  // namespace agens::bridge
+diff --git a/chrome/browser/agens/bridge/ops.cc b/chrome/browser/agens/bridge/ops.cc
+new file mode 100644
+index 0000000000..028f1636af
+--- /dev/null
++++ b/chrome/browser/agens/bridge/ops.cc
+@@ -0,0 +1,22 @@
++// Copyright 2026 SugiyamaLabs.
++
++#include "chrome/browser/agens/bridge/ops.h"
++
++#include <utility>
++
++#include "base/version_info/version_info.h"
++
++namespace agens::bridge {
++
++void HandleOp(Request request, ReplyCallback reply) {
++  if (request.op == "hello") {
++    base::DictValue result;
++    result.Set("protocol", kProtocolVersion);
++    result.Set("browser", version_info::GetVersionNumber());
++    std::move(reply).Run(OkReply(request.id, std::move(result)));
++    return;
++  }
++  std::move(reply).Run(ErrorReply(&request.id, kUnknownOp, request.op));
++}
++
++}  // namespace agens::bridge
+diff --git a/chrome/browser/agens/bridge/ops.h b/chrome/browser/agens/bridge/ops.h
+new file mode 100644
+index 0000000000..869202bb01
+--- /dev/null
++++ b/chrome/browser/agens/bridge/ops.h
+@@ -0,0 +1,19 @@
++// Copyright 2026 SugiyamaLabs.
++// The socket's operations, run on the UI thread.
++#ifndef CHROME_BROWSER_AGENS_BRIDGE_OPS_H_
++#define CHROME_BROWSER_AGENS_BRIDGE_OPS_H_
++
++#include <string>
++
++#include "base/functional/callback.h"
++#include "chrome/browser/agens/bridge/protocol.h"
++
++namespace agens::bridge {
++
++// Gets the finished reply line (protocol.h) to send. Every op runs it exactly once.
++using ReplyCallback = base::OnceCallback<void(std::string line)>;
++void HandleOp(Request request, ReplyCallback reply);
++
++}  // namespace agens::bridge
++
++#endif  // CHROME_BROWSER_AGENS_BRIDGE_OPS_H_
+diff --git a/chrome/browser/agens/bridge/protocol.cc b/chrome/browser/agens/bridge/protocol.cc
+new file mode 100644
+index 0000000000..2ec7ddec6d
+--- /dev/null
++++ b/chrome/browser/agens/bridge/protocol.cc
+@@ -0,0 +1,86 @@
++// Copyright 2026 SugiyamaLabs.
++
++#include "chrome/browser/agens/bridge/protocol.h"
++
++#include <utility>
++
++#include "base/json/json_reader.h"
++#include "base/json/json_writer.h"
++
++namespace agens::bridge {
++
++namespace {
++
++std::string Line(base::DictValue dict) {
++  // Values built here are always serializable; the writer escapes "\n" inside strings.
++  return base::WriteJson(dict).value_or("{}") + "\n";
++}
++
++}  // namespace
++
++bool LineFramer::Append(std::string_view data, std::vector<std::string>& lines) {
++  while (!data.empty()) {
++    const size_t end = data.find('\n');
++    const std::string_view piece = data.substr(0, end);
++    if (partial_.size() + piece.size() > kMaxLineBytes) {
++      partial_.clear();
++      return false;
++    }
++    partial_.append(piece);
++    if (end == std::string_view::npos) break;
++    if (!partial_.empty() && partial_.back() == '\r') partial_.pop_back();
++    if (!partial_.empty()) lines.push_back(std::move(partial_));
++    partial_.clear();
++    data.remove_prefix(end + 1);
++  }
++  return true;
++}
++
++std::optional<Request> ParseRequest(std::string_view line, std::string& error_reply) {
++  std::optional<base::Value> value = base::JSONReader::Read(line, base::JSON_PARSE_RFC);
++  if (!value || !value->is_dict()) {
++    error_reply = ErrorReply(nullptr, kBadRequest, "not a JSON object");
++    return std::nullopt;
++  }
++  base::DictValue& dict = value->GetDict();
++  const base::Value* id = dict.Find("id");
++  if (!id || !(id->is_int() || id->is_double() || id->is_string())) {
++    error_reply = ErrorReply(nullptr, kBadRequest, "missing id");
++    return std::nullopt;
++  }
++  const std::string* op = dict.FindString("op");
++  if (!op || op->empty()) {
++    error_reply = ErrorReply(id, kBadRequest, "missing op");
++    return std::nullopt;
++  }
++  Request request{id->Clone(), *op, {}};
++  request.body = std::move(dict);
++  return request;
++}
++
++std::string OkReply(const base::Value& id, base::DictValue result) {
++  result.Set("id", id.Clone());
++  result.Set("ok", true);
++  return Line(std::move(result));
++}
++
++std::string ErrorReply(const base::Value* id, std::string_view code, std::string_view message) {
++  base::DictValue dict;
++  if (id) dict.Set("id", id->Clone());
++  dict.Set("ok", false);
++  dict.Set("error", code);
++  if (!message.empty()) dict.Set("message", message);
++  return Line(std::move(dict));
++}
++
++std::string EventLine(std::string_view name, base::DictValue fields) {
++  fields.Set("event", name);
++  return Line(std::move(fields));
++}
++
++std::optional<std::string> StringParam(const base::DictValue& body, std::string_view key) {
++  const std::string* s = body.FindString(key);
++  return s ? std::optional<std::string>(*s) : std::nullopt;
++}
++
++}  // namespace agens::bridge
+diff --git a/chrome/browser/agens/bridge/protocol.h b/chrome/browser/agens/bridge/protocol.h
+new file mode 100644
+index 0000000000..895c9468b3
+--- /dev/null
++++ b/chrome/browser/agens/bridge/protocol.h
+@@ -0,0 +1,59 @@
++// Copyright 2026 SugiyamaLabs.
++// The socket's wire format (docs/agens.md, "O socket"): one JSON object per line. Pure logic, no
++// sockets or threads, so protocol_selfcheck.cc can exercise it with only //base.
++#ifndef CHROME_BROWSER_AGENS_BRIDGE_PROTOCOL_H_
++#define CHROME_BROWSER_AGENS_BRIDGE_PROTOCOL_H_
++
++#include <optional>
++#include <string>
++#include <string_view>
++#include <vector>
++
++#include "base/values.h"
++
++namespace agens::bridge {
++
++inline constexpr int kProtocolVersion = 1;
++// A longer line drops the connection.
++inline constexpr size_t kMaxLineBytes = 1 << 20;
++
++// Error codes on the wire.
++inline constexpr char kBadRequest[] = "bad_request";
++inline constexpr char kUnknownOp[] = "unknown_op";
++inline constexpr char kNotFound[] = "not_found";
++inline constexpr char kUnauthorized[] = "unauthorized";
++inline constexpr char kDenied[] = "denied";
++
++// Splits a byte stream into lines (without the "\n"). Empty lines are skipped.
++class LineFramer {
++ public:
++  // Appends `data` and moves every complete line into `lines`. False once a line passes
++  // kMaxLineBytes; the framer is then unusable.
++  bool Append(std::string_view data, std::vector<std::string>& lines);
++
++ private:
++  std::string partial_;
++};
++
++struct Request {
++  base::Value id;          // a number or a string, echoed back as is
++  std::string op;
++  base::DictValue body;  // the whole object, so ops read their params from it
++};
++
++// Parses one line. On failure returns nullopt and fills `error_reply` with the line to send back
++// (bad_request, carrying the id when one could be read).
++std::optional<Request> ParseRequest(std::string_view line, std::string& error_reply);
++
++// Lines to send, each ending in "\n". `result` fields sit next to "id" and "ok".
++std::string OkReply(const base::Value& id, base::DictValue result = {});
++// `id` may be null (no request to answer, e.g. a refused connection).
++std::string ErrorReply(const base::Value* id, std::string_view code, std::string_view message = {});
++std::string EventLine(std::string_view name, base::DictValue fields = {});
++
++// Param helpers: the string at `key`, or nullopt when missing or not a string.
++std::optional<std::string> StringParam(const base::DictValue& body, std::string_view key);
++
++}  // namespace agens::bridge
++
++#endif  // CHROME_BROWSER_AGENS_BRIDGE_PROTOCOL_H_
+diff --git a/chrome/browser/agens/bridge/protocol_selfcheck.cc b/chrome/browser/agens/bridge/protocol_selfcheck.cc
+new file mode 100644
+index 0000000000..119cff55d0
+--- /dev/null
++++ b/chrome/browser/agens/bridge/protocol_selfcheck.cc
+@@ -0,0 +1,95 @@
++// Copyright 2026 SugiyamaLabs.
++// Assert-based check of the wire format (protocol.h). Build and run:
++//   ninja -C out/Dev agens_bridge_selfcheck && out/Dev/agens_bridge_selfcheck
++
++#include <cstdio>
++#include <cstdlib>
++#include <string>
++#include <vector>
++
++#include "base/json/json_reader.h"
++#include "chrome/browser/agens/bridge/protocol.h"
++
++using namespace agens::bridge;
++
++#define CHECK_TRUE(x)                                              \
++  do {                                                             \
++    if (!(x)) {                                                    \
++      std::fprintf(stderr, "FAILED %s:%d: %s\n", __FILE__, __LINE__, #x); \
++      std::exit(1);                                                \
++    }                                                              \
++  } while (0)
++
++static base::DictValue Parse(const std::string& line) {
++  CHECK_TRUE(!line.empty() && line.back() == '\n');
++  CHECK_TRUE(line.find('\n') == line.size() - 1);
++  std::optional<base::Value> v = base::JSONReader::Read(line, base::JSON_PARSE_RFC);
++  CHECK_TRUE(v && v->is_dict());
++  return std::move(v->GetDict());
++}
++
++int main() {
++  // Framing: split across chunks, CRLF, empty lines.
++  {
++    LineFramer framer;
++    std::vector<std::string> lines;
++    CHECK_TRUE(framer.Append("{\"a\":", lines));
++    CHECK_TRUE(lines.empty());
++    CHECK_TRUE(framer.Append("1}\r\n\n{\"b\":2}\n{\"c\"", lines));
++    CHECK_TRUE(lines.size() == 2 && lines[0] == "{\"a\":1}" && lines[1] == "{\"b\":2}");
++    CHECK_TRUE(framer.Append(":3}\n", lines));
++    CHECK_TRUE(lines.size() == 3 && lines[2] == "{\"c\":3}");
++  }
++  // Cap: exactly kMaxLineBytes is fine, one more drops.
++  {
++    LineFramer framer;
++    std::vector<std::string> lines;
++    CHECK_TRUE(framer.Append(std::string(kMaxLineBytes, 'x') + "\n", lines));
++    CHECK_TRUE(lines.size() == 1);
++    LineFramer over;
++    CHECK_TRUE(over.Append(std::string(kMaxLineBytes / 2, 'x'), lines));
++    CHECK_TRUE(!over.Append(std::string(kMaxLineBytes / 2 + 1, 'x'), lines));
++  }
++  // Requests.
++  {
++    std::string error;
++    std::optional<Request> r = ParseRequest(R"({"id":1,"op":"atos.create","name":"Cliente A","tag":"t1"})", error);
++    CHECK_TRUE(r && r->op == "atos.create" && r->id.GetInt() == 1);
++    CHECK_TRUE(StringParam(r->body, "name") == "Cliente A");
++    CHECK_TRUE(StringParam(r->body, "tag") == "t1");
++    CHECK_TRUE(!StringParam(r->body, "color"));
++    CHECK_TRUE(!StringParam(r->body, "id"));  // not a string
++
++    CHECK_TRUE(!ParseRequest("not json", error));
++    base::DictValue e = Parse(error);
++    CHECK_TRUE(*e.FindString("error") == kBadRequest && !e.Find("id") && e.FindBool("ok") == false);
++
++    CHECK_TRUE(!ParseRequest("[1,2]", error));
++    CHECK_TRUE(*Parse(error).FindString("error") == kBadRequest);
++
++    CHECK_TRUE(!ParseRequest(R"({"op":"hello"})", error));
++    CHECK_TRUE(*Parse(error).FindString("error") == kBadRequest);
++
++    CHECK_TRUE(!ParseRequest(R"({"id":7})", error));
++    e = Parse(error);
++    CHECK_TRUE(*e.FindString("error") == kBadRequest && e.FindInt("id") == 7);
++
++    CHECK_TRUE(!ParseRequest(R"({"id":{},"op":"hello"})", error));
++    CHECK_TRUE(ParseRequest(R"({"id":"abc","op":"hello"})", error));
++  }
++  // Replies and events.
++  {
++    base::DictValue result;
++    result.Set("ato", "Profile 1");
++    base::DictValue ok = Parse(OkReply(base::Value(3), std::move(result)));
++    CHECK_TRUE(ok.FindInt("id") == 3 && ok.FindBool("ok") == true && *ok.FindString("ato") == "Profile 1");
++
++    base::DictValue err = Parse(ErrorReply(nullptr, kUnauthorized, "line\nbreak"));
++    CHECK_TRUE(*err.FindString("error") == kUnauthorized && *err.FindString("message") == "line\nbreak");
++
++    base::DictValue ev = Parse(EventLine("session.lost"));
++    CHECK_TRUE(*ev.FindString("event") == "session.lost" && !ev.Find("id"));
++  }
++  std::printf("agens bridge protocol: ok\n");
++  return 0;
++}
+diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
+index 9d0bf4646d..9a54f1f4e2 100644
+--- a/chrome/browser/agens/embed/agens_embed.h
++++ b/chrome/browser/agens/embed/agens_embed.h
+@@ -279,6 +279,15 @@ typedef enum {
+ } AgensPermissionAnswer;
+ void agens_window_permission_answer(AgensWindow* window, AgensPermissionAnswer answer);
+ 
++// A signed local app wants to use the browser through its socket (docs/agens.md):
++// agens_ui_client_prompt asks the person, the UI answers once with agens_window_client_answer.
++typedef enum {
++  kAgensClientAllow,
++  kAgensClientAllowAlways,  // remembered for that app
++  kAgensClientDeny,
++} AgensClientAnswer;
++void agens_window_client_answer(AgensWindow* window, AgensClientAnswer answer);
++
+ // The site of the active page, for the panel behind the site icon. `pattern` is what
+ // agens_site_exception_set takes for this site. Strings valid until the next call.
+ typedef struct {
+@@ -358,6 +367,8 @@ float agens_ui_card_radius(void* chrome);
+ float agens_ui_titlebar_height(void* chrome);
+ void agens_ui_permission_prompt(void* chrome, const char* site, const char* const* asks, int count);
+ void agens_ui_permission_prompt_close(void* chrome);
++// `client` is the app's name, read from its signed bundle.
++void agens_ui_client_prompt(void* chrome, const char* client);
+ void agens_ui_destroy_chrome(void* chrome);
+ 
+ #ifdef __cplusplus
+diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
+index 268d4dc7bd..ce102aeaa0 100644
+--- a/chrome/browser/agens/embed/agens_window.h
++++ b/chrome/browser/agens/embed/agens_window.h
+@@ -230,6 +230,7 @@ struct AgensWindow : public TabStripModelObserver,
+     }
+   }
+   ~AgensWindow() override {
++    if (client_answer) std::move(client_answer).Run(kAgensClientDeny);  // closed while asking
+     if (bookmark_model) bookmark_model->RemoveObserver(this);
+     Storage().RemoveObserver(this);
+     for (download::DownloadItem* item : downloads) item->RemoveObserver(this);
+@@ -647,6 +648,8 @@ struct AgensWindow : public TabStripModelObserver,
+     }
+   }
+   base::WeakPtr<permissions::PermissionPrompt::Delegate> permission_delegate;
++  // A local app waiting for the person's answer (agens_ui_client_prompt).
++  base::OnceCallback<void(AgensClientAnswer)> client_answer;
+   AgensFindChanged find_observer = nullptr;
+   raw_ptr<void> find_context = nullptr;
+   base::ScopedObservation<find_in_page::FindTabHelper, find_in_page::FindResultObserver> find_observation{this};
+diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
+index cfdc014cf4..45f9dc6222 100644
+--- a/chrome/browser/agens/embed/native_shell.cc
++++ b/chrome/browser/agens/embed/native_shell.cc
+@@ -473,6 +473,9 @@ void agens_password_remove(AgensWindow* w, int index) {
+   saved->logins.erase(saved->logins.begin() + index);
+ }
+ 
++void agens_window_client_answer(AgensWindow* w, AgensClientAnswer answer) {
++  if (w->client_answer) std::move(w->client_answer).Run(answer);
++}
+ void agens_window_permission_answer(AgensWindow* w, AgensPermissionAnswer answer) {
+   base::WeakPtr<permissions::PermissionPrompt::Delegate> delegate = std::move(w->permission_delegate);
+   if (!delegate) return;
+@@ -814,6 +817,9 @@ void NativeTabStateChanged(views::Widget*) {}
+ void ConfirmCloseWithDownloads(views::Widget*, int, base::OnceCallback<void(bool)> callback) {
+   std::move(callback).Run(true);
+ }
++void AskClientApproval(const std::string&, base::OnceCallback<void(AgensClientAnswer)> done) {
++  std::move(done).Run(kAgensClientDeny);
++}
+ #endif
+ 
+ bool IsNativeStatusBubble(const StatusBubble* bubble) {
+diff --git a/chrome/browser/agens/embed/native_shell.h b/chrome/browser/agens/embed/native_shell.h
+index d81488f053..7e1d14a14d 100644
+--- a/chrome/browser/agens/embed/native_shell.h
++++ b/chrome/browser/agens/embed/native_shell.h
+@@ -8,6 +8,7 @@
+ 
+ #include "base/feature_list.h"
+ #include "base/functional/callback_forward.h"
++#include "chrome/browser/agens/embed/agens_embed.h"
+ #include "chrome/browser/extensions/extension_install_prompt.h"
+ #include "chrome/browser/ui/login/login_handler.h"
+ #include "components/javascript_dialogs/tab_modal_dialog_view.h"
+@@ -68,6 +69,9 @@ void NativeTabStateChanged(views::Widget* widget);
+ // True for the native shell's bubble. Chromium casts status bubbles to StatusBubbleViews in a
+ // couple of places; those check this first.
+ bool IsNativeStatusBubble(const StatusBubble* bubble);
++// Asks the person whether the local app `client` may use the browser (the socket, bridge/), on
++// the last active window. Answers deny right away without a window to ask on.
++void AskClientApproval(const std::string& client, base::OnceCallback<void(AgensClientAnswer)> done);
+ // Asks whether to close the window and cancel `count` downloads; answers through `callback`.
+ void ConfirmCloseWithDownloads(views::Widget* widget, int count, base::OnceCallback<void(bool)> callback);
+ 
+diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
+index 5d7ca90415..e5d47cf8b2 100644
+--- a/chrome/browser/agens/embed/native_shell_mac.mm
++++ b/chrome/browser/agens/embed/native_shell_mac.mm
+@@ -15,6 +15,7 @@
+ #include "base/strings/sys_string_conversions.h"
+ #include "chrome/browser/extensions/extension_install_prompt_show_params.h"
+ #include "extensions/browser/install_prompt_data.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
+ #include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
+ #include "components/permissions/permission_request.h"
+ #include "ui/base/metadata/metadata_header_macros.h"
+@@ -360,6 +361,23 @@ bool HandleNativeCommand(BrowserWindowInterface* browser, int command_id) {
+   return shell && shell->Command(*command);
+ }
+ 
++void AskClientApproval(const std::string& client, base::OnceCallback<void(AgensClientAnswer)> done) {
++  BrowserWindowInterface* browser = GetLastActiveBrowserWindowInterfaceWithAnyProfile();
++  views::Widget* widget = browser && browser->GetWindow()
++                              ? views::Widget::GetWidgetForNativeWindow(browser->GetWindow()->GetNativeWindow())
++                              : nullptr;
++  auto* shell = IsNativeShellEnabled() && widget
++                    ? views::AsViewClass<NativeShellView>(widget->GetRootView()->GetViewByID(NativeShellView::kViewId))
++                    : nullptr;
++  if (!shell || !shell->window()->ui || shell->window()->client_answer) {
++    std::move(done).Run(kAgensClientDeny);
++    return;
++  }
++  browser->GetWindow()->Activate();  // the sheet must be seen to be answered
++  shell->window()->client_answer = std::move(done);
++  agens_ui_client_prompt(shell->window()->ui, client.c_str());
++}
++
+ bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
+   if (!IsNativeShellEnabled() || !browser->GetWindow()) return false;
+   views::Widget* widget = views::Widget::GetWidgetForNativeWindow(browser->GetWindow()->GetNativeWindow());
+diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
+index 3c18c4eab1..59239f0e44 100644
+--- a/chrome/browser/agens/ui/chrome_mac.mm
++++ b/chrome/browser/agens/ui/chrome_mac.mm
+@@ -1432,6 +1432,7 @@ - (void)showSection:(NSString*)key {
+     NSButton* proxy = [NSButton buttonWithTitle:@"Abrir…" target:self action:@selector(openProxy:)];
+     y = [self option:@"Configurações de proxy" detail:@"Usa as do macOS." control:proxy y:y];
+     y = [self option:@"Restaurar as configurações originais" detail:nil control:[self subButton:@"Restaurar…" key:@"restaurar"] y:y];
++    y = [self option:@"Aceitar apps sem assinatura" detail:@"Para desenvolvimento: qualquer app deste Mac pode controlar o navegador pelo socket, sem pedir." control:[self prefSwitch:"agens.bridge.accept_unsigned"] y:y];
+   } else if ([key isEqualToString:@"sobre"]) {
+     NSString* version = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"";
+     y = [self info:product detail:[NSString stringWithFormat:@"Versão %@ · SugiyamaLabs", version] note:@"" y:y];
+@@ -5204,6 +5205,28 @@ - (void)answerPermission:(NSButton*)button {
+   if (_window) agens_window_permission_answer(_window, (AgensPermissionAnswer)button.tag);
+   [self closeMenu];
+ }
++// A local app (the Agens, a test tool) asks to use the browser through its socket. Closing the
++// window while it waits counts as Não permitir (the engine answers then).
++- (void)askClient:(NSString*)client {
++  if (!_window || !self.window) {
++    if (_window) agens_window_client_answer(_window, kAgensClientDeny);
++    return;
++  }
++  NSAlert* alert = [[NSAlert alloc] init];
++  alert.messageText = [NSString stringWithFormat:@"O %@ quer usar o AgensBrowser", client];
++  alert.informativeText = @"Ele poderá ver, criar e abrir os seus atos.";
++  [alert addButtonWithTitle:@"Permitir"];
++  [alert addButtonWithTitle:@"Permitir sempre"];
++  [alert addButtonWithTitle:@"Não permitir"].keyEquivalent = @"\033";
++  __weak AgensChrome* weak = self;
++  [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
++    AgensChrome* strong = weak;
++    if (!strong || !strong->_window) return;
++    agens_window_client_answer(strong->_window, r == NSAlertFirstButtonReturn    ? kAgensClientAllow
++                                                : r == NSAlertSecondButtonReturn ? kAgensClientAllowAlways
++                                                                                 : kAgensClientDeny);
++  }];
++}
+ - (void)permissionGone {
+   if (!_permissionAsked) return;
+   _permissionAsked = NO;  // nothing to answer any more
+@@ -5412,6 +5435,9 @@ void agens_ui_permission_prompt(void* chrome, const char* site, const char* cons
+   for (int i = 0; i < count; ++i) [list addObject:@(asks[i])];
+   [(__bridge AgensChrome*)chrome askPermission:@(site) asks:list];
+ }
++void agens_ui_client_prompt(void* chrome, const char* client) {
++  [(__bridge AgensChrome*)chrome askClient:@(client)];
++}
+ void agens_ui_permission_prompt_close(void* chrome) {
+   [(__bridge AgensChrome*)chrome permissionGone];
+ }
+diff --git a/chrome/browser/browser_process_impl.cc b/chrome/browser/browser_process_impl.cc
+index 433fa42fa4..9922f10de2 100644
+--- a/chrome/browser/browser_process_impl.cc
++++ b/chrome/browser/browser_process_impl.cc
+@@ -85,6 +85,9 @@
+ #include "chrome/browser/printing/print_job_manager.h"
+ #include "chrome/browser/profiles/profile_manager.h"
+ #include "chrome/browser/sugiyamalabs/adblock.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/agens/bridge/bridge.h"  // SugiyamaLabs
++#endif
+ #include "chrome/browser/resource_coordinator/resource_coordinator_parts.h"
+ #include "chrome/browser/serial/serial_policy_allowed_ports.h"
+ #include "chrome/browser/shell_integration.h"
+@@ -628,6 +631,9 @@ void BrowserProcessImpl::StartTearDown() {
+   // |tearing_down_| necessary in IsShuttingDown().
+   tearing_down_ = true;
+   DCHECK(IsShuttingDown());
++#if BUILDFLAG(IS_MAC)
++  agens::bridge::Stop();  // SugiyamaLabs: removes the socket file
++#endif
+ 
+   features_->PostMainMessageLoopRun();
+   metrics_services_manager_client_ = nullptr;
+@@ -1345,6 +1351,9 @@ BuildState* BrowserProcessImpl::GetBuildState() {
+ // static
+ void BrowserProcessImpl::RegisterPrefs(PrefRegistrySimple* registry) {
+   sugiyamalabs::adblock::RegisterPrefs(registry);  // SugiyamaLabs
++#if BUILDFLAG(IS_MAC)
++  agens::bridge::RegisterPrefs(registry);  // SugiyamaLabs: the local socket
++#endif
+ 
+   registry->RegisterBooleanPref(prefs::kDefaultBrowserSettingEnabled, false);
+ 
+@@ -1706,6 +1715,9 @@ void BrowserProcessImpl::PreMainMessageLoopRun() {
+ 
+   features_->PreMainMessageLoopRun();
+   platform_part_->PreMainMessageLoopRun();
++#if BUILDFLAG(IS_MAC)
++  agens::bridge::Start();  // SugiyamaLabs: the local socket (docs/agens.md)
++#endif
+ 
+   InitializeNetworkTimeTracker();
+ 
+diff --git a/chrome/browser/ui/webui_browser/BUILD.gn b/chrome/browser/ui/webui_browser/BUILD.gn
+index 98ada3ff32..bcecf8fee1 100644
+--- a/chrome/browser/ui/webui_browser/BUILD.gn
++++ b/chrome/browser/ui/webui_browser/BUILD.gn
+@@ -97,6 +97,10 @@ source_set("impl") {
+ 
+   if (is_mac) {
+     sources += [
++      "//chrome/browser/agens/bridge/bridge.h",
++      "//chrome/browser/agens/bridge/bridge_mac.mm",
++      "//chrome/browser/agens/bridge/ops.cc",
++      "//chrome/browser/agens/bridge/ops.h",
+       "//chrome/browser/agens/embed/native_shell_mac.mm",
+       "//chrome/browser/agens/embed/import_chromium_keychain_mac.mm",
+       "//chrome/browser/agens/ui/chrome_mac.mm",
+@@ -192,6 +196,7 @@ source_set("impl") {
+ 
+   if (is_mac) {
+     deps += [
++      "//chrome/browser/agens/bridge:protocol",  # agens: the local socket (docs/agens.md)
+       "//chrome/browser:global_keyboard_shortcuts_mac",
+       "//chrome/browser/apps/app_shim",
+       "//chrome/browser/ui/cocoa",
