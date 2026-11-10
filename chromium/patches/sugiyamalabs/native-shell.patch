@@ -1,9 +1,9 @@
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
 new file mode 100644
-index 0000000000..9dd3dbbb4e
+index 0000000000..d69d159bce
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embed.h
-@@ -0,0 +1,340 @@
+@@ -0,0 +1,346 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The boundary between the engine and any interface (the browser's own chrome today, the Agens
 +// app later). Plain C on purpose: no Chromium or C++ types cross it, Swift imports it as is, and
@@ -35,6 +35,9 @@ index 0000000000..9dd3dbbb4e
 +  int error;               // the page failed to load: Chromium's net error (e.g. -106), else 0
 +  const char* error_name;  // e.g. "ERR_INTERNET_DISCONNECTED", "" when none
 +  int interstitial;  // a security stop page (bad certificate…): see agens_window_interstitial
++  int split;          // shown with another tab: 0 no, 1 side by side, 2 one above the other
++  int split_first;    // this tab is the left (or top) one
++  double split_ratio; // the first one's share of the page area
 +  int camera;      // the page is using the camera now
 +  int microphone;  // the page is using the microphone now
 +} AgensTab;
@@ -59,6 +62,9 @@ index 0000000000..9dd3dbbb4e
 +void agens_window_activate_tab(AgensWindow* window, int index);
 +void agens_window_close_tab(AgensWindow* window, int index);
 +void agens_window_move_tab(AgensWindow* window, int from, int to);
++// Shows the active tab together with the tab at `index`: `layout` 1 side by side, 2 stacked.
++void agens_window_split(AgensWindow* window, int index, int layout);
++void agens_window_unsplit(AgensWindow* window, int index);
 +void agens_window_set_pinned(AgensWindow* window, int index, int pinned);
 +void agens_window_toggle_mute(AgensWindow* window, int index);
 +// Address or search text, as typed; the engine decides which it is.
@@ -346,10 +352,10 @@ index 0000000000..9dd3dbbb4e
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EMBED_H_
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
 new file mode 100644
-index 0000000000..59da15cf18
+index 0000000000..91603c7c4d
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_window.h
-@@ -0,0 +1,645 @@
+@@ -0,0 +1,660 @@
 +// Copyright 2026 SugiyamaLabs.
 +// One browser window as the embed API sees it (agens_embed.h): tabs, suggestions, atos, search
 +// default, bookmarks. Platform-neutral; each platform's shell (native_shell_mac.mm, later
@@ -424,6 +430,8 @@ index 0000000000..59da15cf18
 +#include "content/public/browser/web_contents_observer.h"
 +#include "content/public/browser/web_contents_user_data.h"
 +#include "net/base/net_errors.h"
++#include "components/tabs/public/split_tab_data.h"
++#include "components/split_tabs/split_tab_visual_data.h"
 +#include "components/security_interstitials/content/security_interstitial_page.h"
 +#include "components/security_interstitials/content/security_interstitial_tab_helper.h"
 +#include "chrome/common/chrome_isolated_world_ids.h"
@@ -734,6 +742,18 @@ index 0000000000..59da15cf18
 +    std::vector<std::string> titles(count), urls(count), errors(count);
 +    std::vector<std::vector<uint8_t>> icons(count);
 +    std::vector<AgensTab> tabs(count);
++    struct Split { int layout = 0, first = 0; double ratio = 0.5; };
++    std::vector<Split> splits(count);
++    for (int i = 0; i < count; ++i) {
++      std::optional<split_tabs::SplitTabId> id = model()->GetSplitForTab(i);
++      split_tabs::SplitTabData* data = id ? model()->GetSplitData(*id) : nullptr;
++      if (!data) continue;
++      const auto* visual = data->visual_data();
++      splits[i].layout = visual->split_layout() == split_tabs::SplitTabLayout::kStacked ? 2 : 1;
++      splits[i].ratio = visual->split_ratio();
++      const auto list = data->ListTabs();
++      splits[i].first = !list.empty() && list[0]->GetContents() == model()->GetWebContentsAt(i);
++    }
 +    scoped_refptr<MediaStreamCaptureIndicator> capture =
 +        MediaCaptureDevicesDispatcher::GetInstance()->GetMediaStreamCaptureIndicator();
 +    for (int i = 0; i < count; ++i) {
@@ -758,7 +778,7 @@ index 0000000000..59da15cf18
 +                 bookmarks && bookmarks->IsBookmarked(contents->GetVisibleURL()),
 +                 model()->IsTabPinned(i), contents->IsCurrentlyAudible(),
 +                 contents->IsAudioMuted(), error, errors[i].c_str(),
-+                 Interstitial(contents),
++                 Interstitial(contents), splits[i].layout, splits[i].first, splits[i].ratio,
 +                 capture && capture->IsCapturingVideo(contents), capture && capture->IsCapturingAudio(contents)};
 +    }
 +    observer(context, tabs.data(), static_cast<int>(tabs.size()));
@@ -771,6 +791,7 @@ index 0000000000..59da15cf18
 +    NotifyAtos();  // cheap; keeps "asleep" fresh as atos load and unload
 +  }
 +  void OnTabChangedAt(tabs::TabInterface*, TabChangeType) override { Notify(); }
++  void OnSplitTabChanged(const SplitTabChange&) override { Notify(); }
 +
 +  void Suggest(const std::string& text) {
 +    if (!autocomplete) {
@@ -997,10 +1018,10 @@ index 0000000000..59da15cf18
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
 new file mode 100644
-index 0000000000..e7e822ecf4
+index 0000000000..58380fd42f
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.cc
-@@ -0,0 +1,778 @@
+@@ -0,0 +1,795 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The embed API (agens_embed.h) on top of AgensWindow. Same code on every platform.
 +
@@ -1015,6 +1036,7 @@ index 0000000000..e7e822ecf4
 +#include "base/memory/scoped_refptr.h"
 +#include "base/supports_user_data.h"
 +#include "chrome/browser/history/history_service_factory.h"
++#include "chrome/browser/ui/tabs/split_tab_metrics.h"
 +#include "chrome/browser/extensions/extension_action_runner.h"
 +#include "chrome/browser/extensions/extension_tab_util.h"
 +#include "chrome/browser/extensions/extension_view_host.h"
@@ -1664,6 +1686,22 @@ index 0000000000..e7e822ecf4
 +    w->model()->MoveWebContentsAt(from, to, /*select_after_move=*/false);
 +  }
 +}
++void agens_window_split(AgensWindow* w, int index, int layout) {
++  TabStripModel* m = w->model();
++  const int active = m->active_index();
++  if (!m->ContainsIndex(index) || index == active || m->GetSplitForTab(active) || m->GetSplitForTab(index)) {
++    return;
++  }
++  m->AddToNewSplit({active, index},
++                   split_tabs::SplitTabVisualData(layout == 2 ? split_tabs::SplitTabLayout::kStacked
++                                                              : split_tabs::SplitTabLayout::kSideBySide,
++                                                  0.5),
++                   split_tabs::SplitTabCreatedSource::kTabContextMenu);
++}
++void agens_window_unsplit(AgensWindow* w, int index) {
++  if (!w->model()->ContainsIndex(index)) return;
++  if (std::optional<split_tabs::SplitTabId> id = w->model()->GetSplitForTab(index)) w->model()->RemoveSplit(*id);
++}
 +void agens_window_set_pinned(AgensWindow* w, int index, int pinned) {
 +  if (w->model()->ContainsIndex(index)) w->model()->SetTabPinned(index, pinned);
 +}
@@ -1853,10 +1891,10 @@ index 0000000000..ebd1215130
 +#endif  // CHROME_BROWSER_AGENS_EMBED_NATIVE_SHELL_H_
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
 new file mode 100644
-index 0000000000..48d670c7ba
+index 0000000000..59b5e3fbbd
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
-@@ -0,0 +1,443 @@
+@@ -0,0 +1,534 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The macOS host: the views::View that fills the Webium window, puts the UI's chrome (an NSView)
 +// over it and the active tab in the page card. Everything else is shared (agens_window.h,
@@ -1867,6 +1905,8 @@ index 0000000000..48d670c7ba
 +#import <AppKit/AppKit.h>
 +
 +#include "chrome/browser/agens/embed/agens_window.h"
++#include "components/split_tabs/split_tab_visual_data.h"
++#include "components/tabs/public/split_tab_data.h"
 +#include "base/strings/sys_string_conversions.h"
 +#include "chrome/browser/extensions/extension_install_prompt_show_params.h"
 +#include "extensions/browser/install_prompt_data.h"
@@ -1889,6 +1929,20 @@ index 0000000000..48d670c7ba
 +
 +namespace {
 +
++// Watches one pane's page: a click (focus) in the other pane of a split makes its tab active.
++class PaneWatcher : public content::WebContentsObserver {
++ public:
++  explicit PaneWatcher(base::RepeatingCallback<void(content::WebContents*)> on_focus)
++      : on_focus_(std::move(on_focus)) {}
++  void Watch(content::WebContents* contents) {
++    if (web_contents() != contents) Observe(contents);
++  }
++  void OnWebContentsFocused(content::RenderWidgetHost*) override { on_focus_.Run(web_contents()); }
++
++ private:
++  base::RepeatingCallback<void(content::WebContents*)> on_focus_;
++};
++
 +class NativeShellView : public views::View,
 +                        public TabStripModelObserver,
 +                        public content::WebContentsObserver {
@@ -1908,7 +1962,18 @@ index 0000000000..48d670c7ba
 +    site_icon_ = AddChildView(std::make_unique<views::View>());
 +    site_icon_->SetProperty(views::kElementIdentifierKey, kLocationIconElementId);
 +    extensions_anchor_ = AddChildView(std::make_unique<views::View>());  // where extension popups hang
++    card2_ = AddChildView(std::make_unique<views::View>());
 +    contents_ = AddChildView(std::make_unique<views::WebView>(browser->GetProfile()));
++    contents2_ = AddChildView(std::make_unique<views::WebView>(browser->GetProfile()));  // a split's second tab
++    auto activate = base::BindRepeating(
++        [](BrowserWindowInterface* browser, content::WebContents* contents) {
++          TabStripModel* model = browser->GetTabStripModel();
++          const int index = contents ? model->GetIndexOfWebContents(contents) : TabStripModel::kNoTab;
++          if (index != TabStripModel::kNoTab && index != model->active_index()) model->ActivateTabAt(index);
++        },
++        base::Unretained(browser));
++    pane1_ = std::make_unique<PaneWatcher>(activate);
++    pane2_ = std::make_unique<PaneWatcher>(activate);
 +    // Webium sizes new tabs from this element (GetContentsBoundsInScreen).
 +    contents_->SetProperty(views::kElementIdentifierKey, kContentsContainerViewElementId);
 +    browser->GetTabStripModel()->AddObserver(this);
@@ -1926,6 +1991,7 @@ index 0000000000..48d670c7ba
 +    agens_ui_destroy_chrome((__bridge void*)chrome_);
 +    [chrome_ removeFromSuperview];
 +    contents_->SetWebContents(nullptr);
++    contents2_->SetWebContents(nullptr);
 +  }
 +
 +  void FocusAddress() { agens_ui_focus_address((__bridge void*)chrome_); }
@@ -1946,10 +2012,44 @@ index 0000000000..48d670c7ba
 +  void Layout(PassKey) override {
 +    // A page in full screen (a video, a game) gets the whole window, like Chrome: no chrome, no
 +    // card, no corners. The window's own full screen (green button) keeps the chrome.
-+    content::WebContents* active = contents_->GetWebContents();
++    TabStripModel* model = window_->model();
++    content::WebContents* active = model->GetActiveWebContents();
 +    const bool page_fullscreen = active && active->IsFullscreen();
 +    chrome_.hidden = page_fullscreen;
 +    card_->SetVisible(!page_fullscreen);
++    // A split shows its two tabs; anything else shows the active one alone.
++    content::WebContents* first = active;
++    content::WebContents* second = nullptr;
++    const split_tabs::SplitTabData* split = nullptr;
++    const int active_index = model->active_index();  // kNoTab while the window is being set up
++    if (std::optional<split_tabs::SplitTabId> id =
++            model->ContainsIndex(active_index) ? model->GetSplitForTab(active_index) : std::nullopt;
++        id && !page_fullscreen) {
++      split = model->GetSplitData(*id);
++      const auto tabs = split ? split->ListTabs() : std::vector<tabs::TabInterface*>();
++      if (tabs.size() == 2) {
++        first = tabs[0]->GetContents();
++        second = tabs[1]->GetContents();
++      } else {
++        split = nullptr;
++      }
++    }
++    // Chromium keeps every tab but the active one hidden (no painting); a split shows two.
++    for (views::WebView* pane : {contents_.get(), contents2_.get()}) {
++      content::WebContents* was = pane->GetWebContents();
++      if (was && was != active && was != first && was != second) {
++        was->UpdateWebContentsVisibility(content::Visibility::HIDDEN);
++      }
++    }
++    if (contents_->GetWebContents() != first) contents_->SetWebContents(first);
++    if (contents2_->GetWebContents() != second) contents2_->SetWebContents(second);
++    for (content::WebContents* shown : {first, second}) {
++      if (shown && shown != active) shown->UpdateWebContentsVisibility(content::Visibility::VISIBLE);
++    }
++    contents2_->SetVisible(second);
++    card2_->SetVisible(second);
++    pane1_->Watch(first);
++    pane2_->Watch(second);
 +    if (page_fullscreen) {
 +      SetBackground(views::CreateSolidBackground(SK_ColorBLACK));
 +      contents_->SetBoundsRect(GetLocalBounds());
@@ -1968,18 +2068,45 @@ index 0000000000..48d670c7ba
 +    SetBackground(views::CreateSolidBackground(SkColorSetARGB(window_color >> 24, (window_color >> 16) & 255,
 +                                                              (window_color >> 8) & 255, window_color & 255)));
 +    radius_ = agens_ui_card_radius((__bridge void*)chrome_);
-+    card_->SetBackground(views::CreateRoundedRectBackground(sk(page_color), radius_, 1));
-+    card_->SetBorder(views::CreateRoundedRectBorder(1, radius_, sk(line_color)));
++    for (views::View* card : {card_.get(), card2_.get()}) {
++      card->SetBackground(views::CreateRoundedRectBackground(sk(page_color), radius_, 1));
++      card->SetBorder(views::CreateRoundedRectBorder(1, radius_, sk(line_color)));
++    }
 +    AgensRect page = agens_ui_layout((__bridge void*)chrome_, width(), height());
 +    AgensRect icon = agens_ui_site_icon_rect((__bridge void*)chrome_);
 +    site_icon_->SetBounds(icon.x, icon.y, icon.width, icon.height);
 +    AgensRect ext = agens_ui_extensions_anchor((__bridge void*)chrome_);
 +    extensions_anchor_->SetBounds(ext.x, ext.y, ext.width, ext.height);
 +    gfx::Rect card(page.x, page.y, page.width, page.height);
++    gfx::Rect card2;
++    if (split) {  // two cards with the window's gap between them, split by the ratio
++      constexpr int kGap = 8;
++      const double ratio = split->visual_data()->split_ratio();
++      if (split->visual_data()->split_layout() == split_tabs::SplitTabLayout::kStacked) {
++        const int h1 = static_cast<int>((page.height - kGap) * ratio);
++        card2 = gfx::Rect(page.x, page.y + h1 + kGap, page.width, page.height - h1 - kGap);
++        card.set_height(h1);
++      } else {
++        const int w1 = static_cast<int>((page.width - kGap) * ratio);
++        card2 = gfx::Rect(page.x + w1 + kGap, page.y, page.width - w1 - kGap, page.height);
++        card.set_width(w1);
++      }
++    }
 +    card_->SetBoundsRect(card);
 +    card.Inset(1);
 +    contents_->SetBoundsRect(card);
 +    contents_->holder()->SetNativeViewCornerRadii(gfx::RoundedCornersF(radius_ - 1));
++    if (split) {
++      card2_->SetBoundsRect(card2);
++      card2.Inset(1);
++      contents2_->SetBoundsRect(card2);
++      contents2_->holder()->SetNativeViewCornerRadii(gfx::RoundedCornersF(radius_ - 1));
++    }
++  }
++
++  void OnSplitTabChanged(const SplitTabChange&) override {
++    InvalidateLayout();
++    SchedulePaint();
 +  }
 +
 +  // content::WebContentsObserver (the active tab):
@@ -1991,10 +2118,9 @@ index 0000000000..48d670c7ba
 +  // TabStripModelObserver: the page area follows the active tab.
 +  void OnTabStripModelChanged(TabStripModel*, const TabStripModelChange&,
 +                              const TabStripSelectionChange& selection) override {
++    InvalidateLayout();  // which tabs show (one, or a split's two) is decided in Layout
 +    if (selection.active_tab_changed()) {
-+      contents_->SetWebContents(selection.new_contents);
 +      Observe(selection.new_contents);  // its full screen changes the layout
-+      contents_->holder()->SetNativeViewCornerRadii(gfx::RoundedCornersF(radius_ - 1));
 +      // New tabs open ready to type, as in BrowserView::RestoreFocus. Posted so it lands after
 +      // the window gives the new contents focus.
 +      if (selection.new_contents && selection.new_contents->FocusLocationBarByDefault()) {
@@ -2011,6 +2137,9 @@ index 0000000000..48d670c7ba
 +  raw_ptr<views::View> site_icon_;
 +  raw_ptr<views::View> extensions_anchor_;
 +  raw_ptr<views::WebView> contents_;
++  raw_ptr<views::View> card2_;
++  raw_ptr<views::WebView> contents2_;
++  std::unique_ptr<PaneWatcher> pane1_, pane2_;
 +  NSView* __strong chrome_;
 +};
 +
@@ -2302,10 +2431,10 @@ index 0000000000..48d670c7ba
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..b066cf6133
+index 0000000000..5c17b7fe93
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,4655 @@
+@@ -0,0 +1,4710 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -2768,6 +2897,9 @@ index 0000000000..b066cf6133
 +@property(nonatomic, copy) void (^onClose)(void);
 +@property(nonatomic, copy) void (^onPin)(void);
 +@property(nonatomic, copy) void (^onMute)(void);
++@property(nonatomic, copy) void (^onSplit)(int layout);  // with the active tab: 1 side by side, 2 stacked
++@property(nonatomic, copy) void (^onUnsplit)(void);
++@property(nonatomic, readonly) BOOL inSplit;
 +@property(nonatomic, copy) void (^onDrag)(NSPoint delta);  // pointer moved this much since mouse down
 +@property(nonatomic, copy) void (^onDrop)(void);
 +- (void)updateWith:(const AgensTab&)tab;
@@ -2790,6 +2922,9 @@ index 0000000000..b066cf6133
 +@synthesize onClose = _onClose;
 +@synthesize onPin = _onPin;
 +@synthesize onMute = _onMute;
++@synthesize onSplit = _onSplit;
++@synthesize onUnsplit = _onUnsplit;
++@synthesize inSplit = _inSplit;
 +@synthesize onDrag = _onDrag;
 +@synthesize onDrop = _onDrop;
 +// Click activates on release; a drag of more than 4 pt reorders instead.
@@ -2882,6 +3017,7 @@ index 0000000000..b066cf6133
 +  }
 +  _favicon.hidden = tab.loading;
 +  _pinned = tab.pinned;
++  _inSplit = tab.split != 0;
 +  _muted = tab.muted;
 +  _audible = tab.audible;
 +  _capturing = tab.camera || tab.microphone;
@@ -2913,6 +3049,19 @@ index 0000000000..b066cf6133
 +  NSMenu* menu = [[NSMenu alloc] initWithTitle:@"Aba"];
 +  [menu addItemWithTitle:_pinned ? @"Desafixar aba" : @"Fixar aba" action:@selector(pin:) keyEquivalent:@""].target = self;
 +  [menu addItemWithTitle:_muted ? @"Ativar o som da aba" : @"Silenciar a aba" action:@selector(mute:) keyEquivalent:@""].target = self;
++  if (_inSplit) {
++    [menu addItemWithTitle:@"Separar a visualização dividida" action:@selector(unsplit:) keyEquivalent:@""].target = self;
++  } else if (!self.selected) {
++    NSMenuItem* split = [menu addItemWithTitle:@"Dividir com a aba atual" action:nil keyEquivalent:@""];
++    NSMenu* how = [[NSMenu alloc] initWithTitle:@""];
++    NSMenuItem* side = [how addItemWithTitle:@"Lado a lado" action:@selector(split:) keyEquivalent:@""];
++    side.target = self;
++    side.tag = 1;
++    NSMenuItem* stacked = [how addItemWithTitle:@"Em cima e embaixo" action:@selector(split:) keyEquivalent:@""];
++    stacked.target = self;
++    stacked.tag = 2;
++    split.submenu = how;
++  }
 +  [menu addItem:NSMenuItem.separatorItem];
 +  [menu addItemWithTitle:@"Fechar aba" action:@selector(closeTab:) keyEquivalent:@""].target = self;
 +  return menu;
@@ -2925,6 +3074,12 @@ index 0000000000..b066cf6133
 +}
 +- (void)pin:(id)sender {
 +  if (_onPin) _onPin();
++}
++- (void)split:(NSMenuItem*)item {
++  if (_onSplit) _onSplit((int)item.tag);
++}
++- (void)unsplit:(id)sender {
++  if (_onUnsplit) _onUnsplit();
 +}
 +- (void)mute:(id)sender {
 +  if (_capturing) return;  // the badge only tells; the site panel changes permissions
@@ -5355,6 +5510,9 @@ index 0000000000..b066cf6133
 +  NSMutableArray<NSDictionary*>* _extensions;  // id, name, icon (NSImage, optional)
 +  AgensErrorView* _error;
 +  BOOL _stopPage;  // the active tab shows a security stop page
++  int _split;            // the active tab's split (0 none, 1 side by side, 2 stacked)
++  BOOL _splitFirst;
++  double _splitRatio;
 +  BOOL _passwordAsked;  // our "save password?" panel is open and not answered yet
 +  BOOL _permissionAsked;  // a site's permission request is open and not answered yet
 +  NSView* _bar;  // the bookmarks bar
@@ -5945,11 +6103,26 @@ index 0000000000..b066cf6133
 +  }
 +
 +  _page = page;
-+  _ntp.frame = NSInsetRect(_page, 1, 1);
++  // Our pages over the card (new tab, errors…) cover the active tab's pane only; the engine splits
++  // the card the same way (8 pt gap, the split's ratio).
++  NSRect pane = _page;
++  if (_split) {
++    const CGFloat gap = 8;
++    if (_split == 2) {
++      const CGFloat h1 = floor((NSHeight(page) - gap) * _splitRatio);
++      pane = _splitFirst ? NSMakeRect(NSMinX(page), NSMinY(page), NSWidth(page), h1)
++                         : NSMakeRect(NSMinX(page), NSMinY(page) + h1 + gap, NSWidth(page), NSHeight(page) - h1 - gap);
++    } else {
++      const CGFloat w1 = floor((NSWidth(page) - gap) * _splitRatio);
++      pane = _splitFirst ? NSMakeRect(NSMinX(page), NSMinY(page), w1, NSHeight(page))
++                         : NSMakeRect(NSMinX(page) + w1 + gap, NSMinY(page), NSWidth(page) - w1 - gap, NSHeight(page));
++    }
++  }
++  _ntp.frame = NSInsetRect(pane, 1, 1);
 +  _history.frame = _ntp.frame;
 +  _bookmarksPage.frame = _ntp.frame;
 +  _error.frame = _ntp.frame;
-+  _find.frame = NSMakeRect(NSMaxX(_page) - 10 - 340, NSMinY(_page) + 10, 340, 38);
++  _find.frame = NSMakeRect(NSMaxX(pane) - 10 - 340, NSMinY(pane) + 10, 340, 38);
 +  _loadbar.frame = NSMakeRect(NSMinX(_page), NSMinY(_page) - 5, NSWidth(_page), 2);
 +  if (NSWidth(_page) != _loadW) [self runLoadbar];  // the sweep is sized to the line
 +  CGFloat statusW = MIN(ceil(_statusText.fittingSize.width) + 24, NSWidth(_page) / 2);
@@ -5994,6 +6167,14 @@ index 0000000000..b066cf6133
 +      AgensChrome* strong = weak;
 +      if (strong && strong->_window) agens_window_toggle_mute(strong->_window, weakRow.index);
 +    };
++    row.onSplit = ^(int layout) {
++      AgensChrome* strong = weak;
++      if (strong && strong->_window) agens_window_split(strong->_window, weakRow.index, layout);
++    };
++    row.onUnsplit = ^{
++      AgensChrome* strong = weak;
++      if (strong && strong->_window) agens_window_unsplit(strong->_window, weakRow.index);
++    };
 +    [_tabsDoc addSubview:row];
 +    [_rows addObject:row];
 +  }
@@ -6028,6 +6209,9 @@ index 0000000000..b066cf6133
 +    _capture.toolTip = _capture.accessibilityLabel;
 +    // Our error page over Chromium's, while the tab shows one (not while it retries).
 +    _stopPage = tabs[i].interstitial;
++    _split = tabs[i].split;
++    _splitFirst = tabs[i].split_first;
++    _splitRatio = tabs[i].split_ratio;
 +    _error.hidden = !(tabs[i].error || _stopPage) || tabs[i].loading || !tabs[i].url[0];
 +    if (!_error.hidden) [_error showError:tabs[i].error name:@(tabs[i].error_name) stop:_stopPage];
 +    _url = @(tabs[i].url);
