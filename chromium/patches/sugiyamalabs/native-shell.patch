@@ -1,9 +1,9 @@
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
 new file mode 100644
-index 0000000000..feea358bbe
+index 0000000000..858411a1b7
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embed.h
-@@ -0,0 +1,305 @@
+@@ -0,0 +1,317 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The boundary between the engine and any interface (the browser's own chrome today, the Agens
 +// app later). Plain C on purpose: no Chromium or C++ types cross it, Swift imports it as is, and
@@ -257,6 +257,18 @@ index 0000000000..feea358bbe
 +  kAgensPermissionDismiss,
 +} AgensPermissionAnswer;
 +void agens_window_permission_answer(AgensWindow* window, AgensPermissionAnswer answer);
++
++// The site of the active page, for the panel behind the site icon. `pattern` is what
++// agens_site_exception_set takes for this site. Strings valid until the next call.
++typedef struct {
++  const char* host;
++  const char* pattern;
++  int secure;  // https with a valid certificate
++} AgensSiteInfo;
++int agens_site_info(AgensWindow* window, AgensSiteInfo* out);  // 0 for pages without a site
++AgensPermission agens_site_permission(AgensWindow* window, const char* kind);  // what applies now
++// Cookies and storage of the active page's site only.
++void agens_site_clear_data(AgensWindow* window, AgensDoneFn done, void* context);
 +
 +// Histórico of this window's ato, newest first, one entry per page per day, at most 300.
 +// `text` filters by title and address ("" for all). Calls `fn` later, once.
@@ -842,10 +854,10 @@ index 0000000000..f1beed8297
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
 new file mode 100644
-index 0000000000..b05a2ea408
+index 0000000000..c470c966d4
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.cc
-@@ -0,0 +1,682 @@
+@@ -0,0 +1,726 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The embed API (agens_embed.h) on top of AgensWindow. Same code on every platform.
 +
@@ -860,6 +872,11 @@ index 0000000000..b05a2ea408
 +#include "base/memory/scoped_refptr.h"
 +#include "base/supports_user_data.h"
 +#include "chrome/browser/history/history_service_factory.h"
++#include "content/public/browser/navigation_entry.h"
++#include "content/public/browser/ssl_status.h"
++#include "net/base/registry_controlled_domains/registry_controlled_domain.h"
++#include "net/cert/cert_status_flags.h"
++#include "content/public/browser/browsing_data_filter_builder.h"
 +#include "chrome/browser/ui/passwords/manage_passwords_ui_controller.h"
 +#include "components/password_manager/core/browser/password_form.h"
 +#include "components/password_manager/core/common/password_manager_ui.h"
@@ -1291,6 +1308,45 @@ index 0000000000..b05a2ea408
 +    case kAgensPermissionDeny: delegate->Deny(options); break;
 +    case kAgensPermissionDismiss: delegate->Dismiss(options); break;
 +  }
++}
++static GURL ActiveURL(AgensWindow* w) {
++  content::WebContents* active = w->model()->GetActiveWebContents();
++  return active ? active->GetLastCommittedURL() : GURL();
++}
++int agens_site_info(AgensWindow* w, AgensSiteInfo* out) {
++  static base::NoDestructor<std::string> host, pattern;
++  const GURL url = ActiveURL(w);
++  if (!out || !url.SchemeIsHTTPOrHTTPS()) return 0;
++  *host = std::string(url.host());
++  *pattern = ContentSettingsPattern::FromURLNoWildcard(url).ToString();
++  content::NavigationEntry* entry = w->model()->GetActiveWebContents()->GetController().GetLastCommittedEntry();
++  const bool secure = url.SchemeIs(url::kHttpsScheme) && entry && entry->GetSSL().certificate &&
++                      !net::IsCertStatusError(entry->GetSSL().cert_status);
++  *out = {host->c_str(), pattern->c_str(), secure};
++  return 1;
++}
++AgensPermission agens_site_permission(AgensWindow* w, const char* kind) {
++  std::optional<ContentSettingsType> type = KindOf(kind);
++  const GURL url = ActiveURL(w);
++  if (!type || !url.is_valid()) return kAgensAsk;
++  return ToAgens(HostContentSettingsMapFactory::GetForProfile(w->browser->GetProfile())
++                     ->GetContentSetting(url, url, *type));
++}
++void agens_site_clear_data(AgensWindow* w, AgensDoneFn done, void* context) {
++  const GURL url = ActiveURL(w);
++  if (!url.SchemeIsHTTPOrHTTPS()) {
++    if (done) done(context);
++    return;
++  }
++  auto filter = content::BrowsingDataFilterBuilder::Create(content::BrowsingDataFilterBuilder::Mode::kDelete);
++  std::string domain = net::registry_controlled_domains::GetDomainAndRegistry(
++      url, net::registry_controlled_domains::INCLUDE_PRIVATE_REGISTRIES);
++  filter->AddRegisterableDomain(domain.empty() ? std::string(url.host()) : domain);  // localhost, IPs
++  content::BrowsingDataRemover* remover = w->browser->GetProfile()->GetBrowsingDataRemover();
++  remover->RemoveWithFilterAndReply(base::Time(), base::Time::Max(),
++                                    chrome_browsing_data_remover::DATA_TYPE_SITE_DATA,
++                                    content::BrowsingDataRemover::ORIGIN_TYPE_UNPROTECTED_WEB,
++                                    std::move(filter), new ClearDone(remover, done, context));
 +}
 +void agens_window_set_find_observer(AgensWindow* w, AgensFindChanged observer, void* context) {
 +  w->find_observer = observer;
@@ -1833,10 +1889,10 @@ index 0000000000..ff40eeab47
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..4cb65777de
+index 0000000000..096011f6b4
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,4308 @@
+@@ -0,0 +1,4416 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -4686,6 +4742,10 @@ index 0000000000..4cb65777de
 +}
 +@end
 +
++static void SiteDataCleared(void* context) {
++  NSButton* button = (__bridge_transfer NSButton*)context;
++  button.title = @"Dados apagados";
++}
 +static void FindChanged(void* context, int current, int total) {
 +  [(__bridge AgensFindBar*)context setCurrent:current total:total];
 +}
@@ -4854,7 +4914,7 @@ index 0000000000..4cb65777de
 +    _siteButton.radius = 7;
 +    _siteButton.toolTip = @"Ver informações do site";
 +    _siteButton.accessibilityLabel = @"Informações do site";
-+    _siteButton.onPress = ^{ [weak run:agens_window_show_site_info]; };
++    _siteButton.onPress = ^{ [weak showSiteInfo]; };
 +    [_omni addSubview:_siteButton positioned:NSWindowBelow relativeTo:_omniIcon];
 +    _downloadsButton = [[AgensToolButton alloc] initWithSymbol:@"arrow.down" label:@"Downloads"];
 +    [_downloadsButton setImage:AgensIcon(kIconDown)];
@@ -6028,6 +6088,110 @@ index 0000000000..4cb65777de
 +  if (!_permissionAsked) return;
 +  _permissionAsked = NO;  // nothing to answer any more
 +  [self closeMenu];
++}
++// The panel behind the site icon (Chrome's page info): the site, whether the connection is
++// private, this site's permissions (changed right here), its data, and the full list.
++static void SiteDataCleared(void* context);
++- (void)showSiteInfo {
++  AgensSiteInfo info;
++  if (!_window || !agens_site_info(_window, &info)) return;
++  NSString* pattern = @(info.pattern);
++  struct Kind {
++    const char* kind;
++    NSString* label;
++    BOOL ask;
++  } kinds[] = {
++      {"camera", @"Câmera", YES}, {"microphone", @"Microfone", YES}, {"location", @"Localização", YES},
++      {"notifications", @"Notificações", YES}, {"popups", @"Pop-ups e redirecionamentos", NO}, {"sound", @"Som", NO},
++  };
++  const CGFloat w = 340, rowH = 30, n = std::size(kinds);
++  const CGFloat h = 16 + 20 + 4 + 32 + 12 + 1 + 8 + n * rowH + 8 + 1 + 12 + 24 + 14;
++  NSView* panel = [self popoverWidth:w height:h under:_omni];
++  panel.frame = NSMakeRect(NSMinX(_omni.frame), NSMaxY(_omni.frame) + 6, w, h);
++  panel.accessibilityRole = NSAccessibilityGroupRole;
++  panel.accessibilityLabel = @"Informações do site";
++  CGFloat y = h - 16 - 20;  // the panel isn't flipped: from the top down
++  NSTextField* host = Label(13.5, NSFontWeightSemibold, kInk);
++  host.stringValue = @(info.host);
++  host.lineBreakMode = NSLineBreakByTruncatingMiddle;
++  host.frame = NSMakeRect(16, y, w - 32, 20);
++  y -= 4 + 32;
++  NSImageView* lock = [NSImageView imageViewWithImage:Symbol(info.secure ? @"lock.fill" : @"lock.open", 11)];
++  lock.contentTintColor = info.secure ? kDim.color() : kLight3.color();
++  lock.frame = NSMakeRect(16, y + 16, 14, 14);
++  NSTextField* conn = Label(12, NSFontWeightRegular, kMute);
++  conn.stringValue = info.secure ? @"Conexão segura: o que você envia vai cifrado até o site."
++                                 : @"Conexão não segura: o que você envia pode ser lido no caminho.";
++  conn.maximumNumberOfLines = 2;
++  conn.lineBreakMode = NSLineBreakByWordWrapping;
++  conn.frame = NSMakeRect(36, y, w - 36 - 16, 32);
++  for (NSView* v in @[ host, lock, conn ]) [panel addSubview:v];
++  y -= 12;
++  NSView* line1 = [[NSView alloc] initWithFrame:NSMakeRect(16, y, w - 32, 1)];
++  y -= 8;
++  for (const Kind& k : kinds) {
++    y -= rowH;
++    NSTextField* label = Label(13, NSFontWeightRegular, kInk);
++    label.stringValue = k.label;
++    NSPopUpButton* popup = [[NSPopUpButton alloc] init];
++    popup.controlSize = NSControlSizeSmall;
++    popup.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
++    if (k.ask) {
++      [popup addItemWithTitle:@"Perguntar"];
++      popup.lastItem.tag = kAgensAsk;
++    }
++    [popup addItemWithTitle:@"Permitir"];
++    popup.lastItem.tag = kAgensAllow;
++    [popup addItemWithTitle:@"Bloquear"];
++    popup.lastItem.tag = kAgensBlock;
++    [popup selectItemWithTag:agens_site_permission(_window, k.kind)];
++    popup.identifier = [NSString stringWithFormat:@"%s", k.kind];
++    popup.toolTip = pattern;
++    popup.accessibilityLabel = k.label;
++    popup.target = self;
++    popup.action = @selector(setSitePermission:);
++    [popup sizeToFit];
++    popup.frame = NSMakeRect(w - 16 - NSWidth(popup.frame), y + 3, NSWidth(popup.frame), NSHeight(popup.frame));
++    label.frame = NSMakeRect(16, y + 4, NSMinX(popup.frame) - 8 - 16, 18);  // text centered on the menu (measured)
++    [panel addSubview:label];
++    [panel addSubview:popup];
++  }
++  y -= 8;
++  NSView* line2 = [[NSView alloc] initWithFrame:NSMakeRect(16, y, w - 32, 1)];
++  for (NSView* l in @[ line1, line2 ]) {
++    l.wantsLayer = YES;
++    l.layer.backgroundColor = CG(kLine, self);
++    [panel addSubview:l];
++  }
++  NSButton* clear = [NSButton buttonWithTitle:@"Apagar dados deste site" target:self action:@selector(clearSiteData:)];
++  NSButton* all = [NSButton buttonWithTitle:@"Todas as exceções…" target:self action:@selector(openExceptions:)];
++  for (NSButton* b in @[ clear, all ]) {
++    b.controlSize = NSControlSizeSmall;
++    b.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
++    [b sizeToFit];
++  }
++  clear.frame = NSMakeRect(16, 14, NSWidth(clear.frame), NSHeight(clear.frame));
++  all.frame = NSMakeRect(w - 16 - NSWidth(all.frame), 14, NSWidth(all.frame), NSHeight(all.frame));
++  [panel addSubview:clear];
++  [panel addSubview:all];
++  [self presentPopover:panel anchor:_siteButton.superview];
++}
++- (void)setSitePermission:(NSPopUpButton*)popup {
++  AgensSiteInfo info;
++  if (_window && agens_site_info(_window, &info)) {
++    agens_site_exception_set(_window, info.pattern, popup.identifier.UTF8String, (AgensPermission)popup.selectedItem.tag);
++  }
++}
++- (void)clearSiteData:(NSButton*)button {
++  if (!_window) return;
++  button.enabled = NO;
++  button.title = @"Apagando…";
++  agens_site_clear_data(_window, SiteDataCleared, (__bridge_retained void*)button);  // held until done
++}
++- (void)openExceptions:(id)sender {
++  [self closeMenu];
++  [self menuSettings:nil];
++  [g_settings showSection:@"excecoes"];
 +}
 +- (void)askToSavePassword {
 +  AgensPasswordPrompt prompt;
