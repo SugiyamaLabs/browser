@@ -1409,10 +1409,10 @@ index 0000000000..fb231e798b
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..b2a87bd370
+index 0000000000..8232fcdc85
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,3204 @@
+@@ -0,0 +1,3226 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -3643,6 +3643,7 @@ index 0000000000..b2a87bd370
 +  CGFloat _sideW;       // its width right now (animates between kRail and kSide)
 +  NSTimer* _sideTimer;
 +  id _keyMonitor;
++  id _menuMonitor;  // right click on a tab (Chromium's window would send it to its content view)
 +  AgensNewTabView* _ntp;
 +  NSView* _backdrop;  // under the whole window, for Vidro and Seu (glass, blur, image)
 +  NSString* _url;
@@ -3780,6 +3781,25 @@ index 0000000000..b2a87bd370
 +                                         return nil;
 +                                       }
 +                                       return event;
++                                     }];
++    // NativeWidgetMacNSWindow hands right clicks to its own content view wherever that view has
++    // nothing (our column sits over it), so tabs never get them. Catch them first.
++    _menuMonitor = [NSEvent
++        addLocalMonitorForEventsMatchingMask:NSEventMaskRightMouseDown | NSEventMaskLeftMouseDown
++                                     handler:^NSEvent*(NSEvent* event) {
++                                       AgensChrome* strong = weak;
++                                       if (!strong || event.window != strong.window) return event;
++                                       if (event.type == NSEventTypeLeftMouseDown &&
++                                           !(event.modifierFlags & NSEventModifierFlagControl)) {
++                                         return event;
++                                       }
++                                       NSPoint p = [strong.superview convertPoint:event.locationInWindow fromView:nil];
++                                       NSView* hit = [strong hitTest:p];
++                                       while (hit && ![hit isKindOfClass:AgensTabRow.class]) hit = hit.superview;
++                                       NSMenu* menu = [hit menuForEvent:event];
++                                       if (!menu) return event;
++                                       [NSMenu popUpContextMenu:menu withEvent:event forView:hit];
++                                       return nil;
 +                                     }];
 +    _atoDot = [[NSView alloc] init];
 +    _atoDot.wantsLayer = YES;
@@ -4576,6 +4596,8 @@ index 0000000000..b2a87bd370
 +  [self closeMenu];
 +  if (_keyMonitor) [NSEvent removeMonitor:_keyMonitor];
 +  _keyMonitor = nil;
++  if (_menuMonitor) [NSEvent removeMonitor:_menuMonitor];
++  _menuMonitor = nil;
 +  if (_window) {
 +    agens_window_set_tabs_observer(_window, nullptr, nullptr);
 +    agens_window_set_atos_observer(_window, nullptr, nullptr);
