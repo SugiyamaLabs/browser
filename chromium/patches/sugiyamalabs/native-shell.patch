@@ -776,10 +776,10 @@ index 0000000000..6d06705a23
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_IMPORT_H_
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
 new file mode 100644
-index 0000000000..91603c7c4d
+index 0000000000..b8668ee717
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_window.h
-@@ -0,0 +1,660 @@
+@@ -0,0 +1,664 @@
 +// Copyright 2026 SugiyamaLabs.
 +// One browser window as the embed API sees it (agens_embed.h): tabs, suggestions, atos, search
 +// default, bookmarks. Platform-neutral; each platform's shell (native_shell_mac.mm, later
@@ -1187,7 +1187,11 @@ index 0000000000..91603c7c4d
 +      if (error) errors[i] = net::ErrorToShortString(error);
 +      titles[i] = base::UTF16ToUTF8(contents->GetTitle());
 +      urls[i] = contents->GetVisibleURL().spec();
-+      if (urls[i].starts_with("chrome://newtab")) urls[i].clear();
++      // All three new tab hosts: the first run opens new-tab-page-third-party, not newtab.
++      if (const GURL& u = contents->GetVisibleURL(); u.SchemeIs("chrome") &&
++          (u.host() == "newtab" || u.host() == "new-tab-page" || u.host() == "new-tab-page-third-party")) {
++        urls[i].clear();
++      }
 +      if (auto* driver = favicon::ContentFaviconDriver::FromWebContents(contents)) {
 +        gfx::Image icon = driver->GetFavicon();
 +        if (!icon.IsEmpty()) {
@@ -9962,6 +9966,19 @@ index 8277fe0aba..e496cb7ab4 100644
      chrome::ShowSettings(browser);
    } else {
      chrome::OpenOptionsWindow(profile);
+diff --git a/chrome/browser/chrome_browser_main.cc b/chrome/browser/chrome_browser_main.cc
+index 2f252e5e17..87015e459a 100644
+--- a/chrome/browser/chrome_browser_main.cc
++++ b/chrome/browser/chrome_browser_main.cc
+@@ -1331,7 +1331,7 @@ int ChromeBrowserMainParts::PreCreateThreadsImpl() {
+   if (first_run::IsChromeFirstRun()) {
+     if (!base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kApp) &&
+         !base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kAppId)) {
+-      browser_creator_->AddFirstRunTabs({GURL("chrome://ungoogled-first-run")});
++      // AgensBrowser: no ungoogled-chromium welcome page; the first window opens our new tab.
+       browser_creator_->AddFirstRunTabs(master_prefs_->new_tabs);
+     }
+   }
 diff --git a/chrome/browser/profiles/profile_impl.cc b/chrome/browser/profiles/profile_impl.cc
 index 6f5c220aae..5f70397a82 100644
 --- a/chrome/browser/profiles/profile_impl.cc
