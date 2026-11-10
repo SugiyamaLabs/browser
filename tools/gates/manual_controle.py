@@ -27,11 +27,17 @@ class Conn:  # one connection: control belongs to it
             if msg.get("id") == self.n:
                 return msg
 
-    def event(self):
-        while True:
-            msg = self.read()
-            if "event" in msg:
-                return msg
+    def event(self, seconds=180):  # None when the person took too long, so the script never hangs
+        self.s.settimeout(seconds)
+        try:
+            while True:
+                msg = self.read()
+                if "event" in msg:
+                    return msg
+        except (socket.timeout, TimeoutError):
+            return None
+        finally:
+            self.s.settimeout(None)
 
 
 def passo(titulo, *linhas):
@@ -65,7 +71,8 @@ def comecar_controle(ato, motivo):
 c0 = Conn()
 passo("1. O interruptor de cookies",
       "No navegador que abriu: ⌘, (Configurações) e a seção Atos.",
-      "Cada ato tem \"Compartilhar cookies\", desligado, com o detalhe",
+      "Cada ato é um grupo: o nome e, LOGO ABAIXO dele, o interruptor \"Compartilhar cookies\",",
+      "desligado, com o detalhe",
       "  \"Os logins valem nos outros atos que também ligaram.\"",
       "Ligue no Time B. A folha deve dizer:",
       "  \"Compartilhar os cookies de Time B?\"",
@@ -75,10 +82,14 @@ passo("1. O interruptor de cookies",
       "Toque em Compartilhar. Depois ligue no Time C. Agora a folha deve dizer:",
       "  \"Os logins de Time C passam a valer também em Time B, e os deles em Time C.\"",
       "Toque em Compartilhar.")
-pausa("Enter quando os dois estiverem ligados")
-lista = atos(c0)
-resultado(lista["Time B"]["shared"] and lista["Time C"]["shared"], "Time B e Time C aparecem como compartilhados no socket")
-resultado(not lista["Pessoal"]["shared"], "Pessoal continua isolado")
+while True:
+    pausa("Enter quando os dois estiverem ligados")
+    lista = atos(c0)
+    certo = lista["Time B"]["shared"] and lista["Time C"]["shared"] and not lista["Pessoal"]["shared"]
+    resultado(certo, "Time B e Time C compartilham, Pessoal não. O navegador diz: "
+              + ", ".join(f"{n}={'ligado' if a['shared'] else 'desligado'}" for n, a in lista.items()))
+    if certo or input("  Acerte os interruptores e aperte Enter, ou digite s para seguir assim mesmo: ").strip() == "s":
+        break
 
 passo("2. A folha do controle e a faixa",
       "Vou pedir controle do Time B. Deve aparecer a folha:",
@@ -99,7 +110,8 @@ if c:
           "a faixa \"Controlado pelo Python  ·  Parar\".",
           "Toque em Parar.")
     ev = c.event()
-    resultado(ev.get("event") == "control.stopped" and ev.get("reason") == "user", f"evento recebido: {json.dumps(ev)}")
+    resultado(bool(ev) and ev.get("event") == "control.stopped" and ev.get("reason") == "user",
+              f"evento recebido: {json.dumps(ev)}" if ev else "nenhum evento em 3 minutos")
     r = c.ask("page.snapshot", tab=tab)
     resultado(r.get("error") == "unauthorized", f"depois do Parar o agente não age mais ({r.get('error')})")
     print("  Confira: a faixa e a borda sumiram, e a aba continua aberta.")
@@ -107,13 +119,17 @@ if c:
 
     passo("4. O grupo de cookies muda no meio do controle",
           "Vou pedir controle de novo. Toque em Permitir.")
-    pausa("Enter para eu pedir o controle")
-    c, tab = comecar_controle(lista["Time B"]["id"], "Segundo teste")
-    if c:
-        print("  Agora, em Configurações › Atos, desligue \"Compartilhar cookies\" do Time C.")
-        ev = c.event()
-        resultado(ev.get("event") == "control.stopped" and ev.get("reason") == "sharing_changed", f"evento recebido: {json.dumps(ev)}")
-        c.s.close()
+    if not atos(c0)["Time B"]["shared"]:
+        print("  Pulado: o Time B não está compartilhando cookies, então o grupo dele não tem como mudar.")
+    else:
+        pausa("Enter para eu pedir o controle")
+        c, tab = comecar_controle(lista["Time B"]["id"], "Segundo teste")
+        if c:
+            print("  Agora, em Configurações › Atos, desligue \"Compartilhar cookies\" do Time C.")
+            ev = c.event()
+            resultado(bool(ev) and ev.get("event") == "control.stopped" and ev.get("reason") == "sharing_changed",
+                      f"evento recebido: {json.dumps(ev)}" if ev else "nenhum evento em 3 minutos")
+            c.s.close()
 
 passo("5. Os cookies, à mão (opcional)",
       "Ligue de novo o interruptor do Time C.",
