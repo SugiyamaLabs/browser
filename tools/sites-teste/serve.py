@@ -4,7 +4,7 @@ import http.server, json, sys, urllib.parse
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-PAGES = {"/login": "login.html", "/app/": "app.html", "/form": "form.html", "/other": "other.html"}
+PAGES = {"/login": "login.html", "/app/": "app.html", "/form": "form.html", "/other": "other.html", "/agent": "agent.html"}
 SID = "sid-fake-123"  # fake test values only
 SEEN = {}  # /whoami tag -> whether that request carried the login cookie (in memory only)
 

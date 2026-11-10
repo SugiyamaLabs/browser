@@ -54,6 +54,16 @@ class Conn:  # one connection: control belongs to it
         return self.replies.pop(rid)
     def ask(self, op, timeout=45, **params):
         return self.wait(self.send(op, **params), timeout)
+    def event(self, name, timeout=10):  # the first event `name`; None after `timeout`
+        end = time.time() + timeout
+        while True:  # a "hello" round trip collects what came before it, with no read timeout
+            for e in self.events:
+                if e["event"] == name:
+                    self.events.remove(e)
+                    return e
+            if time.time() > end: return None
+            self.ask("hello")
+            time.sleep(0.3)
     def close(self):
         self.s.close()
 
@@ -110,7 +120,7 @@ if box:
         r = snapshot(c, tab, lambda ns: (find(ns, "checkBox") or {}).get("checked") is want, wait=4)
         b2 = find(r.get("nodes", []), "checkBox") if r else None
         check(f"click on the checkbox: snapshot says checked={want}", bool(b2) and b2.get("checked") is want, b2)
-shot("controlled")  # look: warm border around the card, strip "Controlado pelo … · Parar", mark on the tab
+shot("controlled")  # look: the pill at the bottom of the card ("<app> está usando esta aba", Assumir), mark on the tab
 
 if text and show:
     check("page.type into the text field", code(c.ask("page.type", tab=tab, ref=text["ref"], text="hello agens")) == "ok")
@@ -201,6 +211,142 @@ check("tab.open a second tab", code(r) == "ok" and second and second != tab, r)
 check("tab.close it", code(c.ask("tab.close", tab=second)) == "ok")
 check("a closed tab is not_found", code(c.ask("page.snapshot", tab=second)) == "not_found")
 
+# Agent name, status lines, history, hover, scroll, console, network, dialogs, eval, allow.
+c4 = Conn()
+check("control.status without control.start is unauthorized", code(c4.ask("control.status", title="x")) == "unauthorized")
+check("control.start with an unknown allow value is bad_request",
+      code(c4.ask("control.start", ato=ato, reason="x", allow=["passwords", "camera"])) == "bad_request")
+check("control.start with allow not a list is bad_request", code(c4.ask("control.start", ato=ato, reason="x", allow="clipboard")) == "bad_request")
+for bad in ("", "a\nb", "x" * 41, "a\u202eb"):
+    check(f"control.start with agent {bad[:8]!r} is bad_request", code(c4.ask("control.start", ato=ato, reason="x", agent=bad)) == "bad_request")
+r = c4.ask("control.start", ato=ato, reason="Gate da fase 3: o agente", agent="Popi")
+check("control.start with agent Popi", code(r) == "ok", r)
+for good in ({"title": "Popi está testando a página", "detail": "passo 1 de 3"}, {"detail": "passo 2 de 3"},
+             {"title": "", "detail": ""}, {}):
+    check(f"control.status {good} is ok", code(c4.ask("control.status", **good)) == "ok")
+for bad in ({"title": "x" * 121}, {"detail": "a\nb"}, {"title": 3}, {"detail": "a\u202eb"}):
+    check(f"control.status {str(bad)[:30]} is bad_request", code(c4.ask("control.status", **bad)) == "bad_request")
+c4.ask("control.status", title="Popi está testando a página", detail="passo 3 de 3")
+r = c4.ask("tab.open", ato=ato, url=f"{SITE}/agent")
+at = r.get("tab")
+check("tab.open /agent", code(r) == "ok" and bool(at), r)
+heading = lambda name: (lambda ns: find(ns, "heading", name) is not None)
+
+check("tab.back with nothing behind is bad_request", code(c4.ask("tab.back", tab=at)) == "bad_request")
+check("tab.forward with nothing ahead is bad_request", code(c4.ask("tab.forward", tab=at)) == "bad_request")
+check("tab.back on an unknown tab is not_found", code(c4.ask("tab.back", tab="t999")) == "not_found")
+c4.ask("tab.navigate", tab=at, url=f"{SITE}/other")
+r = c4.ask("tab.back", tab=at)
+check("tab.back answers with the tab", code(r) == "ok" and r.get("tab") == at, r)
+r = snapshot(c4, at, heading("Agent page"), wait=6)
+check("after tab.back the tab shows /agent", bool(r) and r.get("ok") and heading("Agent page")(r["nodes"]))
+check("tab.forward", code(c4.ask("tab.forward", tab=at)) == "ok")
+r = snapshot(c4, at, heading("Other page"), wait=6)
+check("after tab.forward the tab shows /other", bool(r) and r.get("ok") and heading("Other page")(r["nodes"]))
+c4.ask("tab.back", tab=at)
+check("tab.reload", code(c4.ask("tab.reload", tab=at)) == "ok")
+r = snapshot(c4, at, lambda ns: heading("Agent page")(ns) and find(ns, "button", "^Hover me$") is not None, wait=6)
+nodes = r.get("nodes", []) if r else []
+check("after tab.reload the tab shows /agent", heading("Agent page")(nodes))
+
+hover, ask = find(nodes, "button", "^Hover me$"), find(nodes, "button", "^Ask$")
+if hover:
+    check("page.hover", code(c4.ask("page.hover", tab=at, ref=hover["ref"])) == "ok")
+    r = snapshot(c4, at, lambda ns: find(ns, "staticText", "Hovered: yes") is not None, wait=4)
+    check("page.hover reached the page (Hovered: yes)", bool(r) and find(r.get("nodes", []), "staticText", "Hovered: yes") is not None)
+check("page.hover without ref is bad_request", code(c4.ask("page.hover", tab=at)) == "bad_request")
+check("page.scroll without dy is bad_request", code(c4.ask("page.scroll", tab=at)) == "bad_request")
+check("page.scroll dy 600", code(c4.ask("page.scroll", tab=at, dy=600)) == "ok")
+scrolled = lambda ns: any(re.match(r"Scrolled: [1-9]", n["name"]) for n in ns if n["role"] == "staticText")
+r = snapshot(c4, at, scrolled, wait=4)
+check("page.scroll moved the page (Scrolled: > 0)", bool(r) and scrolled(r.get("nodes", [])),
+      [n["name"] for n in (r or {}).get("nodes", []) if n["name"].startswith("Scrolled")])
+if hover:
+    check("page.scroll at an element (ref)", code(c4.ask("page.scroll", tab=at, dy=-300, ref=hover["ref"])) == "ok")
+
+time.sleep(0.5)
+r = c4.ask("page.console", tab=at)
+msgs = r.get("messages", [])
+check("page.console has the page's console.log", any("agens-console-test" in m.get("text", "") for m in msgs), msgs[-5:])
+check("page.console has the uncaught error, as an error",
+      any("agens-uncaught-test" in m.get("text", "") and m.get("level") == "error" for m in msgs), msgs[-5:])
+check("page.console entries carry level, text, url and line",
+      bool(msgs) and all(set(m) == {"level", "text", "url", "line"} for m in msgs), msgs[:2])
+r = c4.ask("page.network", tab=at)
+reqs = r.get("requests", [])
+check("page.network has the 404 the page fetched",
+      any(q.get("url", "").endswith("/missing-404") and q.get("status") == 404 for q in reqs), reqs)
+check("page.network has no entry for the successful /api/ping", not any("/api/ping" in q.get("url", "") for q in reqs), reqs)
+check("page.network entries carry only url, method, status or error, type",
+      all(set(q) <= {"url", "method", "status", "error", "type"} for q in reqs), reqs[:2])
+
+if ask:
+    c4.ask("page.click", tab=at, ref=ask["ref"])  # answers once the click is handled, or after 2 s with the page held
+    ev = c4.event("page.dialog", timeout=10)
+    check("confirm() is held and reported as page.dialog", bool(ev) and ev.get("type") == "confirm" and
+          ev.get("tab") == at and ev.get("message") == "Proceed?", ev)
+    r = c4.ask("page.snapshot", tab=at)
+    check("page.snapshot while the dialog is open is dialog_open", code(r) == "dialog_open", code(r))
+    check("page.eval while the dialog is open is dialog_open", code(c4.ask("page.eval", tab=at, js="1")) == "dialog_open")
+    check("page.dialog with a bad action is bad_request", code(c4.ask("page.dialog", tab=at, action="maybe")) == "bad_request")
+    check("page.dialog accept", code(c4.ask("page.dialog", tab=at, action="accept")) == "ok")
+    r = snapshot(c4, at, lambda ns: find(ns, "staticText", "Answer: true") is not None, wait=4)
+    check("the page got confirm() == true", bool(r) and find(r.get("nodes", []), "staticText", "Answer: true") is not None)
+    check("page.dialog with no dialog open is bad_request", code(c4.ask("page.dialog", tab=at, action="dismiss")) == "bad_request")
+
+r = c4.ask("page.eval", tab=at, js="document.title")
+check("page.eval on the local site returns the value", code(r) == "ok" and r.get("result") == "Agent (test)", r)
+r = c4.ask("page.eval", tab=at, js="({a: 1 + 1, b: [true, null]})")
+check("page.eval returns an object as JSON", code(r) == "ok" and r.get("result") == {"a": 2, "b": [True, None]}, r)
+check("page.eval of undefined returns null", c4.ask("page.eval", tab=at, js="undefined").get("result", 0) is None)
+r = c4.ask("page.eval", tab=at, js="throw new Error('boom')")
+check("page.eval that throws is failed", code(r) == "failed" and "boom" in r.get("message", ""), r)
+check("page.eval of a function (not JSON) is failed", code(c4.ask("page.eval", tab=at, js="(() => 1)")) == "failed")
+check("page.eval with a too long script is bad_request", code(c4.ask("page.eval", tab=at, js="1;" * 50001)) == "bad_request")
+# A look-alike of localhost that still reaches the test site without any network: "localhost."
+# (trailing dot) is not local for page.eval.
+c4.ask("tab.navigate", tab=at, url="http://localhost.:8765/agent")
+r = snapshot(c4, at, heading("Agent page"), wait=4)
+print("info: http://localhost.:8765/agent", "loaded" if r and r.get("ok") and heading("Agent page")(r["nodes"]) else "did not load (error page)")
+check("page.eval on http://localhost.:8765 (look-alike) is denied", code(c4.ask("page.eval", tab=at, js="1")) == "denied")
+c4.ask("tab.navigate", tab=at, url="http://example.invalid/")
+check("page.eval on http://example.invalid/ (error page) is denied", code(c4.ask("page.eval", tab=at, js="1")) == "denied")
+
+# Clipboard: refused without allow, open with allow ["clipboard"] (also on a password field).
+r = c4.ask("tab.open", ato=ato, url=f"{SITE}/form")
+ft = r.get("tab")
+r = snapshot(c4, ft, lambda ns: find(ns, "textField", "Text", lambda n: not n.get("password")) is not None)
+ftext = find(r.get("nodes", []), "textField", "Text", lambda n: not n.get("password")) if r else None
+if ftext:
+    c4.ask("page.click", tab=ft, ref=ftext["ref"])
+check("without clipboard: page.key meta+v is denied", code(c4.ask("page.key", tab=ft, key="v", modifiers=["meta"])) == "denied")
+check("control.stop (agent session)", code(c4.ask("control.stop")) == "ok")
+c4.close()
+c5 = Conn()
+r = c5.ask("control.start", ato=ato, reason="Gate: copiar e colar", allow=["clipboard"])
+check("control.start with allow [clipboard]", code(r) == "ok", r)
+r = c5.ask("tab.open", ato=ato, url=f"{SITE}/form")
+ft = r.get("tab")
+r = snapshot(c5, ft, lambda ns: find(ns, "textField", "Password") is not None)
+fnodes = r.get("nodes", []) if r else []
+ftext, fpw = find(fnodes, "textField", "Text", lambda n: not n.get("password")), find(fnodes, "textField", "Password")
+if ftext:
+    c5.ask("page.click", tab=ft, ref=ftext["ref"])
+    r = c5.ask("page.key", tab=ft, key="v", modifiers=["meta"])
+    check("with clipboard: page.key meta+v is no longer refused", code(r) == "ok", r)
+if fpw:
+    c5.ask("page.click", tab=ft, ref=fpw["ref"])
+    r = c5.ask("page.key", tab=ft, key="v", modifiers=["meta"])
+    check("with clipboard: page.key meta+v on the password field is not refused", code(r) == "ok", r)
+    check("with clipboard: page.type into the password field is still denied",
+          code(c5.ask("page.type", tab=ft, ref=fpw["ref"], text="x")) == "denied")
+check("control.stop (clipboard session)", code(c5.ask("control.stop")) == "ok")
+c5.close()
+skip("Assumir: tab and page ops answer paused, event control.paused {by: user}", "needs a person to press it (PauseBlocks is in the self-check)")
+skip("Devolver: event control.resumed and ops work again", "needs a person to press it")
+skip("Assumir with a dialog pending shows it to the person", "needs a person")
+skip("allow [passwords]: saved logins fill in the session's tabs", "needs a saved login and a person to look")
+
 c.close()  # disconnect: control ends, its tabs stay open but are no longer controlled
 time.sleep(1.5)
 c3 = Conn()
@@ -210,7 +356,7 @@ check("after disconnect, the old tab can't be adopted (not_found)", code(c3.ask(
 shot("after-disconnect")  # look: the /other tab is still open, without border, strip or mark
 check("control.stop", code(c3.ask("control.stop")) == "ok")
 c3.close()
-skip("Parar on the strip sends control.stopped {reason: user}", "needs a person to press it")
+skip("Encerrar (the stop bubble) sends control.stopped {reason: user}", "needs a person to press it")
 
 print("\nRESULT:", "PASS" if not failed else f"FAIL ({len(failed)}): " + "; ".join(failed))
 EOF
