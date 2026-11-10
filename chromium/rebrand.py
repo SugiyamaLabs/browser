@@ -35,6 +35,29 @@ CHROMIUM = re.compile(r'Chromium(?!<ph name="END_LINK_CHROMIUM")')
 GRD_SUBS = [(re.compile(", ungoogled-chromium"), ""), (re.compile("The Chromium Authors"), "SugiyamaLabs"), (CHROMIUM, PRODUCT)]
 XTB_SUBS = [(re.compile("Autores do Chromium"), "SugiyamaLabs"), (CHROMIUM, PRODUCT)]
 
+# "Chrome" / "Google Chrome" naming this browser. Stays: Google services and programs (Web Store, Enterprise,
+# Remote Desktop, Root Store/Program, Sync, Apps, Gemini in/on Chrome) and what isn't a bare word (ChromeOS,
+# Chromebook, ChromeVox, Chromecast: no word boundary). Applied only to message text, never to desc/meaning.
+CHROME = re.compile(
+    r"(?<!Gemini in )(?<!Gemini on )(?<!Gemini no )(?<!Gemini na )(?:Google )?Chrome\b"
+    r"(?! ?(?:Web ?[Ss]tore|Enterprise|Remote Desktop|Root|Sync|Apps?\b|Dino|for Testing|Browser Cloud))")
+MESSAGE = re.compile(r"(<message\b[^>]*>)(.*?)(</message>)", re.S)
+
+# pt-BR: Chromium says "guia" for a tab, we say "aba". Skipped: "guide" senses, i.e. masculine "guia"
+# (o/um/este guia) and "Guia de privacidade/configuração".
+GUIA = re.compile(r"(?<!\b[Oo] )(?<!\b[Uu]m )(?<!\b[Ee]ste )(?<!\b[Ee]sse )(?<!\b[Dd]o )(?<!\b[Nn]o )(?<!\b[Aa]o )"
+                  r"\b([Gg])uia(s?)\b(?! de (?:privacidade|configura))")
+# Other pt-BR xtbs that say "guia" for tabs and whose English has no "Chrome" to rebrand.
+PT_ONLY_GRDS = ["ui/strings/ax_strings.grd", "components/omnibox/resources/omnibox_pedal_synonyms.grd"]
+
+
+def guia_to_aba(text: str) -> str:
+    return GUIA.sub(lambda m: ("A" if m[1] == "G" else "a") + "ba" + m[2], text)
+
+
+def rebrand_chrome(text: str) -> str:
+    return CHROME.sub(PRODUCT, text)
+
 
 def message_ids(grd: Path) -> list[str]:
     root = grd_reader.Parse(str(grd), debug=False, skip_validation_checks=True)
@@ -59,6 +82,7 @@ def rebrand_grd(grd: Path):
         text = f.read_text()
         for old, new in GRD_SUBS:
             text = old.sub(new, text)
+        text = MESSAGE.sub(lambda m: m[1] + rebrand_chrome(m[2]) + m[3], text)
         write_if_changed(f, text)
     after = message_ids(grd)
     assert len(before) == len(after), grd  # same messages, same order: only the text changed
@@ -68,13 +92,36 @@ def rebrand_grd(grd: Path):
         text = re.sub(r'(<translation id=")(\d+)(")', lambda m: m[1] + renamed.get(m[2], m[2]) + m[3], xtb.read_text())
         for old, new in XTB_SUBS:
             text = old.sub(new, text)
+        # only translations of messages whose English changed (their id is in `renamed`) get "Chrome" replaced
+        changed = set(renamed.values())
+        text = re.sub(r'(<translation id=")(\d+)(".*?>)(.*?)(</translation>)',
+                      lambda m: m[1] + m[2] + m[3] + (rebrand_chrome(m[4]) if m[2] in changed else m[4]) + m[5], text, flags=re.S)
+        if xtb.name.endswith("_pt-BR.xtb"):
+            text = guia_to_aba(text)
+        # two messages that differed only by "Chrome"/"Chromium" now share an id: keep one translation (grit asserts on duplicates)
+        seen = set()
+        def first(m):
+            if m[1] in seen:
+                return ""
+            seen.add(m[1])
+            return m[0]
+        text = re.sub(r'<translation id="(\d+)"[^>]*?(?:/>|>.*?</translation>)\n?', first, text, flags=re.S)
         write_if_changed(xtb, text)
     print(f"ok: {grd.relative_to(SRC)} ({len(renamed)} messages renamed)")
+
+
+def rebrand_pt_only(grd: Path):
+    for rel in re.findall(r'<file path="([^"]+_pt-BR\.xtb)"', grd.read_text()):
+        xtb = grd.parent / rel
+        write_if_changed(xtb, guia_to_aba(xtb.read_text()))
+    print(f"ok: {grd.relative_to(SRC)} (pt-BR tabs)")
 
 
 def main():
     for rel in GRDS:
         rebrand_grd(SRC / rel)
+    for rel in PT_ONLY_GRDS:
+        rebrand_pt_only(SRC / rel)
     icons = REPO / "design/logo/exportados"
     mac = SRC / "chrome/app/theme/chromium/mac"
     shutil.copyfile(icons / "agens-navegador-escuro.icns", mac / "app.icns")
