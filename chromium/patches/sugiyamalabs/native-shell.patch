@@ -1,9 +1,9 @@
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
 new file mode 100644
-index 0000000000..6c7af680ff
+index 0000000000..340745ffe1
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embed.h
-@@ -0,0 +1,251 @@
+@@ -0,0 +1,266 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The boundary between the engine and any interface (the browser's own chrome today, the Agens
 +// app later). Plain C on purpose: no Chromium or C++ types cross it, Swift imports it as is, and
@@ -213,6 +213,21 @@ index 0000000000..6c7af680ff
 +int agens_password_get(AgensWindow* window, int index, char* out, int size);
 +void agens_password_remove(AgensWindow* window, int index);
 +
++// Favoritos of this window's ato, in order, folders before what they hold. `parent` is the id of
++// the folder a node is in; `bar` is the id of the bookmarks bar (its children show on the bar).
++// Called now and again on every change.
++typedef struct {
++  long long id, parent;
++  const char* title;
++  const char* url;  // empty for a folder
++} AgensBookmark;
++typedef void (*AgensBookmarksChanged)(void* context, const AgensBookmark* bookmarks, int count,
++                                      long long bar);
++void agens_window_set_bookmarks_observer(AgensWindow* window, AgensBookmarksChanged observer,
++                                         void* context);
++void agens_bookmark_remove(AgensWindow* window, long long id);  // a folder goes with what it holds
++void agens_bookmark_add_folder(AgensWindow* window, const char* title);  // at the end of the bar
++
 +// Histórico of this window's ato, newest first, one entry per page per day, at most 300.
 +// `text` filters by title and address ("" for all). Calls `fn` later, once.
 +typedef struct {
@@ -257,10 +272,10 @@ index 0000000000..6c7af680ff
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EMBED_H_
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
 new file mode 100644
-index 0000000000..f4387816ff
+index 0000000000..8844352ffa
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_window.h
-@@ -0,0 +1,412 @@
+@@ -0,0 +1,454 @@
 +// Copyright 2026 SugiyamaLabs.
 +// One browser window as the embed API sees it (agens_embed.h): tabs, suggestions, atos, search
 +// default, bookmarks. Platform-neutral; each platform's shell (native_shell_mac.mm, later
@@ -288,6 +303,8 @@ index 0000000000..f4387816ff
 +#include "chrome/browser/bookmarks/bookmark_model_factory.h"
 +#include "chrome/browser/browser_process.h"
 +#include "components/bookmarks/browser/bookmark_model.h"
++#include "components/bookmarks/browser/base_bookmark_model_observer.h"
++#include "components/bookmarks/common/bookmark_metrics.h"
 +#include "components/bookmarks/browser/bookmark_utils.h"
 +#include "chrome/browser/profiles/profile.h"
 +#include "chrome/browser/profiles/profile_attributes_entry.h"
@@ -364,7 +381,8 @@ index 0000000000..f4387816ff
 +                     public AutocompleteController::Observer,
 +                     public ProfileAttributesStorage::Observer,
 +                     public content::DownloadManager::Observer,
-+                     public download::DownloadItem::Observer {
++                     public download::DownloadItem::Observer,
++                     public bookmarks::BaseBookmarkModelObserver {
 +  explicit AgensWindow(BrowserWindowInterface* browser) : browser(browser) {
 +    browser->GetTabStripModel()->AddObserver(this);
 +    Storage().AddObserver(this);
@@ -405,6 +423,7 @@ index 0000000000..f4387816ff
 +    }
 +  }
 +  ~AgensWindow() override {
++    if (bookmark_model) bookmark_model->RemoveObserver(this);
 +    Storage().RemoveObserver(this);
 +    for (download::DownloadItem* item : downloads) item->RemoveObserver(this);
 +    if (downloads_manager) downloads_manager->RemoveObserver(this);
@@ -669,16 +688,54 @@ index 0000000000..f4387816ff
 +  raw_ptr<void> downloads_context = nullptr;
 +  base::CallbackListSubscription search_loaded_;
 +  base::CancelableTaskTracker history_tracker;
++  raw_ptr<bookmarks::BookmarkModel> bookmark_model = nullptr;
++  AgensBookmarksChanged bookmarks_observer = nullptr;
++  raw_ptr<void> bookmarks_context = nullptr;
++
++  void WatchBookmarks() {
++    if (bookmark_model) return;
++    bookmark_model = BookmarkModelFactory::GetForBrowserContext(browser->GetProfile());
++    if (bookmark_model) bookmark_model->AddObserver(this);
++  }
++  // bookmarks::BaseBookmarkModelObserver:
++  void BookmarkModelChanged() override {
++    if (!bookmarks_observer || !bookmark_model || !bookmark_model->loaded()) return;
++    std::vector<const bookmarks::BookmarkNode*> nodes;
++    auto walk = [&](auto&& self, const bookmarks::BookmarkNode* folder) -> void {
++      for (const auto& child : folder->children()) {
++        nodes.push_back(child.get());
++        if (child->is_folder()) self(self, child.get());
++      }
++    };
++    std::vector<const bookmarks::BookmarkNode*> roots = {bookmark_model->bookmark_bar_node(),
++                                                         bookmark_model->other_node()};
++    for (const auto* root : roots) {
++      nodes.push_back(root);
++      walk(walk, root);
++    }
++    std::vector<std::string> titles, urls;
++    for (const auto* n : nodes) {
++      titles.push_back(base::UTF16ToUTF8(n->GetTitle()));
++      urls.push_back(n->is_url() ? n->url().spec() : std::string());
++    }
++    std::vector<AgensBookmark> out;
++    for (size_t i = 0; i < nodes.size(); ++i) {
++      out.push_back({nodes[i]->id(), nodes[i]->parent() ? nodes[i]->parent()->id() : 0,
++                     titles[i].c_str(), urls[i].c_str()});
++    }
++    bookmarks_observer(bookmarks_context, out.data(), static_cast<int>(out.size()),
++                       bookmark_model->bookmark_bar_node()->id());
++  }
 +  base::WeakPtrFactory<AgensWindow> weak{this};
 +};
 +
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
 new file mode 100644
-index 0000000000..84ba64e5fc
+index 0000000000..7e68f39639
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.cc
-@@ -0,0 +1,588 @@
+@@ -0,0 +1,609 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The embed API (agens_embed.h) on top of AgensWindow. Same code on every platform.
 +
@@ -1109,6 +1166,27 @@ index 0000000000..84ba64e5fc
 +  saved->logins.erase(saved->logins.begin() + index);
 +}
 +
++void agens_window_set_bookmarks_observer(AgensWindow* w, AgensBookmarksChanged observer, void* context) {
++  w->bookmarks_observer = observer;
++  w->bookmarks_context = context;
++  w->WatchBookmarks();
++  w->BookmarkModelChanged();
++}
++void agens_bookmark_remove(AgensWindow* w, long long id) {
++  w->WatchBookmarks();
++  if (!w->bookmark_model || !w->bookmark_model->loaded()) return;
++  const bookmarks::BookmarkNode* node = bookmarks::GetBookmarkNodeByID(w->bookmark_model, id);
++  if (node && !node->is_permanent_node()) {
++    w->bookmark_model->Remove(node, bookmarks::metrics::BookmarkEditSource::kUser, FROM_HERE);
++  }
++}
++void agens_bookmark_add_folder(AgensWindow* w, const char* title) {
++  w->WatchBookmarks();
++  if (!w->bookmark_model || !w->bookmark_model->loaded() || !title || !*title) return;
++  const bookmarks::BookmarkNode* bar = w->bookmark_model->bookmark_bar_node();
++  w->bookmark_model->AddFolder(bar, bar->children().size(), base::UTF8ToUTF16(title));
++}
++
 +void agens_history(AgensWindow* w, const char* text, AgensHistoryFn fn, void* context) {
 +  history::HistoryService* history = HistoryServiceFactory::GetForProfile(
 +      w->browser->GetProfile(), ServiceAccessType::EXPLICIT_ACCESS);
@@ -1495,10 +1573,10 @@ index 0000000000..e5616339fd
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..f1f2057529
+index 0000000000..49e5b776c5
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,3584 @@
+@@ -0,0 +1,3904 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -1604,6 +1682,7 @@ index 0000000000..f1f2057529
 +static const CGFloat kRail = 40;        // the collapsed column (prototype .collapsed .sidebar)
 +static const CGFloat kLightsEnd = 86;   // the traffic lights end at 72; prototype leaves 12+2 pt
 +static NSString* const kCollapsedKey = @"AgensSidebarCollapsed";
++static NSString* const kBookmarkBarKey = @"AgensBookmarkBar";  // the bookmarks bar shows (⌘⇧B)
 +static NSString* const kTabsOnTopKey = @"AgensTabsOnTop";  // tabs in a strip above the bar (⌘⇧S)
 +static const CGFloat kStrip = 52;  // the top tab strip, same height as the bar so the lights center
 +
@@ -2987,7 +3066,12 @@ index 0000000000..f1f2057529
 +             control:[self segments:@[ @"Aberta", @"Recolhida" ] selected:[_chrome collapsed] ? 1 : 0 action:@selector(setSide:)]
 +                   y:y];
 +  }
-+  y = [self info:@"Densidade, barra de favoritos" detail:nil note:@"Ainda não existem" y:y];
++  NSSwitch* bar = [[NSSwitch alloc] init];
++  bar.state = [NSUserDefaults.standardUserDefaults boolForKey:kBookmarkBarKey] ? NSControlStateValueOn : NSControlStateValueOff;
++  bar.target = self;
++  bar.action = @selector(setBookmarkBar:);
++  y = [self option:@"Barra de favoritos" detail:@"⌘⇧B alterna." control:bar y:y];
++  y = [self info:@"Densidade" detail:nil note:@"Ainda não existe" y:y];
 +  return y;
 +}
 +- (void)themeDidChange {
@@ -3031,6 +3115,10 @@ index 0000000000..f1f2057529
 +}
 +- (void)setMode:(NSSegmentedControl*)seg {
 +  if (_browser) SetMode(_browser, (AgensColorMode)seg.selectedSegment);
++}
++- (void)setBookmarkBar:(NSSwitch*)sw {
++  [NSUserDefaults.standardUserDefaults setBool:sw.state == NSControlStateValueOn forKey:kBookmarkBarKey];
++  [self themeDidChange];
 +}
 +- (void)setTabsPosition:(NSSegmentedControl*)seg {
 +  if ((seg.selectedSegment == 1) != [_chrome tabsOnTop]) [_chrome toggleTabsPosition];
@@ -3679,15 +3767,15 @@ index 0000000000..f1f2057529
 +@end
 +
 +// ---------------------------------------------------------------------------------------------
-+// Histórico (prototype INTERNAL.history): our own page over the card while the tab is on
-+// chrome://history. Search, "Apagar histórico…", days with a line under them, and rows with the
-+// time, a monogram, the title, the site and "x" on hover.
++// Our internal pages (prototype .ip): Histórico and Favoritos, drawn over the card while the tab
++// is on chrome://history or chrome://bookmarks. A heading, a search, one button, groups with a
++// line under their name, and rows: [time] monogram, title, site, "x" on hover.
 +
-+@interface AgensHistoryRow : AgensHoverView
++@interface AgensListRow : AgensHoverView
 +@property(nonatomic, copy) void (^onRemove)(void);
 +- (void)setTime:(NSString*)time title:(NSString*)title site:(NSString*)site;
 +@end
-+@implementation AgensHistoryRow {
++@implementation AgensListRow {
 +  NSTextField* _time;
 +  AgensAtoTile* _tile;
 +  NSTextField* _title;
@@ -3706,31 +3794,36 @@ index 0000000000..f1f2057529
 +    _remove = [NSButton buttonWithImage:Symbol(@"xmark", 10) target:self action:@selector(remove:)];
 +    _remove.bordered = NO;
 +    _remove.contentTintColor = kDim.color();
-+    _remove.toolTip = @"Remover do histórico";
-+    _remove.accessibilityLabel = @"Remover do histórico";
++    _remove.toolTip = @"Remover";
++    _remove.accessibilityLabel = @"Remover";
 +    for (NSView* v in @[ _time, _tile, _title, _site, _remove ]) [self addSubview:v];
 +  }
 +  return self;
 +}
++// The monogram's letter and color come from the site.
 +- (void)setTime:(NSString*)time title:(NSString*)title site:(NSString*)site {
-+  _time.stringValue = time;
++  NSString* host = [site componentsSeparatedByString:@"/"].firstObject ?: site;
++  _time.stringValue = time ?: @"";
++  _time.hidden = time == nil;
 +  _title.stringValue = title;
 +  _site.stringValue = site;
-+  _tile.stringValue = site.length ? [site substringToIndex:1].uppercaseString : @"?";
-+  _tile.layer.backgroundColor = AtoColor((int)(site.hash % 5)).CGColor;
++  _tile.stringValue = host.length ? [host substringToIndex:1].uppercaseString : @"?";
++  _tile.layer.backgroundColor = AtoColor((int)(host.hash % 5)).CGColor;
 +  self.toolTip = title;
-+  self.accessibilityLabel = [NSString stringWithFormat:@"%@, %@, %@", title, site, time];
++  self.accessibilityLabel = time ? [NSString stringWithFormat:@"%@, %@, %@", title, site, time]
++                                 : [NSString stringWithFormat:@"%@, %@", title, site];
 +}
 +- (void)layout {
 +  [super layout];
 +  const CGFloat w = NSWidth(self.bounds);
 +  [_site sizeToFit];
 +  const CGFloat siteW = MIN(NSWidth(_site.frame), w * 0.35);
++  const CGFloat tileX = _time.hidden ? 10 : 66;
 +  _time.frame = NSMakeRect(10, 8, 44, 16);
-+  _tile.frame = NSMakeRect(66, 8, 16, 16);
++  _tile.frame = NSMakeRect(tileX, 8, 16, 16);
 +  _remove.frame = NSMakeRect(w - 30, 4, 24, 24);
 +  _site.frame = NSMakeRect(NSMinX(_remove.frame) - 8 - siteW, 8, siteW, 16);
-+  _title.frame = NSMakeRect(94, 7, NSMinX(_site.frame) - 12 - 94, 18);
++  _title.frame = NSMakeRect(tileX + 28, 7, NSMinX(_site.frame) - 12 - (tileX + 28), 18);
 +  [self refresh];
 +}
 +- (void)refresh {
@@ -3742,38 +3835,76 @@ index 0000000000..f1f2057529
 +}
 +@end
 +
-+@interface AgensHistoryView : NSView <NSSearchFieldDelegate>
-+@property(nonatomic) AgensWindow* engine;
-+@property(nonatomic, copy) void (^onOpen)(NSString* url);
-+@property(nonatomic, copy) void (^onClear)(void);
-+- (void)reload;
-+- (void)refreshTheme;
-+- (void)setVisits:(const AgensVisit*)visits count:(int)count;
++// A group's name with a line under it (prototype .day, .folder).
++@interface AgensListHeader : AgensFlippedView
++- (instancetype)initWithTitle:(NSString*)title folder:(BOOL)folder;
++@end
++@implementation AgensListHeader {
++  NSImageView* _icon;
++  NSTextField* _label;
++  NSView* _line;
++}
++- (instancetype)initWithTitle:(NSString*)title folder:(BOOL)folder {
++  if ((self = [super initWithFrame:NSZeroRect])) {
++    if (folder) {
++      _icon = [NSImageView imageViewWithImage:Symbol(@"folder", 12)];
++      _icon.contentTintColor = kDim.color();
++      [self addSubview:_icon];
++    }
++    _label = Label(folder ? 13 : 12.5, NSFontWeightSemibold, kMute);
++    _label.stringValue = title;
++    _line = [[NSView alloc] init];
++    _line.wantsLayer = YES;
++    [self addSubview:_label];
++    [self addSubview:_line];
++    [self refreshTheme];
++  }
++  return self;
++}
++- (void)refreshTheme {
++  _line.layer.backgroundColor = CG(kLine, self);
++}
++- (void)viewDidChangeEffectiveAppearance {
++  [super viewDidChangeEffectiveAppearance];
++  [self refreshTheme];
++}
++- (void)layout {
++  [super layout];
++  const CGFloat w = NSWidth(self.bounds);
++  _icon.frame = NSMakeRect(0, 1, 16, 16);
++  _label.frame = NSMakeRect(_icon ? 24 : 0, _icon ? 1 : 0, w - (_icon ? 24 : 0), 18);  // centers the text on the icon (measured)
++  _line.frame = NSMakeRect(0, 24, w, 1);
++}
 +@end
 +
-+static void VisitsListed(void* context, const AgensVisit* visits, int count) {
-+  [(__bridge AgensHistoryView*)context setVisits:visits count:count];
-+}
-+
-+@implementation AgensHistoryView {
++@interface AgensListPage : NSView
++@property(nonatomic) AgensWindow* engine;
++@property(nonatomic, copy) void (^onOpen)(NSString* url);
++@property(nonatomic, copy) void (^onAction)(void);  // the button next to the search
++- (instancetype)initWithTitle:(NSString*)title search:(NSString*)search action:(NSString*)action note:(NSString*)note;
++- (NSString*)query;
++- (void)reload;  // subclasses: fetch, then setItems:
++- (void)setItems:(NSArray<NSView*>*)items empty:(NSString*)empty;
++- (void)refreshTheme;
++@end
++@implementation AgensListPage {
 +  NSScrollView* _scroll;
 +  AgensFlippedView* _doc;
 +  NSTextField* _heading;
 +  NSSearchField* _search;
-+  NSButton* _clear;
-+  NSMutableArray<NSView*>* _items;  // day labels, lines and rows
++  NSButton* _action;
++  NSArray<NSView*>* _items;
 +  NSTextField* _note;
-+  std::vector<std::tuple<std::string, std::string, double>> _visits;  // url, title, time
 +}
 +@synthesize engine = _engine;
 +@synthesize onOpen = _onOpen;
-+@synthesize onClear = _onClear;
-+- (instancetype)initWithFrame:(NSRect)frame {
-+  if ((self = [super initWithFrame:frame])) {
++@synthesize onAction = _onAction;
++- (instancetype)initWithTitle:(NSString*)title search:(NSString*)search action:(NSString*)action note:(NSString*)note {
++  if ((self = [super initWithFrame:NSZeroRect])) {
 +    self.wantsLayer = YES;
 +    self.layer.cornerRadius = 11;
 +    self.layer.masksToBounds = YES;
-+    _items = [NSMutableArray array];
++    _items = @[];
 +    _scroll = [[NSScrollView alloc] init];
 +    _scroll.drawsBackground = NO;
 +    _scroll.contentView.drawsBackground = NO;
@@ -3785,18 +3916,17 @@ index 0000000000..f1f2057529
 +    _scroll.documentView = _doc;
 +    [self addSubview:_scroll];
 +    _heading = Label(22, NSFontWeightSemibold, kInk);
-+    _heading.stringValue = @"Histórico";
++    _heading.stringValue = title;
 +    _search = [[NSSearchField alloc] init];
-+    _search.placeholderString = @"Buscar no histórico";
-+    _search.accessibilityLabel = @"Buscar no histórico";
-+    _search.sendsSearchStringImmediately = NO;  // waits for a pause in typing
++    _search.placeholderString = search;
++    _search.accessibilityLabel = search;
 +    _search.target = self;
 +    _search.action = @selector(searchChanged:);
-+    _clear = [NSButton buttonWithTitle:@"Apagar histórico…" target:self action:@selector(clear:)];
-+    _clear.controlSize = NSControlSizeSmall;
++    _action = [NSButton buttonWithTitle:action target:self action:@selector(act:)];
++    _action.controlSize = NSControlSizeSmall;
 +    _note = Label(12, NSFontWeightRegular, kDim);
-+    _note.stringValue = @"O histórico fica só neste Mac, por ato. Nada vai para servidor nenhum.";
-+    for (NSView* v in @[ _heading, _search, _clear, _note ]) [_doc addSubview:v];
++    _note.stringValue = note;
++    for (NSView* v in @[ _heading, _search, _action, _note ]) [_doc addSubview:v];
 +    [self refreshTheme];
 +  }
 +  return self;
@@ -3806,27 +3936,67 @@ index 0000000000..f1f2057529
 +}
 +- (void)refreshTheme {
 +  self.layer.backgroundColor = CG(kBg, self);
-+  for (NSView* v in _items) {
-+    if (!v.subviews.count && v.layer) v.layer.backgroundColor = CG(kLine, self);  // the day lines
-+  }
 +}
 +- (void)viewDidChangeEffectiveAppearance {
 +  [super viewDidChangeEffectiveAppearance];
 +  [self refreshTheme];
 +}
++- (NSString*)query {
++  return _search.stringValue;
++}
 +- (void)reload {
-+  if (_engine) agens_history(_engine, _search.stringValue.UTF8String, VisitsListed, (__bridge void*)self);
 +}
 +- (void)searchChanged:(id)sender {
 +  [self reload];
 +}
-+- (void)clear:(id)sender {
-+  if (_onClear) _onClear();
++- (void)act:(id)sender {
++  if (_onAction) _onAction();
 +}
-+- (void)setVisits:(const AgensVisit*)visits count:(int)count {
-+  _visits.clear();
-+  for (int i = 0; i < count; ++i) _visits.emplace_back(visits[i].url, visits[i].title, visits[i].time);
-+  [self build];
++- (void)setItems:(NSArray<NSView*>*)items empty:(NSString*)empty {
++  for (NSView* v in _items) [v removeFromSuperview];
++  if (!items.count) {
++    NSTextField* none = Label(13, NSFontWeightRegular, kDim);
++    none.stringValue = empty;
++    items = @[ none ];
++  }
++  _items = items;
++  for (NSView* v in _items) [_doc addSubview:v];
++  self.needsLayout = YES;
++}
++// Prototype .ip: at most 820 pt wide, centered, 36 pt from the top, 28 pt on the sides.
++- (void)layout {
++  [super layout];
++  _scroll.frame = self.bounds;
++  const CGFloat W = NSWidth(self.bounds), cw = MIN(820, W) - 56, x0 = (W - cw) / 2;
++  CGFloat y = 36;
++  [_action sizeToFit];
++  _action.frame = NSMakeRect(x0 + cw - NSWidth(_action.frame), y + 4, NSWidth(_action.frame), NSHeight(_action.frame));
++  _search.frame = NSMakeRect(NSMinX(_action.frame) - 12 - 240, y + 2, 240, 24);
++  _heading.frame = NSMakeRect(x0, y, NSMinX(_search.frame) - 12 - x0, 28);
++  y += 28 + 20;
++  for (NSView* v in _items) {
++    if ([v isKindOfClass:AgensListRow.class]) {
++      v.frame = NSMakeRect(x0 - 10, y, cw + 20, 32);  // the hover box reaches past the text, like .row's padding
++      y += 33;
++    } else {  // a group's header, or the empty text
++      y += 22;
++      v.frame = NSMakeRect(x0, y, cw, 25);
++      y += 31;
++    }
++  }
++  y += 24;
++  _note.frame = NSMakeRect(x0, y, cw, 16);
++  y += 16 + 48;
++  _doc.frame = NSMakeRect(0, 0, W, MAX(y, NSHeight(self.bounds)));
++}
++@end
++
++// Histórico: the engine searches; days as groups.
++@interface AgensHistoryView : AgensListPage
++- (void)setVisits:(const AgensVisit*)visits count:(int)count;
++@end
++static void VisitsListed(void* context, const AgensVisit* visits, int count) {
++  [(__bridge AgensHistoryView*)context setVisits:visits count:count];
 +}
 +static NSString* DayName(NSDate* date) {
 +  NSCalendar* cal = NSCalendar.currentCalendar;
@@ -3841,80 +4011,165 @@ index 0000000000..f1f2057529
 +  NSString* s = [f stringFromDate:date];
 +  return [[s substringToIndex:1].uppercaseString stringByAppendingString:[s substringFromIndex:1]];
 +}
-+- (void)build {
-+  for (NSView* v in _items) [v removeFromSuperview];
-+  [_items removeAllObjects];
++@implementation AgensHistoryView
++- (instancetype)init {
++  return [super initWithTitle:@"Histórico" search:@"Buscar no histórico" action:@"Apagar histórico…"
++                         note:@"O histórico fica só neste Mac, por ato. Nada vai para servidor nenhum."];
++}
++- (void)reload {
++  if (self.engine) agens_history(self.engine, self.query.UTF8String, VisitsListed, (__bridge void*)self);
++}
++- (void)setVisits:(const AgensVisit*)visits count:(int)count {
++  NSMutableArray<NSView*>* items = [NSMutableArray array];
 +  NSDateFormatter* hm = [[NSDateFormatter alloc] init];
 +  hm.dateFormat = @"HH:mm";
 +  NSString* day = nil;
 +  __weak AgensHistoryView* weak = self;
-+  for (const auto& [url, title, time] : _visits) {
-+    NSDate* date = [NSDate dateWithTimeIntervalSince1970:time];
++  for (int i = 0; i < count; ++i) {
++    NSDate* date = [NSDate dateWithTimeIntervalSince1970:visits[i].time];
 +    NSString* name = DayName(date);
 +    if (![name isEqualToString:day]) {
 +      day = name;
-+      NSTextField* label = Label(12.5, NSFontWeightSemibold, kMute);
-+      label.stringValue = name;
-+      NSView* line = [[NSView alloc] init];
-+      line.wantsLayer = YES;
-+      line.layer.backgroundColor = CG(kLine, self);
-+      [_items addObject:label];
-+      [_items addObject:line];
++      [items addObject:[[AgensListHeader alloc] initWithTitle:name folder:NO]];
 +    }
-+    NSURL* u = [NSURL URLWithString:@(url.c_str())];
-+    NSString* site = u.host ?: @(url.c_str());
++    NSString* address = @(visits[i].url);
++    NSURL* u = [NSURL URLWithString:address];
++    NSString* site = u.host ?: address;
 +    if ([site hasPrefix:@"www."]) site = [site substringFromIndex:4];
-+    AgensHistoryRow* row = [[AgensHistoryRow alloc] initWithFrame:NSZeroRect];
-+    [row setTime:[hm stringFromDate:date] title:title.empty() ? site : @(title.c_str()) site:site];
-+    NSString* address = @(url.c_str());
++    AgensListRow* row = [[AgensListRow alloc] initWithFrame:NSZeroRect];
++    [row setTime:[hm stringFromDate:date] title:visits[i].title[0] ? @(visits[i].title) : site site:site];
 +    row.onPress = ^{
 +      AgensHistoryView* strong = weak;
-+      if (strong && strong->_onOpen) strong->_onOpen(address);
++      if (strong.onOpen) strong.onOpen(address);
 +    };
 +    row.onRemove = ^{
 +      AgensHistoryView* strong = weak;
-+      if (!strong || !strong->_engine) return;
-+      agens_history_remove(strong->_engine, address.UTF8String);
++      if (!strong.engine) return;
++      agens_history_remove(strong.engine, address.UTF8String);
 +      [strong reload];
 +    };
-+    [_items addObject:row];
++    [items addObject:row];
 +  }
-+  if (_visits.empty()) {
-+    NSTextField* empty = Label(13, NSFontWeightRegular, kDim);
-+    empty.stringValue = _search.stringValue.length ? @"Nada encontrado." : @"Nada por aqui ainda.";
-+    [_items addObject:empty];
-+  }
-+  for (NSView* v in _items) [_doc addSubview:v];
-+  self.needsLayout = YES;
++  [self setItems:items empty:self.query.length ? @"Nada encontrado." : @"Nada por aqui ainda."];
 +}
-+// Prototype .ip: at most 820 pt wide, centered, 36 pt from the top, 28 pt on the sides.
-+- (void)layout {
-+  [super layout];
-+  _scroll.frame = self.bounds;
-+  const CGFloat W = NSWidth(self.bounds), cw = MIN(820, W) - 56, x0 = (W - cw) / 2;
-+  CGFloat y = 36;
-+  [_clear sizeToFit];
-+  _clear.frame = NSMakeRect(x0 + cw - NSWidth(_clear.frame), y + 4, NSWidth(_clear.frame), NSHeight(_clear.frame));
-+  _search.frame = NSMakeRect(NSMinX(_clear.frame) - 12 - 240, y + 2, 240, 24);
-+  _heading.frame = NSMakeRect(x0, y, NSMinX(_search.frame) - 12 - x0, 28);
-+  y += 28 + 20;
-+  for (NSView* v in _items) {
-+    if ([v isKindOfClass:AgensHistoryRow.class]) {
-+      v.frame = NSMakeRect(x0 - 10, y, cw + 20, 32);  // the hover box reaches past the text, like .row's padding
-+      y += 33;
-+    } else if ([v isKindOfClass:NSTextField.class]) {
-+      y += 22;
-+      v.frame = NSMakeRect(x0, y, cw, 18);
-+      y += 24;
-+    } else {  // the line under a day
-+      v.frame = NSMakeRect(x0, y, cw, 1);
-+      y += 7;
++@end
++
++// Favoritos: what the engine last sent, grouped by folder (its path), filtered here.
++struct BookmarkItem {
++  long long id, parent;
++  std::string title, url;
++};
++@interface AgensBookmarksView : AgensListPage
++- (void)setBookmarks:(const std::vector<BookmarkItem>&)bookmarks;
++@end
++@implementation AgensBookmarksView {
++  std::vector<BookmarkItem> _bookmarks;
++}
++- (instancetype)init {
++  return [super initWithTitle:@"Favoritos" search:@"Buscar nos favoritos" action:@"Nova pasta"
++                         note:@"Os favoritos ficam só neste Mac, por ato. A estrela na barra de endereço guarda a página aberta."];
++}
++- (void)setBookmarks:(const std::vector<BookmarkItem>&)bookmarks {
++  _bookmarks = bookmarks;
++  [self reload];
++}
++- (NSString*)pathOf:(long long)folder {
++  NSMutableArray<NSString*>* names = [NSMutableArray array];
++  for (long long id = folder; id;) {
++    long long next = 0;
++    for (const BookmarkItem& b : _bookmarks) {
++      if (b.id != id) continue;
++      [names insertObject:@(b.title.c_str()) atIndex:0];
++      next = b.parent;
++    }
++    id = next;
++  }
++  [names removeObject:@""];  // the invisible root
++  return [names componentsJoinedByString:@" › "];
++}
++- (void)reload {
++  NSString* q = self.query.lowercaseString;
++  NSMutableArray<NSView*>* items = [NSMutableArray array];
++  __weak AgensBookmarksView* weak = self;
++  for (const BookmarkItem& folder : _bookmarks) {
++    if (!folder.url.empty()) continue;
++    BOOL headed = NO;
++    for (const BookmarkItem& b : _bookmarks) {
++      if (b.parent != folder.id || b.url.empty()) continue;
++      NSString* title = @(b.title.c_str());
++      NSString* address = @(b.url.c_str());
++      NSString* shown = address;
++      for (NSString* p in @[ @"https://", @"http://", @"www." ]) {
++        if ([shown hasPrefix:p]) shown = [shown substringFromIndex:p.length];
++      }
++      if ([shown hasSuffix:@"/"]) shown = [shown substringToIndex:shown.length - 1];
++      if (q.length && ![title.lowercaseString containsString:q] && ![shown.lowercaseString containsString:q]) continue;
++      if (!headed) {
++        [items addObject:[[AgensListHeader alloc] initWithTitle:[self pathOf:folder.id] folder:YES]];
++        headed = YES;
++      }
++      AgensListRow* row = [[AgensListRow alloc] initWithFrame:NSZeroRect];
++      [row setTime:nil title:title.length ? title : shown site:shown];
++      row.onPress = ^{
++        AgensBookmarksView* strong = weak;
++        if (strong.onOpen) strong.onOpen(address);
++      };
++      const long long id = b.id;
++      row.onRemove = ^{
++        AgensBookmarksView* strong = weak;
++        if (strong.engine) agens_bookmark_remove(strong.engine, id);  // the engine sends the new list
++      };
++      [items addObject:row];
 +    }
 +  }
-+  y += 24;
-+  _note.frame = NSMakeRect(x0, y, cw, 16);
-+  y += 16 + 48;
-+  _doc.frame = NSMakeRect(0, 0, W, MAX(y, NSHeight(self.bounds)));
++  [self setItems:items empty:q.length ? @"Nada encontrado." : @"Nenhum favorito ainda. A estrela na barra de endereço guarda a página aberta."];
++}
++@end
++
++// The bookmarks bar (prototype .bmbar, .bm): folders first (each opens a menu of what it holds),
++// then the loose bookmarks.
++@interface AgensBarButton : AgensHoverView
++- (instancetype)initWithTitle:(NSString*)title folder:(BOOL)folder site:(NSString*)site;
++@end
++@implementation AgensBarButton {
++  NSView* _icon;
++  NSTextField* _label;
++}
++- (instancetype)initWithTitle:(NSString*)title folder:(BOOL)folder site:(NSString*)site {
++  if ((self = [super initWithFrame:NSZeroRect])) {
++    self.layer.cornerRadius = 7;
++    if (folder) {
++      NSImageView* icon = [NSImageView imageViewWithImage:Symbol(@"folder", 11)];
++      icon.contentTintColor = kDim.color();
++      _icon = icon;
++    } else {
++      AgensAtoTile* tile = AtoTile(14);
++      tile.stringValue = site.length ? [site substringToIndex:1].uppercaseString : @"?";
++      tile.layer.backgroundColor = AtoColor((int)(site.hash % 5)).CGColor;
++      _icon = tile;
++    }
++    _label = Label(12.5, NSFontWeightRegular, kMute);
++    _label.stringValue = title;
++    _label.lineBreakMode = NSLineBreakByTruncatingTail;
++    [self addSubview:_icon];
++    [self addSubview:_label];
++    self.toolTip = title;
++    self.accessibilityLabel = title;
++  }
++  return self;
++}
++- (CGFloat)fittingWidth {
++  return 9 + 14 + 7 + MIN(ceil(_label.fittingSize.width), 160) + 9;
++}
++- (void)layout {
++  [super layout];
++  const CGFloat h = NSHeight(self.bounds);
++  _icon.frame = NSMakeRect(9, (h - 14) / 2, 14, 14);
++  _label.frame = NSMakeRect(30, (h - 18) / 2 + 2, NSWidth(self.bounds) - 30 - 9, 18);  // +2: the text box sits high; measured on screen
++}
++- (void)refresh {
++  [super refresh];
++  _label.textColor = self.hovered ? kInk.color() : kMute.color();
 +}
 +@end
 +
@@ -3947,6 +4202,12 @@ index 0000000000..f1f2057529
 +}
 +static void DownloadsChanged(void* context, const AgensDownload* downloads, int count, int started) {
 +  [(__bridge AgensChrome*)context setDownloads:downloads count:count started:started];
++}
++@interface AgensChrome (Bookmarks)
++- (void)setBookmarks:(const AgensBookmark*)bookmarks count:(int)count bar:(long long)bar;
++@end
++static void BookmarksChanged(void* context, const AgensBookmark* bookmarks, int count, long long bar) {
++  [(__bridge AgensChrome*)context setBookmarks:bookmarks count:count bar:bar];
 +}
 +static void SuggestionsChanged(void* context, const AgensSuggestion* suggestions, int count) {
 +  [(__bridge AgensChrome*)context setSuggestions:suggestions count:count];
@@ -4012,6 +4273,11 @@ index 0000000000..f1f2057529
 +  AgensNewTabView* _ntp;
 +  // shortcut: Chromium's history page still loads under ours (one renderer more); serve a blank page for chrome://history if memory needs it.
 +  AgensHistoryView* _history;
++  AgensBookmarksView* _bookmarksPage;  // same shortcut as the history page
++  std::vector<BookmarkItem> _bookmarks;
++  long long _barId;
++  NSView* _bar;  // the bookmarks bar
++  BOOL _barShown;
 +  NSView* _backdrop;  // under the whole window, for Vidro and Seu (glass, blur, image)
 +  NSString* _url;
 +  BOOL _loading;
@@ -4192,12 +4458,21 @@ index 0000000000..f1f2057529
 +      AgensChrome* strong = weak;
 +      if (strong && strong->_window) agens_window_navigate(strong->_window, url.UTF8String);
 +    };
-+    _history.onClear = ^{
++    _history.onAction = ^{
 +      AgensChrome* strong = weak;
 +      if (!strong || !strong->_window) return;
 +      [strong menuSettings:nil];
 +      [g_settings showSection:@"apagar"];
 +    };
++    _bookmarksPage = [[AgensBookmarksView alloc] init];
++    _bookmarksPage.hidden = YES;
++    _bookmarksPage.engine = window;
++    _bookmarksPage.onOpen = _history.onOpen;
++    _bookmarksPage.onAction = ^{ [weak newBookmarkFolder]; };
++    _bar = [[NSView alloc] init];
++    _bar.accessibilityRole = NSAccessibilityToolbarRole;
++    _bar.accessibilityLabel = @"Barra de favoritos";
++    _barShown = [NSUserDefaults.standardUserDefaults boolForKey:kBookmarkBarKey];
 +    _ntp = [[AgensNewTabView alloc] init];
 +    _ntp.hidden = YES;
 +    _ntp.field.target = self;
@@ -4205,7 +4480,7 @@ index 0000000000..f1f2057529
 +    _ntp.field.delegate = self;
 +
 +    for (NSView* v in @[ _toggle, _back, _forward, _reload, _omni, _downloadsButton, _menu, _tabsScroll, _moreAtos, _atoTile, _atoName, _separator, _newTab, _newTabTop,
-+                         _atosLine, _addAto, _atoDot, _history, _ntp, _loadbar, _statusPill, _suggest ]) {
++                         _atosLine, _addAto, _atoDot, _bar, _history, _bookmarksPage, _ntp, _loadbar, _statusPill, _suggest ]) {
 +      [self addSubview:v];
 +    }
 +    [self refreshTheme];
@@ -4216,6 +4491,7 @@ index 0000000000..f1f2057529
 +    dispatch_async(dispatch_get_main_queue(), ^{ [AgensFirstRun showIfNeededFor:opened]; });
 +    agens_window_set_status_observer(_window, StatusChanged, (__bridge void*)self);
 +    agens_window_set_downloads_observer(_window, DownloadsChanged, (__bridge void*)self);
++    agens_window_set_bookmarks_observer(_window, BookmarksChanged, (__bridge void*)self);
 +    [NSNotificationCenter.defaultCenter addObserver:self
 +                                           selector:@selector(themeChanged:)
 +                                               name:kThemeChanged
@@ -4311,6 +4587,7 @@ index 0000000000..f1f2057529
 +}
 +- (void)themeChanged:(NSNotification*)note {
 +  [self setTop:[NSUserDefaults.standardUserDefaults boolForKey:kTabsOnTopKey]];
++  _barShown = [NSUserDefaults.standardUserDefaults boolForKey:kBookmarkBarKey];
 +  [self refreshBackdrop];
 +  RefreshTree(self);
 +
@@ -4443,6 +4720,7 @@ index 0000000000..f1f2057529
 +      ++slot;
 +    }
 +    page = NSMakeRect(kPad, kStrip + 52, width - 2 * kPad, height - kStrip - 52 - kPad);
++    page = [self roomForBar:page];
 +  } else {
 +    // Column: ato title (prototype .space-title), pinned tiles, separator, new tab, tabs.
 +    CGFloat y = kToolbar;
@@ -4517,11 +4795,13 @@ index 0000000000..f1f2057529
 +    _tabsDoc.frame = NSMakeRect(0, 0, side, MAX(rowY, NSHeight(_tabsScroll.frame)));
 +    page = NSMakeRect(columnEnd + kGap, kToolbar, width - (columnEnd + kGap) - kPad,
 +                      height - kToolbar - kPad);
++    page = [self roomForBar:page];
 +  }
 +
 +  _page = page;
 +  _ntp.frame = NSInsetRect(_page, 1, 1);
 +  _history.frame = _ntp.frame;
++  _bookmarksPage.frame = _ntp.frame;
 +  _loadbar.frame = NSMakeRect(NSMinX(_page), NSMinY(_page) - 5, NSWidth(_page), 2);
 +  if (NSWidth(_page) != _loadW) [self runLoadbar];  // the sweep is sized to the line
 +  CGFloat statusW = MIN(ceil(_statusText.fittingSize.width) + 24, NSWidth(_page) / 2);
@@ -4607,6 +4887,7 @@ index 0000000000..f1f2057529
 +  const BOOL wasHistory = !_history.hidden;
 +  _history.hidden = ![_url hasPrefix:@"chrome://history"];
 +  if (!_history.hidden && !wasHistory) [_history reload];
++  _bookmarksPage.hidden = ![_url hasPrefix:@"chrome://bookmarks"];
 +  BOOL wasNTP = !_ntp.hidden;
 +  _ntp.hidden = _url.length > 0;
 +  if (!_ntp.hidden && !wasNTP) _ntp.field.stringValue = @"";
@@ -4617,6 +4898,7 @@ index 0000000000..f1f2057529
 +// The address as the prototype shows it: no https:// or www., no lone trailing slash.
 +- (NSString*)displayURL {
 +  if ([_url hasPrefix:@"chrome://history"]) return @"Histórico";
++  if ([_url hasPrefix:@"chrome://bookmarks"]) return @"Favoritos";
 +  NSString* s = _url;
 +  for (NSString* p in @[ @"https://", @"www." ]) {
 +    if ([s hasPrefix:p]) s = [s substringFromIndex:p.length];
@@ -4769,6 +5051,7 @@ index 0000000000..f1f2057529
 +      {kIconPlus, @"Nova aba", @"⌘T", ^{ [weak menuNewTab:nil]; }},
 +      {kIconStar, @"Favoritos", @"⌘⌥B", ^{ [weak menuBookmarks:nil]; }},
 +      {kIconClock, @"Histórico", @"⌘Y", ^{ [weak menuHistory:nil]; }},
++      {kIconStar, _barShown ? @"Ocultar barra de favoritos" : @"Mostrar barra de favoritos", @"⌘⇧B", ^{ [weak toggleBookmarkBar]; }},
 +      {kIconSettings, @"Configurações", @"⌘,", ^{ [weak menuSettings:nil]; }},
 +  };
 +  const CGFloat w = 260, rowH = 33;
@@ -5036,13 +5319,128 @@ index 0000000000..f1f2057529
 +    agens_window_set_suggestions_observer(_window, nullptr, nullptr);
 +    agens_window_set_status_observer(_window, nullptr, nullptr);
 +    agens_window_set_downloads_observer(_window, nullptr, nullptr);
++    agens_window_set_bookmarks_observer(_window, nullptr, nullptr);
 +  }
 +  _window = nullptr;
++}
++// --- Favoritos: the page, the bar and its menus.
++- (void)setBookmarks:(const AgensBookmark*)bookmarks count:(int)count bar:(long long)bar {
++  _bookmarks.clear();
++  for (int i = 0; i < count; ++i) {
++    _bookmarks.push_back({bookmarks[i].id, bookmarks[i].parent, bookmarks[i].title, bookmarks[i].url});
++  }
++  _barId = bar;
++  [_bookmarksPage setBookmarks:_bookmarks];
++  [self fillBar];
++}
++- (void)fillBar {
++  for (NSView* v in [_bar.subviews copy]) [v removeFromSuperview];
++  __weak AgensChrome* weak = self;
++  // Folders first, then the loose ones (prototype renderBmBar).
++  for (int pass = 0; pass < 2; ++pass) {
++    for (const BookmarkItem& b : _bookmarks) {
++      if (b.parent != _barId || b.url.empty() != (pass == 0)) continue;
++      NSString* address = @(b.url.c_str());
++      NSString* site = [NSURL URLWithString:address].host ?: @"";
++      if ([site hasPrefix:@"www."]) site = [site substringFromIndex:4];
++      NSString* title = b.title.empty() ? site : @(b.title.c_str());
++      AgensBarButton* button = [[AgensBarButton alloc] initWithTitle:title folder:pass == 0 site:site];
++      __weak AgensBarButton* weakButton = button;
++      const long long id = b.id;
++      button.onPress = pass == 0 ? ^{ [weak showFolder:id under:weakButton]; } : ^{ [weak openBookmark:address]; };
++      [_bar addSubview:button];
++    }
++  }
++  [self relayout];
++}
++// Below the address bar, over the page's column; the page moves down to make room.
++- (NSRect)roomForBar:(NSRect)page {
++  _bar.hidden = !_barShown;
++  if (!_barShown) return page;
++  _bar.frame = NSMakeRect(NSMinX(page), NSMinY(page) - 2, NSWidth(page), 26);
++  CGFloat x = 0;
++  for (AgensBarButton* b in _bar.subviews) {
++    const CGFloat w = [b fittingWidth];
++    b.frame = NSMakeRect(x, 0, w, 26);
++    // shortcut: what doesn't fit is hidden, not in a "»" menu; add one if people keep long bars.
++    b.hidden = x + w > NSWidth(page);
++    x += w + 2;
++  }
++  page.origin.y += 32;
++  page.size.height -= 32;
++  return page;
++}
++- (void)toggleBookmarkBar {
++  [NSUserDefaults.standardUserDefaults setBool:!_barShown forKey:kBookmarkBarKey];
++  [NSNotificationCenter.defaultCenter postNotificationName:kThemeChanged object:nil];  // every window
++}
++// A folder opens our menu panel under its button (prototype folderMenu: .menu with a .mi per
++// bookmark). A folder inside opens in the same panel.
++- (void)showFolder:(long long)folder under:(NSView*)button {
++  if (!button) return;
++  std::vector<const BookmarkItem*> items;
++  for (const BookmarkItem& b : _bookmarks) {
++    if (b.parent == folder) items.push_back(&b);
++  }
++  const CGFloat w = 260, rowH = 30, h = MAX((CGFloat)1, (CGFloat)items.size()) * rowH + 10;
++  NSRect at = [button convertRect:button.bounds toView:self];
++  NSView* panel = [self popoverWidth:w height:h under:button];
++  panel.frame = NSMakeRect(MIN(NSMinX(at), NSWidth(self.bounds) - w - 8), NSMaxY(at) + 4, w, h);
++  panel.accessibilityRole = NSAccessibilityMenuRole;
++  __weak AgensChrome* weak = self;
++  CGFloat y = h - 5 - rowH;  // the panel isn't flipped
++  for (const BookmarkItem* b : items) {
++    NSString* address = @(b->url.c_str());
++    NSString* site = [NSURL URLWithString:address].host ?: @"";
++    if ([site hasPrefix:@"www."]) site = [site substringFromIndex:4];
++    NSString* title = b->title.empty() ? site : @(b->title.c_str());
++    AgensBarButton* row = [[AgensBarButton alloc] initWithTitle:title folder:b->url.empty() site:site];
++    row.frame = NSMakeRect(5, y, w - 10, rowH);
++    const long long id = b->id;
++    __weak AgensBarButton* weakRow = row;
++    row.onPress = b->url.empty() ? ^{ [weak showFolder:id under:weakRow]; } : ^{
++      [weak closeMenu];
++      [weak openBookmark:address];
++    };
++    [panel addSubview:row];
++    y -= rowH;
++  }
++  if (items.empty()) {
++    NSTextField* none = Label(12.5, NSFontWeightRegular, kDim);
++    none.stringValue = @"Pasta vazia";
++    none.frame = NSMakeRect(14, 11, w - 28, 18);
++    [panel addSubview:none];
++  }
++  [self presentPopover:panel anchor:_bar];
++}
++- (void)openBookmark:(NSString*)url {
++  if (_window && url.length) agens_window_navigate(_window, url.UTF8String);
++}
++- (void)newBookmarkFolder {
++  NSAlert* alert = [[NSAlert alloc] init];
++  alert.messageText = @"Nova pasta na barra de favoritos";
++  NSTextField* name = [NSTextField textFieldWithString:@""];
++  name.placeholderString = @"Nome da pasta";
++  name.frame = NSMakeRect(0, 0, 240, 24);
++  alert.accessoryView = name;
++  [alert addButtonWithTitle:@"Criar"];
++  [alert addButtonWithTitle:@"Cancelar"];
++  alert.window.initialFirstResponder = name;
++  __weak AgensChrome* weak = self;
++  [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
++    AgensChrome* strong = weak;
++    if (r == NSAlertFirstButtonReturn && strong && strong->_window && name.stringValue.length) {
++      agens_bookmark_add_folder(strong->_window, name.stringValue.UTF8String);
++    }
++  }];
 +}
 +- (int)command:(AgensCommand)command {
 +  switch (command) {
 +    case kAgensCommandSettings:
 +      [self menuSettings:nil];
++      return 1;
++    case kAgensCommandBookmarkBar:
++      [self toggleBookmarkBar];
 +      return 1;
 +    default:
 +      return 0;
