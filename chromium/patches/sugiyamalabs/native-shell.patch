@@ -986,10 +986,10 @@ index 0000000000..ee2f209a38
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
 new file mode 100644
-index 0000000000..e2b1fac68e
+index 0000000000..1253503078
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.cc
-@@ -0,0 +1,762 @@
+@@ -0,0 +1,767 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The embed API (agens_embed.h) on top of AgensWindow. Same code on every platform.
 +
@@ -1726,6 +1726,11 @@ index 0000000000..e2b1fac68e
 +ExtensionInstallPrompt::ShowDialogCallback NativeInstallDialogCallback() {
 +  return ExtensionInstallPrompt::ShowDialogCallback();
 +}
++base::WeakPtr<javascript_dialogs::TabModalDialogView> CreateNativeJsDialog(
++    content::WebContents*, const std::u16string&, content::JavaScriptDialogType, const std::u16string&,
++    const std::u16string&, content::JavaScriptDialogManager::DialogClosedCallback, base::OnceClosure) {
++  NOTREACHED();
++}
 +std::unique_ptr<permissions::PermissionPrompt> CreateNativePermissionPrompt(
 +    content::WebContents*,
 +    permissions::PermissionPrompt::Delegate*) {
@@ -1754,10 +1759,10 @@ index 0000000000..e2b1fac68e
 +}  // namespace agens
 diff --git a/chrome/browser/agens/embed/native_shell.h b/chrome/browser/agens/embed/native_shell.h
 new file mode 100644
-index 0000000000..a063b72c46
+index 0000000000..6cd4dc8781
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.h
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,60 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Glue between Chromium's Webium window (WebUIBrowserWindow, without its HTML page) and the
 +// agens_embed.h interface.
@@ -1769,7 +1774,9 @@ index 0000000000..a063b72c46
 +#include "base/feature_list.h"
 +#include "base/functional/callback_forward.h"
 +#include "chrome/browser/extensions/extension_install_prompt.h"
++#include "components/javascript_dialogs/tab_modal_dialog_view.h"
 +#include "components/permissions/permission_prompt.h"
++#include "content/public/browser/javascript_dialog_manager.h"
 +
 +class BrowserWindowInterface;
 +class StatusBubble;
@@ -1792,6 +1799,15 @@ index 0000000000..a063b72c46
 +    permissions::PermissionPrompt::Delegate* delegate);
 +// Where the window's traffic lights center (the shell's toolbar or tab strip height).
 +float NativeTitlebarHeight(views::Widget* widget);
++// A page's alert/confirm/prompt as a native sheet on its window.
++base::WeakPtr<javascript_dialogs::TabModalDialogView> CreateNativeJsDialog(
++    content::WebContents* contents,
++    const std::u16string& title,
++    content::JavaScriptDialogType type,
++    const std::u16string& message,
++    const std::u16string& default_prompt,
++    content::JavaScriptDialogManager::DialogClosedCallback callback,
++    base::OnceClosure force_closed);
 +// "Adicionar extensão?" as a native sheet on the browser window.
 +ExtensionInstallPrompt::ShowDialogCallback NativeInstallDialogCallback();
 +// Lets the native shell take a browser command (IDC_*) before Chromium runs it. True if it did.
@@ -1809,10 +1825,10 @@ index 0000000000..a063b72c46
 +#endif  // CHROME_BROWSER_AGENS_EMBED_NATIVE_SHELL_H_
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
 new file mode 100644
-index 0000000000..5f5ecbcfbd
+index 0000000000..ad031393ed
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
-@@ -0,0 +1,308 @@
+@@ -0,0 +1,382 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The macOS host: the views::View that fills the Webium window, puts the UI's chrome (an NSView)
 +// over it and the active tab in the page card. Everything else is shared (agens_window.h,
@@ -2100,6 +2116,80 @@ index 0000000000..5f5ecbcfbd
 +  }
 +}
 +}  // namespace
++
++// Owns itself: deleted when its sheet ends.
++class NativeJsDialog : public javascript_dialogs::TabModalDialogView {
++ public:
++  NativeJsDialog(content::WebContents* contents,
++                 const std::u16string& title,
++                 content::JavaScriptDialogType type,
++                 const std::u16string& message,
++                 const std::u16string& default_prompt,
++                 content::JavaScriptDialogManager::DialogClosedCallback callback,
++                 base::OnceClosure force_closed)
++      : callback_(std::move(callback)), force_closed_(std::move(force_closed)) {
++    alert_ = [[NSAlert alloc] init];
++    alert_.messageText = base::SysUTF16ToNSString(title);
++    alert_.informativeText = base::SysUTF16ToNSString(message);
++    [alert_ addButtonWithTitle:@"OK"];
++    if (type != content::JAVASCRIPT_DIALOG_TYPE_ALERT) [alert_ addButtonWithTitle:@"Cancelar"];
++    if (type == content::JAVASCRIPT_DIALOG_TYPE_PROMPT) {
++      field_ = [NSTextField textFieldWithString:base::SysUTF16ToNSString(default_prompt)];
++      field_.frame = NSMakeRect(0, 0, 260, 24);
++      alert_.accessoryView = field_;
++      alert_.window.initialFirstResponder = field_;
++    }
++    window_ = contents->GetTopLevelNativeWindow().GetNativeNSWindow();
++    base::WeakPtr<NativeJsDialog> weak = weak_.GetWeakPtr();
++    void (^done)(NSModalResponse) = ^(NSModalResponse response) {
++      if (weak) weak->Finish(response == NSAlertFirstButtonReturn);
++    };
++    if (window_) {
++      [alert_ beginSheetModalForWindow:window_ completionHandler:done];
++    } else {
++      done([alert_ runModal]);
++    }
++  }
++  void CloseDialogWithoutCallback() override {
++    callback_.Reset();
++    force_closed_.Reset();
++    if (window_ && alert_.window.sheetParent) {
++      [window_ endSheet:alert_.window];  // Finish() runs from the completion handler
++    } else {
++      Finish(false);
++    }
++  }
++  std::u16string GetUserInput() override {
++    return field_ ? base::SysNSStringToUTF16(field_.stringValue) : std::u16string();
++  }
++  base::WeakPtr<NativeJsDialog> GetWeakPtr() { return weak_.GetWeakPtr(); }
++
++ private:
++  void Finish(bool ok) {
++    force_closed_.Reset();
++    if (callback_) std::move(callback_).Run(ok, ok ? GetUserInput() : std::u16string());
++    base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE, this);
++  }
++  content::JavaScriptDialogManager::DialogClosedCallback callback_;
++  base::OnceClosure force_closed_;
++  NSAlert* __strong alert_;
++  NSTextField* __strong field_ = nil;
++  NSWindow* __strong window_ = nil;
++  base::WeakPtrFactory<NativeJsDialog> weak_{this};
++};
++
++base::WeakPtr<javascript_dialogs::TabModalDialogView> CreateNativeJsDialog(
++    content::WebContents* contents,
++    const std::u16string& title,
++    content::JavaScriptDialogType type,
++    const std::u16string& message,
++    const std::u16string& default_prompt,
++    content::JavaScriptDialogManager::DialogClosedCallback callback,
++    base::OnceClosure force_closed) {
++  return (new NativeJsDialog(contents, title, type, message, default_prompt, std::move(callback),
++                             std::move(force_closed)))
++      ->GetWeakPtr();
++}
 +
 +ExtensionInstallPrompt::ShowDialogCallback NativeInstallDialogCallback() {
 +  return base::BindRepeating(&ShowNativeInstallDialog);
@@ -6952,6 +7042,31 @@ index 83ce5b59c1..71aaf5ca2e 100644
 +  }
    return base::BindRepeating(&ShowExtensionInstallDialogImpl);
  }
+diff --git a/chrome/browser/ui/views/javascript_tab_modal_dialog_view_views.cc b/chrome/browser/ui/views/javascript_tab_modal_dialog_view_views.cc
+index 7c39cff1a2..12aaf6ef38 100644
+--- a/chrome/browser/ui/views/javascript_tab_modal_dialog_view_views.cc
++++ b/chrome/browser/ui/views/javascript_tab_modal_dialog_view_views.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "chrome/browser/ui/views/javascript_tab_modal_dialog_view_views.h"
+ 
++#include "chrome/browser/agens/embed/native_shell.h"
++
+ #include "base/functional/callback.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ #include "chrome/browser/ui/javascript_dialogs/javascript_tab_modal_dialog_manager_delegate_desktop.h"
+@@ -175,6 +177,11 @@ JavaScriptTabModalDialogManagerDelegateDesktop::CreateNewDialog(
+     const std::u16string& default_prompt_text,
+     content::JavaScriptDialogManager::DialogClosedCallback dialog_callback,
+     base::OnceClosure dialog_force_closed_callback) {
++  if (agens::IsNativeShellEnabled()) {  // agens: a native sheet
++    return agens::CreateNativeJsDialog(alerting_web_contents, title, dialog_type, message_text,
++                                       default_prompt_text, std::move(dialog_callback),
++                                       std::move(dialog_force_closed_callback));
++  }
+   return (new JavaScriptTabModalDialogViewViews(
+               web_contents_, alerting_web_contents, title, dialog_type,
+               message_text, default_prompt_text, std::move(dialog_callback),
 diff --git a/chrome/browser/ui/views/permissions/permission_prompt_factory.cc b/chrome/browser/ui/views/permissions/permission_prompt_factory.cc
 index 12bb0ac5fb..52735f7a84 100644
 --- a/chrome/browser/ui/views/permissions/permission_prompt_factory.cc
