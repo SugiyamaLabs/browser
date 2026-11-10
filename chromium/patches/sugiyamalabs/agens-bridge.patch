@@ -2904,10 +2904,10 @@ index 0000000000..168e6239f8
 +}
 diff --git a/chrome/browser/agens/bridge/session_ops.cc b/chrome/browser/agens/bridge/session_ops.cc
 new file mode 100644
-index 0000000000..89d41fd0ae
+index 0000000000..ab81719bc2
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/session_ops.cc
-@@ -0,0 +1,248 @@
+@@ -0,0 +1,267 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Session values (cookie, localStorage and header values) live only in memory on their way to the
 +// socket: never in a log line, pref, file or error message.
@@ -2934,7 +2934,9 @@ index 0000000000..89d41fd0ae
 +#include "content/public/browser/storage_partition.h"
 +#include "content/public/browser/web_contents.h"
 +#include "content/public/browser/web_contents_observer.h"
++#include "base/timer/timer.h"
 +#include "mojo/public/cpp/bindings/receiver.h"
++#include "net/base/registry_controlled_domains/registry_controlled_domain.h"
 +#include "net/cookies/cookie_change_dispatcher.h"
 +#include "net/cookies/cookie_options.h"
 +#include "net/cookies/cookie_partition_key_collection.h"
@@ -2948,6 +2950,10 @@ index 0000000000..89d41fd0ae
 +constexpr char kFailed[] = "failed";
 +constexpr char kCancelled[] = "cancelled";
 +
++// Per connection, and how long one may wait for the person (also covers a profile that never opens).
++constexpr size_t kMaxLoginsInFlight = 4;
++constexpr base::TimeDelta kMaxLoginTime = base::Minutes(15);
++
 +// The ato whose folder is `id`, among the atos the UI lists (as ops.cc), so a client never names a path.
 +ProfileAttributesEntry* FindAto(const std::string& id) {
 +  for (ProfileAttributesEntry* entry : AgensWindow::Atos()) {
@@ -2960,23 +2966,15 @@ index 0000000000..89d41fd0ae
 +  return profile->GetDefaultStoragePartition()->GetCookieManagerForBrowserProcess();
 +}
 +
-+// The cookie `name` the ato would send to `origin` (httpOnly included), or nullopt.
-+void ReadCookie(Profile* profile,
-+                const url::Origin& origin,
-+                const std::string& name,
-+                base::OnceCallback<void(std::optional<std::string>)> done) {
++// Whether the ato would send a cookie `name` to `origin` (httpOnly included). Only that: the value
++// is not needed, so it never leaves the cookie store.
++void HasCookie(Profile* profile, const url::Origin& origin, const std::string& name, base::OnceCallback<void(bool)> done) {
 +  CookiesOf(profile)->GetCookieList(
 +      origin.GetURL(), net::CookieOptions::MakeAllInclusive(), net::CookiePartitionKeyCollection(),
 +      base::BindOnce(
-+          [](std::string name, base::OnceCallback<void(std::optional<std::string>)> done,
-+             const std::vector<net::CookieWithAccessResult>& cookies, const std::vector<net::CookieWithAccessResult>&) {
-+            for (const net::CookieWithAccessResult& cookie : cookies) {
-+              if (cookie.cookie.Name() == name) {
-+                std::move(done).Run(cookie.cookie.Value());
-+                return;
-+              }
-+            }
-+            std::move(done).Run(std::nullopt);
++          [](std::string name, base::OnceCallback<void(bool)> done, const std::vector<net::CookieWithAccessResult>& cookies,
++             const std::vector<net::CookieWithAccessResult>&) {
++            std::move(done).Run(std::ranges::any_of(cookies, [&](const auto& c) { return c.cookie.Name() == name; }));
 +          },
 +          name, std::move(done)));
 +}
@@ -3012,20 +3010,28 @@ index 0000000000..89d41fd0ae
 +        reply_(std::move(reply)),
 +        url_prefix_(std::move(url_prefix)),
 +        cookie_origin_(std::move(cookie_origin)),
-+        cookie_name_(std::move(cookie_name)) {}
++        cookie_name_(std::move(cookie_name)) {
++    timeout_.Start(FROM_HERE, kMaxLoginTime,
++                   base::BindOnce(&LoginWatch::Finish, base::Unretained(this),
++                                  ErrorReply(&id_, kFailed, "timed out"), /*close_tab=*/false));
++  }
 +
 +  void Start(Profile* profile, content::WebContents* tab) {
 +    Observe(tab);
 +    if (!cookie_origin_) return;
 +    CookiesOf(profile)->AddCookieChangeListener(cookie_origin_->GetURL(), cookie_name_,
 +                                                receiver_.BindNewPipeAndPassRemote());
++    // E.g. the network service restarted: nothing would ever tell this watch.
++    receiver_.set_disconnect_handler(base::BindOnce(&LoginWatch::Finish, base::Unretained(this),
++                                                    ErrorReply(&id_, kFailed, "lost the cookie store"),
++                                                    /*close_tab=*/false));
 +    // The person may already be logged in.
-+    ReadCookie(profile, *cookie_origin_, cookie_name_,
-+               base::BindOnce(
-+                   [](base::WeakPtr<LoginWatch> self, std::optional<std::string> value) {
-+                     if (self && value) self->Finish(OkReply(self->id_), /*close_tab=*/true);
-+                   },
-+                   weak_factory_.GetWeakPtr()));
++    HasCookie(profile, *cookie_origin_, cookie_name_,
++              base::BindOnce(
++                  [](base::WeakPtr<LoginWatch> self, bool has) {
++                    if (self && has) self->Finish(OkReply(self->id_), /*close_tab=*/true);
++                  },
++                  weak_factory_.GetWeakPtr()));
 +  }
 +
 +  void Fail() { Finish(ErrorReply(&id_, kFailed, "could not open the ato"), /*close_tab=*/false); }
@@ -3070,6 +3076,7 @@ index 0000000000..89d41fd0ae
 +  const std::optional<url::Origin> cookie_origin_;
 +  const std::string cookie_name_;
 +  mojo::Receiver<network::mojom::CookieChangeListener> receiver_{this};
++  base::OneShotTimer timeout_;
 +  base::WeakPtrFactory<LoginWatch> weak_factory_{this};
 +};
 +
@@ -3081,9 +3088,16 @@ index 0000000000..89d41fd0ae
 +  std::optional<url::Origin> cookie_origin;
 +  std::string cookie_name;
 +  bool done_ok = false;
++  // The rule must be about the site it opens: otherwise opening any page would tell a client whether
++  // the person is logged in somewhere else, unseen.
++  auto same_site = [&](const url::Origin& other) {
++    return url.is_valid() && net::registry_controlled_domains::SameDomainOrHost(
++                                 url::Origin::Create(url), other,
++                                 net::registry_controlled_domains::INCLUDE_PRIVATE_REGISTRIES);
++  };
 +  if (done && done->size() == 1) {
 +    const GURL prefix(StringParam(*done, "url_prefix").value_or(""));
-+    if (prefix.is_valid() && prefix.SchemeIsHTTPOrHTTPS()) {
++    if (prefix.is_valid() && prefix.SchemeIsHTTPOrHTTPS() && same_site(url::Origin::Create(prefix))) {
 +      url_prefix = prefix.spec();
 +      done_ok = true;
 +    }
@@ -3091,14 +3105,19 @@ index 0000000000..89d41fd0ae
 +    std::optional<std::string> name = StringParam(*done, "cookie");
 +    std::optional<std::string> from = StringParam(*done, "from");
 +    cookie_origin = from ? ParseOrigin(*from) : std::nullopt;
-+    if (name && ValidName(*name) && cookie_origin) {
++    if (name && ValidName(*name) && cookie_origin && same_site(*cookie_origin)) {
 +      cookie_name = *name;
 +      done_ok = true;
 +    }
 +  }
 +  if (!id || !url.is_valid() || !url.SchemeIsHTTPOrHTTPS() || !done_ok) {
 +    std::move(reply).Run(ErrorReply(&request.id, kBadRequest,
-+                                    "needs ato, url (http or https) and done: {cookie, from} or {url_prefix}"));
++                                    "needs ato, url (http or https) and done: {cookie, from} or {url_prefix}, "
++                                    "on the same site as url"));
++    return;
++  }
++  if (Connections()[client.connection].logins.size() >= kMaxLoginsInFlight) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "at most 4 logins at once per connection"));
 +    return;
 +  }
 +  ProfileAttributesEntry* entry = FindAto(*id);
@@ -3704,7 +3723,7 @@ index 9d0bf4646d..83e2a0f0ad 100644
  
  #ifdef __cplusplus
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
-index 268d4dc7bd..153be18fca 100644
+index 268d4dc7bd..99df9fd6fa 100644
 --- a/chrome/browser/agens/embed/agens_window.h
 +++ b/chrome/browser/agens/embed/agens_window.h
 @@ -15,7 +15,9 @@
@@ -3776,8 +3795,8 @@ index 268d4dc7bd..153be18fca 100644
 +    return chosen >= 0 ? chosen : index % static_cast<int>(std::size(kAtoColors));
 +  }
 +  // "Compartilhar cookies" (off by default): the atos with it on form one cookie pool
-+  // (AgensCookiePool). Such an ato is not isolated; ops that hand out sessions or control tabs
-+  // refuse it (isolation_off, docs/agens.md). `dir` is the profile folder.
++  // (AgensCookiePool). Such an ato is not isolated from the others in the pool. `dir` is the
++  // profile folder.
 +  static bool AtoSharesCookies(const base::FilePath& dir) {
 +    const base::DictValue* extras =
 +        g_browser_process->local_state()->GetDict(kAtosPref).FindDict(dir.BaseName().AsUTF8Unsafe());
@@ -4092,7 +4111,7 @@ index 5d7ca90415..3d238795f6 100644
    if (!IsNativeShellEnabled() || !browser->GetWindow()) return false;
    views::Widget* widget = views::Widget::GetWidgetForNativeWindow(browser->GetWindow()->GetNativeWindow());
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
-index 3c18c4eab1..360d8d923b 100644
+index 3c18c4eab1..70ad1711ca 100644
 --- a/chrome/browser/agens/ui/chrome_mac.mm
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
 @@ -525,6 +525,7 @@ @implementation AgensTabRow {
@@ -4222,7 +4241,7 @@ index 3c18c4eab1..360d8d923b 100644
 +                       ? [NSString stringWithFormat:@"Os logins de %@ passam a valer também em %@, e os deles em %@.", name, list, name]
 +                       : [NSString stringWithFormat:@"Por enquanto nada é compartilhado: os logins de %@ só passam a valer em outro ato quando ele também ligar esta opção.", name];
 +  alert.informativeText = [what stringByAppendingString:
-+      @" No mesmo site, o login dos outros atos substitui o deste. Apagar cookies num ato que compartilha apaga nos outros também. Só cookies: senhas, histórico e dados dos sites continuam separados. Enquanto estiver ligado, apps conectados ao navegador não recebem sessões nem controlam abas deste ato."];
++      @" No mesmo site, o login dos outros atos substitui o deste. Apagar cookies num ato que compartilha apaga nos outros também. Só cookies: senhas, histórico e dados dos sites continuam separados."];
 +  [alert addButtonWithTitle:@"Compartilhar"];
 +  [alert addButtonWithTitle:@"Cancelar"];
 +  __weak AgensSettings* weak = self;
