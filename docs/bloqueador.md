@@ -117,3 +117,28 @@ Não testado: troca de nível com o navegador aberto (testado trocando a pref e 
 - **Configurações › Bloqueador**: a tela usa a API acima (parte 2 da #63).
 - **Medir com as 20 abas** (`tools/measure.py` no build oficial) e comparar com antes.
 - Na primeira abertura de um perfil, as páginas abertas nos ~2 s antes de a lista ser indexada não são filtradas.
+
+## Filtro cosmético, avisos de cookies e YouTube (#63, parte 2)
+
+Patch [`adblock-cosmetic.patch`](../chromium/patches/sugiyamalabs/adblock-cosmetic.patch). Não usa extensão: é um observer no renderer mais um serviço no navegador.
+
+| Peça | O que faz |
+|---|---|
+| `chrome/browser/agens_adblock/cosmetic_engine.*` | lê as listas (`##seletor`, `dominio##seletor`, `~dominio`, `#@#`) e monta o CSS de cada host. Regras de sintaxe só do uBlock (`:has-text`, `:xpath`, `+js(`, `:style(`…) são ignoradas |
+| `cosmetic_service.cc` | carrega as listas numa thread (22 ms para ~47 mil regras), lê `agens.adblock.level` e `agens.adblock.hide_cookie_notices` (Local State; sem registro = padrão 2 / ligado), confere o content setting `ADS` do site |
+| `youtube_scriptlet.cc` | scriptlet do YouTube, mesma ideia do `json-prune` do uBlock |
+| `chrome/renderer/agens_adblock/cosmetic_observer.cc` | em cada documento http(s) novo, antes de qualquer script da página, faz **uma** chamada mojo síncrona ao navegador e aplica o CSS (`InsertStyleSheet`, origem usuário) e o scriptlet (main world) |
+
+- **Por que renderer e não extensão ou injeção pelo navegador.** Só o gancho do renderer roda antes do primeiro script e do primeiro paint, sem corrida com o commit da navegação, e dispensa componente de extensão (que traria service worker e mensagens só para entregar CSS por domínio). A chamada síncrona é um lookup em hash no navegador; sem ela haveria corrida com o JSON do player.
+- **Níveis.** 0 = nada. 1 (Padrão) = EasyList + lista de cookies (se `hide_cookie_notices`) + YouTube. 2 (Forte) = + listas uBlock. O nível de uma lista vem do nome do arquivo (`*cookie*` = cookies, `*ublock*` = Forte, o resto = Padrão). Site liberado (`ADS` = ALLOW) não recebe nada; subframe segue o site da aba.
+- **Subframes** recebem só as regras do próprio domínio (sem as genéricas), para o CSS por frame ficar pequeno.
+- **Onde ficam as listas.** `<perfil>/AgensAdblock/lists/*.txt` se existir (atualização diária), senão `Resources/adblock_lists/*.txt` do app. A cada 10 min o serviço confere tamanho/data e recarrega sozinho. Só para teste: `--agens-adblock-lists-dir=<pasta>`. Nenhuma conexão de rede nova.
+- **YouTube.** No documento (antes do script da página): `ytInitialPlayerResponse` ganha um setter que remove `adPlacements`, `playerAds`, `adSlots` e `auxiliaryUi.messageRenderers.enforcementMessageViewModel`; `JSON.parse`, `fetch` e `XMLHttpRequest` de `/youtubei/v1/player` e `get_watch` passam pelo mesmo filtro (navegação SPA). Há uma rede de segurança que pula o anúncio se mesmo assim um começar (`.ad-showing`). Medido em 3 vídeos reais: sem pré-roll, reproduz, sem o aviso "bloqueadores violam os termos", a rede de segurança nunca disparou.
+- **Twitch: não feito.** O anúncio é costurado no HLS do mesmo domínio; precisa reescrever a playlist (`$replace`), fora do escopo desta parte.
+- **Teste sem build:** `chromium/adblock/cosmetic_selftest.cc` (instruções no topo) cobre o parser; com listas reais mede tempo e tamanho.
+
+### Custo medido (build dev, listas reais, nível 2 com a lista de cookies)
+
+- CSS por página: ~1,19 MB nas genéricas; montar no navegador leva ~0,05–0,6 ms. As genéricas da lista de cookies (~650 KB) são mais da metade.
+- Renderer: ~+35 ms no DOMContentLoaded de uma página local simples (parse do CSS) e ~+13 MB por renderer de aba. É o custo do desenho "uma folha por frame". Se pesar: indexar as genéricas por classe/id e só injetar as que existem na página (como o uBlock), ao custo de um piscar nos elementos já existentes.
+- Navegador: ~15 MB de pico ao carregar as listas (parse), menos depois.
