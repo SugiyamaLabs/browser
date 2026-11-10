@@ -10,7 +10,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 OUT = HERE / "exportados"
-CHROME = sys.argv[1] if len(sys.argv) > 1 else str(Path.home() / "browser-work/ungoogled-chromium-macos/build/src/out/Default/Agens.app/Contents/MacOS/Agens")
+CHROME = sys.argv[1] if len(sys.argv) > 1 else str(Path.home() / "browser-work/ungoogled-chromium-macos/build/src/out/Default/AgensBrowser.app/Contents/MacOS/AgensBrowser")
 
 # macOS iconset: name -> pixel size
 ICNS = {"icon_16x16": 16, "icon_16x16@2x": 32, "icon_32x32": 32, "icon_32x32@2x": 64, "icon_128x128": 128,

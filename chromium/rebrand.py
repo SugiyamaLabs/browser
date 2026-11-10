@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Puts the Agens brand on a patched Chromium tree: user-visible strings and the macOS app icon.
+"""Puts the AgensBrowser brand on a patched Chromium tree: user-visible strings and the macOS app icon.
 
 Usage: rebrand.py <chromium-src>   (fetch.sh runs it after our patches; safe to run twice)
 
@@ -19,6 +19,10 @@ sys.path.insert(0, str(SRC / "tools/grit"))
 from grit import grd_reader  # noqa: E402
 from grit.node import message  # noqa: E402
 
+# The product name everywhere the UI says "Chromium". Not just "Agens": that is the Agens app's
+# name, and the two install side by side.
+PRODUCT = "AgensBrowser"
+
 # Top-level .grd files whose messages (or parts) say "Chromium".
 GRDS = ["chrome/app/chromium_strings.grd", "chrome/app/generated_resources.grd",
         "components/components_chromium_strings.grd", "components/components_strings.grd",
@@ -28,8 +32,8 @@ GRDS = ["chrome/app/chromium_strings.grd", "chrome/app/generated_resources.grd",
 # text, whose translations are still in the .xtb.
 # The About credit line keeps naming the Chromium project (the link to it), as its license asks.
 CHROMIUM = re.compile(r'Chromium(?!<ph name="END_LINK_CHROMIUM")')
-GRD_SUBS = [(re.compile(", ungoogled-chromium"), ""), (re.compile("The Chromium Authors"), "SugiyamaLabs"), (CHROMIUM, "Agens")]
-XTB_SUBS = [(re.compile("Autores do Chromium"), "SugiyamaLabs"), (CHROMIUM, "Agens")]
+GRD_SUBS = [(re.compile(", ungoogled-chromium"), ""), (re.compile("The Chromium Authors"), "SugiyamaLabs"), (CHROMIUM, PRODUCT)]
+XTB_SUBS = [(re.compile("Autores do Chromium"), "SugiyamaLabs"), (CHROMIUM, PRODUCT)]
 
 
 def message_ids(grd: Path) -> list[str]:
