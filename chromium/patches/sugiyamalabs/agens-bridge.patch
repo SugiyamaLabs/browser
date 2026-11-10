@@ -245,10 +245,10 @@ index 0000000000..1184ce2d94
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_BRIDGE_H_
 diff --git a/chrome/browser/agens/bridge/bridge_mac.mm b/chrome/browser/agens/bridge/bridge_mac.mm
 new file mode 100644
-index 0000000000..f00e5aef20
+index 0000000000..ac8013e4eb
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/bridge_mac.mm
-@@ -0,0 +1,540 @@
+@@ -0,0 +1,547 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The socket server on macOS: a Unix socket in the user data dir, the peer's code signature read
 +// from its audit token, and the approval of the person before a signed client gets in.
@@ -294,6 +294,7 @@ index 0000000000..f00e5aef20
 +#include "chrome/browser/agens/bridge/approval.h"
 +#include "chrome/browser/agens/bridge/ops.h"
 +#include "chrome/browser/agens/bridge/protocol.h"
++#include "chrome/browser/agens/embed/agens_embedded.h"
 +#include "chrome/browser/agens/embed/native_shell.h"
 +#include "chrome/browser/browser_process.h"
 +#include "chrome/common/chrome_paths.h"
@@ -401,6 +402,12 @@ index 0000000000..f00e5aef20
 +void Decide(Peer peer, uint64_t connection, Decision done) {
 +  if (!g_browser_process || g_browser_process->IsShuttingDown()) {
 +    std::move(done).Run(kDenied);
++    return;
++  }
++  // Embedded, the product is the host itself (docs/protocolo.md, "Quem pode conectar"): our
++  // signature gets in without the sheet, and nothing else does, but the development switch.
++  if (IsEmbedded()) {
++    std::move(done).Run(peer.ours || AcceptUnsignedClients() ? nullptr : kUnauthorized);
 +    return;
 +  }
 +  if (!peer.ours) {
@@ -4841,23 +4848,41 @@ index 0000000000..c55c694d5a
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EMBEDDED_H_
 diff --git a/chrome/browser/agens/embed/agens_embedded_mac.mm b/chrome/browser/agens/embed/agens_embedded_mac.mm
 new file mode 100644
-index 0000000000..5d76a34e8c
+index 0000000000..b454014634
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embedded_mac.mm
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,83 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/embed/agens_embedded.h"
 +
++#import <AppKit/AppKit.h>
++#include <dispatch/dispatch.h>
 +#include <unistd.h>
 +
 +#include "base/command_line.h"
++#include "chrome/browser/lifetime/application_lifetime.h"
++#include "chrome/common/chrome_switches.h"
 +
 +namespace agens {
 +
 +namespace {
 +
 +pid_t g_parent = 0;
++dispatch_source_t g_parent_watch;  // kept for the life of the process
++
++void ParentGone() {
++  static bool quitting = false;
++  if (quitting) return;
++  quitting = true;
++  // Nobody is left to answer a "leave this page?" dialog.
++  chrome::ExitIgnoreUnloadHandlers();
++  // shortcut: a shutdown stuck for 10 s ends hard (no clean exit); find out why if it shows up.
++  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC),
++                 dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
++                   _exit(0);
++                 });
++}
 +
 +}  // namespace
 +
@@ -4871,12 +4896,42 @@ index 0000000000..5d76a34e8c
 +}
 +
 +bool AcceptUnsignedClients() {
++#if defined(OFFICIAL_BUILD)
 +  return false;
++#else
++  return IsEmbedded() && base::CommandLine::ForCurrentProcess()->HasSwitch(kAcceptUnsignedSwitch);
++#endif
 +}
 +
 +void StartEmbedded() {
 +  if (!IsEmbedded()) return;
 +  g_parent = getppid();
++  if (g_parent <= 1) _exit(0);  // the app that launched the engine is already gone (now launchd's)
++
++  // No window of our own: tabs live in browser windows that never go on screen
++  // (WebUIBrowserWindow::Show), and the host shows them.
++  base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
++  command_line->AppendSwitch(switches::kNoStartupWindow);  // also no session restore at startup
++  command_line->AppendSwitch(switches::kNoFirstRun);
++  // Our own onboarding window (AgensFirstRun, ui/chrome_mac.mm) is the stand-alone product's. A
++  // volatile domain: it lasts for this process and is never saved to the shared defaults.
++  NSUserDefaults* defaults = NSUserDefaults.standardUserDefaults;
++  NSMutableDictionary* arguments = [[defaults volatileDomainForName:NSArgumentDomain] mutableCopy]
++                                       ?: [NSMutableDictionary dictionary];
++  arguments[@"AgensFirstRunDone"] = @YES;
++  [defaults removeVolatileDomainForName:NSArgumentDomain];
++  [defaults setVolatileDomain:arguments forName:NSArgumentDomain];
++  // Before NSApp finishes launching, so the Dock never shows the engine.
++  [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
++
++  // On the main queue: it runs once the UI thread's run loop does, where quitting is safe.
++  g_parent_watch = dispatch_source_create(DISPATCH_SOURCE_TYPE_PROC, static_cast<uintptr_t>(g_parent),
++                                          DISPATCH_PROC_EXIT, dispatch_get_main_queue());
++  dispatch_source_set_event_handler(g_parent_watch, ^{
++    ParentGone();
++  });
++  dispatch_resume(g_parent_watch);
++  if (getppid() != g_parent) _exit(0);  // it went away before the watch was set
 +}
 +
 +}  // namespace agens
@@ -5222,7 +5277,7 @@ index d81488f053..28c38bd394 100644
  void ConfirmCloseWithDownloads(views::Widget* widget, int count, base::OnceCallback<void(bool)> callback);
  
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
-index 5d7ca90415..6aa6da358a 100644
+index 5d7ca90415..c4dfaa4d35 100644
 --- a/chrome/browser/agens/embed/native_shell_mac.mm
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
 @@ -8,6 +8,8 @@
@@ -5301,6 +5356,37 @@ index 5d7ca90415..6aa6da358a 100644
  bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
    if (!IsNativeShellEnabled() || !browser->GetWindow()) return false;
    views::Widget* widget = views::Widget::GetWidgetForNativeWindow(browser->GetWindow()->GetNativeWindow());
+@@ -520,6 +559,13 @@ void CloseDialog() override {
+                  content::JavaScriptDialogManager::DialogClosedCallback callback,
+                  base::OnceClosure force_closed)
+       : callback_(std::move(callback)), force_closed_(std::move(force_closed)) {
++    if (IsEmbedded()) {
++      // shortcut: embedded, no window may go on screen, so the page's alert/confirm/prompt is
++      // dismissed (as Cancel); it should reach the host as data, like approvals.
++      base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++          FROM_HERE, base::BindOnce(&NativeJsDialog::Finish, weak_.GetWeakPtr(), false));
++      return;
++    }
+     alert_ = [[NSAlert alloc] init];
+     alert_.messageText = base::SysUTF16ToNSString(title);
+     alert_.informativeText = base::SysUTF16ToNSString(message);
+@@ -558,6 +604,8 @@ void CloseDialogWithoutCallback() override {
+ 
+  private:
+   void Finish(bool ok) {
++    if (finished_) return;  // embedded: the posted dismissal and a close may both come
++    finished_ = true;
+     force_closed_.Reset();
+     if (callback_) std::move(callback_).Run(ok, ok ? GetUserInput() : std::u16string());
+     base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE, this);
+@@ -567,6 +615,7 @@ void Finish(bool ok) {
+   NSAlert* __strong alert_;
+   NSTextField* __strong field_ = nil;
+   NSWindow* __strong window_ = nil;
++  bool finished_ = false;
+   base::WeakPtrFactory<NativeJsDialog> weak_{this};
+ };
+ 
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 index 3c18c4eab1..025f3d08ec 100644
 --- a/chrome/browser/agens/ui/chrome_mac.mm
@@ -5893,6 +5979,90 @@ index 98ada3ff32..8002af248b 100644
        "//chrome/browser:global_keyboard_shortcuts_mac",
        "//chrome/browser/apps/app_shim",
        "//chrome/browser/ui/cocoa",
+diff --git a/chrome/browser/ui/webui_browser/webui_browser_window.cc b/chrome/browser/ui/webui_browser/webui_browser_window.cc
+index 67c962e1dd..d607336567 100644
+--- a/chrome/browser/ui/webui_browser/webui_browser_window.cc
++++ b/chrome/browser/ui/webui_browser/webui_browser_window.cc
+@@ -41,6 +41,9 @@
+ #include "chrome/browser/ui/webui/webui_toolbar/webui_toolbar_extensions_container.h"
+ #include "chrome/browser/ui/webui_browser/browser_elements_webui_browser.h"
+ #include "chrome/browser/agens/embed/native_shell.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/agens/embed/agens_embedded.h"
++#endif
+ #include "chrome/browser/ui/webui_browser/webui_browser_client_view.h"
+ #include "chrome/browser/ui/webui_browser/webui_browser_exclusive_access_context.h"
+ #include "chrome/browser/ui/webui_browser/webui_browser_modal_dialog_host.h"
+@@ -77,6 +80,16 @@ namespace {
+ 
+ const char* const kWebUIBrowserWindowKey = "__WEBUI_BROWSER_WINDOW__";
+ 
++// agens: embedded (agens_embedded.h), the window holds tabs another app shows and never goes on
++// screen: no show, activation, maximize, restore or window full screen.
++bool AgensOffScreen() {
++#if BUILDFLAG(IS_MAC)
++  return agens::IsEmbedded();
++#else
++  return false;
++#endif
++}
++
+ // Copied from chrome/browser/ui/views/frame/browser_widget.cc.
+ bool IsUsingLinuxSystemTheme(Profile* profile) {
+ #if BUILDFLAG(IS_LINUX)
+@@ -313,6 +326,11 @@ void WebUIBrowserWindow::Show() {
+   BrowserActiveStateManager::From(browser_)->DidBecomeActive();
+ #endif
+ 
++  if (AgensOffScreen()) {  // agens: embedded, another app shows the tabs
++    EnsureActiveTabHasNonZeroSize();
++    return;
++  }
++
+   // If the window is already visible, just activate it.
+   if (widget_->IsVisible()) {
+     widget_->Activate();
+@@ -381,6 +399,7 @@ void WebUIBrowserWindow::EnsureActiveTabHasNonZeroSize() {
+ }
+ 
+ void WebUIBrowserWindow::ShowInactive() {
++  if (AgensOffScreen()) return;  // agens
+   widget_->ShowInactive();
+ }
+ 
+@@ -409,6 +428,7 @@ void WebUIBrowserWindow::Close() {
+ }
+ 
+ void WebUIBrowserWindow::Activate() {
++  if (AgensOffScreen()) return;  // agens
+   widget_->Activate();
+ }
+ 
+@@ -661,7 +681,7 @@ gfx::Rect WebUIBrowserWindow::GetContentsBoundsInScreen() const {
+ }
+ 
+ void WebUIBrowserWindow::ProcessFullscreen(bool fullscreen) {
+-  widget_->SetFullscreen(fullscreen);
++  if (!AgensOffScreen()) widget_->SetFullscreen(fullscreen);  // agens: the page alone goes full screen
+ 
+   auto* manager = ExclusiveAccessManager::From(browser_);
+   if (!manager) {
+@@ -1281,6 +1301,7 @@ ui::mojom::WindowShowState WebUIBrowserWindow::GetRestoredState() const {
+ }
+ 
+ void WebUIBrowserWindow::Maximize() {
++  if (AgensOffScreen()) return;  // agens
+   widget_->Maximize();
+ }
+ 
+@@ -1289,6 +1310,7 @@ void WebUIBrowserWindow::Minimize() {
+ }
+ 
+ void WebUIBrowserWindow::Restore() {
++  if (AgensOffScreen()) return;  // agens
+   widget_->Restore();
+ }
+ 
 diff --git a/content/browser/BUILD.gn b/content/browser/BUILD.gn
 index 901df80d0d..ecbb202f98 100644
 --- a/content/browser/BUILD.gn
