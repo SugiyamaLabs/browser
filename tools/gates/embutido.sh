@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Gate for the embedded engine (docs/protocolo.md, "host e view"). Usage:
 #   BROWSER_WORK=~/browser-work-2 tools/gates/embutido.sh
-# A small Python parent starts the engine with --agens-embedded --agens-accept-unsigned on a
-# throwaway profile and acts as its host on one connection. The engine must never put a window on
+# A small Python parent starts the engine with --agens-embedded on a throwaway profile and acts as
+# its host on one connection (the parent always gets in); a second short launch adds
+# --agens-accept-unsigned to check that switch. The engine must never put a window on
 # screen nor show in the Dock, so this gate should not take focus. It never captures the screen and
 # never sends system-wide input. EMBUTIDO_STANDALONE=1 also launches the engine WITHOUT the switch
 # to check unknown_op: that one is a normal Dock app and can take focus, so it is opt-in.
@@ -38,16 +39,29 @@ def check(name, ok, detail=""):
 
 profile = tempfile.mkdtemp(prefix="agens-e.", dir="/tmp")   # short: a socket path is limited to 104 bytes
 SOCK = profile + "/agens.sock"
-log = open(f"{OUT}/engine.log", "w")
-engine = subprocess.Popen([APP, f"--user-data-dir={profile}", "--agens-embedded", "--agens-accept-unsigned",
-                           "--use-mock-keychain", "--no-first-run"], stdout=log, stderr=log)
+def launch(profile, *extra):
+    log = open(f"{OUT}/engine{'-' + extra[0].strip('-') if extra else ''}.log", "w")
+    p = subprocess.Popen([APP, f"--user-data-dir={profile}", "--agens-embedded", *extra,
+                          "--use-mock-keychain", "--no-first-run"], stdout=log, stderr=log)
+    for _ in range(60):
+        if os.path.exists(profile + "/agens.sock"): return p
+        time.sleep(0.5)
+    print("FAIL: no socket after 30 s"); open(f"{OUT}/done", "w").write("1"); time.sleep(3600)
+
+engine = launch(profile)
 open(f"{OUT}/engine.pid", "w").write(str(engine.pid))
 open(f"{OUT}/profile", "w").write(profile)
-for _ in range(60):
-    if os.path.exists(SOCK): break
-    time.sleep(0.5)
-else:
-    print("FAIL: no socket after 30 s"); open(f"{OUT}/done", "w").write("1"); time.sleep(3600)
+
+def other_process(sock, *lines):  # another process: sends each line, prints each answer (or "closed")
+    code = f"""
+import json, socket
+s = socket.socket(socket.AF_UNIX); s.connect({sock!r}); f = s.makefile()
+for line in {list(lines)!r}:
+    try: s.sendall((line + "\\n").encode())
+    except OSError: pass
+    print(f.readline().strip() or "closed")"""
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30).stdout.split("\n")
+    return [json.loads(l) if l.startswith("{") else {"ok": False, "error": l} for l in out if l]
 
 class Conn:
     def __init__(self):
@@ -95,14 +109,20 @@ m = re.search(r"pid = %d .*?type=\"(\w+)\"" % engine.pid, apps)
 kind = m.group(1) if m else "not registered"
 check("engine is not a Dock app", kind != "Foreground", kind)
 
-# host.attach from a process that is not the parent.
-other = subprocess.run([sys.executable, "-c", f"""
-import json, socket
-s = socket.socket(socket.AF_UNIX); s.connect({SOCK!r})
-s.sendall(b'{{"id":1,"op":"host.attach"}}\\n'); print(s.makefile().readline())"""], capture_output=True, text=True)
-try: r = json.loads(other.stdout)
-except ValueError: r = {"ok": False, "error": other.stdout + other.stderr}
-check("host.attach from another process is unauthorized", err(r) == "unauthorized", r)
+# Another process, unsigned and not listed in --agens-allowed-clients: refused at connect.
+r = other_process(SOCK, '{"id":1,"op":"hello"}', '{"id":2,"op":"hello"}')
+check("another process is refused at connect", len(r) == 2 and err(r[0]) == "unauthorized" and r[1].get("error") == "closed", r)
+
+# With --agens-accept-unsigned it gets in, but host.attach stays the parent's.
+profile2 = tempfile.mkdtemp(prefix="agens-u.", dir="/tmp")
+engine2 = launch(profile2, "--agens-accept-unsigned")
+r = other_process(profile2 + "/agens.sock", '{"id":1,"op":"hello"}', '{"id":2,"op":"host.attach"}')
+check("--agens-accept-unsigned lets another process in", len(r) == 2 and r[0].get("ok"), r)
+check("host.attach from another process is unauthorized", len(r) == 2 and err(r[1]) == "unauthorized", r)
+engine2.terminate()
+try: engine2.wait(15)
+except subprocess.TimeoutExpired: engine2.kill()
+subprocess.run(["rm", "-rf", profile2])
 
 check("host.attach from the parent", c.ask("host.attach").get("ok"))
 r = c.ask("host.attach")
@@ -136,6 +156,8 @@ l1 = layer_event(t1, 800)
 check("view.layer for the attached tab, non-zero context, the asked size",
       bool(l1) and l1["context"] > 0 and l1["width"] == 800 and l1["height"] == 600, l1)
 e = tab_event(t1, loaded("/form"))
+r = c.ask("view.attach", tab=t1, width=8193, height=600, scale=1)
+check("view.attach past 8192 points is bad_request", err(r) == "bad_request", r)
 check("view.tab with title and url of the test site", bool(e) and e.get("title") == "Form (test)" and e.get("ato") == ato, e)
 
 drop(t1); c.ask("view.navigate", tab=t1, text=SITE + "/other")
@@ -172,11 +194,28 @@ for bad in [{"op": "view.mouse", "tab": t1, "data": "!!!", "x": "a"},
             {"op": "view.mouse", "tab": "v999999", "data": "AAAA", "x": 1, "y": 1},
             {"op": "view.edit", "tab": t1, "command": "rm -rf"},
             {"op": "view.focus", "tab": t1, "on": "yes"},
-            {"op": "view.mouse.leave", "tab": "nope"}]:
+            {"op": "view.mouse.leave", "tab": "nope"},
+            {"op": "view.key", "tab": t1, "data": "AAAA", "commands": [""]},
+            {"op": "view.key", "tab": t1, "data": "AAAA", "commands": ["not a selector"]}]:
     c.send_raw(bad)
 c.send_raw({"op": "view.focus", "tab": t1, "on": True})
 r = c.ask("hello")
 check("garbage input is ignored and the connection survives", r.get("ok") and None not in c.replies, c.replies.get(None))
+
+# A normal op without id: refused (bad_request, without id) and not run.
+c.send_raw({"op": "atos.create", "name": "NoIdGate"})
+r = c.ask("atos.list")
+bad = c.replies.pop(None, {})
+check("a normal op without id is bad_request and does nothing",
+      err(bad) == "bad_request" and all(a.get("name") != "NoIdGate" for a in r.get("atos", [])), bad)
+
+# Attached again after a detach, at the same size: the layer comes again although nothing redraws.
+c.ask("view.detach", tab=t1)
+c.pump(1)
+c.events = [e for e in c.events if e["event"] != "view.layer"]
+c.ask("view.attach", tab=t1, width=700, height=500, scale=1)
+l1c = layer_event(t1, 700, 5)
+check("view.attach of an idle tab at the same size gets view.layer", bool(l1c) and l1c["context"] > 0, l1c)
 
 # The engine has no window on screen (its tabs live in windows that never show).
 time.sleep(1)
