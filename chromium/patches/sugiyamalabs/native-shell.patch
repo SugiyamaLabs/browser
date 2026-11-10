@@ -1,9 +1,9 @@
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
 new file mode 100644
-index 0000000000..ff8fbd4ff2
+index 0000000000..aedcf0fee4
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embed.h
-@@ -0,0 +1,270 @@
+@@ -0,0 +1,279 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The boundary between the engine and any interface (the browser's own chrome today, the Agens
 +// app later). Plain C on purpose: no Chromium or C++ types cross it, Swift imports it as is, and
@@ -228,6 +228,13 @@ index 0000000000..ff8fbd4ff2
 +void agens_bookmark_remove(AgensWindow* window, long long id);  // a folder goes with what it holds
 +void agens_bookmark_add_folder(AgensWindow* window, const char* title);  // at the end of the bar
 +
++// Find in the active page. "" clears the highlights; stop keeps the current match selected.
++// Results arrive through the observer: the current match (1-based, 0 for none) and the total.
++typedef void (*AgensFindChanged)(void* context, int current, int total);
++void agens_window_set_find_observer(AgensWindow* window, AgensFindChanged observer, void* context);
++void agens_find(AgensWindow* window, const char* text, int forward);
++void agens_find_stop(AgensWindow* window);
++
 +// Histórico of this window's ato, newest first, one entry per page per day, at most 300.
 +// `text` filters by title and address ("" for all). Calls `fn` later, once.
 +typedef struct {
@@ -256,6 +263,8 @@ index 0000000000..ff8fbd4ff2
 +  kAgensCommandBookmarks,    // ⌘⌥B
 +  kAgensCommandBookmarkBar,  // ⌘⇧B
 +  kAgensCommandFind,         // ⌘F
++  kAgensCommandFindNext,     // ⌘G
++  kAgensCommandFindPrevious, // ⌘⇧G
 +} AgensCommand;
 +int agens_ui_command(void* chrome, AgensCommand command);
 +// Where Chromium anchors its bubbles (permissions, site info): the address's site icon.
@@ -276,10 +285,10 @@ index 0000000000..ff8fbd4ff2
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EMBED_H_
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
 new file mode 100644
-index 0000000000..8844352ffa
+index 0000000000..5c7ff2a4a7
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_window.h
-@@ -0,0 +1,454 @@
+@@ -0,0 +1,496 @@
 +// Copyright 2026 SugiyamaLabs.
 +// One browser window as the embed API sees it (agens_embed.h): tabs, suggestions, atos, search
 +// default, bookmarks. Platform-neutral; each platform's shell (native_shell_mac.mm, later
@@ -309,6 +318,10 @@ index 0000000000..8844352ffa
 +#include "components/bookmarks/browser/bookmark_model.h"
 +#include "components/bookmarks/browser/base_bookmark_model_observer.h"
 +#include "components/bookmarks/common/bookmark_metrics.h"
++#include "base/scoped_observation.h"
++#include "components/find_in_page/find_result_observer.h"
++#include "components/find_in_page/find_tab_helper.h"
++#include "components/find_in_page/find_types.h"
 +#include "components/bookmarks/browser/bookmark_utils.h"
 +#include "chrome/browser/profiles/profile.h"
 +#include "chrome/browser/profiles/profile_attributes_entry.h"
@@ -386,7 +399,8 @@ index 0000000000..8844352ffa
 +                     public ProfileAttributesStorage::Observer,
 +                     public content::DownloadManager::Observer,
 +                     public download::DownloadItem::Observer,
-+                     public bookmarks::BaseBookmarkModelObserver {
++                     public bookmarks::BaseBookmarkModelObserver,
++                     public find_in_page::FindResultObserver {
 +  explicit AgensWindow(BrowserWindowInterface* browser) : browser(browser) {
 +    browser->GetTabStripModel()->AddObserver(this);
 +    Storage().AddObserver(this);
@@ -692,6 +706,43 @@ index 0000000000..8844352ffa
 +  raw_ptr<void> downloads_context = nullptr;
 +  base::CallbackListSubscription search_loaded_;
 +  base::CancelableTaskTracker history_tracker;
++  AgensFindChanged find_observer = nullptr;
++  raw_ptr<void> find_context = nullptr;
++  base::ScopedObservation<find_in_page::FindTabHelper, find_in_page::FindResultObserver> find_observation{this};
++
++  find_in_page::FindTabHelper* ActiveFind() {
++    content::WebContents* active = model()->GetActiveWebContents();
++    return active ? find_in_page::FindTabHelper::FromWebContents(active) : nullptr;
++  }
++  void Find(const std::string& text, bool forward) {
++    find_in_page::FindTabHelper* helper = ActiveFind();
++    if (!helper) return;
++    if (!find_observation.IsObservingSource(helper)) {
++      find_observation.Reset();
++      find_observation.Observe(helper);
++    }
++    if (text.empty()) {
++      helper->StopFinding(find_in_page::SelectionAction::kClear);
++      if (find_observer) find_observer(find_context, 0, 0);
++      return;
++    }
++    helper->StartFinding(base::UTF8ToUTF16(text), forward, /*case_sensitive=*/false, /*find_match=*/true);
++  }
++  void StopFind() {
++    if (find_in_page::FindTabHelper* helper = ActiveFind()) {
++      helper->StopFinding(find_in_page::SelectionAction::kKeep);
++    }
++    find_observation.Reset();
++  }
++  // find_in_page::FindResultObserver:
++  void OnFindResultAvailable(content::WebContents* contents) override {
++    auto* helper = find_in_page::FindTabHelper::FromWebContents(contents);
++    if (!find_observer || !helper) return;
++    find_observer(find_context, helper->find_result().active_match_ordinal(),
++                  helper->find_result().number_of_matches());
++  }
++  void OnFindTabHelperDestroyed(find_in_page::FindTabHelper*) override { find_observation.Reset(); }
++
 +  raw_ptr<bookmarks::BookmarkModel> bookmark_model = nullptr;
 +  AgensBookmarksChanged bookmarks_observer = nullptr;
 +  raw_ptr<void> bookmarks_context = nullptr;
@@ -736,10 +787,10 @@ index 0000000000..8844352ffa
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
 new file mode 100644
-index 0000000000..40ef8ec987
+index 0000000000..713456478b
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.cc
-@@ -0,0 +1,612 @@
+@@ -0,0 +1,622 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The embed API (agens_embed.h) on top of AgensWindow. Same code on every platform.
 +
@@ -1170,6 +1221,16 @@ index 0000000000..40ef8ec987
 +  saved->logins.erase(saved->logins.begin() + index);
 +}
 +
++void agens_window_set_find_observer(AgensWindow* w, AgensFindChanged observer, void* context) {
++  w->find_observer = observer;
++  w->find_context = context;
++}
++void agens_find(AgensWindow* w, const char* text, int forward) {
++  w->Find(text ? text : "", forward != 0);
++}
++void agens_find_stop(AgensWindow* w) {
++  w->StopFind();
++}
 +void agens_window_set_bookmarks_observer(AgensWindow* w, AgensBookmarksChanged observer, void* context) {
 +  w->bookmarks_observer = observer;
 +  w->bookmarks_context = context;
@@ -1401,10 +1462,10 @@ index 0000000000..04fb6f0162
 +#endif  // CHROME_BROWSER_AGENS_EMBED_NATIVE_SHELL_H_
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
 new file mode 100644
-index 0000000000..093813f024
+index 0000000000..e07df98db2
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
-@@ -0,0 +1,185 @@
+@@ -0,0 +1,187 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The macOS host: the views::View that fills the Webium window, puts the UI's chrome (an NSView)
 +// over it and the active tab in the page card. Everything else is shared (agens_window.h,
@@ -1564,6 +1625,8 @@ index 0000000000..093813f024
 +    case IDC_SHOW_BOOKMARK_MANAGER: command = kAgensCommandBookmarks; break;
 +    case IDC_SHOW_BOOKMARK_BAR: command = kAgensCommandBookmarkBar; break;
 +    case IDC_FIND: command = kAgensCommandFind; break;
++    case IDC_FIND_NEXT: command = kAgensCommandFindNext; break;
++    case IDC_FIND_PREVIOUS: command = kAgensCommandFindPrevious; break;
 +    default: return false;
 +  }
 +  if (!IsNativeShellEnabled() || !browser->GetWindow()) return false;
@@ -1592,10 +1655,10 @@ index 0000000000..093813f024
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..c240f584a0
+index 0000000000..398369c944
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,3952 @@
+@@ -0,0 +1,4078 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -4232,6 +4295,116 @@ index 0000000000..c240f584a0
 +}
 +@end
 +
++// Find in page (⌘F): a small float at the page's top right, like Safari's. Enter goes to the next
++// match, ⇧Enter to the previous, Esc closes; Chromium does the finding.
++@interface AgensFindBar : NSView <NSTextFieldDelegate>
++@property(nonatomic) AgensWindow* engine;
++- (void)open;
++- (void)close;
++- (void)step:(BOOL)forward;
++- (void)setCurrent:(int)current total:(int)total;
++- (void)refreshTheme;
++@end
++@implementation AgensFindBar {
++  NSTextField* _field;
++  NSTextField* _count;
++  AgensToolButton* _up;
++  AgensToolButton* _down;
++  AgensToolButton* _close;
++}
++@synthesize engine = _engine;
++- (instancetype)initWithFrame:(NSRect)frame {
++  if ((self = [super initWithFrame:frame])) {
++    self.wantsLayer = YES;
++    self.layer.borderWidth = 1;
++    self.hidden = YES;
++    self.accessibilityRole = NSAccessibilityGroupRole;
++    self.accessibilityLabel = @"Buscar na página";
++    _field = WellField(13, @"Buscar na página", @"Buscar na página");
++    _field.delegate = self;
++    _count = Label(12, NSFontWeightRegular, kDim);
++    _count.font = [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightRegular];
++    _count.alignment = NSTextAlignmentRight;
++    __weak AgensFindBar* weak = self;
++    _up = [[AgensToolButton alloc] initWithSymbol:@"chevron.up" label:@"Anterior (⌘⇧G)" size:12];
++    _up.onPress = ^{ [weak step:NO]; };
++    _down = [[AgensToolButton alloc] initWithSymbol:@"chevron.down" label:@"Próximo (⌘G)" size:12];
++    _down.onPress = ^{ [weak step:YES]; };
++    _close = [[AgensToolButton alloc] initWithSymbol:@"xmark" label:@"Fechar (Esc)" size:11];
++    _close.onPress = ^{ [weak close]; };
++    for (NSView* v in @[ _field, _count, _up, _down, _close ]) [self addSubview:v];
++    [self refreshTheme];
++  }
++  return self;
++}
++- (BOOL)isFlipped {
++  return YES;
++}
++- (void)refreshTheme {
++  self.layer.cornerRadius = 10 * Round();
++  self.layer.backgroundColor = CG(kFloat, self);
++  self.layer.borderColor = CG(kLineStrong, self);
++}
++- (void)viewDidChangeEffectiveAppearance {
++  [super viewDidChangeEffectiveAppearance];
++  [self refreshTheme];
++}
++- (void)layout {
++  [super layout];
++  const CGFloat w = NSWidth(self.bounds), h = NSHeight(self.bounds);
++  _close.frame = NSMakeRect(w - 6 - 26, (h - 26) / 2, 26, 26);
++  _down.frame = NSMakeRect(NSMinX(_close.frame) - 26, (h - 26) / 2, 26, 26);
++  _up.frame = NSMakeRect(NSMinX(_down.frame) - 26, (h - 26) / 2, 26, 26);
++  _count.frame = NSMakeRect(NSMinX(_up.frame) - 6 - 64, (h - 16) / 2, 64, 16);
++  _field.frame = NSMakeRect(12, (h - 18) / 2, NSMinX(_count.frame) - 8 - 12, 18);
++}
++- (void)open {
++  self.hidden = NO;
++  [self.window makeFirstResponder:_field];  // selects what was there, ready to replace
++  if (_field.stringValue.length) [self search:YES];
++}
++- (void)close {
++  if (self.hidden) return;
++  self.hidden = YES;
++  if (_engine) agens_find_stop(_engine);
++}
++- (void)search:(BOOL)forward {
++  if (_engine) agens_find(_engine, _field.stringValue.UTF8String, forward);
++  if (!_field.stringValue.length) _count.stringValue = @"";
++}
++- (void)step:(BOOL)forward {
++  if (self.hidden) {
++    [self open];
++    return;
++  }
++  [self search:forward];
++}
++- (void)setCurrent:(int)current total:(int)total {
++  _count.stringValue = !_field.stringValue.length ? @""
++                       : total ? [NSString stringWithFormat:@"%d de %d", current, total]
++                               : @"Nada";
++  _count.accessibilityLabel = total ? [NSString stringWithFormat:@"%d de %d resultados", current, total] : @"Nenhum resultado";
++}
++- (void)controlTextDidChange:(NSNotification*)note {
++  [self search:YES];
++}
++- (BOOL)control:(NSControl*)control textView:(NSTextView*)textView doCommandBySelector:(SEL)command {
++  if (command == @selector(insertNewline:)) {
++    [self search:!(NSApp.currentEvent.modifierFlags & NSEventModifierFlagShift)];
++    return YES;
++  }
++  if (command == @selector(cancelOperation:)) {
++    [self close];
++    return YES;
++  }
++  return NO;
++}
++@end
++
++static void FindChanged(void* context, int current, int total) {
++  [(__bridge AgensFindBar*)context setCurrent:current total:total];
++}
++
 +// ---------------------------------------------------------------------------------------------
 +// The chrome.
 +
@@ -4335,6 +4508,7 @@ index 0000000000..c240f584a0
 +  AgensBookmarksView* _bookmarksPage;  // same shortcut as the history page
 +  std::vector<BookmarkItem> _bookmarks;
 +  long long _barId;
++  AgensFindBar* _find;
 +  NSView* _bar;  // the bookmarks bar
 +  BOOL _barShown;
 +  NSView* _backdrop;  // under the whole window, for Vidro and Seu (glass, blur, image)
@@ -4520,6 +4694,9 @@ index 0000000000..c240f584a0
 +      [strong menuSettings:nil];
 +      [g_settings showSection:@"apagar"];
 +    };
++    _find = [[AgensFindBar alloc] initWithFrame:NSZeroRect];
++    _find.engine = window;
++    agens_window_set_find_observer(window, FindChanged, (__bridge void*)_find);
 +    _bookmarksPage = [[AgensBookmarksView alloc] init];
 +    _bookmarksPage.hidden = YES;
 +    _bookmarksPage.engine = window;
@@ -4536,7 +4713,7 @@ index 0000000000..c240f584a0
 +    _ntp.field.delegate = self;
 +
 +    for (NSView* v in @[ _toggle, _back, _forward, _reload, _omni, _downloadsButton, _menu, _tabsScroll, _moreAtos, _atoTile, _atoName, _separator, _newTab, _newTabTop,
-+                         _atosLine, _addAto, _atoDot, _bar, _history, _bookmarksPage, _ntp, _loadbar, _statusPill, _suggest ]) {
++                         _atosLine, _addAto, _atoDot, _bar, _history, _bookmarksPage, _ntp, _find, _loadbar, _statusPill, _suggest ]) {
 +      [self addSubview:v];
 +    }
 +    [self refreshTheme];
@@ -4863,6 +5040,7 @@ index 0000000000..c240f584a0
 +  _ntp.frame = NSInsetRect(_page, 1, 1);
 +  _history.frame = _ntp.frame;
 +  _bookmarksPage.frame = _ntp.frame;
++  _find.frame = NSMakeRect(NSMaxX(_page) - 10 - 340, NSMinY(_page) + 10, 340, 38);
 +  _loadbar.frame = NSMakeRect(NSMinX(_page), NSMinY(_page) - 5, NSWidth(_page), 2);
 +  if (NSWidth(_page) != _loadW) [self runLoadbar];  // the sweep is sized to the line
 +  CGFloat statusW = MIN(ceil(_statusText.fittingSize.width) + 24, NSWidth(_page) / 2);
@@ -4918,6 +5096,7 @@ index 0000000000..c240f584a0
 +    if (tabs[i].pinned) ++_pinnedCount;
 +    if (tabs[i].active) activeTab = i;
 +    if (!tabs[i].active) continue;
++    if (_activeIndex != i) [_find close];  // a find belongs to the page it ran on
 +    _activeIndex = i;
 +    _sound.hidden = !(tabs[i].audible || tabs[i].muted);
 +    [_sound setSymbol:tabs[i].muted ? @"speaker.slash.fill" : @"speaker.wave.2.fill"];
@@ -5381,6 +5560,7 @@ index 0000000000..c240f584a0
 +    agens_window_set_status_observer(_window, nullptr, nullptr);
 +    agens_window_set_downloads_observer(_window, nullptr, nullptr);
 +    agens_window_set_bookmarks_observer(_window, nullptr, nullptr);
++    agens_window_set_find_observer(_window, nullptr, nullptr);
 +  }
 +  _window = nullptr;
 +}
@@ -5502,6 +5682,15 @@ index 0000000000..c240f584a0
 +      return 1;
 +    case kAgensCommandBookmarkBar:
 +      [self toggleBookmarkBar];
++      return 1;
++    case kAgensCommandFind:
++      [_find open];
++      return 1;
++    case kAgensCommandFindNext:
++      [_find step:YES];
++      return 1;
++    case kAgensCommandFindPrevious:
++      [_find step:NO];
 +      return 1;
 +    default:
 +      return 0;
