@@ -22,6 +22,10 @@ FIXES = {
     "extensions/common/api/_api_features.json": [
         ('"https://chromewebstore.9oo91e.qjz9zk/*"', '"https://chromewebstore.google.com/*"'),
     ],
+    # The store's update response is checked against this namespace; without it every install and update fails.
+    "extensions/browser/updater/safe_manifest_parser.cc": [
+        ("http://www.9oo91e.qjz9zk/update2/response", "http://www.google.com/update2/response"),
+    ],
 }
 
 
