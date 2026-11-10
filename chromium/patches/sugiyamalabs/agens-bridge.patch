@@ -24,6 +24,168 @@ index 0000000000..d31857a1a6
 +    "//base",
 +  ]
 +}
+diff --git a/chrome/browser/agens/bridge/approval.cc b/chrome/browser/agens/bridge/approval.cc
+new file mode 100644
+index 0000000000..66016c0331
+--- /dev/null
++++ b/chrome/browser/agens/bridge/approval.cc
+@@ -0,0 +1,114 @@
++// Copyright 2026 SugiyamaLabs.
++
++#include "chrome/browser/agens/bridge/approval.h"
++
++#include <cstdlib>
++#include <deque>
++#include <optional>
++#include <utility>
++#include <vector>
++
++#include "base/logging.h"
++#include "base/no_destructor.h"
++#include "chrome/browser/agens/embed/native_shell.h"
++
++namespace agens::bridge {
++
++namespace {
++
++struct Ask {
++  uint64_t connection;
++  std::string title, detail;
++  bool offer_always;
++  ApprovalCallback done;  // null once that connection closed (its sheet may still be up)
++
++  bool SameQuestion(const Ask& other) const {
++    return title == other.title && detail == other.detail && offer_always == other.offer_always;
++  }
++};
++std::deque<Ask>& Asks() {
++  static base::NoDestructor<std::deque<Ask>> asks;
++  return *asks;
++}
++bool g_asking = false;
++
++void AskNext();
++
++// Runs (and removes) the front ask and every queued one asking the same.
++void Resolve(AgensApprovalAnswer answer) {
++  const Ask front = {0, Asks().front().title, Asks().front().detail, Asks().front().offer_always, {}};
++  std::vector<ApprovalCallback> dones;
++  for (auto it = Asks().begin(); it != Asks().end();) {
++    if (!it->SameQuestion(front)) {
++      ++it;
++      continue;
++    }
++    if (it->done) dones.push_back(std::move(it->done));
++    it = Asks().erase(it);
++  }
++  for (ApprovalCallback& done : dones) std::move(done).Run(answer);
++}
++
++void Answered(AgensApprovalAnswer answer) {
++  g_asking = false;
++  if (Asks().empty()) return;
++  Resolve(answer);
++  AskNext();
++}
++
++#if !defined(OFFICIAL_BUILD)
++// Test seam, never in official builds: AGENS_BRIDGE_TEST_ANSWER=allow|always|deny answers every
++// approval without a sheet. Deliberately no pref or switch: the sheet guards session secrets.
++std::optional<AgensApprovalAnswer> TestAnswer(bool offer_always) {
++  const char* value = getenv("AGENS_BRIDGE_TEST_ANSWER");
++  if (!value) return std::nullopt;
++  const std::string answer = value;
++  if (answer == "allow") return kAgensApprovalAllow;
++  if (answer == "always") return offer_always ? kAgensApprovalAllowAlways : kAgensApprovalAllow;
++  if (answer == "deny") return kAgensApprovalDeny;
++  return std::nullopt;
++}
++#endif
++
++void AskNext() {
++  while (!g_asking && !Asks().empty()) {
++    const Ask& front = Asks().front();
++#if !defined(OFFICIAL_BUILD)
++    if (std::optional<AgensApprovalAnswer> answer = TestAnswer(front.offer_always)) {
++      LOG(WARNING) << "agens bridge: AGENS_BRIDGE_TEST_ANSWER answered an approval without a sheet ("
++                   << *answer << ")";
++      Resolve(*answer);
++      continue;
++    }
++#endif
++    g_asking = true;
++    // Copies: it may answer right away (no window to ask on), and Answered then erases `front`.
++    const std::string title = front.title, detail = front.detail;
++    agens::ShowApprovalSheet(title, detail, front.offer_always, base::BindOnce(&Answered));
++  }
++}
++
++}  // namespace
++
++void AskApproval(uint64_t connection,
++                 std::string title,
++                 std::string detail,
++                 bool offer_always,
++                 ApprovalCallback done) {
++  Asks().push_back({connection, std::move(title), std::move(detail), offer_always, std::move(done)});
++  AskNext();
++}
++
++void CancelApprovals(uint64_t connection) {
++  for (auto it = Asks().begin(); it != Asks().end();) {
++    if (it->connection != connection) {
++      ++it;
++    } else if (g_asking && it == Asks().begin()) {
++      (it++)->done.Reset();
++    } else {
++      it = Asks().erase(it);
++    }
++  }
++}
++
++}  // namespace agens::bridge
+diff --git a/chrome/browser/agens/bridge/approval.h b/chrome/browser/agens/bridge/approval.h
+new file mode 100644
+index 0000000000..f9a53def1b
+--- /dev/null
++++ b/chrome/browser/agens/bridge/approval.h
+@@ -0,0 +1,36 @@
++// Copyright 2026 SugiyamaLabs.
++// Approval sheets for the socket: the person's OK before something happens on a client's behalf.
++#ifndef CHROME_BROWSER_AGENS_BRIDGE_APPROVAL_H_
++#define CHROME_BROWSER_AGENS_BRIDGE_APPROVAL_H_
++
++#include <cstdint>
++#include <string>
++
++#include "base/functional/callback.h"
++#include "chrome/browser/agens/embed/agens_embed.h"
++
++namespace agens::bridge {
++
++using ApprovalCallback = base::OnceCallback<void(AgensApprovalAnswer)>;
++
++// UI thread. Asks the person, for the client on `connection`, with a sheet on the most recently
++// active window: `title` is the question (pt-BR), `detail` the text under it (may be multi-line),
++// `offer_always` adds "Permitir sempre". "Não permitir" is the Return default.
++// - One sheet at a time, in order. Pending asks with the same title, detail and offer_always are
++//   answered together by one sheet.
++// - `done` runs once with the answer; kAgensApprovalDeny when there is no window to ask on or it
++//   closes first. Remembering kAgensApprovalAllowAlways is the caller's job.
++// - `done` never runs if `connection` closes first (its queued asks are dropped; a sheet already
++//   showing stays up and its answer goes only to the other asks it covers).
++void AskApproval(uint64_t connection,
++                 std::string title,
++                 std::string detail,
++                 bool offer_always,
++                 ApprovalCallback done);
++
++// UI thread, from OnConnectionClosed (ops.h).
++void CancelApprovals(uint64_t connection);
++
++}  // namespace agens::bridge
++
++#endif  // CHROME_BROWSER_AGENS_BRIDGE_APPROVAL_H_
 diff --git a/chrome/browser/agens/bridge/bridge.h b/chrome/browser/agens/bridge/bridge.h
 new file mode 100644
 index 0000000000..392ac29938
@@ -62,10 +224,10 @@ index 0000000000..392ac29938
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_BRIDGE_H_
 diff --git a/chrome/browser/agens/bridge/bridge_mac.mm b/chrome/browser/agens/bridge/bridge_mac.mm
 new file mode 100644
-index 0000000000..9ddb5d65f5
+index 0000000000..4f5200a085
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/bridge_mac.mm
-@@ -0,0 +1,567 @@
+@@ -0,0 +1,534 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The socket server on macOS: a Unix socket in the user data dir, the peer's code signature read
 +// from its audit token, and the approval of the person before a signed client gets in.
@@ -107,6 +269,7 @@ index 0000000000..9ddb5d65f5
 +#include "base/task/current_thread.h"
 +#include "base/task/sequenced_task_runner.h"
 +#include "base/task/thread_pool.h"
++#include "chrome/browser/agens/bridge/approval.h"
 +#include "chrome/browser/agens/bridge/ops.h"
 +#include "chrome/browser/agens/bridge/protocol.h"
 +#include "chrome/browser/agens/embed/native_shell.h"
@@ -208,76 +371,9 @@ index 0000000000..9ddb5d65f5
 +
 +using Decision = base::OnceCallback<void(const char* error)>;
 +
-+struct Ask {
-+  Peer peer;
-+  uint64_t connection;
-+  Decision done;  // null once that connection closed (its sheet may still be up)
-+};
-+std::deque<Ask>& Asks() {
-+  static base::NoDestructor<std::deque<Ask>> asks;
-+  return *asks;
-+}
-+bool g_asking = false;
-+
 +bool AlwaysAllowed(const std::string& identity) {
 +  const base::ListValue& list = g_browser_process->local_state()->GetList(kAllowedClientsPref);
 +  return std::ranges::contains(list, base::Value(identity));
-+}
-+
-+void AskNext();
-+
-+// Runs (and removes) every queued ask of `identity`: one sheet answers all of that app's waiting
-+// connections, so an app never has more than one sheet pending.
-+void Resolve(const std::string& identity, const char* error) {
-+  std::vector<Decision> dones;
-+  for (auto it = Asks().begin(); it != Asks().end();) {
-+    if (it->peer.identity != identity) {
-+      ++it;
-+      continue;
-+    }
-+    if (it->done) dones.push_back(std::move(it->done));
-+    it = Asks().erase(it);
-+  }
-+  for (Decision& done : dones) std::move(done).Run(error);  // each only posts to the IO thread
-+}
-+
-+void Answered(AgensClientAnswer answer) {
-+  g_asking = false;
-+  if (Asks().empty()) return;
-+  const std::string identity = Asks().front().peer.identity;
-+  if (answer == kAgensClientAllowAlways && !AlwaysAllowed(identity)) {
-+    ScopedListPrefUpdate(g_browser_process->local_state(), kAllowedClientsPref)->Append(identity);
-+  }
-+  Resolve(identity, answer == kAgensClientDeny ? kDenied : nullptr);
-+  AskNext();
-+}
-+
-+// One sheet at a time; a client answered "Permitir sempre" meanwhile skips its own.
-+void AskNext() {
-+  while (!g_asking && !Asks().empty()) {
-+    if (AlwaysAllowed(Asks().front().peer.identity)) {
-+      Resolve(Asks().front().peer.identity, nullptr);
-+      continue;
-+    }
-+    g_asking = true;
-+    // May answer right away (no window to ask on): Answered then resolves this one.
-+    agens::AskClientApproval(Asks().front().peer.name, base::BindOnce(&Answered));
-+  }
-+}
-+
-+// The connection closed before the person answered: no sheet for it. One already showing stays
-+// up (there is no hook to take it down); its answer then only reaches the app's other waiting
-+// connections, if any.
-+void CancelAsk(uint64_t connection) {
-+  for (auto it = Asks().begin(); it != Asks().end();) {
-+    if (it->connection != connection) {
-+      ++it;
-+    } else if (g_asking && it == Asks().begin()) {
-+      (it++)->done.Reset();
-+    } else {
-+      it = Asks().erase(it);
-+    }
-+  }
 +}
 +
 +void Decide(Peer peer, uint64_t connection, Decision done) {
@@ -290,8 +386,21 @@ index 0000000000..9ddb5d65f5
 +    std::move(done).Run(accept ? nullptr : kUnauthorized);
 +    return;
 +  }
-+  Asks().push_back({std::move(peer), connection, std::move(done)});
-+  AskNext();
++  if (AlwaysAllowed(peer.identity)) {
++    std::move(done).Run(nullptr);
++    return;
++  }
++  // Connections of the same app ask the same question, so one sheet answers them all.
++  AskApproval(connection, "O " + peer.name + " quer usar o AgensBrowser", "Ele poderá ver, criar e abrir os seus atos.",
++              /*offer_always=*/true,
++              base::BindOnce(
++                  [](std::string identity, Decision done, AgensApprovalAnswer answer) {
++                    if (answer == kAgensApprovalAllowAlways && !AlwaysAllowed(identity)) {
++                      ScopedListPrefUpdate(g_browser_process->local_state(), kAllowedClientsPref)->Append(identity);
++                    }
++                    std::move(done).Run(answer == kAgensApprovalDeny ? kDenied : nullptr);
++                  },
++                  peer.identity, std::move(done)));
 +}
 +
 +// --- The server (IO thread).
@@ -302,7 +411,7 @@ index 0000000000..9ddb5d65f5
 + public:
 +  Connection(Server* server, base::ScopedFD fd) : server_(server), fd_(std::move(fd)) {
 +    static uint64_t next_id = 0;  // IO thread only
-+    id_ = ++next_id;
++    client_.connection = ++next_id;
 +  }
 +
 +  void Start();
@@ -323,11 +432,12 @@ index 0000000000..9ddb5d65f5
 +
 +  raw_ptr<Server> server_;
 +  base::ScopedFD fd_;
-+  uint64_t id_;
++  Client client_;  // name and identity filled once the signature is read
 +  State state_ = State::kChecking;
 +  LineFramer framer_;
 +  std::vector<std::string> waiting_;  // lines read before the client was let in
 +  size_t waiting_bytes_ = 0;
++  bool closed_posted_ = false;
 +  std::string out_;
 +  base::MessagePumpForIO::FdWatchController read_watch_{FROM_HERE};
 +  base::MessagePumpForIO::FdWatchController write_watch_{FROM_HERE};
@@ -352,6 +462,12 @@ index 0000000000..9ddb5d65f5
 +    base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE, std::move(it->second));
 +    connections_.erase(it);
 +    ResumeAccept();  // its descriptor is about to be free
++  }
++
++  void SendTo(uint64_t connection, const std::string& line) {
++    for (auto& [c, owned] : connections_) {
++      if (c->client_.connection == connection && c->state_ == Connection::State::kAllowed) c->Send(line);
++    }
 +  }
 +
 +  void Broadcast(const std::string& line) {
@@ -422,11 +538,13 @@ index 0000000000..9ddb5d65f5
 +      base::BindOnce(&Connection::Checked, weak_.GetWeakPtr()));
 +}
 +
-+// Back on IO; skipped when the connection closed meanwhile. A close after this posts CancelAsk
-+// behind Decide, so the UI drops the ask.
++// Back on IO; skipped when the connection closed meanwhile. A close after this posts
++// OnConnectionClosed behind Decide, so the UI drops the ask.
 +void Connection::Checked(Peer peer) {
++  client_.name = peer.name;
++  client_.identity = peer.identity;
 +  content::GetUIThreadTaskRunner({})->PostTask(
-+      FROM_HERE, base::BindOnce(&Decide, std::move(peer), id_,
++      FROM_HERE, base::BindOnce(&Decide, std::move(peer), client_.connection,
 +                                base::BindPostTask(content::GetIOThreadTaskRunner({}),
 +                                                   base::BindOnce(&Connection::Authorized, weak_.GetWeakPtr()))));
 +}
@@ -462,7 +580,7 @@ index 0000000000..9ddb5d65f5
 +    return;
 +  }
 +  content::GetUIThreadTaskRunner({})->PostTask(
-+      FROM_HERE, base::BindOnce(&HandleOp, std::move(*request),
++      FROM_HERE, base::BindOnce(&HandleOp, client_, std::move(*request),
 +                                base::BindPostTask(content::GetIOThreadTaskRunner({}),
 +                                                   base::BindOnce(&Connection::Send, weak_.GetWeakPtr()))));
 +}
@@ -502,8 +620,10 @@ index 0000000000..9ddb5d65f5
 +}
 +
 +void Connection::Close() {
-+  if (state_ == State::kChecking) {
-+    content::GetUIThreadTaskRunner({})->PostTask(FROM_HERE, base::BindOnce(&CancelAsk, id_));
++  if (!closed_posted_) {  // Close can run twice (a write error while closing)
++    closed_posted_ = true;
++    content::GetUIThreadTaskRunner({})->PostTask(FROM_HERE,
++                                                 base::BindOnce(&OnConnectionClosed, client_.connection));
 +  }
 +  read_watch_.StopWatchingFileDescriptor();
 +  write_watch_.StopWatchingFileDescriptor();
@@ -632,13 +752,76 @@ index 0000000000..9ddb5d65f5
 +                     EventLine(name, std::move(fields))));
 +}
 +
++void SendEventTo(uint64_t connection, std::string_view name, base::DictValue fields) {
++  content::GetIOThreadTaskRunner({})->PostTask(
++      FROM_HERE, base::BindOnce(
++                     [](uint64_t connection, std::string line) {
++                       if (g_server) g_server->SendTo(connection, line);
++                     },
++                     connection, EventLine(name, std::move(fields))));
++}
++
 +}  // namespace agens::bridge
+diff --git a/chrome/browser/agens/bridge/control_ops.cc b/chrome/browser/agens/bridge/control_ops.cc
+new file mode 100644
+index 0000000000..bc3a5913af
+--- /dev/null
++++ b/chrome/browser/agens/bridge/control_ops.cc
+@@ -0,0 +1,21 @@
++// Copyright 2026 SugiyamaLabs.
++
++#include "chrome/browser/agens/bridge/control_ops.h"
++
++#include <utility>
++
++#include "base/strings/string_util.h"
++
++namespace agens::bridge::control {
++
++bool Handles(std::string_view op) {
++  return base::StartsWith(op, "control.") || base::StartsWith(op, "tab.") || base::StartsWith(op, "page.");
++}
++
++void HandleOp(const Client& client, Request request, ReplyCallback reply) {
++  std::move(reply).Run(ErrorReply(&request.id, kUnknownOp, request.op));  // phase 3
++}
++
++void OnConnectionClosed(uint64_t connection) {}
++
++}  // namespace agens::bridge::control
+diff --git a/chrome/browser/agens/bridge/control_ops.h b/chrome/browser/agens/bridge/control_ops.h
+new file mode 100644
+index 0000000000..eda9e71d52
+--- /dev/null
++++ b/chrome/browser/agens/bridge/control_ops.h
+@@ -0,0 +1,21 @@
++// Copyright 2026 SugiyamaLabs.
++// Agent control ops: control.*, tab.*, page.* (docs/agens.md, "Controle"). UI thread; see ops.h
++// for what a handler gets.
++#ifndef CHROME_BROWSER_AGENS_BRIDGE_CONTROL_OPS_H_
++#define CHROME_BROWSER_AGENS_BRIDGE_CONTROL_OPS_H_
++
++#include <cstdint>
++#include <string_view>
++
++#include "chrome/browser/agens/bridge/ops.h"
++
++namespace agens::bridge::control {
++
++// True for the ops this area answers.
++bool Handles(std::string_view op);
++void HandleOp(const Client& client, Request request, ReplyCallback reply);
++void OnConnectionClosed(uint64_t connection);
++
++}  // namespace agens::bridge::control
++
++#endif  // CHROME_BROWSER_AGENS_BRIDGE_CONTROL_OPS_H_
 diff --git a/chrome/browser/agens/bridge/ops.cc b/chrome/browser/agens/bridge/ops.cc
 new file mode 100644
-index 0000000000..30c401b7dc
+index 0000000000..94e45b098e
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ops.cc
-@@ -0,0 +1,192 @@
+@@ -0,0 +1,205 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/ops.h"
@@ -646,6 +829,9 @@ index 0000000000..30c401b7dc
 +#include <utility>
 +
 +#include "base/version_info/version_info.h"
++#include "chrome/browser/agens/bridge/approval.h"
++#include "chrome/browser/agens/bridge/control_ops.h"
++#include "chrome/browser/agens/bridge/session_ops.h"
 +#include "chrome/browser/agens/embed/agens_window.h"
 +#include "chrome/browser/profiles/profile_window.h"
 +#include "url/gurl.h"
@@ -806,7 +992,7 @@ index 0000000000..30c401b7dc
 +
 +}  // namespace
 +
-+void HandleOp(Request request, ReplyCallback reply) {
++void HandleOp(Client client, Request request, ReplyCallback reply) {
 +  const std::string& op = request.op;
 +  if (op == "hello") {
 +    base::DictValue result;
@@ -825,33 +1011,66 @@ index 0000000000..30c401b7dc
 +    AtosColor(request, std::move(reply));
 +  } else if (op == "atos.open") {
 +    AtosOpen(std::move(request), std::move(reply));
++  } else if (session::Handles(op)) {
++    session::HandleOp(client, std::move(request), std::move(reply));
++  } else if (control::Handles(op)) {
++    control::HandleOp(client, std::move(request), std::move(reply));
 +  } else {
 +    std::move(reply).Run(ErrorReply(&request.id, kUnknownOp, op));
 +  }
 +}
 +
++void OnConnectionClosed(uint64_t connection) {
++  CancelApprovals(connection);
++  session::OnConnectionClosed(connection);
++  control::OnConnectionClosed(connection);
++}
++
 +}  // namespace agens::bridge
 diff --git a/chrome/browser/agens/bridge/ops.h b/chrome/browser/agens/bridge/ops.h
 new file mode 100644
-index 0000000000..869202bb01
+index 0000000000..245680ec72
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ops.h
-@@ -0,0 +1,19 @@
+@@ -0,0 +1,42 @@
 +// Copyright 2026 SugiyamaLabs.
-+// The socket's operations, run on the UI thread.
++// The socket's operations, run on the UI thread. HandleOp (ops.cc) answers hello and atos.* and
++// hands the rest to one area each, in its own file: session_ops.h (login, session, renew) and
++// control_ops.h (control.*, tab.*, page.*). An area gets, for each request:
++// - `client`: which connection it serves and who is on the other side (verified by signature);
++// - `reply`: run it exactly once, now or later (async is fine);
++// and may call SendEventTo(client.connection, ...) and AskApproval (approval.h). Each area's
++// OnConnectionClosed(connection) runs on the UI thread once that connection is gone.
 +#ifndef CHROME_BROWSER_AGENS_BRIDGE_OPS_H_
 +#define CHROME_BROWSER_AGENS_BRIDGE_OPS_H_
 +
++#include <cstdint>
 +#include <string>
++#include <string_view>
 +
 +#include "base/functional/callback.h"
++#include "base/values.h"
 +#include "chrome/browser/agens/bridge/protocol.h"
 +
 +namespace agens::bridge {
 +
-+// Gets the finished reply line (protocol.h) to send. Every op runs it exactly once.
++struct Client {
++  uint64_t connection = 0;  // unique for this run of the browser
++  std::string name;         // the app's display name (from its bundle)
++  std::string identity;     // "<team id>/<signing identifier>"; empty for an unsigned client
++};
++
++// Gets the finished reply line (protocol.h: OkReply / ErrorReply). Safe to run from any thread;
++// dropped if the connection closed.
 +using ReplyCallback = base::OnceCallback<void(std::string line)>;
-+void HandleOp(Request request, ReplyCallback reply);
++
++void HandleOp(Client client, Request request, ReplyCallback reply);
++
++// UI thread. `{"event": name, ...fields}` to that connection only; dropped if it closed.
++void SendEventTo(uint64_t connection, std::string_view name, base::DictValue fields);
++
++// UI thread, from the server: the connection closed. Cancels its approvals and tells each area.
++void OnConnectionClosed(uint64_t connection);
 +
 +}  // namespace agens::bridge
 +
@@ -1135,8 +1354,60 @@ index 0000000000..6684ee0021
 +  std::printf("agens bridge protocol: ok\n");
 +  return 0;
 +}
+diff --git a/chrome/browser/agens/bridge/session_ops.cc b/chrome/browser/agens/bridge/session_ops.cc
+new file mode 100644
+index 0000000000..393ff20a85
+--- /dev/null
++++ b/chrome/browser/agens/bridge/session_ops.cc
+@@ -0,0 +1,19 @@
++// Copyright 2026 SugiyamaLabs.
++
++#include "chrome/browser/agens/bridge/session_ops.h"
++
++#include <utility>
++
++namespace agens::bridge::session {
++
++bool Handles(std::string_view op) {
++  return op == "login" || op == "session" || op == "renew";
++}
++
++void HandleOp(const Client& client, Request request, ReplyCallback reply) {
++  std::move(reply).Run(ErrorReply(&request.id, kUnknownOp, request.op));  // phase 2
++}
++
++void OnConnectionClosed(uint64_t connection) {}
++
++}  // namespace agens::bridge::session
+diff --git a/chrome/browser/agens/bridge/session_ops.h b/chrome/browser/agens/bridge/session_ops.h
+new file mode 100644
+index 0000000000..2a1a874d47
+--- /dev/null
++++ b/chrome/browser/agens/bridge/session_ops.h
+@@ -0,0 +1,21 @@
++// Copyright 2026 SugiyamaLabs.
++// Session ops for the bridges: login, session, renew (docs/agens.md, "Sessão"). UI thread; see
++// ops.h for what a handler gets.
++#ifndef CHROME_BROWSER_AGENS_BRIDGE_SESSION_OPS_H_
++#define CHROME_BROWSER_AGENS_BRIDGE_SESSION_OPS_H_
++
++#include <cstdint>
++#include <string_view>
++
++#include "chrome/browser/agens/bridge/ops.h"
++
++namespace agens::bridge::session {
++
++// True for the ops this area answers.
++bool Handles(std::string_view op);
++void HandleOp(const Client& client, Request request, ReplyCallback reply);
++void OnConnectionClosed(uint64_t connection);
++
++}  // namespace agens::bridge::session
++
++#endif  // CHROME_BROWSER_AGENS_BRIDGE_SESSION_OPS_H_
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
-index 9d0bf4646d..3b294ce550 100644
+index 9d0bf4646d..1e7d19edac 100644
 --- a/chrome/browser/agens/embed/agens_embed.h
 +++ b/chrome/browser/agens/embed/agens_embed.h
 @@ -109,6 +109,7 @@ typedef struct {
@@ -1147,33 +1418,35 @@ index 9d0bf4646d..3b294ce550 100644
  } AgensAto;
  typedef void (*AgensAtosChanged)(void* context, const AgensAto* atos, int count);
  void agens_window_set_atos_observer(AgensWindow* window, AgensAtosChanged observer, void* context);
-@@ -279,6 +280,15 @@ typedef enum {
+@@ -279,6 +280,16 @@ typedef enum {
  } AgensPermissionAnswer;
  void agens_window_permission_answer(AgensWindow* window, AgensPermissionAnswer answer);
  
-+// A signed local app wants to use the browser through its socket (docs/agens.md):
-+// agens_ui_client_prompt asks the person, the UI answers once with agens_window_client_answer.
++// An approval the socket needs from the person (a local app connecting, later a site session or
++// agent control): agens_ui_approval_prompt shows it, the UI answers once with
++// agens_window_approval_answer.
 +typedef enum {
-+  kAgensClientAllow,
-+  kAgensClientAllowAlways,  // remembered for that app
-+  kAgensClientDeny,
-+} AgensClientAnswer;
-+void agens_window_client_answer(AgensWindow* window, AgensClientAnswer answer);
++  kAgensApprovalAllow,
++  kAgensApprovalAllowAlways,  // the asker remembers it; only offered when it says so
++  kAgensApprovalDeny,
++} AgensApprovalAnswer;
++void agens_window_approval_answer(AgensWindow* window, AgensApprovalAnswer answer);
 +
  // The site of the active page, for the panel behind the site icon. `pattern` is what
  // agens_site_exception_set takes for this site. Strings valid until the next call.
  typedef struct {
-@@ -358,6 +368,8 @@ float agens_ui_card_radius(void* chrome);
+@@ -358,6 +369,9 @@ float agens_ui_card_radius(void* chrome);
  float agens_ui_titlebar_height(void* chrome);
  void agens_ui_permission_prompt(void* chrome, const char* site, const char* const* asks, int count);
  void agens_ui_permission_prompt_close(void* chrome);
-+// `client` is the app's name, read from its signed bundle.
-+void agens_ui_client_prompt(void* chrome, const char* client);
++// `title` is the question, `detail` the explanation under it (may hold several lines). The answer
++// buttons are Permitir, Permitir sempre (only when `offer_always`) and Não permitir (the default).
++void agens_ui_approval_prompt(void* chrome, const char* title, const char* detail, int offer_always);
  void agens_ui_destroy_chrome(void* chrome);
  
  #ifdef __cplusplus
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
-index 268d4dc7bd..d9d7f081d7 100644
+index 268d4dc7bd..2aaa010953 100644
 --- a/chrome/browser/agens/embed/agens_window.h
 +++ b/chrome/browser/agens/embed/agens_window.h
 @@ -48,7 +48,9 @@
@@ -1200,9 +1473,9 @@ index 268d4dc7bd..d9d7f081d7 100644
    }
    ~AgensWindow() override {
 +    // Closed while asking. Posted: run here, the next ask could pick this dying window.
-+    if (client_answer) {
++    if (approval_answer) {
 +      base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
-+          FROM_HERE, base::BindOnce(std::move(client_answer), kAgensClientDeny));
++          FROM_HERE, base::BindOnce(std::move(approval_answer), kAgensApprovalDeny));
 +    }
      if (bookmark_model) bookmark_model->RemoveObserver(this);
      Storage().RemoveObserver(this);
@@ -1333,20 +1606,20 @@ index 268d4dc7bd..d9d7f081d7 100644
    }
    base::WeakPtr<permissions::PermissionPrompt::Delegate> permission_delegate;
 +  // A local app waiting for the person's answer (agens_ui_client_prompt).
-+  base::OnceCallback<void(AgensClientAnswer)> client_answer;
++  base::OnceCallback<void(AgensApprovalAnswer)> approval_answer;
    AgensFindChanged find_observer = nullptr;
    raw_ptr<void> find_context = nullptr;
    base::ScopedObservation<find_in_page::FindTabHelper, find_in_page::FindResultObserver> find_observation{this};
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
-index cfdc014cf4..45f9dc6222 100644
+index cfdc014cf4..656d274759 100644
 --- a/chrome/browser/agens/embed/native_shell.cc
 +++ b/chrome/browser/agens/embed/native_shell.cc
 @@ -473,6 +473,9 @@ void agens_password_remove(AgensWindow* w, int index) {
    saved->logins.erase(saved->logins.begin() + index);
  }
  
-+void agens_window_client_answer(AgensWindow* w, AgensClientAnswer answer) {
-+  if (w->client_answer) std::move(w->client_answer).Run(answer);
++void agens_window_approval_answer(AgensWindow* w, AgensApprovalAnswer answer) {
++  if (w->approval_answer) std::move(w->approval_answer).Run(answer);
 +}
  void agens_window_permission_answer(AgensWindow* w, AgensPermissionAnswer answer) {
    base::WeakPtr<permissions::PermissionPrompt::Delegate> delegate = std::move(w->permission_delegate);
@@ -1355,14 +1628,14 @@ index cfdc014cf4..45f9dc6222 100644
  void ConfirmCloseWithDownloads(views::Widget*, int, base::OnceCallback<void(bool)> callback) {
    std::move(callback).Run(true);
  }
-+void AskClientApproval(const std::string&, base::OnceCallback<void(AgensClientAnswer)> done) {
-+  std::move(done).Run(kAgensClientDeny);
++void ShowApprovalSheet(const std::string&, const std::string&, bool, base::OnceCallback<void(AgensApprovalAnswer)> done) {
++  std::move(done).Run(kAgensApprovalDeny);
 +}
  #endif
  
  bool IsNativeStatusBubble(const StatusBubble* bubble) {
 diff --git a/chrome/browser/agens/embed/native_shell.h b/chrome/browser/agens/embed/native_shell.h
-index d81488f053..7e1d14a14d 100644
+index d81488f053..28c38bd394 100644
 --- a/chrome/browser/agens/embed/native_shell.h
 +++ b/chrome/browser/agens/embed/native_shell.h
 @@ -8,6 +8,7 @@
@@ -1373,18 +1646,21 @@ index d81488f053..7e1d14a14d 100644
  #include "chrome/browser/extensions/extension_install_prompt.h"
  #include "chrome/browser/ui/login/login_handler.h"
  #include "components/javascript_dialogs/tab_modal_dialog_view.h"
-@@ -68,6 +69,9 @@ void NativeTabStateChanged(views::Widget* widget);
+@@ -68,6 +69,12 @@ void NativeTabStateChanged(views::Widget* widget);
  // True for the native shell's bubble. Chromium casts status bubbles to StatusBubbleViews in a
  // couple of places; those check this first.
  bool IsNativeStatusBubble(const StatusBubble* bubble);
-+// Asks the person whether the local app `client` may use the browser (the socket, bridge/), on
-+// the last active window. Answers deny right away without a window to ask on.
-+void AskClientApproval(const std::string& client, base::OnceCallback<void(AgensClientAnswer)> done);
++// Shows a socket approval (bridge/approval.h queues them) on the most recently active window that
++// can show one. Answers deny right away without such a window, and later if it closes first.
++void ShowApprovalSheet(const std::string& title,
++                       const std::string& detail,
++                       bool offer_always,
++                       base::OnceCallback<void(AgensApprovalAnswer)> done);
  // Asks whether to close the window and cancel `count` downloads; answers through `callback`.
  void ConfirmCloseWithDownloads(views::Widget* widget, int count, base::OnceCallback<void(bool)> callback);
  
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
-index 5d7ca90415..d20fb1b148 100644
+index 5d7ca90415..3d238795f6 100644
 --- a/chrome/browser/agens/embed/native_shell_mac.mm
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
 @@ -15,6 +15,7 @@
@@ -1395,11 +1671,14 @@ index 5d7ca90415..d20fb1b148 100644
  #include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
  #include "components/permissions/permission_request.h"
  #include "ui/base/metadata/metadata_header_macros.h"
-@@ -360,6 +361,31 @@ bool HandleNativeCommand(BrowserWindowInterface* browser, int command_id) {
+@@ -360,6 +361,34 @@ bool HandleNativeCommand(BrowserWindowInterface* browser, int command_id) {
    return shell && shell->Command(*command);
  }
  
-+void AskClientApproval(const std::string& client, base::OnceCallback<void(AgensClientAnswer)> done) {
++void ShowApprovalSheet(const std::string& title,
++                       const std::string& detail,
++                       bool offer_always,
++                       base::OnceCallback<void(AgensApprovalAnswer)> done) {
 +  // The most recently active window that isn't closing and isn't already asking.
 +  BrowserWindowInterface* browser = nullptr;
 +  NativeShellView* shell = nullptr;
@@ -1409,26 +1688,26 @@ index 5d7ca90415..d20fb1b148 100644
 +      views::Widget* widget = views::Widget::GetWidgetForNativeWindow(b->GetWindow()->GetNativeWindow());
 +      if (!widget || widget->IsClosed()) return true;
 +      auto* s = views::AsViewClass<NativeShellView>(widget->GetRootView()->GetViewByID(NativeShellView::kViewId));
-+      if (!s || !s->window()->ui || s->window()->client_answer) return true;
++      if (!s || !s->window()->ui || s->window()->approval_answer) return true;
 +      browser = b;
 +      shell = s;
 +      return false;
 +    });
 +  }
 +  if (!shell) {
-+    std::move(done).Run(kAgensClientDeny);
++    std::move(done).Run(kAgensApprovalDeny);
 +    return;
 +  }
 +  browser->GetWindow()->Activate();  // the sheet must be seen to be answered
-+  shell->window()->client_answer = std::move(done);
-+  agens_ui_client_prompt(shell->window()->ui, client.c_str());
++  shell->window()->approval_answer = std::move(done);
++  agens_ui_approval_prompt(shell->window()->ui, title.c_str(), detail.c_str(), offer_always);
 +}
 +
  bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
    if (!IsNativeShellEnabled() || !browser->GetWindow()) return false;
    views::Widget* widget = views::Widget::GetWidgetForNativeWindow(browser->GetWindow()->GetNativeWindow());
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
-index 3c18c4eab1..77b206bc89 100644
+index 3c18c4eab1..6f44ec0271 100644
 --- a/chrome/browser/agens/ui/chrome_mac.mm
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
 @@ -766,7 +766,7 @@ - (void)layout {
@@ -1461,19 +1740,19 @@ index 3c18c4eab1..77b206bc89 100644
    if (_window) agens_window_permission_answer(_window, (AgensPermissionAnswer)button.tag);
    [self closeMenu];
  }
-+// A local app (the Agens, a test tool) asks to use the browser through its socket. Closing the
-+// window while it waits counts as Não permitir (the engine answers then).
-+- (void)askClient:(NSString*)client {
++// The socket needs the person's OK (an app connecting; later a site session, agent control).
++// Closing the window while it waits counts as Não permitir (the engine answers then).
++- (void)askApproval:(NSString*)title detail:(NSString*)detail offerAlways:(BOOL)offerAlways {
 +  if (!_window || !self.window) {
-+    if (_window) agens_window_client_answer(_window, kAgensClientDeny);
++    if (_window) agens_window_approval_answer(_window, kAgensApprovalDeny);
 +    return;
 +  }
 +  NSAlert* alert = [[NSAlert alloc] init];
-+  alert.messageText = [NSString stringWithFormat:@"O %@ quer usar o AgensBrowser", client];
-+  alert.informativeText = @"Ele poderá ver, criar e abrir os seus atos.";
++  alert.messageText = title;
++  alert.informativeText = detail;
 +  // Return answers Não permitir: the sheet comes up while the person may be typing elsewhere.
 +  [alert addButtonWithTitle:@"Permitir"].keyEquivalent = @"";
-+  [alert addButtonWithTitle:@"Permitir sempre"];
++  if (offerAlways) [alert addButtonWithTitle:@"Permitir sempre"];
 +  [alert addButtonWithTitle:@"Não permitir"].keyEquivalent = @"\r";
 +  __weak AgensChrome* weak = self;
 +  [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
@@ -1481,9 +1760,9 @@ index 3c18c4eab1..77b206bc89 100644
 +    // No window to answer through: it closed, and closing it already answered Não permitir
 +    // (~AgensWindow posts the deny).
 +    if (!strong || !strong->_window) return;
-+    agens_window_client_answer(strong->_window, r == NSAlertFirstButtonReturn    ? kAgensClientAllow
-+                                                : r == NSAlertSecondButtonReturn ? kAgensClientAllowAlways
-+                                                                                 : kAgensClientDeny);
++    agens_window_approval_answer(strong->_window, r == NSAlertFirstButtonReturn                ? kAgensApprovalAllow
++                                                  : offerAlways && r == NSAlertSecondButtonReturn ? kAgensApprovalAllowAlways
++                                                                                                  : kAgensApprovalDeny);
 +  }];
 +}
  - (void)permissionGone {
@@ -1493,8 +1772,8 @@ index 3c18c4eab1..77b206bc89 100644
    for (int i = 0; i < count; ++i) [list addObject:@(asks[i])];
    [(__bridge AgensChrome*)chrome askPermission:@(site) asks:list];
  }
-+void agens_ui_client_prompt(void* chrome, const char* client) {
-+  [(__bridge AgensChrome*)chrome askClient:@(client)];
++void agens_ui_approval_prompt(void* chrome, const char* title, const char* detail, int offer_always) {
++  [(__bridge AgensChrome*)chrome askApproval:@(title) detail:@(detail) offerAlways:offer_always != 0];
 +}
  void agens_ui_permission_prompt_close(void* chrome) {
    [(__bridge AgensChrome*)chrome permissionGone];
@@ -1557,21 +1836,27 @@ index 433fa42fa4..65017e0702 100644
    InitializeNetworkTimeTracker();
  
 diff --git a/chrome/browser/ui/webui_browser/BUILD.gn b/chrome/browser/ui/webui_browser/BUILD.gn
-index 98ada3ff32..bcecf8fee1 100644
+index 98ada3ff32..da3f53cfea 100644
 --- a/chrome/browser/ui/webui_browser/BUILD.gn
 +++ b/chrome/browser/ui/webui_browser/BUILD.gn
-@@ -97,6 +97,10 @@ source_set("impl") {
+@@ -97,6 +97,16 @@ source_set("impl") {
  
    if (is_mac) {
      sources += [
++      "//chrome/browser/agens/bridge/approval.cc",
++      "//chrome/browser/agens/bridge/approval.h",
 +      "//chrome/browser/agens/bridge/bridge.h",
 +      "//chrome/browser/agens/bridge/bridge_mac.mm",
++      "//chrome/browser/agens/bridge/control_ops.cc",
++      "//chrome/browser/agens/bridge/control_ops.h",
 +      "//chrome/browser/agens/bridge/ops.cc",
 +      "//chrome/browser/agens/bridge/ops.h",
++      "//chrome/browser/agens/bridge/session_ops.cc",
++      "//chrome/browser/agens/bridge/session_ops.h",
        "//chrome/browser/agens/embed/native_shell_mac.mm",
        "//chrome/browser/agens/embed/import_chromium_keychain_mac.mm",
        "//chrome/browser/agens/ui/chrome_mac.mm",
-@@ -192,6 +196,7 @@ source_set("impl") {
+@@ -192,6 +202,7 @@ source_set("impl") {
  
    if (is_mac) {
      deps += [
