@@ -798,10 +798,10 @@ index 0000000000..ac8013e4eb
 +}  // namespace agens::bridge
 diff --git a/chrome/browser/agens/bridge/control_keys.cc b/chrome/browser/agens/bridge/control_keys.cc
 new file mode 100644
-index 0000000000..6f41b799ed
+index 0000000000..a5efca6faf
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_keys.cc
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,126 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/control_keys.h"
@@ -810,6 +810,7 @@ index 0000000000..6f41b799ed
 +
 +#include "base/json/json_writer.h"
 +#include "base/strings/utf_string_conversions.h"
++#include "chrome/browser/agens/bridge/protocol.h"
 +
 +namespace agens::bridge {
 +
@@ -907,6 +908,19 @@ index 0000000000..6f41b799ed
 +  return out;
 +}
 +
++bool IsDisplayText(std::string_view utf8, size_t max) {
++  std::u16string text;
++  if (utf8.empty() || !AtMostChars(utf8, max) || !base::UTF8ToUTF16(utf8.data(), utf8.size(), &text)) return false;
++  return std::none_of(text.begin(), text.end(), [](char16_t c) {
++    return c < 0x20 || (c >= 0x7F && c < 0xA0) || (c >= 0x200E && c <= 0x200F) || (c >= 0x202A && c <= 0x202E) ||
++           (c >= 0x2066 && c <= 0x2069) || c == 0x2028 || c == 0x2029;
++  });
++}
++
++bool PauseBlocks(std::string_view op) {
++  return op.starts_with("tab.") || op.starts_with("page.");
++}
++
 +bool TouchesClipboard(const Key& key) {
 +  if (key.key == "Delete" && key.shift) return true;  // cut, on Windows and Linux
 +  if (!key.meta && !key.ctrl) return false;
@@ -916,10 +930,10 @@ index 0000000000..6f41b799ed
 +}  // namespace agens::bridge
 diff --git a/chrome/browser/agens/bridge/control_keys.h b/chrome/browser/agens/bridge/control_keys.h
 new file mode 100644
-index 0000000000..972a04f6a5
+index 0000000000..4421b9b2cc
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_keys.h
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,55 @@
 +// Copyright 2026 SugiyamaLabs.
 +// page.key's key names and the password rules that depend on them (docs/protocolo.md, "control,
 +// tab, page"). Pure logic, checked by protocol_selfcheck.cc with only //base.
@@ -962,6 +976,13 @@ index 0000000000..972a04f6a5
 +// so that a change in that group asks again.
 +std::string ControlAlwaysKey(std::string_view identity, std::string_view ato, std::vector<std::string> shares_with);
 +
++// Text the shell shows (control.start's agent, control.status): valid UTF-8, 1 to `max`
++// characters, no control characters and no bidi controls that could reorder what is shown.
++bool IsDisplayText(std::string_view utf8, size_t max);
++
++// While the person is in control (control.paused), these ops answer kPaused.
++bool PauseBlocks(std::string_view op);
++
 +// "A", "A e B", "A, B e C".
 +std::string JoinNames(const std::vector<std::string>& names);
 +
@@ -970,14 +991,16 @@ index 0000000000..972a04f6a5
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_CONTROL_KEYS_H_
 diff --git a/chrome/browser/agens/bridge/control_ops.cc b/chrome/browser/agens/bridge/control_ops.cc
 new file mode 100644
-index 0000000000..60916496fa
+index 0000000000..02b6a09e05
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_ops.cc
-@@ -0,0 +1,498 @@
+@@ -0,0 +1,594 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The control session (docs/protocolo.md, "control, tab, page"): an app, after the person's OK,
 +// drives tabs of one ato. It belongs to the connection and ends on control.stop, when the
-+// connection closes, or when the person presses "Parar" on a controlled tab.
++// connection closes, or when the person presses "Encerrar" on a controlled tab's pill. The person
++// can also take the tabs over ("Assumir": the session pauses, its ops answer `paused`) and hand
++// them back ("Devolver").
 +// - It only ever sees the tabs it opened: ids are its own, valid for this session only.
 +// - Controlled tabs are marked (AgensControlled): the shell shows it; saved passwords, autofill
 +//   and downloads stay out of them.
@@ -1020,18 +1043,34 @@ index 0000000000..60916496fa
 +// tab.open and tab.navigate answer when the navigation commits or fails, or after this.
 +constexpr base::TimeDelta kNavigationWait = base::Seconds(30);
 +constexpr size_t kMaxTypeChars = 10000;
++constexpr size_t kMaxAgentChars = 40;
++constexpr size_t kMaxStatusChars = 120;
 +
 +void StopByUser(uint64_t connection);
++void Pause(uint64_t connection);
++void Resume(uint64_t connection);
 +
 +// A tab the session opened. Marks it while it lives, and unmarks it when the session lets go.
 +class Tab : public content::WebContentsObserver {
 + public:
-+  Tab(uint64_t connection, std::string id, content::WebContents* contents, const std::string& client)
++  // The session fills the mark's text (Sync).
++  Tab(uint64_t connection, std::string id, content::WebContents* contents)
 +      : content::WebContentsObserver(contents), id(std::move(id)), page(contents), connection_(connection) {
 +    AgensControlled::CreateForWebContents(contents);
 +    AgensControlled* mark = AgensControlled::FromWebContents(contents);
-+    mark->by = client;
 +    mark->stop = base::BindRepeating(&StopByUser, connection);
++    mark->take_over = base::BindRepeating(&Pause, connection);
++    mark->hand_back = base::BindRepeating(&Resume, connection);
++    // The agent's cursor on the pill's page: where it last clicked or hovered.
++    page.on_pointer = base::BindRepeating(
++        [](content::WebContents* contents, gfx::PointF point) {
++          if (AgensControlled* mark = AgensControlled::FromWebContents(contents)) {
++            mark->cursor_x = point.x();
++            mark->cursor_y = point.y();
++            contents->NotifyNavigationStateChanged(content::INVALIDATE_TYPE_TAB);
++          }
++        },
++        contents);
 +    // Keeps rendering while in the background: input, screenshots and the accessibility tree work
 +    // on a tab that isn't the active one.
 +    capture_ = contents->IncrementCapturerCount(gfx::Size(), /*stay_hidden=*/true, /*stay_awake=*/false,
@@ -1085,7 +1124,10 @@ index 0000000000..60916496fa
 +
 +// One app's control of one ato.
 +struct Session {
-+  std::string client;  // the app's name, shown on its tabs
++  std::string agent;   // the name shown on its tabs: control.start's agent, else the app's name
++  std::string reason;  // control.start's, on one line: the pill's default detail
++  std::string title, detail;  // control.status; empty for the defaults
++  bool paused = false;  // the person took over
 +  base::FilePath ato;  // the ato's profile folder
 +  std::vector<std::string> shares_with;  // SharesWith(ato) when the person agreed
 +  std::vector<std::unique_ptr<Tab>> tabs;
@@ -1101,6 +1143,39 @@ index 0000000000..60916496fa
 +std::map<uint64_t, Session>& Sessions() {
 +  static base::NoDestructor<std::map<uint64_t, Session>> sessions;
 +  return *sessions;
++}
++
++// The session's state onto its tabs' marks, and the shell redraws them.
++void Sync(Session& session) {
++  for (auto& tab : session.tabs) {
++    content::WebContents* contents = tab->web_contents();
++    AgensControlled* mark = contents ? AgensControlled::FromWebContents(contents) : nullptr;
++    if (!mark) continue;
++    mark->by = session.agent;
++    mark->title = session.title.empty() ? session.agent + " está usando esta aba" : session.title;
++    mark->detail = session.detail.empty() ? session.reason : session.detail;
++    mark->paused = session.paused;
++    contents->NotifyNavigationStateChanged(content::INVALIDATE_TYPE_TAB);
++  }
++}
++
++// "Assumir": ops still in flight finish; queued and new ones answer `paused`.
++void Pause(uint64_t connection) {
++  auto it = Sessions().find(connection);
++  if (it == Sessions().end() || it->second.paused) return;
++  it->second.paused = true;
++  for (auto& tab : it->second.tabs) tab->page.FailWaiting(kPaused, "the person took over the tab");
++  Sync(it->second);
++  base::DictValue fields;
++  fields.Set("by", "user");
++  SendEventTo(connection, "control.paused", std::move(fields));
++}
++void Resume(uint64_t connection) {
++  auto it = Sessions().find(connection);
++  if (it == Sessions().end() || !it->second.paused) return;
++  it->second.paused = false;
++  Sync(it->second);
++  SendEventTo(connection, "control.resumed", {});
 +}
 +// Connections whose control.start waits for the person.
 +std::set<uint64_t>& Asking() {
@@ -1193,6 +1268,11 @@ index 0000000000..60916496fa
 +  return url;
 +}
 +
++// What control.start asked for, carried through the approval.
++struct Wanted {
++  std::string agent, reason;
++};
++
 +void Start(const Client& client, Request request, ReplyCallback reply) {
 +  const uint64_t connection = client.connection;
 +  if (Sessions().contains(connection) || Asking().contains(connection)) {
@@ -1205,12 +1285,20 @@ index 0000000000..60916496fa
 +    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs ato and reason (up to 1024 characters)"));
 +    return;
 +  }
++  const base::Value* agent_param = request.body.Find("agent");
++  if (agent_param && (!agent_param->is_string() || !IsDisplayText(agent_param->GetString(), kMaxAgentChars))) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "agent is 1 to 40 characters, no control characters"));
++    return;
++  }
 +  ProfileAttributesEntry* entry = FindAto(*id);
 +  if (!entry) {
 +    std::move(reply).Run(ErrorReply(&request.id, kNotFound, *id));
 +    return;
 +  }
 +  const std::string name = client.name.empty() ? "app" : client.name;
++  Wanted wanted;
++  wanted.agent = agent_param ? agent_param->GetString() : name;
++  wanted.reason = base::CollapseWhitespaceASCII(*reason, /*trim_sequences_with_line_breaks=*/false);
 +  const std::string ato_name = AgensWindow::AtoName(entry);
 +  std::vector<std::string> shares_with = SharesWith(entry->GetPath());
 +  std::string detail = *reason;
@@ -1227,7 +1315,7 @@ index 0000000000..60916496fa
 +  const std::string always_key =
 +      signed_client ? ControlAlwaysKey(client.identity, entry->GetPath().BaseName().AsUTF8Unsafe(), shares_with)
 +                    : std::string();
-+  auto begin = [](uint64_t connection, std::string name, base::FilePath ato, std::vector<std::string> shares_with,
++  auto begin = [](uint64_t connection, Wanted wanted, base::FilePath ato, std::vector<std::string> shares_with,
 +                  std::string always_key, Request request, ReplyCallback reply, AgensApprovalAnswer answer) {
 +    // Gone from Asking: the connection closed while the sheet was up.
 +    if (!Asking().erase(connection)) return;
@@ -1248,19 +1336,20 @@ index 0000000000..60916496fa
 +    }
 +    WatchSharing();
 +    Session& session = Sessions()[connection];
-+    session.client = std::move(name);
++    session.agent = std::move(wanted.agent);
++    session.reason = std::move(wanted.reason);
 +    session.ato = std::move(ato);
 +    session.shares_with = std::move(shares_with);
 +    std::move(reply).Run(OkReply(request.id));
 +  };
 +  Asking().insert(connection);
 +  if (signed_client && ControlAlways(always_key)) {
-+    begin(connection, name, entry->GetPath(), std::move(shares_with), always_key, std::move(request), std::move(reply),
++    begin(connection, std::move(wanted), entry->GetPath(), std::move(shares_with), always_key, std::move(request), std::move(reply),
 +          kAgensApprovalAllow);
 +    return;
 +  }
 +  AskApproval(connection, "O " + name + " quer usar abas do ato " + ato_name, detail, /*offer_always=*/signed_client,
-+              base::BindOnce(begin, connection, name, entry->GetPath(), std::move(shares_with), always_key,
++              base::BindOnce(begin, connection, std::move(wanted), entry->GetPath(), std::move(shares_with), always_key,
 +                             std::move(request), std::move(reply)));
 +}
 +
@@ -1284,8 +1373,7 @@ index 0000000000..60916496fa
 +    std::move(reply).Run(ErrorReply(&request.id, kFailed, "could not open the tab"));
 +    return;
 +  }
-+  auto tab = std::make_unique<Tab>(connection, "t" + base::NumberToString(session.next_tab++), contents,
-+                                   session.client);
++  auto tab = std::make_unique<Tab>(connection, "t" + base::NumberToString(session.next_tab++), contents);
 +  if (handle) {
 +    tab->WaitFor(handle->GetNavigationId(), std::move(request.id), std::move(reply));
 +  } else {
@@ -1294,6 +1382,7 @@ index 0000000000..60916496fa
 +    std::move(reply).Run(OkReply(request.id, std::move(result)));
 +  }
 +  session.tabs.push_back(std::move(tab));
++  Sync(session);
 +}
 +
 +void TabOpen(const Client& client, Request request, ReplyCallback reply) {
@@ -1426,6 +1515,26 @@ index 0000000000..60916496fa
 +  }
 +}
 +
++// The pill's two lines; each omitted or empty goes back to its default.
++void Status(Session& session, const Request& request, ReplyCallback reply) {
++  std::string lines[2];
++  const char* keys[2] = {"title", "detail"};
++  for (int i = 0; i < 2; ++i) {
++    const base::Value* value = request.body.Find(keys[i]);
++    if (!value) continue;
++    if (!value->is_string() || (!value->GetString().empty() && !IsDisplayText(value->GetString(), kMaxStatusChars))) {
++      std::move(reply).Run(ErrorReply(&request.id, kBadRequest,
++                                      "title and detail are up to 120 characters, no control characters"));
++      return;
++    }
++    lines[i] = value->GetString();
++  }
++  session.title = std::move(lines[0]);
++  session.detail = std::move(lines[1]);
++  Sync(session);
++  std::move(reply).Run(OkReply(request.id));
++}
++
 +}  // namespace
 +
 +bool Handles(std::string_view op) {
@@ -1443,7 +1552,7 @@ index 0000000000..60916496fa
 +    std::move(reply).Run(OkReply(request.id));
 +    return;
 +  }
-+  if (op.starts_with("control.")) {
++  if (op.starts_with("control.") && op != "control.status") {
 +    std::move(reply).Run(ErrorReply(&request.id, kUnknownOp, op));
 +    return;
 +  }
@@ -1453,6 +1562,14 @@ index 0000000000..60916496fa
 +    return;
 +  }
 +  Session& session = it->second;
++  if (op == "control.status") {
++    Status(session, request, std::move(reply));
++    return;
++  }
++  if (session.paused && PauseBlocks(op)) {
++    std::move(reply).Run(ErrorReply(&request.id, kPaused, "the person took over: wait for control.resumed"));
++    return;
++  }
 +  if (op == "tab.open") {
 +    TabOpen(client, std::move(request), std::move(reply));
 +  } else if (op == "tab.navigate") {
@@ -1501,10 +1618,10 @@ index 0000000000..eda9e71d52
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_CONTROL_OPS_H_
 diff --git a/chrome/browser/agens/bridge/control_page.cc b/chrome/browser/agens/bridge/control_page.cc
 new file mode 100644
-index 0000000000..b0e8458803
+index 0000000000..a8073e5307
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_page.cc
-@@ -0,0 +1,485 @@
+@@ -0,0 +1,492 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/control_page.h"
@@ -1704,6 +1821,12 @@ index 0000000000..b0e8458803
 +  if (!busy_) Next();
 +}
 +
++void Page::FailWaiting(std::string_view code, std::string_view message) {
++  std::deque<Waiting> waiting = std::move(waiting_);
++  waiting_.clear();
++  for (Waiting& w : waiting) std::move(w.reply).Run(ErrorReply(&w.id, code, message));
++}
++
 +void Page::Next() {
 +  if (waiting_.empty()) {
 +    busy_ = false;
@@ -1869,6 +1992,7 @@ index 0000000000..b0e8458803
 +  // Tree bounds are in physical pixels; input takes DIPs.
 +  const float scale = self->RootManager() ? self->RootManager()->device_scale_factor() : 1;
 +  const gfx::PointF point(bounds.CenterPoint().x() / scale, bounds.CenterPoint().y() / scale);
++  if (self->on_pointer) self->on_pointer.Run(point);
 +  AckWaiter::Start(widget, blink::WebInputEvent::Type::kMouseUp,
 +                   base::BindOnce([](base::Value id, ReplyCallback reply) { std::move(reply).Run(OkReply(id)); },
 +                                  std::move(id), std::move(reply)));
@@ -1992,10 +2116,10 @@ index 0000000000..b0e8458803
 +}  // namespace agens::bridge::control
 diff --git a/chrome/browser/agens/bridge/control_page.h b/chrome/browser/agens/bridge/control_page.h
 new file mode 100644
-index 0000000000..15127a1f23
+index 0000000000..f87cc2be7b
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_page.h
-@@ -0,0 +1,97 @@
+@@ -0,0 +1,103 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The page side of a controlled tab (page.* in docs/protocolo.md): its accessibility tree with
 +// refs, real input on its widget, and screenshots. UI thread. Password rules, checked against the
@@ -2019,6 +2143,7 @@ index 0000000000..15127a1f23
 +#include "chrome/browser/agens/bridge/ops.h"
 +#include "content/public/browser/web_contents_observer.h"
 +#include "ui/accessibility/ax_tree_id.h"
++#include "ui/gfx/geometry/point_f.h"
 +
 +namespace content {
 +class RenderWidgetHost;
@@ -2042,6 +2167,11 @@ index 0000000000..15127a1f23
 +  // Past kMaxWaitingOps waiting, answers bad_request.
 +  using Op = base::OnceCallback<void(ReplyCallback)>;
 +  void Run(base::Value id, Op op, ReplyCallback reply);
++  // Answers every op still waiting with error `code`; the one running finishes.
++  void FailWaiting(std::string_view code, std::string_view message);
++
++  // Runs with the point (DIPs, from the page's top-left) of each real click, for the shell's cursor.
++  base::RepeatingCallback<void(gfx::PointF)> on_pointer;
 +
 +  // The ops, for Run. Each answers `reply` once, for the request `id`.
 +  void Snapshot(base::Value id, ReplyCallback reply);
@@ -2463,10 +2593,10 @@ index 0000000000..e9608caa6e
 +}  // namespace agens::bridge
 diff --git a/chrome/browser/agens/bridge/protocol.h b/chrome/browser/agens/bridge/protocol.h
 new file mode 100644
-index 0000000000..db0ed8f476
+index 0000000000..82537f5b69
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/protocol.h
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,63 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The socket's wire format (docs/agens.md, "O socket"): one JSON object per line. Pure logic, no
 +// sockets or threads, so protocol_selfcheck.cc can exercise it with only //base.
@@ -2492,6 +2622,8 @@ index 0000000000..db0ed8f476
 +inline constexpr char kNotFound[] = "not_found";
 +inline constexpr char kUnauthorized[] = "unauthorized";
 +inline constexpr char kDenied[] = "denied";
++// The person took over the controlled tabs (control.paused): tab.* and page.* wait for "Devolver".
++inline constexpr char kPaused[] = "paused";
 +
 +// Splits a byte stream into lines (without the "\n"). Empty lines are skipped.
 +class LineFramer {
@@ -2530,10 +2662,10 @@ index 0000000000..db0ed8f476
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_PROTOCOL_H_
 diff --git a/chrome/browser/agens/bridge/protocol_selfcheck.cc b/chrome/browser/agens/bridge/protocol_selfcheck.cc
 new file mode 100644
-index 0000000000..c1785a6e96
+index 0000000000..ea7194e643
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/protocol_selfcheck.cc
-@@ -0,0 +1,154 @@
+@@ -0,0 +1,165 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Assert-based check of the wire format (protocol.h). Build and run:
 +//   ninja -C out/Dev agens_bridge_selfcheck && out/Dev/agens_bridge_selfcheck
@@ -2682,6 +2814,17 @@ index 0000000000..c1785a6e96
 +    CHECK_TRUE(ControlAlwaysKey("T/a", "b", {}) != ControlAlwaysKey("T/a\",\"b", "", {}));
 +    CHECK_TRUE(JoinNames({}) == "" && JoinNames({"A"}) == "A" && JoinNames({"A", "B"}) == "A e B");
 +    CHECK_TRUE(JoinNames({"A", "B", "C"}) == "A, B e C");
++  }
++  // control.start's agent and control.status lines; what a pause blocks.
++  {
++    CHECK_TRUE(IsDisplayText("Popi", 40) && IsDisplayText("Agente \xC3\xA7", 40));
++    CHECK_TRUE(IsDisplayText(std::string(40, 'a'), 40) && !IsDisplayText(std::string(41, 'a'), 40));
++    CHECK_TRUE(!IsDisplayText("", 40) && !IsDisplayText("a\nb", 40) && !IsDisplayText("a\tb", 40));
++    CHECK_TRUE(!IsDisplayText("a\x7F", 40) && !IsDisplayText("a\xC2\x85", 40));  // DEL, NEL (C1)
++    CHECK_TRUE(!IsDisplayText("a\xE2\x80\xAE" "b", 40) && !IsDisplayText("a\xE2\x81\xA6", 40));  // RLO, LRI
++    CHECK_TRUE(!IsDisplayText("\xFF", 40));  // not UTF-8
++    CHECK_TRUE(PauseBlocks("tab.open") && PauseBlocks("page.snapshot") && PauseBlocks("page.dialog"));
++    CHECK_TRUE(!PauseBlocks("control.stop") && !PauseBlocks("control.status") && !PauseBlocks("atos.list"));
 +  }
 +  std::printf("agens bridge protocol: ok\n");
 +  RunSessionNeedChecks();
@@ -4273,14 +4416,14 @@ index 0000000000..7d791e90d7
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_VIEW_OPS_H_
 diff --git a/chrome/browser/agens/embed/agens_controlled.h b/chrome/browser/agens/embed/agens_controlled.h
 new file mode 100644
-index 0000000000..d17f28fa05
+index 0000000000..b6839860a3
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_controlled.h
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,33 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Marks a tab an app drives over the socket (bridge/control_ops.cc, docs/agens.md "Controle").
-+// The shell shows it (AgensTab.controller, with "Parar"); saved passwords, autofill and downloads
-+// stay out of it.
++// The shell shows it (AgensTab.controller: the pill with Assumir / Devolver); saved passwords,
++// autofill and downloads stay out of it.
 +#ifndef CHROME_BROWSER_AGENS_EMBED_AGENS_CONTROLLED_H_
 +#define CHROME_BROWSER_AGENS_EMBED_AGENS_CONTROLLED_H_
 +
@@ -4293,8 +4436,14 @@ index 0000000000..d17f28fa05
 + public:
 +  static bool Is(content::WebContents* contents) { return contents && FromWebContents(contents); }
 +
-+  std::string by;               // the app's name, for "Controlado pelo …"
-+  base::RepeatingClosure stop;  // the person pressed "Parar"; ends the whole control session
++  std::string by;               // the agent's name, for the pill and "Controlado pelo …"
++  std::string title, detail;    // the pill's two lines while the agent works (control.status)
++  bool paused = false;          // the person took over ("Assumir")
++  // Where the agent last clicked or hovered, in DIPs from the page's top-left; x < 0 when never.
++  float cursor_x = -1, cursor_y = -1;
++  base::RepeatingClosure stop;       // "Encerrar": ends the whole control session
++  base::RepeatingClosure take_over;  // "Assumir": pauses the session
++  base::RepeatingClosure hand_back;  // "Devolver ao …": resumes it
 +
 + private:
 +  explicit AgensControlled(content::WebContents* contents)
@@ -4747,27 +4896,35 @@ index 0000000000..48063dd9a1
 +
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_COOKIE_POOL_H_
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
-index 9d0bf4646d..83e2a0f0ad 100644
+index 9d0bf4646d..2329299532 100644
 --- a/chrome/browser/agens/embed/agens_embed.h
 +++ b/chrome/browser/agens/embed/agens_embed.h
-@@ -36,6 +36,7 @@ typedef struct {
+@@ -36,6 +36,11 @@ typedef struct {
    int microphone;  // the page is using the microphone now
    int indicators;  // kAgensInd* mask: Chromium's address-bar icons for this tab (active tab only)
    int zoom_percent;  // the page's zoom, 100 by default
-+  const char* controller;  // the app driving this tab over the socket, "" when none: show "Controlado pelo …"
++  const char* controller;  // the agent driving this tab over the socket, "" when none: show the pill
++  const char* control_title;   // the pill's two lines while the agent works
++  const char* control_detail;
++  int control_paused;          // the person took over: "Você está no controle"
++  double cursor_x, cursor_y;   // the agent's last click or hover, DIPs from the page's top-left; x < 0 when none
  } AgensTab;
  
  // What `AgensTab.indicators` carries (camera and microphone have their own fields above).
-@@ -87,6 +88,8 @@ void agens_window_show_site_info(AgensWindow* window);
+@@ -87,6 +92,12 @@ void agens_window_show_site_info(AgensWindow* window);
  // Asks the engine to lay out and repaint again (after the UI changes size or colors, e.g.
  // light/dark mode).
  void agens_window_relayout(AgensWindow* window);
-+// "Parar" on a controlled tab (AgensTab.controller): ends that app's control; the tabs stay open.
++// "Encerrar" on a controlled tab (AgensTab.controller): ends that agent's control; the tabs stay open.
 +void agens_window_stop_control(AgensWindow* window, int index);
++// "Assumir" / "Devolver ao …": the person takes the agent's tabs over (the agent's ops wait), and
++// hands them back.
++void agens_window_take_control(AgensWindow* window, int index);
++void agens_window_hand_back_control(AgensWindow* window, int index);
  
  // Address suggestions, from local sources only (history, bookmarks, the typed search); remote
  // search suggestions stay off. Call suggest on every edit, with "" to stop.
-@@ -109,9 +112,14 @@ typedef struct {
+@@ -109,9 +120,14 @@ typedef struct {
    const char* name;  // UTF-8
    int active;        // this window's ato
    int asleep;        // not loaded in memory right now
@@ -4782,7 +4939,7 @@ index 9d0bf4646d..83e2a0f0ad 100644
  // Opens that ato's window over this one (each ato keeps its own window and tabs).
  void agens_window_switch_ato(AgensWindow* window, int index);
  void agens_window_new_ato(AgensWindow* window);
-@@ -279,6 +287,16 @@ typedef enum {
+@@ -279,6 +295,16 @@ typedef enum {
  } AgensPermissionAnswer;
  void agens_window_permission_answer(AgensWindow* window, AgensPermissionAnswer answer);
  
@@ -4799,7 +4956,7 @@ index 9d0bf4646d..83e2a0f0ad 100644
  // The site of the active page, for the panel behind the site icon. `pattern` is what
  // agens_site_exception_set takes for this site. Strings valid until the next call.
  typedef struct {
-@@ -358,6 +376,9 @@ float agens_ui_card_radius(void* chrome);
+@@ -358,6 +384,9 @@ float agens_ui_card_radius(void* chrome);
  float agens_ui_titlebar_height(void* chrome);
  void agens_ui_permission_prompt(void* chrome, const char* site, const char* const* asks, int count);
  void agens_ui_permission_prompt_close(void* chrome);
@@ -4936,7 +5093,7 @@ index 0000000000..b454014634
 +
 +}  // namespace agens
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
-index 268d4dc7bd..99df9fd6fa 100644
+index 268d4dc7bd..2722c451ef 100644
 --- a/chrome/browser/agens/embed/agens_window.h
 +++ b/chrome/browser/agens/embed/agens_window.h
 @@ -15,7 +15,9 @@
@@ -5119,25 +5276,36 @@ index 268d4dc7bd..99df9fd6fa 100644
    void OnProfileNameChanged(const base::FilePath&, const std::u16string&) override { NotifyAtos(); }
  
    TabStripModel* model() { return browser->GetTabStripModel(); }
-@@ -406,7 +489,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -406,7 +489,8 @@ struct AgensWindow : public TabStripModelObserver,
      const int count = model()->count();
      bookmarks::BookmarkModel* bookmarks =
          BookmarkModelFactory::GetForBrowserContextIfExists(browser->GetProfile());
 -    std::vector<std::string> titles(count), urls(count), errors(count);
-+    std::vector<std::string> titles(count), urls(count), errors(count), controllers(count);
++    std::vector<std::string> titles(count), urls(count), errors(count), controllers(count), control_titles(count),
++        control_details(count);
      std::vector<std::vector<uint8_t>> icons(count);
      std::vector<AgensTab> tabs(count);
      struct Split { int layout = 0, first = 0; double ratio = 0.5; };
-@@ -455,6 +538,8 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -455,6 +539,18 @@ struct AgensWindow : public TabStripModelObserver,
                   zoom::ZoomController::FromWebContents(contents)
                       ? zoom::ZoomController::FromWebContents(contents)->GetZoomPercent()
                       : 100};
-+      if (const AgensControlled* controlled = AgensControlled::FromWebContents(contents)) controllers[i] = controlled->by;
++      tabs[i].cursor_x = tabs[i].cursor_y = -1;
++      if (const AgensControlled* controlled = AgensControlled::FromWebContents(contents)) {
++        controllers[i] = controlled->by;
++        control_titles[i] = controlled->title;
++        control_details[i] = controlled->detail;
++        tabs[i].control_paused = controlled->paused;
++        tabs[i].cursor_x = controlled->cursor_x;
++        tabs[i].cursor_y = controlled->cursor_y;
++      }
 +      tabs[i].controller = controllers[i].c_str();
++      tabs[i].control_title = control_titles[i].c_str();
++      tabs[i].control_detail = control_details[i].c_str();
      }
      observer(context, tabs.data(), static_cast<int>(tabs.size()));
    }
-@@ -582,6 +667,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -582,6 +678,7 @@ struct AgensWindow : public TabStripModelObserver,
    raw_ptr<void> downloads_context = nullptr;
    base::CallbackListSubscription search_loaded_;
    base::CancelableTaskTracker history_tracker;
@@ -5145,7 +5313,7 @@ index 268d4dc7bd..99df9fd6fa 100644
    raw_ptr<void> ui = nullptr;  // the chrome (agens_ui_*), set by the platform shell
    raw_ptr<views::View> extensions_anchor = nullptr;  // under the UI's extensions button
    AgensExtensionButtonsChanged extension_buttons_observer = nullptr;
-@@ -647,6 +733,8 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -647,6 +744,8 @@ struct AgensWindow : public TabStripModelObserver,
      }
    }
    base::WeakPtr<permissions::PermissionPrompt::Delegate> permission_delegate;
@@ -5187,7 +5355,7 @@ index 4eb24ab895..436be6abd7 100644
      progress_.Run(0, created ? "Criando o ato " + ato + "…" : "Usando o ato " + ato + "…");
      manager->CreateProfileAsync(
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
-index cfdc014cf4..36f1a335e2 100644
+index cfdc014cf4..bd1bc19265 100644
 --- a/chrome/browser/agens/embed/native_shell.cc
 +++ b/chrome/browser/agens/embed/native_shell.cc
 @@ -61,6 +61,7 @@
@@ -5222,26 +5390,38 @@ index cfdc014cf4..36f1a335e2 100644
  void agens_window_permission_answer(AgensWindow* w, AgensPermissionAnswer answer) {
    base::WeakPtr<permissions::PermissionPrompt::Delegate> delegate = std::move(w->permission_delegate);
    if (!delegate) return;
-@@ -707,6 +718,18 @@ void agens_window_unsplit(AgensWindow* w, int index) {
+@@ -707,6 +718,30 @@ void agens_window_unsplit(AgensWindow* w, int index) {
  void agens_window_set_pinned(AgensWindow* w, int index, int pinned) {
    if (w->model()->ContainsIndex(index)) w->model()->SetTabPinned(index, pinned);
  }
-+void agens_window_stop_control(AgensWindow* w, int index) {
-+  // The tab at `index`; if that went stale (tabs moved since the UI's last update), the active tab,
-+  // else any controlled tab of this window: "Parar" never does nothing while one is controlled.
++// The controlled tab at `index`; if that went stale (tabs moved since the UI's last update), the
++// active tab, else any controlled tab of this window: the pill's buttons never do nothing.
++static const AgensControlled* ControlledAt(AgensWindow* w, int index) {
 +  auto at = [w](int i) {
 +    return w->model()->ContainsIndex(i) ? AgensControlled::FromWebContents(w->model()->GetWebContentsAt(i)) : nullptr;
 +  };
 +  const AgensControlled* controlled = at(index);
 +  if (!controlled) controlled = at(w->model()->active_index());
 +  for (int i = 0; !controlled && i < w->model()->count(); ++i) controlled = at(i);
-+  // Posted: stopping removes the mark that holds this closure.
-+  if (controlled && controlled->stop) base::SequencedTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE, controlled->stop);
++  return controlled;
++}
++// Posted: stopping removes the mark that holds these closures.
++static void PostControl(const base::RepeatingClosure& action) {
++  if (action) base::SequencedTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE, action);
++}
++void agens_window_stop_control(AgensWindow* w, int index) {
++  if (const AgensControlled* controlled = ControlledAt(w, index)) PostControl(controlled->stop);
++}
++void agens_window_take_control(AgensWindow* w, int index) {
++  if (const AgensControlled* controlled = ControlledAt(w, index)) PostControl(controlled->take_over);
++}
++void agens_window_hand_back_control(AgensWindow* w, int index) {
++  if (const AgensControlled* controlled = ControlledAt(w, index)) PostControl(controlled->hand_back);
 +}
  void agens_window_toggle_mute(AgensWindow* w, int index) {
    if (!w->model()->ContainsIndex(index)) return;
    content::WebContents* contents = w->model()->GetWebContentsAt(index);
-@@ -814,6 +837,9 @@ void NativeTabStateChanged(views::Widget*) {}
+@@ -814,6 +849,9 @@ void NativeTabStateChanged(views::Widget*) {}
  void ConfirmCloseWithDownloads(views::Widget*, int, base::OnceCallback<void(bool)> callback) {
    std::move(callback).Run(true);
  }
@@ -5388,10 +5568,20 @@ index 5d7ca90415..c4dfaa4d35 100644
  };
  
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
-index 3c18c4eab1..025f3d08ec 100644
+index 3c18c4eab1..9bc92c46fc 100644
 --- a/chrome/browser/agens/ui/chrome_mac.mm
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -525,6 +525,7 @@ @implementation AgensTabRow {
+@@ -93,7 +93,8 @@ unsigned solid(NSView* v) const {
+     kInk{0xF2F2F4, 0x16161A, 0xF8F0E7}, kMute{0x9A9AA4, 0x5C5C66, 0xB6A899},
+     kDim{0x8A8A94, 0x71717B, 0xA09182}, kHover{0x18181C, 0xE8E8EC, 0x211913, 0x0FFFFFFF, 0x0D000000},
+     kFloat{0x1A1A1F, 0xFFFFFF, 0x241B15, 0xE61E1E24, 0xF2FFFFFF},
+-    kRaise2{0x26262D, 0xE2E2E7, 0x2A2018, 0x24FFFFFF, 0xE6FFFFFF}, kLight3{0xFFC98A, 0xE8893A, 0xFFC98A};
++    kRaise2{0x26262D, 0xE2E2E7, 0x2A2018, 0x24FFFFFF, 0xE6FFFFFF}, kLight3{0xFFC98A, 0xE8893A, 0xFFC98A},
++    kLineHover{0x4A4A54, 0xB9B9C2, 0x5A4636};
+ static NSString* const kThemeChanged = @"AgensThemeChanged";
+ // Only the window color (Seu's tint and transparency): the engine repaints, nothing is rebuilt.
+ // Sliders send it on every step while dragged.
+@@ -525,6 +526,7 @@ @implementation AgensTabRow {
    NSTextField* _title;
    NSButton* _sound;
    NSButton* _close;
@@ -5399,7 +5589,7 @@ index 3c18c4eab1..025f3d08ec 100644
  }
  @synthesize index = _index;
  @synthesize look = _look;
-@@ -611,6 +612,12 @@ - (void)updateWith:(const AgensTab&)tab {
+@@ -611,6 +613,12 @@ - (void)updateWith:(const AgensTab&)tab {
    _title.stringValue = title;
    self.toolTip = title;
    self.accessibilityLabel = tab.sleeping ? [title stringByAppendingString:@", dormindo"] : title;
@@ -5412,7 +5602,7 @@ index 3c18c4eab1..025f3d08ec 100644
    NSImage* icon = nil;
    if (tab.favicon_png) {
      icon = [[NSImage alloc] initWithData:[NSData dataWithBytes:tab.favicon_png
-@@ -654,6 +661,10 @@ - (void)refresh {
+@@ -654,6 +662,10 @@ - (void)refresh {
    const BOOL border = _look == kLookPin || (_look == kLookTop && self.selected);
    self.layer.borderWidth = border ? 1 : 0;
    self.layer.borderColor = CG(kLine, self);
@@ -5423,7 +5613,7 @@ index 3c18c4eab1..025f3d08ec 100644
  }
  - (NSMenu*)menuForEvent:(NSEvent*)event {
    NSMenu* menu = [[NSMenu alloc] initWithTitle:@"Aba"];
-@@ -766,9 +777,10 @@ - (void)layout {
+@@ -766,9 +778,10 @@ - (void)layout {
  - (void)updateWith:(const AgensAto&)ato index:(int)index {
    NSString* name = @(ato.name);
    _tile.stringValue = Monogram(name);
@@ -5435,7 +5625,7 @@ index 3c18c4eab1..025f3d08ec 100644
    self.accessibilityLabel = self.toolTip;
    self.selected = ato.active;
  }
-@@ -1015,6 +1027,8 @@ - (void)toggleSidebar;
+@@ -1015,6 +1028,8 @@ - (void)toggleSidebar;
  - (BOOL)tabsOnTop;
  - (void)toggleTabsPosition;
  - (NSArray<NSString*>*)atoNamesForSettings;
@@ -5444,7 +5634,100 @@ index 3c18c4eab1..025f3d08ec 100644
  - (NSImage*)extensionIcon:(NSString*)extensionId;
  @end
  
-@@ -1432,6 +1446,7 @@ - (void)showSection:(NSString*)key {
+@@ -1032,6 +1047,92 @@ - (BOOL)isFlipped {
+ }
+ @end
+ 
++// The control pill's buttons (prototipos/controle.html .btn, .btn.pri and .nav-end): a bordered
++// text button, the primary one filled with ink, or a round icon bubble.
++@interface AgensPillButton : AgensHoverView
++@property(nonatomic) BOOL primary;
++@property(nonatomic, readonly) NSTextField* label;
++@property(nonatomic, readonly) NSImageView* icon;
++@end
++@implementation AgensPillButton
++@synthesize primary = _primary;
++@synthesize label = _label;
++@synthesize icon = _icon;
++- (instancetype)initWithFrame:(NSRect)frame {
++  if ((self = [super initWithFrame:frame])) {
++    self.layer.borderWidth = 1;
++    _label = Label(13, NSFontWeightRegular, kInk);
++    _label.alignment = NSTextAlignmentCenter;
++    _icon = [[NSImageView alloc] init];
++    [self addSubview:_label];
++    [self addSubview:_icon];
++  }
++  return self;
++}
++- (void)setPrimary:(BOOL)primary {
++  _primary = primary;
++  _label.font = [NSFont systemFontOfSize:13 weight:primary ? NSFontWeightSemibold : NSFontWeightRegular];
++  [self refresh];
++}
++- (void)refresh {
++  [super refresh];
++  if (self.icon.image) self.layer.cornerRadius = NSHeight(self.bounds) / 2;  // the round bubble
++  if (_primary) {
++    NSColor* hover = IsDark(self.effectiveAppearance) ? NSColor.whiteColor : NSColor.blackColor;
++    self.layer.backgroundColor = self.hovered ? hover.CGColor : CG(kInk, self);
++    self.layer.borderColor = CG(kInk, self);
++    _label.textColor = kBg.color();
++  } else {
++    self.layer.backgroundColor = self.hovered ? CG(kHover, self) : NSColor.clearColor.CGColor;
++    self.layer.borderColor = CG(self.hovered ? kLineHover : kLineStrong, self);
++    _label.textColor = kInk.color();
++    _icon.contentTintColor = (self.hovered ? kInk : kDim).color();
++  }
++}
++- (void)layout {
++  [super layout];
++  _label.frame = NSMakeRect(0, (NSHeight(self.bounds) - 17) / 2, NSWidth(self.bounds), 17);
++  _icon.frame = self.bounds;
++  [self refresh];
++}
++@end
++
++// The agent's cursor over the page (prototype .nav-cursor): an arrow and a tag with its name. The
++// pointer goes through it.
++@interface AgensCursorView : AgensPassThroughView
++@property(nonatomic, readonly) NSTextField* nameTag;
++@end
++@implementation AgensCursorView
++@synthesize nameTag = _tag;
++- (instancetype)initWithFrame:(NSRect)frame {
++  if ((self = [super initWithFrame:frame])) {
++    NSString* svg = @"<svg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 18 18'><path "
++                    @"d='M2 1.5l12.5 6.2-5.3 1.6-1.9 5.2z' fill='#FFE9C7' stroke='#0B0B0D' stroke-width='1.2' "
++                    @"stroke-linejoin='round'/></svg>";
++    NSImageView* arrow = [NSImageView imageViewWithImage:[[NSImage alloc] initWithData:[svg dataUsingEncoding:NSUTF8StringEncoding]]];
++    arrow.frame = NSMakeRect(0, 0, 18, 18);
++    [self addSubview:arrow];
++    _tag = Label(11, NSFontWeightSemibold, kBg);
++    _tag.textColor = Hex(0x0B0B0D);
++    _tag.alignment = NSTextAlignmentCenter;
++    _tag.wantsLayer = YES;
++    _tag.layer.backgroundColor = Hex(0xFFE9C7).CGColor;
++    _tag.layer.cornerRadius = 6 * Round();
++    [self addSubview:_tag];
++  }
++  return self;
++}
++- (BOOL)isFlipped {
++  return YES;
++}
++// Sized around the name; the arrow's tip is 2, 1.5 from the view's top-left.
++- (void)fit {
++  const CGFloat w = ceil(_tag.fittingSize.width) + 14;
++  _tag.frame = NSMakeRect(20, 14, w, 16);
++  self.frameSize = NSMakeSize(20 + w, 30);
++}
++@end
++
+ static AgensSettings* g_settings;
+ 
+ @implementation AgensSettings {
+@@ -1432,6 +1533,7 @@ - (void)showSection:(NSString*)key {
      NSButton* proxy = [NSButton buttonWithTitle:@"Abrir…" target:self action:@selector(openProxy:)];
      y = [self option:@"Configurações de proxy" detail:@"Usa as do macOS." control:proxy y:y];
      y = [self option:@"Restaurar as configurações originais" detail:nil control:[self subButton:@"Restaurar…" key:@"restaurar"] y:y];
@@ -5452,7 +5735,7 @@ index 3c18c4eab1..025f3d08ec 100644
    } else if ([key isEqualToString:@"sobre"]) {
      NSString* version = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"";
      y = [self info:product detail:[NSString stringWithFormat:@"Versão %@ · SugiyamaLabs", version] note:@"" y:y];
-@@ -1602,7 +1617,10 @@ static void EnginesListed(void* context, const AgensSearchEngine* engines, int c
+@@ -1602,7 +1704,10 @@ static void EnginesListed(void* context, const AgensSearchEngine* engines, int c
  - (CGFloat)fillAtos:(CGFloat)y {
    // The atos list comes from the chrome (it already observes them); rename in place.
    NSArray<NSString*>* names = [_chrome atoNamesForSettings];
@@ -5464,7 +5747,7 @@ index 3c18c4eab1..025f3d08ec 100644
      NSTextField* field = [NSTextField textFieldWithString:names[i]];
      field.tag = i;
      field.delegate = self;
-@@ -1610,12 +1628,18 @@ - (CGFloat)fillAtos:(CGFloat)y {
+@@ -1610,12 +1715,18 @@ - (CGFloat)fillAtos:(CGFloat)y {
      field.action = @selector(renameAto:);
      field.frame = NSMakeRect(0, 0, 220, 24);
      y = [self option:[NSString stringWithFormat:@"Ato %lu", (unsigned long)i + 1] detail:nil control:field y:y];
@@ -5484,7 +5767,7 @@ index 3c18c4eab1..025f3d08ec 100644
    note.frame = NSMakeRect(32, y + 44, NSWidth(_pane.bounds) - 64, 16);
    [_pane addSubview:note];
    return y + 70;
-@@ -1818,6 +1842,48 @@ - (void)setEngine:(NSPopUpButton*)popup {
+@@ -1818,6 +1929,48 @@ - (void)setEngine:(NSPopUpButton*)popup {
  - (void)renameAto:(NSTextField*)field {
    if (_browser && field.stringValue.length) agens_window_rename_ato(_browser, (int)field.tag, field.stringValue.UTF8String);
  }
@@ -5533,7 +5816,7 @@ index 3c18c4eab1..025f3d08ec 100644
  - (void)newAto:(id)sender {
    if (_browser) agens_window_new_ato(_browser);
  }
-@@ -2634,7 +2700,7 @@ - (void)showStep:(int)step {
+@@ -2634,7 +2787,7 @@ - (void)showStep:(int)step {
        _atoName = [NSTextField textFieldWithString:@"Pessoal"];
        _atoName.frame = NSMakeRect(170, y + 30, 300, 26);
        NSTextField* cookies = Label(12, NSFontWeightRegular, kDim);
@@ -5542,7 +5825,7 @@ index 3c18c4eab1..025f3d08ec 100644
        cookies.frame = NSMakeRect(90, y + 76, 460, 16);
        cookies.alignment = NSTextAlignmentCenter;
        for (NSView* v in @[ label, _atoName, cookies ]) [_body addSubview:v];
-@@ -3625,6 +3691,8 @@ @implementation AgensChrome {
+@@ -3625,6 +3778,8 @@ @implementation AgensChrome {
    AgensDragView* _tabsDoc;
    AgensToolButton* _moreAtos;  // "⋯" when the atos don't fit
    NSMutableArray<NSString*>* _atoNames;
@@ -5551,21 +5834,28 @@ index 3c18c4eab1..025f3d08ec 100644
    int _activeAto;
    NSView* _atosLine;
    NSMutableArray<AgensAtoButton*>* _atoButtons;
-@@ -3691,6 +3759,13 @@ @implementation AgensChrome {
+@@ -3691,6 +3846,20 @@ @implementation AgensChrome {
    NSString* _url;
    BOOL _loading;
    NSRect _page;
-+  NSString* _controller;  // the app driving a tab shown in the card (active or split partner), nil when none
-+  int _controlIndex;      // that tab, for "Parar"
-+  NSView* _controlBar;    // above the card while it is: "Controlado pelo … · Parar"
-+  NSTextField* _controlText;
-+  AgensHoverView* _controlStop;
-+  NSTextField* _controlStopLabel;
-+  NSView* _controlFrame;  // the warm border around the card
++  NSString* _controller;  // the agent driving a tab shown in the card (active or split partner), nil when none
++  int _controlIndex;      // that tab, for the pill's buttons
++  NSString* _controlTitleText;  // the pill's lines while the agent works
++  NSString* _controlDetailText;
++  BOOL _controlPaused;    // the person took over
++  NSPoint _cursorPoint;   // the agent's last click, DIPs in that tab's page; x < 0 when none
++  NSString* _pillState;   // what the pill showed last ("work", "paused"), nil when hidden: animates a change
++  NSView* _controlBar;    // the pill over the bottom of the card (prototipos/controle.html .nav-botbar)
++  AgensAtoTile* _controlMark;
++  NSTextField* _controlTitle;
++  NSTextField* _controlDetail;
++  AgensPillButton* _controlMain;  // Assumir, or Devolver ao …
++  AgensPillButton* _controlEnd;   // the stop bubble while the person is in control
++  AgensCursorView* _cursor;
  }
  
  - (instancetype)initWithWindow:(AgensWindow*)window {
-@@ -3859,6 +3934,8 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3859,6 +4028,8 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
      _tabsDoc = [[AgensDragView alloc] init];
      _tabsScroll.documentView = _tabsDoc;
      _atoNames = [NSMutableArray array];
@@ -5574,98 +5864,90 @@ index 3c18c4eab1..025f3d08ec 100644
      _moreAtos = [[AgensToolButton alloc] initWithSymbol:@"ellipsis" label:@"Todos os atos" size:13];
      _moreAtos.onPress = ^{ [weak showAtosMenu]; };
      _addAto = [[AgensToolButton alloc] initWithSymbol:@"plus" label:@"Novo ato"];
-@@ -3969,6 +4046,38 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3969,6 +4140,44 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
                           _atosLine, _addAto, _atoDot, _strip, _bar, _history, _bookmarksPage, _ntp2, _ntp2Click, _ntp, _error, _find, _loadbar, _statusPill, _suggest ]) {
        [self addSubview:v];
      }
 +    {
-+      // Socket control of the active tab (docs/agens.md, "Controle"): a strip over the card and a
-+      // border around it. The border lets clicks through to the page.
-+      _controlFrame = [[AgensPassThroughView alloc] init];
-+      _controlFrame.wantsLayer = YES;
-+      _controlFrame.layer.borderWidth = 2;
-+      _controlFrame.hidden = YES;
-+      _controlBar = [[NSView alloc] init];
++      // Socket control of the tab in the card (docs/agens.md, "Controle"): a pill over the bottom
++      // of the card and the agent's cursor. Only the pill takes the pointer.
++      _controlBar = [[AgensFlippedView alloc] init];
 +      _controlBar.wantsLayer = YES;
 +      _controlBar.layer.borderWidth = 1;
 +      _controlBar.hidden = YES;
 +      _controlBar.accessibilityElement = YES;
 +      _controlBar.accessibilityRole = NSAccessibilityGroupRole;
-+      _controlText = Label(12, NSFontWeightMedium, kInk);
-+      _controlText.lineBreakMode = NSLineBreakByTruncatingTail;
-+      _controlStop = [[AgensHoverView alloc] init];
-+      _controlStop.radius = 7;
-+      _controlStop.toolTip = @"Parar o controle desta aba";
-+      _controlStop.accessibilityLabel = @"Parar o controle";
-+      _controlStop.onPress = ^{
++      _controlMark = AtoTile(24);
++      _controlTitle = Label(13, NSFontWeightMedium, kInk);
++      _controlDetail = Label(12, NSFontWeightRegular, kDim);
++      _controlMain = [[AgensPillButton alloc] init];
++      _controlMain.radius = 10;
++      _controlMain.onPress = ^{
++        AgensChrome* strong = weak;
++        if (!strong || !strong->_window) return;
++        if (strong->_controlPaused) {
++          agens_window_hand_back_control(strong->_window, strong->_controlIndex);
++        } else {
++          agens_window_take_control(strong->_window, strong->_controlIndex);
++        }
++      };
++      _controlEnd = [[AgensPillButton alloc] init];
++      _controlEnd.icon.image = AgensIcon(@"<rect x='6.5' y='6.5' width='7' height='7' rx='1.2' fill='#000' stroke='none'/>", 20);
++      _controlEnd.toolTip = @"Encerrar o controle";
++      _controlEnd.accessibilityLabel = @"Encerrar o controle";
++      _controlEnd.onPress = ^{
 +        AgensChrome* strong = weak;
 +        if (strong && strong->_window) agens_window_stop_control(strong->_window, strong->_controlIndex);
 +      };
-+      _controlStopLabel = Label(12, NSFontWeightSemibold, kLight3);
-+      _controlStopLabel.stringValue = @"Parar";
-+      _controlStopLabel.alignment = NSTextAlignmentCenter;
-+      [_controlStop addSubview:_controlStopLabel];
-+      [_controlBar addSubview:_controlText];
-+      [_controlBar addSubview:_controlStop];
-+      [self addSubview:_controlFrame];
-+      [self addSubview:_controlBar];
++      for (NSView* v in @[ _controlMark, _controlTitle, _controlDetail, _controlMain, _controlEnd ]) [_controlBar addSubview:v];
++      _cursor = [[AgensCursorView alloc] init];
++      _cursor.hidden = YES;
++      _cursorPoint = NSMakePoint(-1, -1);
++      [self addSubview:_cursor positioned:NSWindowBelow relativeTo:_suggest];
++      [self addSubview:_controlBar positioned:NSWindowBelow relativeTo:_suggest];
 +    }
      [self refreshTheme];
      ApplyAppearance(agens_window_color_mode(_window));  // the saved choice, from the first window on
      agens_window_set_tabs_observer(_window, TabsChanged, (__bridge void*)self);
-@@ -4009,6 +4118,11 @@ - (void)refreshTheme {
+@@ -4009,6 +4218,10 @@ - (void)refreshTheme {
    _atoDot.layer.backgroundColor = CG(kLight3, self);
    _statusPill.layer.backgroundColor = CG(kFloat, self);
    _statusPill.layer.borderColor = CG(kLine, self);
-+  _controlBar.layer.cornerRadius = 9 * Round();
-+  _controlBar.layer.backgroundColor = CG(kRaise, self);
-+  _controlBar.layer.borderColor = CG(kLight3, self);
-+  _controlFrame.layer.borderColor = CG(kLight3, self);
-+  _controlFrame.layer.cornerRadius = 12 * Round() + 2;  // around the card (agens_ui_card_radius)
++  _controlBar.layer.cornerRadius = 14 * Round();
++  _controlBar.layer.backgroundColor = CG(kFloat, self);
++  _controlBar.layer.borderColor = CG(kLineStrong, self);
++  _cursor.nameTag.layer.cornerRadius = 6 * Round();
    SyncGlass(_suggest, 12 * Round());
    [self runLoadbar];  // the glow's color
  }
-@@ -4338,6 +4452,7 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
-     page = [self roomForBar:page];
+@@ -4367,6 +4580,7 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+     _ntp2.frame = NSInsetRect(other, 1, 1);
+     _ntp2Click.frame = _ntp2.frame;
    }
- 
-+  page = [self roomForControl:page];
-   _page = page;
-   // Our pages over the card (new tab, errors…) cover the active tab's pane only; the engine splits
-   // the card the same way (8 pt gap, the split's ratio).
-@@ -4431,6 +4546,8 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
++  [self layoutControlIn:pane];
+   _history.frame = _ntp.frame;
+   _bookmarksPage.frame = _ntp.frame;
+   _error.frame = _ntp.frame;
+@@ -4431,6 +4645,7 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
      [_rows removeLastObject];
    }
    int activeTab = -1;
-+  NSString* wasController = _controller;
 +  _controller = nil;
    _pinnedCount = 0;
    _partner = -1;
    BOOL partnerIsNewTab = NO;
-@@ -4480,6 +4597,13 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+@@ -4480,7 +4695,10 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
      _bookmarked = tabs[i].bookmarked;
      _back.enabled = tabs[i].can_go_back;
      _forward.enabled = tabs[i].can_go_forward;
-+    _controller = tabs[i].controller && tabs[i].controller[0] ? @(tabs[i].controller) : nil;
-+    _controlIndex = i;
-+  }
-+  // The other pane of a split shows too: its control counts when the active tab has none.
-+  if (!_controller && _partner >= 0 && tabs[_partner].controller && tabs[_partner].controller[0]) {
-+    _controller = @(tabs[_partner].controller);
-+    _controlIndex = _partner;
++    [self readControl:tabs[i] index:i];
    }
++  // The other pane of a split shows too: its control counts when the active tab has none.
++  if (!_controller && _partner >= 0) [self readControl:tabs[_partner] index:_partner];
    if (_loadbar.hidden == _loading) {
      _loadbar.hidden = !_loading;
-@@ -4505,6 +4629,8 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
-   _ntp.hidden = _url.length > 0;
-   if (!_ntp.hidden && !wasNTP) _ntp.field.stringValue = @"";
-   [self relayout];
-+  // The control strip takes room from the card: the engine moves the page.
-+  if (_window && (wasController != _controller && ![wasController isEqualToString:_controller])) agens_window_relayout(_window);
-   if (activeTab >= 0 && _rows[activeTab].superview == _tabsDoc) [_tabsDoc scrollRectToVisible:_rows[activeTab].frame];
- }
- 
-@@ -4539,14 +4665,18 @@ - (void)setAtos:(const AgensAto*)atos count:(int)count {
+     [self runLoadbar];
+@@ -4539,14 +4757,18 @@ - (void)setAtos:(const AgensAto*)atos count:(int)count {
      [_atoButtons removeLastObject];
    }
    [_atoNames removeAllObjects];
@@ -5685,7 +5967,7 @@ index 3c18c4eab1..025f3d08ec 100644
    }
    [self relayout];
  }
-@@ -4854,6 +4984,12 @@ - (BOOL)collapsed {
+@@ -4854,6 +5076,12 @@ - (BOOL)collapsed {
  - (NSArray<NSString*>*)atoNamesForSettings {
    return [_atoNames copy];
  }
@@ -5698,31 +5980,94 @@ index 3c18c4eab1..025f3d08ec 100644
  - (void)toggleSidebar {
    _collapsed = !_collapsed;
    [NSUserDefaults.standardUserDefaults setBool:_collapsed forKey:kCollapsedKey];
-@@ -5094,6 +5230,23 @@ - (NSRect)roomForBar:(NSRect)page {
+@@ -5094,6 +5322,86 @@ - (NSRect)roomForBar:(NSRect)page {
    page.size.height -= 32;
    return page;
  }
-+// The control strip above the card while the active tab is driven over the socket.
-+- (NSRect)roomForControl:(NSRect)page {
-+  _controlBar.hidden = _controlFrame.hidden = !_controller;
-+  if (!_controller) return page;
-+  const CGFloat h = 30;
-+  _controlBar.frame = NSMakeRect(NSMinX(page), NSMinY(page), NSWidth(page), h);
-+  _controlText.stringValue = [NSString stringWithFormat:@"Controlado pelo %@  ·", _controller];
-+  _controlBar.accessibilityLabel = [NSString stringWithFormat:@"Controlado pelo %@", _controller];
-+  const CGFloat textW = MIN(ceil(_controlText.fittingSize.width), NSWidth(page) - 12 - 58);
-+  _controlText.frame = NSMakeRect(12, (h - 16) / 2, MAX(0, textW), 16);
-+  _controlStop.frame = NSMakeRect(NSMaxX(_controlText.frame) + 4, 3, 52, h - 6);
-+  _controlStopLabel.frame = NSMakeRect(0, (h - 6 - 16) / 2, 52, 16);
-+  page.origin.y += h + 6;
-+  page.size.height -= h + 6;
-+  _controlFrame.frame = NSInsetRect(page, -2, -2);
-+  return page;
++- (void)readControl:(const AgensTab&)tab index:(int)i {
++  _controller = tab.controller && tab.controller[0] ? @(tab.controller) : nil;
++  if (!_controller) return;
++  _controlIndex = i;
++  _controlTitleText = @(tab.control_title);
++  _controlDetailText = @(tab.control_detail);
++  _controlPaused = tab.control_paused;
++  _cursorPoint = NSMakePoint(tab.cursor_x, tab.cursor_y);
++}
++// The pill over the bottom of the card while a tab in it is driven over the socket, and the
++// agent's cursor over `pane` (the active tab's page) while it is the one driven.
++- (void)layoutControlIn:(NSRect)pane {
++  _controlBar.hidden = !_controller;
++  const BOOL hideCursor = !_controller || _controlPaused || _controlIndex != _activeIndex || _cursorPoint.x < 0;
++  const BOOL appearing = _cursor.hidden && !hideCursor;  // shows up where it is, without flying in
++  _cursor.hidden = hideCursor;
++  if (!_controller) {
++    _pillState = nil;
++    return;
++  }
++  _controlMark.stringValue = Monogram(_controller);
++  _controlMark.layer.backgroundColor = _atoTile.layer.backgroundColor;  // the ato's color
++  _controlMark.layer.cornerRadius = 12;
++  _controlTitle.stringValue = _controlPaused ? @"Você está no controle" : _controlTitleText;
++  _controlDetail.stringValue =
++      _controlPaused ? [NSString stringWithFormat:@"o %@ pausou e espera você", _controller] : _controlDetailText;
++  _controlMain.primary = !_controlPaused;
++  _controlMain.label.stringValue = _controlPaused ? [NSString stringWithFormat:@"Devolver ao %@", _controller] : @"Assumir";
++  _controlMain.accessibilityLabel = _controlMain.label.stringValue;
++  _controlEnd.hidden = !_controlPaused;
++  _controlBar.accessibilityLabel =
++      [NSString stringWithFormat:@"%@, %@", _controlTitle.stringValue, _controlDetail.stringValue];
++  // .nav-botbar: padding 8 8 8 12, gap 12, the button 6 pt further; at most the card less 32.
++  const CGFloat h = 50, mark = 24, gap = 12, btnH = 32, end = _controlPaused ? gap + 26 + 2 : 0;
++  const CGFloat btnW = ceil(_controlMain.label.fittingSize.width) + 28;
++  const CGFloat fixed = 12 + mark + gap + gap + 6 + btnW + end + 8;
++  const CGFloat textW = MAX(0, MIN(ceil(MAX(_controlTitle.fittingSize.width, _controlDetail.fittingSize.width)),
++                                   NSWidth(_page) - 32 - fixed));
++  const CGFloat w = fixed + textW;
++  _controlBar.frame = NSMakeRect(round(NSMidX(_page) - w / 2), NSMaxY(_page) - 18 - h, w, h);
++  CGFloat x = 12;
++  _controlMark.frame = NSMakeRect(x, (h - mark) / 2, mark, mark);
++  x += mark + gap;
++  _controlTitle.frame = NSMakeRect(x, 8, textW, 18);
++  _controlDetail.frame = NSMakeRect(x, 26, textW, 16);
++  x += textW + gap + 6;
++  _controlMain.frame = NSMakeRect(x, (h - btnH) / 2, btnW, btnH);
++  _controlEnd.frame = NSMakeRect(x + btnW + gap, (h - 26) / 2, 26, 26);
++  NSString* state = _controlPaused ? @"paused" : @"work";
++  if (![state isEqualToString:_pillState]) {  // .nav-botbar's entrance: up 12 pt and in, .4 s
++    _pillState = state;
++    if (!NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) {
++      CABasicAnimation* fade = [CABasicAnimation animationWithKeyPath:@"opacity"];
++      fade.fromValue = @0;
++      CABasicAnimation* rise = [CABasicAnimation animationWithKeyPath:@"transform.translation.y"];
++      rise.fromValue = @(self.layer.geometryFlipped ? 12 : -12);  // from below
++      CAAnimationGroup* group = [CAAnimationGroup animation];
++      group.animations = @[ fade, rise ];
++      group.duration = 0.4;
++      group.timingFunction = [CAMediaTimingFunction functionWithControlPoints:0.16 :1 :0.3 :1];
++      [_controlBar.layer addAnimation:group forKey:@"enter"];
++    }
++  }
++  if (_cursor.hidden) return;
++  if (![_cursor.nameTag.stringValue isEqualToString:_controller]) {
++    _cursor.nameTag.stringValue = _controller;
++    [_cursor fit];
++  }
++  const NSPoint to = NSMakePoint(round(NSMinX(pane) + _cursorPoint.x - 2), round(NSMinY(pane) + _cursorPoint.y - 1.5));
++  if (NSEqualPoints(to, _cursor.frame.origin)) return;
++  if (appearing) {
++    _cursor.frameOrigin = to;
++    return;
++  }
++  [NSAnimationContext runAnimationGroup:^(NSAnimationContext* context) {
++    context.duration = 0.35;
++    context.timingFunction = [CAMediaTimingFunction functionWithControlPoints:0.16 :1 :0.3 :1];
++    _cursor.animator.frameOrigin = to;
++  }];
 +}
  - (void)toggleBookmarkBar {
    [NSUserDefaults.standardUserDefaults setBool:!_barShown forKey:kBookmarkBarKey];
    [NSNotificationCenter.defaultCenter postNotificationName:kThemeChanged object:nil];  // every window
-@@ -5204,6 +5357,31 @@ - (void)answerPermission:(NSButton*)button {
+@@ -5204,6 +5512,31 @@ - (void)answerPermission:(NSButton*)button {
    if (_window) agens_window_permission_answer(_window, (AgensPermissionAnswer)button.tag);
    [self closeMenu];
  }
@@ -5754,7 +6099,7 @@ index 3c18c4eab1..025f3d08ec 100644
  - (void)permissionGone {
    if (!_permissionAsked) return;
    _permissionAsked = NO;  // nothing to answer any more
-@@ -5412,6 +5590,9 @@ void agens_ui_permission_prompt(void* chrome, const char* site, const char* cons
+@@ -5412,6 +5745,9 @@ void agens_ui_permission_prompt(void* chrome, const char* site, const char* cons
    for (int i = 0; i < count; ++i) [list addObject:@(asks[i])];
    [(__bridge AgensChrome*)chrome askPermission:@(site) asks:list];
  }
