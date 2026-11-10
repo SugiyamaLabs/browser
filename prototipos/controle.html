@@ -61,8 +61,9 @@ button{font:inherit;color:inherit;background:none;cursor:pointer}
 .nav-botbar b{font-weight:500;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .nav-botbar small{color:var(--dim);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .nav-botbar .btn{margin-left:6px}
+.nav-botbar .nav-end{margin-right:2px}
 .nav-botbar svg{flex:none}
-/* encerrar o controle: uma bolha com o ícone de pausa, ao lado do texto */
+/* encerrar o controle: uma bolha com o ícone de parar, depois do botão de devolver */
 .nav-end{display:grid;place-items:center;width:26px;height:26px;flex:none;border:1px solid var(--line-strong);border-radius:50%;color:var(--dim)}
 .nav-end:hover{border-color:var(--line-hover);background:var(--hover-2);color:var(--ink)}
 .nav-end:focus-visible{outline:2px solid var(--light-2);outline-offset:2px}
@@ -79,7 +80,7 @@ button{font:inherit;color:inherit;background:none;cursor:pointer}
 <main>
   <header>
     <h1>Controle por agente</h1>
-    <p>O aviso que aparece na página enquanto um agente usa a aba, tirado do protótipo do Agens. Clique em Assumir e em Devolver. A bolha com o ícone de pausa encerra o controle.</p>
+    <p>O aviso que aparece na página enquanto um agente usa a aba, tirado do protótipo do Agens. Clique em Assumir e em Devolver. A bolha com o ícone de parar encerra o controle.</p>
   </header>
   <section>
     <h2>Na página</h2>
@@ -109,7 +110,7 @@ button{font:inherit;color:inherit;background:none;cursor:pointer}
 const POPI = `<svg class="agav work exec" width="24" height="24" viewBox="0 0 100 100" role="img" aria-label="Popi · trabalhando"><defs><radialGradient id="ag-b-orquidea" cx=".36" cy=".3" r=".8"><stop offset="0" stop-color="#f2d7f9"/><stop offset=".38" stop-color="#de9df1"/><stop offset=".8" stop-color="#CF6FEA"/><stop offset="1" stop-color="#9953ad"/></radialGradient><radialGradient id="ag-spec"><stop offset="0" stop-color="#fff" stop-opacity=".95"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient><radialGradient id="ag-core" cx=".42" cy=".38" r=".55"><stop offset="0" stop-color="#fff" stop-opacity=".5"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient></defs><g class="sphere"><circle cx="50" cy="50" r="44" fill="url(#ag-b-orquidea)"/><circle class="core" cx="50" cy="50" r="44" fill="url(#ag-core)"/><path d="M22 72A36 36 0 0 0 78 72" fill="none" stroke="#fff" stroke-opacity=".22" stroke-width="3" stroke-linecap="round"/><ellipse cx="33" cy="25" rx="13" ry="7.5" transform="rotate(-28 33 25)" fill="url(#ag-spec)"/></g><g class="face" transform="translate(50 58) scale(1.22) translate(-50 -58)"><g fill="#FF8FB3" opacity=".5"><ellipse cx="31" cy="62" rx="6" ry="3.4"/><ellipse cx="75" cy="62" rx="6" ry="3.4"/></g><g class="eyes"><path d="M35.2 49.8H46.8A5.8 5 0 0 1 35.2 49.8Z" fill="#3b2148"/><path d="M59.2 49.8H70.8A5.8 5 0 0 1 59.2 49.8Z" fill="#3b2148"/></g><path d="M-4 1H4" transform="translate(53 66)" fill="none" stroke="#3b2148" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></g><circle class="dash" cx="50" cy="50" r="50.5" fill="none" stroke="#CF6FEA" stroke-width="3.4" stroke-dasharray="7 5.6" stroke-linecap="round"/><g class="orbit"><circle cx="50" cy="0" r="4.6" fill="#fff"/></g></svg>`;
 const ME = `<svg width="22" height="22" viewBox="0 0 100 100" aria-label="Você"><defs><radialGradient id="me-l" cx=".42" cy=".38" r=".62"><stop offset="0" stop-color="#FFFDF7"/><stop offset=".45" stop-color="#FFE9C7"/><stop offset=".85" stop-color="#FFC98A"/><stop offset="1" stop-color="#F7A95C"/></radialGradient><radialGradient id="me-s"><stop offset="0" stop-color="#fff" stop-opacity=".9"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient></defs><circle cx="50" cy="50" r="44" fill="url(#me-l)"/><ellipse cx="34" cy="27" rx="12" ry="7" transform="rotate(-28 34 27)" fill="url(#me-s)"/></svg>`;
 const bot = live => `<div class="nav-botbar" role="status">${POPI}<span><b>Popi está testando a página de preços aqui</b><small>passo 3 de 5 · a tabela em 375 px</small></span><button class="btn pri" ${live ? "data-take" : "tabindex=-1"}>Assumir</button></div>`;
-const you = live => `<div class="nav-botbar" role="status">${ME}<span><b>Você está no controle</b><small>o Popi pausou e espera você</small></span><button class="nav-end" title="Encerrar o controle" aria-label="Encerrar o controle" ${live ? "data-end" : "tabindex=-1"}><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect x="1.5" y="1" width="2.5" height="8" rx=".8" fill="currentColor"/><rect x="6" y="1" width="2.5" height="8" rx=".8" fill="currentColor"/></svg></button><button class="btn" ${live ? "data-give" : "tabindex=-1"}>Devolver ao Popi</button></div>`;
+const you = live => `<div class="nav-botbar" role="status">${ME}<span><b>Você está no controle</b><small>o Popi pausou e espera você</small></span><button class="btn" ${live ? "data-give" : "tabindex=-1"}>Devolver ao Popi</button><button class="nav-end" title="Encerrar o controle" aria-label="Encerrar o controle" ${live ? "data-end" : "tabindex=-1"}><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect x="1.5" y="1.5" width="7" height="7" rx="1.2" fill="currentColor"/></svg></button></div>`;
 const bar = document.getElementById("bar"), cursor = document.getElementById("cursor");
 function show(mine) { bar.innerHTML = mine ? you(true) : bot(true); cursor.hidden = mine; cursor.style.display = mine ? "none" : ""; }
 // The bubble ends the control: the pill goes away. Here it comes back after a moment so the page stays usable.
