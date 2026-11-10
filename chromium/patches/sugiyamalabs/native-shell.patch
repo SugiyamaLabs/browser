@@ -10370,7 +10370,7 @@ index 2018474821..e0e0a8581e 100644
    // ExclusiveAccessContext:
    Profile* GetProfile() override;
 diff --git a/chrome/browser/ui/webui_browser/webui_browser_window.cc b/chrome/browser/ui/webui_browser/webui_browser_window.cc
-index f83d197409..7d927f2cd4 100644
+index f83d197409..942e13a715 100644
 --- a/chrome/browser/ui/webui_browser/webui_browser_window.cc
 +++ b/chrome/browser/ui/webui_browser/webui_browser_window.cc
 @@ -40,6 +40,7 @@
@@ -10447,6 +10447,24 @@ index f83d197409..7d927f2cd4 100644
      page->OnPaintAsActiveChanged(widget_->ShouldPaintAsActive());
    }
  }
+@@ -430,13 +447,13 @@ gfx::NativeWindow WebUIBrowserWindow::GetNativeWindow() const {
+ }
+ 
+ bool WebUIBrowserWindow::IsOnCurrentWorkspace() const {
+-  NOTIMPLEMENTED_LOG_ONCE();
+-  return false;
++  // Same as BrowserView on Mac. Returning false made every "open in a tab" with no
++  // source window (DevTools, other apps, extensions) create a new window instead.
++  return true;
+ }
+ 
+ bool WebUIBrowserWindow::IsVisibleOnScreen() const {
+-  NOTIMPLEMENTED_LOG_ONCE();
+-  return false;
++  return widget_ && widget_->IsVisibleOnScreen();
+ }
+ 
+ void WebUIBrowserWindow::SetTopControlsShownRatio(
 @@ -475,6 +492,9 @@ const ui::ColorProvider* WebUIBrowserWindow::GetColorProvider() const {
  }
  
