@@ -1,9 +1,9 @@
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
 new file mode 100644
-index 0000000000..edd467643e
+index 0000000000..9dd3dbbb4e
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embed.h
-@@ -0,0 +1,336 @@
+@@ -0,0 +1,340 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The boundary between the engine and any interface (the browser's own chrome today, the Agens
 +// app later). Plain C on purpose: no Chromium or C++ types cross it, Swift imports it as is, and
@@ -34,6 +34,7 @@ index 0000000000..edd467643e
 +  int muted;       // sound turned off by the person
 +  int error;               // the page failed to load: Chromium's net error (e.g. -106), else 0
 +  const char* error_name;  // e.g. "ERR_INTERNET_DISCONNECTED", "" when none
++  int interstitial;  // a security stop page (bad certificate…): see agens_window_interstitial
 +  int camera;      // the page is using the camera now
 +  int microphone;  // the page is using the microphone now
 +} AgensTab;
@@ -287,6 +288,9 @@ index 0000000000..edd467643e
 +// Runs the extension's action on the active page; its popup opens under agens_ui_extensions_anchor.
 +void agens_extension_click(AgensWindow* window, const char* id);
 +
++// Answers the security stop page of the active tab: 1 goes on to the site anyway, 0 goes back.
++void agens_window_interstitial(AgensWindow* window, int proceed);
++
 +// Histórico of this window's ato, newest first, one entry per page per day, at most 300.
 +// `text` filters by title and address ("" for all). Calls `fn` later, once.
 +typedef struct {
@@ -342,10 +346,10 @@ index 0000000000..edd467643e
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EMBED_H_
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
 new file mode 100644
-index 0000000000..ee2f209a38
+index 0000000000..59da15cf18
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_window.h
-@@ -0,0 +1,638 @@
+@@ -0,0 +1,645 @@
 +// Copyright 2026 SugiyamaLabs.
 +// One browser window as the embed API sees it (agens_embed.h): tabs, suggestions, atos, search
 +// default, bookmarks. Platform-neutral; each platform's shell (native_shell_mac.mm, later
@@ -420,6 +424,8 @@ index 0000000000..ee2f209a38
 +#include "content/public/browser/web_contents_observer.h"
 +#include "content/public/browser/web_contents_user_data.h"
 +#include "net/base/net_errors.h"
++#include "components/security_interstitials/content/security_interstitial_page.h"
++#include "components/security_interstitials/content/security_interstitial_tab_helper.h"
 +#include "chrome/common/chrome_isolated_world_ids.h"
 +#include "chrome/browser/media/webrtc/media_capture_devices_dispatcher.h"
 +#include "chrome/browser/media/webrtc/media_stream_capture_indicator.h"
@@ -715,6 +721,10 @@ index 0000000000..ee2f209a38
 +        FROM_HERE, base::BindOnce(&AgensWindow::NotifyNow, weak.GetWeakPtr()));
 +  }
 +
++  static int Interstitial(content::WebContents* contents) {
++    auto* helper = security_interstitials::SecurityInterstitialTabHelper::FromWebContents(contents);
++    return helper && helper->IsDisplayingInterstitial();
++  }
 +  void NotifyNow() {
 +    notify_pending = false;
 +    if (!observer) return;
@@ -748,6 +758,7 @@ index 0000000000..ee2f209a38
 +                 bookmarks && bookmarks->IsBookmarked(contents->GetVisibleURL()),
 +                 model()->IsTabPinned(i), contents->IsCurrentlyAudible(),
 +                 contents->IsAudioMuted(), error, errors[i].c_str(),
++                 Interstitial(contents),
 +                 capture && capture->IsCapturingVideo(contents), capture && capture->IsCapturingAudio(contents)};
 +    }
 +    observer(context, tabs.data(), static_cast<int>(tabs.size()));
@@ -986,10 +997,10 @@ index 0000000000..ee2f209a38
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
 new file mode 100644
-index 0000000000..b38bf3de03
+index 0000000000..e7e822ecf4
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.cc
-@@ -0,0 +1,771 @@
+@@ -0,0 +1,778 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The embed API (agens_embed.h) on top of AgensWindow. Same code on every platform.
 +
@@ -1512,6 +1523,13 @@ index 0000000000..b38bf3de03
 +                            extensions::ExtensionViewHostFactory::CreatePopupHost(*extension, popup, w->browser.get()),
 +                            views::BubbleAnchor(w->extensions_anchor.get()), views::BubbleBorder::TOP_RIGHT, PopupShowAction::kShow,
 +                            base::DoNothing());
++}
++void agens_window_interstitial(AgensWindow* w, int proceed) {
++  content::WebContents* active = w->model()->GetActiveWebContents();
++  auto* helper = active ? security_interstitials::SecurityInterstitialTabHelper::FromWebContents(active) : nullptr;
++  // The page Chromium shows; its own buttons send these same commands (CMD_PROCEED / CMD_DONT_PROCEED).
++  auto* page = helper ? helper->GetBlockingPageForCurrentlyCommittedNavigationForTesting() : nullptr;
++  if (page) page->CommandReceived(proceed ? "1" : "0");
 +}
 +void agens_window_set_find_observer(AgensWindow* w, AgensFindChanged observer, void* context) {
 +  w->find_observer = observer;
@@ -2284,10 +2302,10 @@ index 0000000000..48d670c7ba
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..11615a0a28
+index 0000000000..b066cf6133
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,4618 @@
+@@ -0,0 +1,4655 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -4980,7 +4998,8 @@ index 0000000000..11615a0a28
 +// code in mono, and "Tentar de novo". Certificate warnings stay Chromium's (they are interstitials).
 +@interface AgensErrorView : NSView
 +@property(nonatomic, copy) void (^onRetry)(void);
-+- (void)showError:(int)error name:(NSString*)name;
++@property(nonatomic, copy) void (^onProceed)(void);  // security stops: go on anyway
++- (void)showError:(int)error name:(NSString*)name stop:(BOOL)stop;
 +- (void)refreshTheme;
 +@end
 +@implementation AgensErrorView {
@@ -4989,8 +5008,11 @@ index 0000000000..11615a0a28
 +  NSTextField* _detail;
 +  NSTextField* _code;
 +  NSButton* _retry;
++  NSButton* _proceed;
++  BOOL _stop;
 +}
 +@synthesize onRetry = _onRetry;
++@synthesize onProceed = _onProceed;
 +- (instancetype)initWithFrame:(NSRect)frame {
 +  if ((self = [super initWithFrame:frame])) {
 +    self.wantsLayer = YES;
@@ -5004,7 +5026,11 @@ index 0000000000..11615a0a28
 +    for (NSTextField* t in @[ _title, _detail, _code ]) t.alignment = NSTextAlignmentCenter;
 +    _retry = [NSButton buttonWithTitle:@"Tentar de novo" target:self action:@selector(retry:)];
 +    _retry.keyEquivalent = @"\r";  // the prototype's primary button
-+    for (NSView* v in @[ _icon, _title, _detail, _code, _retry ]) [self addSubview:v];
++    _proceed = [NSButton buttonWithTitle:@"Continuar mesmo assim (não seguro)" target:self action:@selector(proceed:)];
++    _proceed.bordered = NO;
++    _proceed.font = [NSFont systemFontOfSize:12];
++    _proceed.contentTintColor = kDim.color();
++    for (NSView* v in @[ _icon, _title, _detail, _code, _retry, _proceed ]) [self addSubview:v];
 +    [self refreshTheme];
 +  }
 +  return self;
@@ -5020,7 +5046,8 @@ index 0000000000..11615a0a28
 +  [super viewDidChangeEffectiveAppearance];
 +  [self refreshTheme];
 +}
-+- (void)showError:(int)error name:(NSString*)name {
++- (void)showError:(int)error name:(NSString*)name stop:(BOOL)stop {
++  _stop = stop;
 +  NSString* title = @"Não deu para abrir a página";
 +  NSString* detail = @"Tente de novo daqui a pouco.";
 +  BOOL offline = NO;
@@ -5054,7 +5081,16 @@ index 0000000000..11615a0a28
 +      offline = YES;
 +      break;
 +  }
-+  _icon.image = AgensIcon(offline ? kIconWifiOff : kIconAbout, 40);
++  // Certificate errors (-200…-299) and other security stops: back is the safe answer.
++  const BOOL certificate = error <= -200 && error > -300;
++  if (stop || certificate) {
++    title = certificate ? @"Esta conexão não é privada" : @"O navegador parou antes de abrir o site";
++    detail = certificate ? @"O certificado do site não confere. Alguém pode estar tentando ler o que você envia."
++                         : @"Este endereço pode não ser seguro.";
++  }
++  _retry.title = stop ? @"Voltar" : @"Tentar de novo";
++  _proceed.hidden = !stop;
++  _icon.image = AgensIcon(stop || certificate ? kIconLock : offline ? kIconWifiOff : kIconAbout, 40);
 +  _title.stringValue = title;
 +  _detail.stringValue = detail;
 +  _code.stringValue = name;
@@ -5076,6 +5112,11 @@ index 0000000000..11615a0a28
 +  _code.frame = NSMakeRect(24, y, w - 48, 16);
 +  y += 16 + 18;
 +  _retry.frame = NSMakeRect((w - NSWidth(_retry.frame)) / 2, y, NSWidth(_retry.frame), NSHeight(_retry.frame));
++  [_proceed sizeToFit];
++  _proceed.frame = NSMakeRect((w - NSWidth(_proceed.frame)) / 2, NSMaxY(_retry.frame) + 14, NSWidth(_proceed.frame), 18);
++}
++- (void)proceed:(id)sender {
++  if (_onProceed) _onProceed();
 +}
 +- (void)retry:(id)sender {
 +  if (_onRetry) _onRetry();
@@ -5313,6 +5354,7 @@ index 0000000000..11615a0a28
 +  AgensToolButton* _extButton;  // extensions, before downloads and the menu
 +  NSMutableArray<NSDictionary*>* _extensions;  // id, name, icon (NSImage, optional)
 +  AgensErrorView* _error;
++  BOOL _stopPage;  // the active tab shows a security stop page
 +  BOOL _passwordAsked;  // our "save password?" panel is open and not answered yet
 +  BOOL _permissionAsked;  // a site's permission request is open and not answered yet
 +  NSView* _bar;  // the bookmarks bar
@@ -5522,7 +5564,19 @@ index 0000000000..11615a0a28
 +    };
 +    _error = [[AgensErrorView alloc] initWithFrame:NSZeroRect];
 +    _error.hidden = YES;
-+    _error.onRetry = ^{ [weak run:agens_window_reload]; };
++    _error.onRetry = ^{
++      AgensChrome* strong = weak;
++      if (!strong || !strong->_window) return;
++      if (strong->_stopPage) {
++        agens_window_interstitial(strong->_window, 0);  // back to safety
++      } else {
++        agens_window_reload(strong->_window);
++      }
++    };
++    _error.onProceed = ^{
++      AgensChrome* strong = weak;
++      if (strong && strong->_window) agens_window_interstitial(strong->_window, 1);
++    };
 +    _find = [[AgensFindBar alloc] initWithFrame:NSZeroRect];
 +    _find.engine = window;
 +    agens_window_set_find_observer(window, FindChanged, (__bridge void*)_find);
@@ -5973,8 +6027,9 @@ index 0000000000..11615a0a28
 +                                                                       : @"Usando o microfone";
 +    _capture.toolTip = _capture.accessibilityLabel;
 +    // Our error page over Chromium's, while the tab shows one (not while it retries).
-+    _error.hidden = !tabs[i].error || tabs[i].loading || !tabs[i].url[0];
-+    if (!_error.hidden) [_error showError:tabs[i].error name:@(tabs[i].error_name)];
++    _stopPage = tabs[i].interstitial;
++    _error.hidden = !(tabs[i].error || _stopPage) || tabs[i].loading || !tabs[i].url[0];
++    if (!_error.hidden) [_error showError:tabs[i].error name:@(tabs[i].error_name) stop:_stopPage];
 +    _url = @(tabs[i].url);
 +    _loading = tabs[i].loading;
 +    _bookmarked = tabs[i].bookmarked;
