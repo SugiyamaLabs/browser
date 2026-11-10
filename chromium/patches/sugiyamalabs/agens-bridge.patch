@@ -1895,6 +1895,266 @@ index 0000000000..2a1a874d47
 +}  // namespace agens::bridge::session
 +
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_SESSION_OPS_H_
+diff --git a/chrome/browser/agens/embed/agens_cookie_pool.cc b/chrome/browser/agens/embed/agens_cookie_pool.cc
+new file mode 100644
+index 0000000000..fd0899a40a
+--- /dev/null
++++ b/chrome/browser/agens/embed/agens_cookie_pool.cc
+@@ -0,0 +1,232 @@
++// Copyright 2026 SugiyamaLabs.
++// Mirrors cookies between the loaded atos of the pool through each profile's own CookieManager.
++// Cookie values pass through here only on their way from one store to another: never logged,
++// stored or counted.
++
++#include "chrome/browser/agens/embed/agens_cookie_pool.h"
++
++#include <map>
++#include <memory>
++#include <set>
++#include <utility>
++#include <vector>
++
++#include "base/functional/bind.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
++#include "base/no_destructor.h"
++#include "base/scoped_multi_source_observation.h"
++#include "base/scoped_observation.h"
++#include "chrome/browser/agens/embed/agens_window.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/profiles/profile_manager.h"
++#include "chrome/browser/profiles/profile_manager_observer.h"
++#include "chrome/browser/profiles/profile_observer.h"
++#include "content/public/browser/storage_partition.h"
++#include "mojo/public/cpp/bindings/receiver.h"
++#include "net/cookies/canonical_cookie.h"
++#include "net/cookies/cookie_access_result.h"
++#include "net/cookies/cookie_change_dispatcher.h"
++#include "net/cookies/cookie_options.h"
++#include "net/cookies/cookie_util.h"
++#include "net/cookies/unique_cookie_key.h"
++#include "services/network/public/mojom/cookie_manager.mojom.h"
++
++namespace agens {
++
++namespace {
++
++network::mojom::CookieManager* CookiesOf(Profile* profile) {
++  return profile->GetDefaultStoragePartition()->GetCookieManagerForBrowserProcess();
++}
++
++// Name, domain, path and partition key (what makes two cookies "the same" for a store), plus
++// whether it is a deletion. No value.
++using EchoKey = std::pair<net::UniqueCookieKey, bool>;
++EchoKey KeyOf(const net::CanonicalCookie& cookie, bool deletion) {
++  return {cookie.LegacyUniqueKey(), deletion};
++}
++
++class CookiePool : public ProfileManagerObserver, public ProfileObserver {
++ public:
++  static CookiePool& Get() {
++    static base::NoDestructor<CookiePool> pool;
++    return *pool;
++  }
++
++  void Start() {
++    ProfileManager* manager = g_browser_process->profile_manager();
++    if (started_ || !manager) return;
++    started_ = true;
++    manager_observation_.Observe(manager);
++    prefs_.Init(g_browser_process->local_state());
++    // The switch flipped: pool wins for an ato that joins.
++    prefs_.Add(AgensWindow::kAtosPref, base::BindRepeating(&CookiePool::Refresh, base::Unretained(this), false));
++    Refresh(/*reloaded=*/true);
++  }
++
++ private:
++  // One loaded ato of the pool, listening to every change in its store.
++  struct Member : network::mojom::CookieChangeListener {
++    Member(CookiePool* pool, Profile* profile) : pool(pool), profile(profile) {
++      CookiesOf(profile)->AddGlobalChangeListener(receiver.BindNewPipeAndPassRemote());
++    }
++    void OnCookieChange(const net::CookieChangeInfo& change) override { pool->OnChange(this, change); }
++
++    raw_ptr<CookiePool> pool;
++    raw_ptr<Profile> profile;
++    // Writes this pool made into this store, which the store reports back: they are not mirrored
++    // again (that would ping-pong forever). Dropped when the write turns out to change nothing.
++    std::multiset<EchoKey> echoes;
++    mojo::Receiver<network::mojom::CookieChangeListener> receiver{this};
++  };
++
++  // `reloaded`: an ato of the pool that was already in it got loaded (not a switch just turned on).
++  void Refresh(bool reloaded) {
++    ProfileManager* manager = g_browser_process->profile_manager();
++    if (!manager) return;
++    for (Profile* profile : manager->GetLoadedProfiles()) {
++      if (profile->IsOffTheRecord()) continue;
++      const bool shared = AgensWindow::AtoSharesCookies(profile->GetPath());
++      if (shared && !members_.contains(profile)) {
++        Join(profile, reloaded);
++      } else if (!shared && members_.contains(profile)) {
++        Leave(profile);  // keeps the cookies it has now
++      }
++    }
++  }
++
++  // shortcut: atos of the pool that are not loaded get nothing until they load, and then only
++  // from a pool ato loaded at that moment; two pool atos never loaded together don't share, and
++  // a cookie deleted while the other was asleep comes back from it. Upgrade when that matters:
++  // load the asleep pool atos' cookie stores alone, without the whole profile.
++  void Join(Profile* profile, bool reloaded) {
++    Member* source = members_.empty() ? nullptr : members_.begin()->second.get();
++    members_[profile] = std::make_unique<Member>(this, profile);
++    profile_observations_.AddObservation(profile);
++    if (!source) return;  // the first loaded ato of the pool: nothing to share yet
++    CookiesOf(source->profile)
++        ->GetAllCookies(base::BindOnce(&CookiePool::GotPool, weak_.GetWeakPtr(), profile, reloaded));
++  }
++  void GotPool(Profile* profile, bool reloaded, const std::vector<net::CanonicalCookie>& pool) {
++    if (!members_.contains(profile)) return;
++    CookiesOf(profile)->GetAllCookies(
++        base::BindOnce(&CookiePool::Merge, weak_.GetWeakPtr(), profile, reloaded, pool));
++  }
++  // The pool's cookies go to the joining ato, its own that the pool lacks go to the pool. Same
++  // cookie on both sides: the pool's wins; for an ato that was already in the pool and just
++  // loaded, the newer one wins (it may have changed while the others slept).
++  void Merge(Profile* profile,
++             bool reloaded,
++             const std::vector<net::CanonicalCookie>& pool,
++             const std::vector<net::CanonicalCookie>& own) {
++    auto it = members_.find(profile);
++    if (it == members_.end()) return;
++    Member* joining = it->second.get();
++    std::map<net::UniqueCookieKey, const net::CanonicalCookie*> mine;
++    for (const net::CanonicalCookie& cookie : own) mine[cookie.LegacyUniqueKey()] = &cookie;
++    for (const net::CanonicalCookie& cookie : pool) {
++      auto same = mine.find(cookie.LegacyUniqueKey());
++      const net::CanonicalCookie* other = same == mine.end() ? nullptr : same->second;
++      if (other) mine.erase(same);
++      if (other && reloaded && other->LastUpdateDate() > cookie.LastUpdateDate()) {
++        Mirror(joining, *other, /*deletion=*/false);
++      } else {
++        Write(joining, cookie);
++      }
++    }
++    for (const auto& [key, cookie] : mine) Mirror(joining, *cookie, /*deletion=*/false);
++  }
++
++  void Leave(Profile* profile) {
++    if (members_.erase(profile)) profile_observations_.RemoveObservation(profile);
++  }
++
++  void OnChange(Member* member, const net::CookieChangeInfo& change) {
++    using Cause = net::CookieChangeCause;
++    const Cause cause = change.cause;
++    const bool deletion = cause == Cause::EXPLICIT || cause == Cause::UNKNOWN_DELETION ||
++                          cause == Cause::EXPIRED_OVERWRITE;  // a site deletes by setting it expired
++    const bool insertion = cause == Cause::INSERTED || cause == Cause::INSERTED_NO_CHANGE_OVERWRITE ||
++                           cause == Cause::INSERTED_NO_VALUE_CHANGE_OVERWRITE;
++    // OVERWRITE is followed by the insertion; EXPIRED and EVICTED happen in each store by itself.
++    if (!deletion && !insertion) return;
++    auto echo = member->echoes.find(KeyOf(change.cookie, deletion));
++    if (echo != member->echoes.end()) {
++      member->echoes.erase(echo);
++      return;
++    }
++    if (cause == Cause::INSERTED_NO_CHANGE_OVERWRITE) return;  // nothing changed
++    Mirror(member, change.cookie, deletion);
++  }
++
++  // To every other loaded ato of the pool.
++  void Mirror(Member* from, const net::CanonicalCookie& cookie, bool deletion) {
++    for (auto& [profile, member] : members_) {
++      if (member.get() == from) continue;
++      if (deletion) {
++        Delete(member.get(), cookie);
++      } else {
++        Write(member.get(), cookie);
++      }
++    }
++  }
++  // As it is: httpOnly, SameSite, session-only and partitioned included.
++  void Write(Member* to, const net::CanonicalCookie& cookie) {
++    to->echoes.insert(KeyOf(cookie, false));
++    const bool secure = cookie.IsSecure() || cookie.SourceScheme() == net::CookieSourceScheme::kSecure;
++    CookiesOf(to->profile)
++        ->SetCanonicalCookie(cookie, net::cookie_util::SimulatedCookieSource(cookie, secure ? "https" : "http"),
++                             net::CookieOptions::MakeAllInclusive(),
++                             base::BindOnce(
++                                 [](base::WeakPtr<CookiePool> pool, Profile* profile, EchoKey key,
++                                    net::CookieAccessResult result) {
++                                   if (pool && !result.status.IsInclude()) pool->DropEcho(profile, key);
++                                 },
++                                 weak_.GetWeakPtr(), to->profile.get(), KeyOf(cookie, false)));
++  }
++  // Only the same cookie with the same value goes (CookieManager::DeleteCanonicalCookie).
++  void Delete(Member* to, const net::CanonicalCookie& cookie) {
++    to->echoes.insert(KeyOf(cookie, true));
++    CookiesOf(to->profile)
++        ->DeleteCanonicalCookie(cookie, base::BindOnce(
++                                            [](base::WeakPtr<CookiePool> pool, Profile* profile, EchoKey key,
++                                               bool deleted) {
++                                              if (pool && !deleted) pool->DropEcho(profile, key);
++                                            },
++                                            weak_.GetWeakPtr(), to->profile.get(), KeyOf(cookie, true)));
++  }
++  // The store refused or had nothing to change, so it will not report this write.
++  void DropEcho(Profile* profile, const EchoKey& key) {
++    auto it = members_.find(profile);
++    if (it == members_.end()) return;
++    auto echo = it->second->echoes.find(key);
++    if (echo != it->second->echoes.end()) it->second->echoes.erase(echo);
++  }
++
++  // ProfileManagerObserver:
++  void OnProfileAdded(Profile* profile) override { Refresh(/*reloaded=*/true); }
++  void OnProfileManagerDestroying() override {
++    members_.clear();
++    profile_observations_.RemoveAllObservations();
++    manager_observation_.Reset();
++    prefs_.RemoveAll();
++  }
++  // ProfileObserver:
++  void OnProfileWillBeDestroyed(Profile* profile) override { Leave(profile); }
++
++  bool started_ = false;
++  std::map<Profile*, std::unique_ptr<Member>> members_;
++  PrefChangeRegistrar prefs_;
++  base::ScopedObservation<ProfileManager, ProfileManagerObserver> manager_observation_{this};
++  base::ScopedMultiSourceObservation<Profile, ProfileObserver> profile_observations_{this};
++  base::WeakPtrFactory<CookiePool> weak_{this};
++};
++
++}  // namespace
++
++void StartCookiePool() {
++  CookiePool::Get().Start();
++}
++
++}  // namespace agens
+diff --git a/chrome/browser/agens/embed/agens_cookie_pool.h b/chrome/browser/agens/embed/agens_cookie_pool.h
+new file mode 100644
+index 0000000000..19eb43705a
+--- /dev/null
++++ b/chrome/browser/agens/embed/agens_cookie_pool.h
+@@ -0,0 +1,16 @@
++// Copyright 2026 SugiyamaLabs.
++// "Compartilhar cookies": the atos with the switch on (AgensWindow::AtoSharesCookies) form one
++// pool, and a cookie set, changed or deleted in one of them is written to the others' cookie
++// stores. Cookies only; nothing else of the profile is shared, and no copy is kept outside the
++// profiles' own stores.
++#ifndef CHROME_BROWSER_AGENS_EMBED_AGENS_COOKIE_POOL_H_
++#define CHROME_BROWSER_AGENS_EMBED_AGENS_COOKIE_POOL_H_
++
++namespace agens {
++
++// Starts following the pool (once; later calls do nothing). UI thread, after the profile manager.
++void StartCookiePool();
++
++}  // namespace agens
++
++#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_COOKIE_POOL_H_
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
 index 9d0bf4646d..ffbec8e7a3 100644
 --- a/chrome/browser/agens/embed/agens_embed.h
@@ -1941,10 +2201,18 @@ index 9d0bf4646d..ffbec8e7a3 100644
  
  #ifdef __cplusplus
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
-index 268d4dc7bd..666c179c4c 100644
+index 268d4dc7bd..ddaf874a9d 100644
 --- a/chrome/browser/agens/embed/agens_window.h
 +++ b/chrome/browser/agens/embed/agens_window.h
-@@ -48,7 +48,9 @@
+@@ -16,6 +16,7 @@
+ #include "base/strings/utf_string_conversions.h"
+ #include "chrome/app/chrome_command_ids.h"
+ #include "chrome/browser/agens/embed/agens_embed.h"
++#include "chrome/browser/agens/embed/agens_cookie_pool.h"
+ #include "chrome/browser/autocomplete/autocomplete_classifier_factory.h"
+ #include "chrome/browser/autocomplete/chrome_autocomplete_provider_client.h"
+ #include "chrome/browser/autocomplete/chrome_autocomplete_scheme_classifier.h"
+@@ -48,7 +49,9 @@
  #include "chrome/browser/profiles/profile_manager.h"
  #include "chrome/browser/profiles/profile_window.h"
  #include "chrome/browser/search_engines/template_url_service_factory.h"
@@ -1954,16 +2222,17 @@ index 268d4dc7bd..666c179c4c 100644
  #include "components/search_engines/default_search_manager.h"
  #include "components/search_engines/template_url.h"
  #include "components/search_engines/template_url_data_util.h"
-@@ -193,6 +195,8 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -193,6 +196,9 @@ struct AgensWindow : public TabStripModelObserver,
    explicit AgensWindow(BrowserWindowInterface* browser) : browser(browser) {
      browser->GetTabStripModel()->AddObserver(this);
      Storage().AddObserver(this);
 +    ato_prefs.Init(g_browser_process->local_state());
 +    ato_prefs.Add(kAtosPref, base::BindRepeating(&AgensWindow::NotifyAtos, base::Unretained(this)));
++    agens::StartCookiePool();  // once, with the first window
      PreferDuckDuckGo();
      if (content::DownloadManager* manager = browser->GetProfile()->GetDownloadManager()) {
        downloads_manager = manager;
-@@ -230,6 +234,11 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -230,6 +236,11 @@ struct AgensWindow : public TabStripModelObserver,
      }
    }
    ~AgensWindow() override {
@@ -1975,7 +2244,7 @@ index 268d4dc7bd..666c179c4c 100644
      if (bookmark_model) bookmark_model->RemoveObserver(this);
      Storage().RemoveObserver(this);
      for (download::DownloadItem* item : downloads) item->RemoveObserver(this);
-@@ -284,7 +293,79 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -284,7 +295,79 @@ struct AgensWindow : public TabStripModelObserver,
      return g_browser_process->profile_manager()->GetProfileAttributesStorage();
    }
  
@@ -2056,7 +2325,7 @@ index 268d4dc7bd..666c179c4c 100644
      // Creation order, so an ato keeps its place and color: Chromium names profile folders
      // "Default", then "Profile 1", "Profile 2"…
      std::vector<ProfileAttributesEntry*> atos;
-@@ -307,16 +388,11 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -307,16 +390,11 @@ struct AgensWindow : public TabStripModelObserver,
      std::vector<std::string> names;
      std::vector<AgensAto> atos;
      const base::FilePath current = browser->GetProfile()->GetOriginalProfile()->GetPath();
@@ -2076,7 +2345,7 @@ index 268d4dc7bd..666c179c4c 100644
      }
      atos_observer(atos_context, atos.data(), static_cast<int>(atos.size()));
    }
-@@ -330,14 +406,9 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -330,14 +408,9 @@ struct AgensWindow : public TabStripModelObserver,
    }
  
    void NewAto() {
@@ -2093,7 +2362,7 @@ index 268d4dc7bd..666c179c4c 100644
      const gfx::Rect bounds = browser->GetWindow()->GetBounds();
      const std::u16string name = base::UTF8ToUTF16(base::StringPrintf("Ato %zu", Atos().size() + 1));
      manager->CreateProfileAsync(
-@@ -362,7 +433,10 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -362,7 +435,10 @@ struct AgensWindow : public TabStripModelObserver,
  
    // ProfileAttributesStorage::Observer:
    void OnProfileAdded(const base::FilePath&) override { NotifyAtos(); }
@@ -2105,7 +2374,7 @@ index 268d4dc7bd..666c179c4c 100644
    void OnProfileNameChanged(const base::FilePath&, const std::u16string&) override { NotifyAtos(); }
  
    TabStripModel* model() { return browser->GetTabStripModel(); }
-@@ -582,6 +656,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -582,6 +658,7 @@ struct AgensWindow : public TabStripModelObserver,
    raw_ptr<void> downloads_context = nullptr;
    base::CallbackListSubscription search_loaded_;
    base::CancelableTaskTracker history_tracker;
@@ -2113,7 +2382,7 @@ index 268d4dc7bd..666c179c4c 100644
    raw_ptr<void> ui = nullptr;  // the chrome (agens_ui_*), set by the platform shell
    raw_ptr<views::View> extensions_anchor = nullptr;  // under the UI's extensions button
    AgensExtensionButtonsChanged extension_buttons_observer = nullptr;
-@@ -647,6 +722,8 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -647,6 +724,8 @@ struct AgensWindow : public TabStripModelObserver,
      }
    }
    base::WeakPtr<permissions::PermissionPrompt::Delegate> permission_delegate;
@@ -2491,10 +2760,19 @@ index 433fa42fa4..65017e0702 100644
    InitializeNetworkTimeTracker();
  
 diff --git a/chrome/browser/ui/webui_browser/BUILD.gn b/chrome/browser/ui/webui_browser/BUILD.gn
-index 98ada3ff32..da3f53cfea 100644
+index 98ada3ff32..0ee653185b 100644
 --- a/chrome/browser/ui/webui_browser/BUILD.gn
 +++ b/chrome/browser/ui/webui_browser/BUILD.gn
-@@ -97,6 +97,16 @@ source_set("impl") {
+@@ -83,6 +83,8 @@ source_set("impl") {
+     "//chrome/browser/agens/embed/agens_adblock.h",
+     "//chrome/browser/agens/embed/agens_credits.cc",
+     "//chrome/browser/agens/embed/agens_credits.h",
++    "//chrome/browser/agens/embed/agens_cookie_pool.cc",
++    "//chrome/browser/agens/embed/agens_cookie_pool.h",
+     "//chrome/browser/agens/embed/agens_embed.h",
+     "//chrome/browser/agens/embed/agens_window.h",
+     "//chrome/browser/agens/embed/native_shell.cc",
+@@ -97,6 +99,16 @@ source_set("impl") {
  
    if (is_mac) {
      sources += [
@@ -2511,7 +2789,7 @@ index 98ada3ff32..da3f53cfea 100644
        "//chrome/browser/agens/embed/native_shell_mac.mm",
        "//chrome/browser/agens/embed/import_chromium_keychain_mac.mm",
        "//chrome/browser/agens/ui/chrome_mac.mm",
-@@ -192,6 +202,7 @@ source_set("impl") {
+@@ -192,6 +204,7 @@ source_set("impl") {
  
    if (is_mac) {
      deps += [
