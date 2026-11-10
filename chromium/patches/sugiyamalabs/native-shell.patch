@@ -1673,10 +1673,10 @@ index 0000000000..9b81aa73ae
 +#endif  // CHROME_BROWSER_AGENS_EMBED_NATIVE_SHELL_H_
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
 new file mode 100644
-index 0000000000..ff40eeab47
+index 0000000000..af382d65b2
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
-@@ -0,0 +1,245 @@
+@@ -0,0 +1,266 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The macOS host: the views::View that fills the Webium window, puts the UI's chrome (an NSView)
 +// over it and the active tab in the page card. Everything else is shared (agens_window.h,
@@ -1706,7 +1706,9 @@ index 0000000000..ff40eeab47
 +
 +namespace {
 +
-+class NativeShellView : public views::View, public TabStripModelObserver {
++class NativeShellView : public views::View,
++                        public TabStripModelObserver,
++                        public content::WebContentsObserver {
 +  METADATA_HEADER(NativeShellView, views::View)
 +
 + public:
@@ -1757,6 +1759,18 @@ index 0000000000..ff40eeab47
 +                                  relativeTo:window.contentView];
 +  }
 +  void Layout(PassKey) override {
++    // A page in full screen (a video, a game) gets the whole window, like Chrome: no chrome, no
++    // card, no corners. The window's own full screen (green button) keeps the chrome.
++    content::WebContents* active = contents_->GetWebContents();
++    const bool page_fullscreen = active && active->IsFullscreen();
++    chrome_.hidden = page_fullscreen;
++    card_->SetVisible(!page_fullscreen);
++    if (page_fullscreen) {
++      SetBackground(views::CreateSolidBackground(SK_ColorBLACK));
++      contents_->SetBoundsRect(GetLocalBounds());
++      contents_->holder()->SetNativeViewCornerRadii(gfx::RoundedCornersF(0));
++      return;
++    }
 +    if (chrome_.superview) {
 +      NSView* content = GetWidget()->GetNativeWindow().GetNativeNSWindow().contentView;
 +      chrome_.frame = [content convertRect:content.bounds toView:chrome_.superview];
@@ -1781,11 +1795,18 @@ index 0000000000..ff40eeab47
 +    contents_->holder()->SetNativeViewCornerRadii(gfx::RoundedCornersF(radius_ - 1));
 +  }
 +
++  // content::WebContentsObserver (the active tab):
++  void DidToggleFullscreenModeForTab(bool, bool) override {
++    InvalidateLayout();
++    SchedulePaint();
++  }
++
 +  // TabStripModelObserver: the page area follows the active tab.
 +  void OnTabStripModelChanged(TabStripModel*, const TabStripModelChange&,
 +                              const TabStripSelectionChange& selection) override {
 +    if (selection.active_tab_changed()) {
 +      contents_->SetWebContents(selection.new_contents);
++      Observe(selection.new_contents);  // its full screen changes the layout
 +      contents_->holder()->SetNativeViewCornerRadii(gfx::RoundedCornersF(radius_ - 1));
 +      // New tabs open ready to type, as in BrowserView::RestoreFocus. Posted so it lands after
 +      // the window gives the new contents focus.
