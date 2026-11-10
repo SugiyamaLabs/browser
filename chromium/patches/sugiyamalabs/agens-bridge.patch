@@ -3237,10 +3237,10 @@ index 0000000000..d17f28fa05
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_CONTROLLED_H_
 diff --git a/chrome/browser/agens/embed/agens_cookie_pool.cc b/chrome/browser/agens/embed/agens_cookie_pool.cc
 new file mode 100644
-index 0000000000..97ebf43efb
+index 0000000000..36b5ad620a
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_cookie_pool.cc
-@@ -0,0 +1,396 @@
+@@ -0,0 +1,411 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Mirrors cookies between the loaded atos of the pool through each profile's own CookieManager.
 +// Cookie values pass through here only on their way from one store to another: never logged,
@@ -3285,7 +3285,9 @@ index 0000000000..97ebf43efb
 +
 +// A write we made that the store has not reported back after this long never will be.
 +constexpr base::TimeDelta kEchoLifetime = base::Seconds(5);
-+// "synced" is exact at merge end, unload and quit; in between (for a crash) at most this old.
++// "synced" is exact at merge end, unload, quit and EndSession; in between at most this old.
++// shortcut: after a crash, cookies mirrored in the last minute look newer than "synced", so a
++// logout made in another ato while this one slept can come back; upgrade if crashes make it matter.
 +constexpr base::TimeDelta kSyncedEvery = base::Seconds(60);
 +// Changes during a merge make it read both sides again, at most this many passes in all.
 +constexpr int kMaxMergePasses = 3;
@@ -3554,9 +3556,7 @@ index 0000000000..97ebf43efb
 +    }
 +    if (base::Time::Now() - last_synced_ > kSyncedEvery && ReadyCount() > 1) {
 +      last_synced_ = base::Time::Now();
-+      for (auto& [profile, member] : members_) {
-+        if (member->state == State::kReady) SetSynced(profile->GetPath());
-+      }
++      RecordSynced();
 +    }
 +  }
 +  // From a member merging to the pool (the ready members).
@@ -3604,14 +3604,25 @@ index 0000000000..97ebf43efb
 +    if (echo != member->echoes.end()) member->echoes.erase(echo);
 +  }
 +
++  // Every ready member is in sync with the others now. Mirrored writes are stamped with the time
++  // they happen, so "synced" must be at least the last of them: else, on the next load, a cookie
++  // the others deleted meanwhile looks new and comes back.
++  void RecordSynced() {
++    if (ReadyCount() < 2) return;
++    for (auto& [profile, member] : members_) {
++      if (member->state == State::kReady) SetSynced(profile->GetPath());
++    }
++  }
++
++ public:
++  // SIGTERM and logout skip OnProfileManagerDestroying and OnProfileWillBeDestroyed.
++  void EndSession() { RecordSynced(); }
++
++ private:
 +  // ProfileManagerObserver:
 +  void OnProfileAdded(Profile* profile) override { Refresh(); }
 +  void OnProfileManagerDestroying() override {
-+    if (ReadyCount() > 1) {
-+      for (auto& [profile, member] : members_) {
-+        if (member->state == State::kReady) SetSynced(profile->GetPath());
-+      }
-+    }
++    RecordSynced();
 +    members_.clear();
 +    profile_observations_.RemoveAllObservations();
 +    manager_observation_.Reset();
@@ -3636,13 +3647,17 @@ index 0000000000..97ebf43efb
 +  CookiePool::Get().Start();
 +}
 +
++void EndCookiePoolSession() {
++  CookiePool::Get().EndSession();
++}
++
 +}  // namespace agens
 diff --git a/chrome/browser/agens/embed/agens_cookie_pool.h b/chrome/browser/agens/embed/agens_cookie_pool.h
 new file mode 100644
-index 0000000000..19eb43705a
+index 0000000000..48063dd9a1
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_cookie_pool.h
-@@ -0,0 +1,16 @@
+@@ -0,0 +1,19 @@
 +// Copyright 2026 SugiyamaLabs.
 +// "Compartilhar cookies": the atos with the switch on (AgensWindow::AtoSharesCookies) form one
 +// pool, and a cookie set, changed or deleted in one of them is written to the others' cookie
@@ -3655,6 +3670,9 @@ index 0000000000..19eb43705a
 +
 +// Starts following the pool (once; later calls do nothing). UI thread, after the profile manager.
 +void StartCookiePool();
++// The process is about to end without tearing profiles down (SIGTERM, logout): records "synced"
++// for the atos in sync now, before Local State's last write. From BrowserProcessImpl::EndSession.
++void EndCookiePoolSession();
 +
 +}  // namespace agens
 +
@@ -4487,20 +4505,21 @@ index 3c18c4eab1..70ad1711ca 100644
    [(__bridge AgensChrome*)chrome permissionGone];
  }
 diff --git a/chrome/browser/browser_process_impl.cc b/chrome/browser/browser_process_impl.cc
-index 433fa42fa4..65017e0702 100644
+index 433fa42fa4..db8969bb41 100644
 --- a/chrome/browser/browser_process_impl.cc
 +++ b/chrome/browser/browser_process_impl.cc
-@@ -85,6 +85,9 @@
+@@ -85,6 +85,10 @@
  #include "chrome/browser/printing/print_job_manager.h"
  #include "chrome/browser/profiles/profile_manager.h"
  #include "chrome/browser/sugiyamalabs/adblock.h"
 +#if BUILDFLAG(IS_MAC)
 +#include "chrome/browser/agens/bridge/bridge.h"  // SugiyamaLabs
++#include "chrome/browser/agens/embed/agens_cookie_pool.h"  // SugiyamaLabs
 +#endif
  #include "chrome/browser/resource_coordinator/resource_coordinator_parts.h"
  #include "chrome/browser/serial/serial_policy_allowed_ports.h"
  #include "chrome/browser/shell_integration.h"
-@@ -628,6 +631,9 @@ void BrowserProcessImpl::StartTearDown() {
+@@ -628,6 +632,9 @@ void BrowserProcessImpl::StartTearDown() {
    // |tearing_down_| necessary in IsShuttingDown().
    tearing_down_ = true;
    DCHECK(IsShuttingDown());
@@ -4510,18 +4529,19 @@ index 433fa42fa4..65017e0702 100644
  
    features_->PostMainMessageLoopRun();
    metrics_services_manager_client_ = nullptr;
-@@ -882,6 +888,10 @@ void RequestProxyResolvingSocketFactory(
+@@ -882,6 +889,11 @@ void RequestProxyResolvingSocketFactory(
  }  // namespace
  
  void BrowserProcessImpl::EndSession() {
 +#if BUILDFLAG(IS_MAC)
 +  // SugiyamaLabs: SIGTERM and logout end here and exit without StartTearDown.
 +  agens::bridge::Stop();
++  agens::EndCookiePoolSession();  // before Local State's write below
 +#endif
    // Mark all the profiles as clean.
    ProfileManager* pm = profile_manager();
    scoped_refptr<RundownTaskCounter> rundown_counter =
-@@ -1345,6 +1355,11 @@ BuildState* BrowserProcessImpl::GetBuildState() {
+@@ -1345,6 +1357,11 @@ BuildState* BrowserProcessImpl::GetBuildState() {
  // static
  void BrowserProcessImpl::RegisterPrefs(PrefRegistrySimple* registry) {
    sugiyamalabs::adblock::RegisterPrefs(registry);  // SugiyamaLabs
@@ -4533,7 +4553,7 @@ index 433fa42fa4..65017e0702 100644
  
    registry->RegisterBooleanPref(prefs::kDefaultBrowserSettingEnabled, false);
  
-@@ -1706,6 +1721,9 @@ void BrowserProcessImpl::PreMainMessageLoopRun() {
+@@ -1706,6 +1723,9 @@ void BrowserProcessImpl::PreMainMessageLoopRun() {
  
    features_->PreMainMessageLoopRun();
    platform_part_->PreMainMessageLoopRun();
