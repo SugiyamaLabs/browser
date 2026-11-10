@@ -1014,7 +1014,7 @@ index 0000000000..64f981ee02
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..fbf9987531
+index 0000000000..8d3f790530
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
 @@ -0,0 +1,2119 @@
@@ -2098,7 +2098,7 @@ index 0000000000..fbf9987531
 +                                                defer:YES];
 +  w.titlebarAppearsTransparent = YES;
 +  w.titleVisibility = NSWindowTitleHidden;
-+  w.title = @"Boas-vindas ao Agens";
++  w.title = @"Boas-vindas ao AgensBrowser";
 +  w.releasedWhenClosed = NO;
 +  if ((self = [super initWithWindow:w])) {
 +    w.delegate = self;
@@ -2210,7 +2210,7 @@ index 0000000000..fbf9987531
 +      [self line:@"Nenhuma telemetria: parado, o navegador não faz conexão nenhuma" y:y];
 +      break;
 +    case 4: {
-+      y = [self title:@"Abrir os links no Agens?" lead:@"Links do Slack, do e-mail e de outros apps passam a abrir aqui."];
++      y = [self title:@"Abrir os links no AgensBrowser?" lead:@"Links do Slack, do e-mail e de outros apps passam a abrir aqui."];
 +      NSButton* yes = [NSButton buttonWithTitle:_madeDefault ? @"Pronto, é o padrão" : @"Usar como navegador padrão"
 +                                         target:self
 +                                         action:@selector(makeDefault:)];
