@@ -144,13 +144,22 @@ O controle vale **para a conexão**: quando o cliente desconecta, o controle aca
 → {"id": 10, "op": "control.stop"}
 ```
 
-- **`control.start {ato, reason}`**: a pessoa vê a folha "O <app> quer usar abas do ato <ato>" com o `reason` (até 1024 caracteres), e pode escolher **Permitir sempre** (só vale para app assinado). Uma sessão por conexão, para um ato; um segundo `control.start` na mesma conexão dá `bad_request`.
+- **`control.start {ato, reason, agent?, allow?}`**: a pessoa vê a folha "O <app> quer usar abas do ato <ato>" com o `reason` (até 1024 caracteres), e pode escolher **Permitir sempre** (só vale para app assinado). Uma sessão por conexão, para um ato; um segundo `control.start` na mesma conexão dá `bad_request`.
+- **Nome e permissões.** `agent` é o nome que aparece no aviso (até 40 caracteres; o padrão é o nome do app). `allow` é uma lista com `"passwords"` (extensões e senhas salvas voltam a preencher nas abas da sessão) e/ou `"clipboard"` (copiar, recortar e colar pelo teclado, inclusive em campo de senha). A folha mostra o que foi pedido; com `clipboard`, avisa que o agente pode acabar vendo uma senha. Sem `allow`, os dois ficam bloqueados. Pedir mais do que da última vez faz a folha aparecer de novo, mesmo com "Permitir sempre".
+- **O que o agente está fazendo.** `control.status {title?, detail?}` (até 120 caracteres cada) troca as duas linhas do aviso; vazio volta ao padrão ("<agent> está usando esta aba" e o `reason`).
+- **Assumir e devolver.** No aviso, a pessoa toca em **Assumir**: chega o evento `control.paused`, e `tab.*` e `page.*` respondem `paused` até ela tocar em **Devolver** (`control.resumed`). A bolha de parar encerra o controle (`control.stopped`).
 - **Fim do controle**: `control.stop` fecha as abas da sessão. Ao desconectar, as abas ficam abertas, sem controle. Se a pessoa tocar em "Parar", chega o evento `control.stopped` e `tab.*` e `page.*` passam a dar `unauthorized`.
 - **`tab.open` e `tab.navigate`**: só `http` e `https`, só no ato da sessão (outro ato dá `denied`). Respondem quando a navegação termina, com teto de 30 s; página que falhou ao carregar ainda é `ok`. O `tab` vale só nesta sessão: fora dela, ou depois de fechada, dá `not_found`.
+- **`tab.back`, `tab.forward`, `tab.reload {tab}`**: respondem quando a navegação termina (teto de 30 s). Sem para onde ir, `bad_request`.
 - **`page.snapshot`**: lista plana, na ordem do documento, de controles, links, títulos, imagens com nome e texto. Cada nó tem `ref`, `role`, `name`, `value` e `depth`, e, quando vale, `focused`, `disabled`, `checked` e `password`. Os papéis são os nomes do Chromium (`textField`, `button`, `link`, `checkBox`, `comboBoxSelect`, `staticText`, `heading`, `image`). Teto de 2000 nós (`truncated: true`). O `ref` vale até a próxima navegação da aba; depois dá `not_found`.
 - **`page.click`**: clique de mouse de verdade no centro do elemento, rolando até ele antes.
 - **`page.type`**: foca o elemento e digita tecla a tecla, até 10000 caracteres. Quebra de linha e tab dão `bad_request`: use `page.key`.
 - **`page.key`**: `Enter`, `Tab`, `Escape`, `Backspace`, `Delete`, `ArrowUp/Down/Left/Right`, `PageUp`, `PageDown`, `Home`, `End` ou um caractere, com `modifiers` opcionais (`shift`, `meta`, `alt`, `ctrl`). Copiar, recortar e colar pelo teclado dão `denied`.
+- **`page.hover {tab, ref}`** move o mouse até o elemento. **`page.scroll {tab, dy, ref?}`** rola `dy` pixels no elemento ou no centro da página.
+- **`page.console {tab}`** → `{messages: [{level, text, url, line}]}`: as últimas 200 mensagens do console e erros não tratados desde que a sessão pegou a aba. `console.log` e `console.info` chegam como `info`; erro não tratado, como `error`.
+- **`page.network {tab}`** → `{requests: [{url, method, status ou error, type}]}`: só as requisições que falharam (erro de rede ou status 400 ou mais), até 200. Nunca traz cabeçalhos, cookies nem corpo.
+- **Diálogos.** `alert`, `confirm`, `prompt` e `beforeunload` de uma aba controlada não abrem janela: chega o evento `page.dialog {tab, type, message}`, as outras operações da aba respondem `dialog_open`, e o agente responde com `page.dialog {tab, action, text?}` (`accept` ou `dismiss`). Se a pessoa assumir, o diálogo aparece para ela.
+- **`page.eval {tab, js}`** → `{result}`: roda JavaScript **só em endereço local** (`localhost`, `*.localhost`, `127.0.0.1`, `[::1]`); em qualquer outro site responde `denied`. O resultado tem de caber em JSON e em 1 MB; promessa não é esperada; teto de 10 s.
 - **`page.screenshot`**: PNG da área visível da aba, a 1x. Funciona com a aba em segundo plano.
 - **Senha**: campo de senha vem com `password: true` e sem `value`, inclusive depois de "mostrar senha". `page.type` nele dá `denied`. Com o foco nele, `page.key` só aceita teclas que movem (Tab, Enter, Escape, setas). `page.screenshot` dá `denied` enquanto houver senha revelada na página.
 - Nas abas controladas não há senhas salvas, autofill nem downloads.
@@ -192,6 +201,8 @@ Quem desenha a interface é o app hospedeiro: barra de endereço, abas, atos, o 
 | `unauthorized` | O cliente não passou na checagem de assinatura ou de aprovação, ou usou `tab`/`page` sem `control.start` nesta conexão. |
 | `denied` | A pessoa tocou em **Não permitir**, ou a operação é proibida (ex.: `page.type` em campo de senha). |
 | `failed` | O navegador não conseguiu criar ou abrir o ato, ou está fechando. |
+| `paused` | A pessoa assumiu a aba: o agente espera ela devolver. |
+| `dialog_open` | A aba tem um diálogo aberto: responda com `page.dialog`. |
 | `cancelled` | `login`: a pessoa fechou a aba antes do fim. |
 | `needs_login` | `renew`: o site pediu login; use `login`. |
 
@@ -200,7 +211,9 @@ Quem desenha a interface é o app hospedeiro: barra de endereço, abas, atos, o 
 | Evento | Campos | Quando |
 |---|---|---|
 | `session.lost` | `ato`, `from`, `name` | Um item de sessão vigiado sumiu ou expirou no cookie store do ato. |
-| `control.stopped` | `reason` | O controle desta conexão acabou: `"user"` (a pessoa tocou em "Parar") ou `"sharing_changed"` (mudou o grupo de atos que compartilham cookies com este). |
+| `control.paused` / `control.resumed` | — | A pessoa tocou em Assumir ou em Devolver. |
+| `page.dialog` | `tab`, `type`, `message` | Uma aba controlada abriu um diálogo e espera resposta. |
+| `control.stopped` | `reason` | O controle desta conexão acabou: `"user"` (a pessoa tocou na bolha de parar) ou `"sharing_changed"` (mudou o grupo de atos que compartilham cookies com este). |
 
 ## Regras de segurança que o cliente sente
 
@@ -208,8 +221,8 @@ Quem desenha a interface é o app hospedeiro: barra de endereço, abas, atos, o 
 - **Só os itens exatos do `need`.** Nunca o cookie jar inteiro. Item novo é aprovação nova.
 - **Aprovação.** `session` e `control.start` esperam a pessoa. "Permitir sempre" vale por app, ato e itens exatos.
 - **Controle só vê as abas que ele abriu**, no ato aprovado. As abas da pessoa não aparecem.
-- **Senha é recusada.** O snapshot traz campo de senha sem valor, e `page.type` nele dá `denied`. Cookies e senhas salvas ficam fora do controle.
-- **Faixa visível** nas abas controladas: "Controlado pelo Agens · Parar".
+- **Senha é recusada**, salvo o que a pessoa liberou em `allow`. O snapshot traz campo de senha sem valor, e `page.type` nele dá `denied`. Cookies e senhas salvas ficam fora do controle.
+- **Aviso visível** nas abas controladas: quem é o agente, o que está fazendo, e o botão Assumir.
 - **Cookies compartilhados.** Cada ato tem o interruptor "Compartilhar cookies"; os atos com ele ligado dividem os cookies entre si, e `atos.list` traz `shared` em cada ato. Um ato que compartilha funciona normalmente com `login`, `session` e `control`: a folha de aprovação avisa com quais atos ele divide os cookies. Se esse grupo mudar durante um controle, o controle acaba com `control.stopped` e `reason` `"sharing_changed"`. Só a pessoa muda o interruptor, pela interface.
 
 ## Testando com agensctl
