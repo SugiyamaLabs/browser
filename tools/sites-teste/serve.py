@@ -4,7 +4,7 @@ import http.server, json, sys, urllib.parse
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-PAGES = {"/login": "login.html", "/app/": "app.html", "/form": "form.html", "/other": "other.html", "/agent": "agent.html"}
+PAGES = {"/login": "login.html", "/app/": "app.html", "/form": "form.html", "/other": "other.html", "/agent": "agent.html", "/post": "post.html"}
 SID = "sid-fake-123"  # fake test values only
 SEEN = {}  # /whoami tag -> whether that request carried the login cookie (in memory only)
 
@@ -57,6 +57,9 @@ class H(http.server.BaseHTTPRequestHandler):
         self.redirect("/app/", [f"sid={SID}; Path=/; Max-Age=3600; HttpOnly", "d=fake-d-cookie-456; Path=/; Max-Age=3600"])  # persistent: they survive a browser restart
 
     def do_POST(self):
+        if self.path == "/posted":  # a page reached by a form POST, for tab.reload
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            return self.reply(200, b'<!doctype html><meta charset="utf-8"><title>Posted (test)</title><h1>Posted</h1>')
         if self.path != "/login":
             return self.reply(404, b"not found")
         self.rfile.read(int(self.headers.get("Content-Length") or 0))  # any credentials work: they are fake

@@ -219,15 +219,17 @@ check("control.start with an unknown allow value is bad_request",
 check("control.start with allow not a list is bad_request", code(c4.ask("control.start", ato=ato, reason="x", allow="clipboard")) == "bad_request")
 for bad in ("", "a\nb", "x" * 41, "a\u202eb"):
     check(f"control.start with agent {bad[:8]!r} is bad_request", code(c4.ask("control.start", ato=ato, reason="x", agent=bad)) == "bad_request")
-r = c4.ask("control.start", ato=ato, reason="Gate da fase 3: o agente", agent="Popi")
-check("control.start with agent Popi", code(r) == "ok", r)
+for bad in ("a\nb", "a\u202eb", "a\u2060b"):
+    check(f"control.start with reason {bad!r} is bad_request", code(c4.ask("control.start", ato=ato, reason=bad)) == "bad_request")
+r = c4.ask("control.start", ato=ato, reason="Gate da fase 3: o agente", agent="Popi", allow=["eval"])
+check("control.start with agent Popi and allow [eval]", code(r) == "ok", r)
 for good in ({"title": "Popi está testando a página", "detail": "passo 1 de 3"}, {"detail": "passo 2 de 3"},
              {"title": "", "detail": ""}, {}):
     check(f"control.status {good} is ok", code(c4.ask("control.status", **good)) == "ok")
 for bad in ({"title": "x" * 121}, {"detail": "a\nb"}, {"title": 3}, {"detail": "a\u202eb"}):
     check(f"control.status {str(bad)[:30]} is bad_request", code(c4.ask("control.status", **bad)) == "bad_request")
 c4.ask("control.status", title="Popi está testando a página", detail="passo 3 de 3")
-r = c4.ask("tab.open", ato=ato, url=f"{SITE}/agent")
+r = c4.ask("tab.open", ato=ato, url=f"{SITE}/agent#frag-secret")
 at = r.get("tab")
 check("tab.open /agent", code(r) == "ok" and bool(at), r)
 heading = lambda name: (lambda ns: find(ns, "heading", name) is not None)
@@ -277,6 +279,8 @@ reqs = r.get("requests", [])
 check("page.network has the 404 the page fetched",
       any(q.get("url", "").endswith("/missing-404") and q.get("status") == 404 for q in reqs), reqs)
 check("page.network has no entry for the successful /api/ping", not any("/api/ping" in q.get("url", "") for q in reqs), reqs)
+check("no fragment in page.console or page.network URLs",
+      not any("#" in e.get("url", "") for e in msgs + reqs), [e.get("url") for e in msgs + reqs if "#" in e.get("url", "")])
 check("page.network entries carry only url, method, status or error, type",
       all(set(q) <= {"url", "method", "status", "error", "type"} for q in reqs), reqs[:2])
 
@@ -295,6 +299,7 @@ if ask:
     check("page.dialog with no dialog open is bad_request", code(c4.ask("page.dialog", tab=at, action="dismiss")) == "bad_request")
 
 r = c4.ask("page.eval", tab=at, js="document.title")
+check("with allow [eval]: page.eval works on the local site", code(c4.ask("page.eval", tab=at, js="1 + 1")) == "ok")
 check("page.eval on the local site returns the value", code(r) == "ok" and r.get("result") == "Agent (test)", r)
 r = c4.ask("page.eval", tab=at, js="({a: 1 + 1, b: [true, null]})")
 check("page.eval returns an object as JSON", code(r) == "ok" and r.get("result") == {"a": 2, "b": [True, None]}, r)
@@ -311,6 +316,19 @@ print("info: http://localhost.:8765/agent", "loaded" if r and r.get("ok") and he
 check("page.eval on http://localhost.:8765 (look-alike) is denied", code(c4.ask("page.eval", tab=at, js="1")) == "denied")
 c4.ask("tab.navigate", tab=at, url="http://example.invalid/")
 check("page.eval on http://example.invalid/ (error page) is denied", code(c4.ask("page.eval", tab=at, js="1")) == "denied")
+
+# tab.reload after a form POST would resubmit it: refused.
+r = c4.ask("tab.navigate", tab=at, url=f"{SITE}/post")
+r = snapshot(c4, at, lambda ns: find(ns, "button", "^Send$") is not None, wait=6)
+send = find(r.get("nodes", []), "button", "^Send$") if r else None
+if send:
+    c4.ask("page.click", tab=at, ref=send["ref"])
+    r = snapshot(c4, at, heading("Posted"), wait=6)
+    check("the POST form landed on /posted", bool(r) and r.get("ok") and heading("Posted")(r["nodes"]))
+    r = c4.ask("tab.reload", tab=at)
+    check("tab.reload after a form POST is bad_request", code(r) == "bad_request" and "resubmit" in r.get("message", ""), r)
+else:
+    check("the /post page shows its Send button", False)
 
 # Clipboard: refused without allow, open with allow ["clipboard"] (also on a password field).
 r = c4.ask("tab.open", ato=ato, url=f"{SITE}/form")
@@ -330,6 +348,8 @@ ft = r.get("tab")
 r = snapshot(c5, ft, lambda ns: find(ns, "textField", "Password") is not None)
 fnodes = r.get("nodes", []) if r else []
 ftext, fpw = find(fnodes, "textField", "Text", lambda n: not n.get("password")), find(fnodes, "textField", "Password")
+r = c5.ask("page.eval", tab=ft, js="1")
+check("without allow [eval]: page.eval on the local site is denied", code(r) == "denied", r)
 if ftext:
     c5.ask("page.click", tab=ft, ref=ftext["ref"])
     r = c5.ask("page.key", tab=ft, key="v", modifiers=["meta"])

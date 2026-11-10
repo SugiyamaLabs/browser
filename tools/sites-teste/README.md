@@ -14,7 +14,8 @@ tools/sites-teste/serve.py [PORTA]   # padrão 8765
 | `/logout` | Apaga os cookies e volta para `/login` (para testar `session.lost` e `needs_login`). |
 | `/form` | Para o controle: campo de texto, campo de senha, checkbox, select, botão "Show" que escreve o digitado em `#out`, e link para `/other`. O `type` no campo de senha deve ser recusado. |
 | `/other` | Destino do link, para testar `tab.navigate` e o clique em link. |
-| `/agent` | Para o resto do controle: "Hover me" escreve "Hovered: yes" ao passar o mouse, "Ask" abre um `confirm()` e escreve "Answer: true/false", a página é alta e um texto fixo mostra "Scrolled: N". Ao abrir, faz `console.log("agens-console-test")`, lança um erro não tratado ("agens-uncaught-test"), busca `/missing-404` (404) e `/api/ping` (200). |
+| `/post` | Um formulário POST ("Send") para `/posted`, que responde "Posted": `tab.reload` ali deve ser recusado. |
+| `/agent` | Para o resto do controle: "Hover me" escreve "Hovered: yes" ao passar o mouse, "Ask" abre um `confirm()` e escreve "Answer: true/false", a página é alta e um texto fixo mostra "Scrolled: N". Ao abrir, faz `console.log("agens-console-test")`, lança um erro não tratado ("agens-uncaught-test"), busca `/missing-404#frag-secret` (404; o fragmento não pode aparecer em `page.network`) e `/api/ping` (200). |
 | `/whoami?tag=X` | Anota se esse pedido veio com o cookie de login (`sid`). Serve para ver se um ato está logado sem nenhuma op de sessão: `atos open <ato> …/whoami?tag=X`. |
 | `/seen?tag=X` | Devolve o que `/whoami` anotou: `{"seen": true, "logged_in": false}`. Para o `curl` do gate. |
 

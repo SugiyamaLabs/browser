@@ -12,6 +12,6 @@ $("ask").onclick = () => { $("answer").textContent = "Answer: " + confirm("Proce
 addEventListener("scroll", () => { $("scrolled").textContent = "Scrolled: " + Math.round(scrollY); });
 console.log("agens-console-test");
 setTimeout(() => { throw new Error("agens-uncaught-test"); });
-fetch("/missing-404");  // a failed request for page.network
+fetch("/missing-404#frag-secret");  // a failed request for page.network (its fragment must not show)
 fetch("/api/ping");     // a successful one, which page.network must not list
 </script>
