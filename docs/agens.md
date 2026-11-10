@@ -106,7 +106,7 @@ O agente nunca vê as abas que a pessoa abriu, só as que ele abriu, e só no at
 - `chrome/browser/agens/bridge/`: o servidor do socket (no thread de IO), o despacho para o thread de UI e cada operação. A cola é a `AgensWindow`, sem passar pela interface.
 - As folhas de aprovação e o aviso de controle ficam na interface (`ui/chrome_mac.mm`), por ganchos novos na API C (`agens_embed.h`). Dentro do Agens, o kit repassa esses pedidos para o Agens desenhar.
 - `kit/apple/`: o `BrowserKit`.
-- `tools/agensctl`: cliente de linha de comando para o protocolo, a nossa bancada. Comandos como `agensctl atos create "Cliente A" --cor azul --tag time-123` e `agensctl session --ato … --need cookie:https://app.slack.com:d`. O time do Agens usa para testar sem a Engine.
+- `tools/agensctl`: cliente de linha de comando para o protocolo, a nossa bancada. Comandos como `agensctl atos create "Cliente A" --cor blue --tag time-123` e `agensctl session --ato … --need cookie:https://app.slack.com:d`. O time do Agens usa para testar sem a Engine.
 - `docs/protocolo.md`: a referência do protocolo para o time do Agens, com exemplos.
 
 ## Fases
@@ -114,7 +114,7 @@ O agente nunca vê as abas que a pessoa abriu, só as que ele abriu, e só no at
 | Fase | O que entra | Pronto quando | Estimativa |
 |---|---|---|---|
 | 0 | Este plano e o protocolo aprovados | Willian aprova | — |
-| 1 | Socket, autenticação do cliente, `hello`, atos com `tag`, `agensctl`, `protocolo.md` | `agensctl atos create "Cliente A" --cor azul --tag t1` cria o ato, e ele aparece na lateral | ~1 dia |
+| 1 | Socket, autenticação do cliente, `hello`, atos com `tag`, `agensctl`, `protocolo.md` | `agensctl atos create "Cliente A" --cor blue --tag t1` cria o ato, e ele aparece na lateral | ~1 dia |
 | 2 | `login`, `session`, `renew`, `session.lost`, folhas de aprovação, recusa com cookies compartilhados | Login num Slack de teste por `agensctl login`, depois `session` entrega o cookie `d` só depois do OK. Um header Bearer capturado de um site de teste | 1–2 dias |
 | 3 | Controle: `control.*`, `tab.*`, `page.*`, aviso visível, recusa em senha | `agensctl` abre um site, lê o snapshot, clica e digita; a faixa aparece; digitar em senha é recusado | 2–3 dias |
 | 4 | Prova do embed: um app Swift de exemplo mostra uma aba do motor auxiliar | A aba aparece e responde a clique e teclado dentro do app de exemplo, com o motor em outro processo | ~1 semana, a parte mais incerta |

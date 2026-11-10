@@ -6,7 +6,7 @@ Referência para quem escreve um cliente (o time do Agens, em Go). O plano e o p
 
 | Fase | Operações | Estado |
 |---|---|---|
-| 1 | `hello`, `atos.*` | em construção agora |
+| 1 | `hello`, `atos.*` | implementado |
 | 2 | `login`, `session`, `renew`, evento `session.lost` | especificado, **não implementado** |
 | 3 | `control.*`, `tab.*`, `page.*` | especificado, **não implementado** |
 
@@ -55,23 +55,28 @@ UTF-8, um objeto JSON por linha (`\n`). Parâmetros ficam no mesmo objeto, sem a
 
 ```
 → {"id": 1, "op": "hello", "client": "agens-engine"}
-← {"id": 1, "ok": true, "protocol": 1, "browser": "1.4.0"}
+← {"id": 1, "ok": true, "protocol": 1, "browser": "156.0.8078.79"}
 ```
 
 ### atos (fase 1)
 
 Um pedido para um ato dormindo acorda o ato. `tag` é uma etiqueta opaca do cliente: o navegador só guarda e devolve. Apagar ato não existe na v1.
 
+- O id do ato é o nome da pasta do perfil (`Default`, `Profile 1`…) e não muda. O primeiro ato (`Default`) aparece como "Pessoal".
+- `color` é uma de `orange`, `blue`, `pink`, `purple`, `teal`. Outra dá `bad_request`.
+- Em `atos.create`, `color` e `tag` são opcionais. O ato é criado sem abrir janela.
+- `atos.open` só aceita `url` com `http` ou `https`.
+
 ```
-→ {"id": 2, "op": "atos.create", "name": "Cliente A", "color": "azul", "tag": "time-123"}
-← {"id": 2, "ok": true, "ato": "p7f3a"}
+→ {"id": 2, "op": "atos.create", "name": "Cliente A", "color": "blue", "tag": "time-123"}
+← {"id": 2, "ok": true, "ato": "Profile 1"}
 
 → {"id": 3, "op": "atos.list"}
-← {"id": 3, "ok": true, "atos": [{"id": "p7f3a", "name": "Cliente A", "color": "azul", "tag": "time-123", "asleep": false}]}
+← {"id": 3, "ok": true, "atos": [{"id": "Profile 1", "name": "Cliente A", "color": "blue", "tag": "time-123", "asleep": false}]}
 
-→ {"id": 4, "op": "atos.rename", "ato": "p7f3a", "name": "Cliente B"}
-→ {"id": 5, "op": "atos.color", "ato": "p7f3a", "color": "verde"}
-→ {"id": 6, "op": "atos.open", "ato": "p7f3a", "url": "https://example.com"}
+→ {"id": 4, "op": "atos.rename", "ato": "Profile 1", "name": "Cliente B"}
+→ {"id": 5, "op": "atos.color", "ato": "Profile 1", "color": "teal"}
+→ {"id": 6, "op": "atos.open", "ato": "Profile 1", "url": "https://example.com"}
 ← {"id": 6, "ok": true}
 ```
 
@@ -80,8 +85,8 @@ Um pedido para um ato dormindo acorda o ato. `tag` é uma etiqueta opaca do clie
 Abre o site no ato; a pessoa entra como sempre. A aba fecha quando `done` acontece. `done` é a regra que a ponte conhece: o navegador não adivinha.
 
 ```
-→ {"id": 7, "op": "login", "ato": "p7f3a", "url": "https://app.slack.com", "done": {"cookie": "d", "from": "https://app.slack.com"}}
-→ {"id": 7, "op": "login", "ato": "p7f3a", "url": "https://outlook.office.com", "done": {"url_prefix": "https://outlook.office.com/mail/"}}
+→ {"id": 7, "op": "login", "ato": "Profile 1", "url": "https://app.slack.com", "done": {"cookie": "d", "from": "https://app.slack.com"}}
+→ {"id": 7, "op": "login", "ato": "Profile 1", "url": "https://outlook.office.com", "done": {"url_prefix": "https://outlook.office.com/mail/"}}
 ← {"id": 7, "ok": true}
 ← {"id": 7, "ok": false, "error": "cancelled"}
 ```
@@ -91,7 +96,7 @@ Abre o site no ato; a pessoa entra como sempre. A aba fecha quando `done` aconte
 Mostra a folha "Entregar ao Agens: cookie `d` de app.slack.com…" com o motivo e os itens exatos. Só com **Permitir** (ou **Permitir sempre**) os valores saem.
 
 ```
-→ {"id": 8, "op": "session", "ato": "p7f3a", "reason": "Ponte do Slack",
+→ {"id": 8, "op": "session", "ato": "Profile 1", "reason": "Ponte do Slack",
    "need": [{"type": "cookie", "from": "https://app.slack.com", "name": "d"}]}
 ← {"id": 8, "ok": true, "items": [{"type": "cookie", "from": "https://app.slack.com", "name": "d", "value": "..."}]}
 ```
@@ -106,7 +111,7 @@ Tipos de `need`:
 Pega de novo sem janela, numa aba escondida do ato.
 
 ```
-→ {"id": 9, "op": "renew", "ato": "p7f3a", "need": [...]}
+→ {"id": 9, "op": "renew", "ato": "Profile 1", "need": [...]}
 ← {"id": 9, "ok": true, "items": [...]}
 ← {"id": 9, "ok": false, "error": "needs_login"}
 ```
@@ -116,9 +121,9 @@ Pega de novo sem janela, numa aba escondida do ato.
 O controle vale **para a conexão**: quando o cliente desconecta, o controle acaba. Um fluxo de vários passos usa uma conexão só.
 
 ```
-→ {"id": 1, "op": "control.start", "ato": "p7f3a", "reason": "Preencher o formulário"}
+→ {"id": 1, "op": "control.start", "ato": "Profile 1", "reason": "Preencher o formulário"}
 ← {"id": 1, "ok": true}
-→ {"id": 2, "op": "tab.open", "ato": "p7f3a", "url": "https://example.com"}
+→ {"id": 2, "op": "tab.open", "ato": "Profile 1", "url": "https://example.com"}
 ← {"id": 2, "ok": true, "tab": "t1"}
 → {"id": 3, "op": "page.snapshot", "tab": "t1"}
 ← {"id": 3, "ok": true, "nodes": [{"ref": "e1", "role": "textbox", "name": "Text", "value": ""}, ...]}
@@ -141,6 +146,7 @@ O controle vale **para a conexão**: quando o cliente desconecta, o controle aca
 | `not_found` | Ato, aba ou `ref` que não existe. |
 | `unauthorized` | O cliente não passou na checagem de assinatura ou de aprovação, ou usou `tab`/`page` sem `control.start` nesta conexão. |
 | `denied` | A pessoa tocou em **Não permitir**, ou a operação é proibida (ex.: `page.type` em campo de senha). |
+| `failed` | O navegador não conseguiu criar ou abrir o ato, ou está fechando. |
 | `cancelled` | `login`: a pessoa fechou a aba antes do fim. |
 | `needs_login` | `renew`: o site pediu login; use `login`. |
 | `isolation_off` | "Compartilhar cookies entre atos" está ligado: `session` e `control` são recusados até desligar. |
@@ -169,10 +175,10 @@ Quando a pessoa toca em "Parar" na faixa, o controle acaba e o cliente é avisad
 
 ```
 agensctl hello
-agensctl atos create "Cliente A" --cor azul --tag time-123
+agensctl atos create "Cliente A" --cor blue --tag time-123
 agensctl atos list
 agensctl atos rename ID "Cliente B"
-agensctl atos color ID verde
+agensctl atos color ID teal
 agensctl atos open ID https://example.com
 agensctl login --ato ID --url http://127.0.0.1:8765/login --done cookie:http://127.0.0.1:8765:d
 agensctl login --ato ID --url http://127.0.0.1:8765/login --done url_prefix:http://127.0.0.1:8765/app/

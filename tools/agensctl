@@ -3,7 +3,7 @@
 
 Examples:
   agensctl hello
-  agensctl atos create "Cliente A" --cor azul --tag time-123
+  agensctl atos create "Cliente A" --cor blue --tag time-123
   agensctl session --ato ID --need cookie:https://app.slack.com:d --reason "Slack bridge"
   echo '{"op":"control.start","ato":"ID","reason":"test"}' | agensctl raw
 

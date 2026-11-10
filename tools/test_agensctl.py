@@ -72,7 +72,7 @@ class T(unittest.TestCase):
                               capture_output=True, text=True, timeout=20)
 
     def test_atos_roundtrip(self):
-        r = self.ctl("atos", "create", "Cliente A", "--cor", "azul", "--tag", "t1")
+        r = self.ctl("atos", "create", "Cliente A", "--cor", "blue", "--tag", "t1")
         self.assertEqual((r.returncode, json.loads(r.stdout)["ato"]), (0, "a1"))
         out = json.loads(self.ctl("atos", "list").stdout)
         self.assertEqual((out["atos"][0]["name"], out["atos"][0]["tag"]), ("Cliente A", "t1"))
