@@ -3218,29 +3218,33 @@ index 0000000000..d17f28fa05
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_CONTROLLED_H_
 diff --git a/chrome/browser/agens/embed/agens_cookie_pool.cc b/chrome/browser/agens/embed/agens_cookie_pool.cc
 new file mode 100644
-index 0000000000..fd0899a40a
+index 0000000000..97ebf43efb
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_cookie_pool.cc
-@@ -0,0 +1,232 @@
+@@ -0,0 +1,396 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Mirrors cookies between the loaded atos of the pool through each profile's own CookieManager.
 +// Cookie values pass through here only on their way from one store to another: never logged,
-+// stored or counted.
++// stored or counted. Local State gets one time per ato ("synced"), never a cookie name or value.
 +
 +#include "chrome/browser/agens/embed/agens_cookie_pool.h"
 +
++#include <algorithm>
 +#include <map>
 +#include <memory>
-+#include <set>
++#include <optional>
 +#include <utility>
 +#include <vector>
 +
 +#include "base/functional/bind.h"
++#include "base/json/values_util.h"
 +#include "base/memory/raw_ptr.h"
 +#include "base/memory/weak_ptr.h"
 +#include "base/no_destructor.h"
 +#include "base/scoped_multi_source_observation.h"
 +#include "base/scoped_observation.h"
++#include "base/task/sequenced_task_runner.h"
++#include "base/time/time.h"
 +#include "chrome/browser/agens/embed/agens_window.h"
 +#include "chrome/browser/profiles/profile.h"
 +#include "chrome/browser/profiles/profile_manager.h"
@@ -3260,6 +3264,13 @@ index 0000000000..fd0899a40a
 +
 +namespace {
 +
++// A write we made that the store has not reported back after this long never will be.
++constexpr base::TimeDelta kEchoLifetime = base::Seconds(5);
++// "synced" is exact at merge end, unload and quit; in between (for a crash) at most this old.
++constexpr base::TimeDelta kSyncedEvery = base::Seconds(60);
++// Changes during a merge make it read both sides again, at most this many passes in all.
++constexpr int kMaxMergePasses = 3;
++
 +network::mojom::CookieManager* CookiesOf(Profile* profile) {
 +  return profile->GetDefaultStoragePartition()->GetCookieManagerForBrowserProcess();
 +}
@@ -3269,6 +3280,34 @@ index 0000000000..fd0899a40a
 +using EchoKey = std::pair<net::UniqueCookieKey, bool>;
 +EchoKey KeyOf(const net::CanonicalCookie& cookie, bool deletion) {
 +  return {cookie.LegacyUniqueKey(), deletion};
++}
++
++// When this store got this value (old cookies may lack the update time).
++base::Time Updated(const net::CanonicalCookie& cookie) {
++  return std::max(cookie.LastUpdateDate(), cookie.CreationDate());
++}
++
++// The cookie as written into another store: same everything but updated now, so that store's
++// LastUpdateDate says when it got the value (what a reload merge compares with "synced").
++net::CanonicalCookie Stamped(const net::CanonicalCookie& c) {
++  std::unique_ptr<net::CanonicalCookie> copy = net::CanonicalCookie::FromStorage(
++      c.Name(), c.Value(), c.Domain(), c.Path(), c.CreationDate(), c.ExpiryDate(), c.LastAccessDate(),
++      base::Time::Now(), c.SecureAttribute(), c.IsHttpOnly(), c.SameSite(), c.Priority(), c.PartitionKey(),
++      c.SourceScheme(), c.SourcePort(), c.SourceType(), net::CanonicalCookieFromStorageCallSite::kCookieManager);
++  return copy ? *copy : c;
++}
++
++// agens.atos[<folder>].synced: the last moment this ato was in sync with another loaded ato of the
++// pool. Missing: it never was (or it left the pool since), so its next merge is a first join.
++std::optional<base::Time> Synced(const base::FilePath& dir) {
++  const base::DictValue* extras =
++      g_browser_process->local_state()->GetDict(AgensWindow::kAtosPref).FindDict(dir.BaseName().AsUTF8Unsafe());
++  return extras ? base::ValueToTime(extras->Find("synced")) : std::nullopt;
++}
++void SetSynced(const base::FilePath& dir) {
++  if (!AgensWindow::AtoSharesCookies(dir)) return;  // left the pool or was deleted: nothing to keep
++  ScopedDictPrefUpdate update(g_browser_process->local_state(), AgensWindow::kAtosPref);
++  update->EnsureDict(dir.BaseName().AsUTF8Unsafe())->Set("synced", base::TimeToValue(base::Time::Now()));
 +}
 +
 +class CookiePool : public ProfileManagerObserver, public ProfileObserver {
@@ -3284,86 +3323,178 @@ index 0000000000..fd0899a40a
 +    started_ = true;
 +    manager_observation_.Observe(manager);
 +    prefs_.Init(g_browser_process->local_state());
-+    // The switch flipped: pool wins for an ato that joins.
-+    prefs_.Add(AgensWindow::kAtosPref, base::BindRepeating(&CookiePool::Refresh, base::Unretained(this), false));
-+    Refresh(/*reloaded=*/true);
++    // Posted: our own "synced" writes change this pref from inside the loops below.
++    prefs_.Add(AgensWindow::kAtosPref, base::BindRepeating(&CookiePool::RefreshSoon, base::Unretained(this)));
++    Refresh();
 +  }
 +
 + private:
-+  // One loaded ato of the pool, listening to every change in its store.
++  enum class State { kWaiting, kMerging, kReady };
++
++  // One loaded ato of the pool, listening to every change in its store. Changes are mirrored only
++  // between kReady members; a member still merging is marked dirty instead and reads again.
 +  struct Member : network::mojom::CookieChangeListener {
-+    Member(CookiePool* pool, Profile* profile) : pool(pool), profile(profile) {
++    Member(CookiePool* pool, Profile* profile, int generation)
++        : pool(pool), profile(profile), generation(generation) {
 +      CookiesOf(profile)->AddGlobalChangeListener(receiver.BindNewPipeAndPassRemote());
++      // E.g. the network service restarted: leave, and join again on the new store.
++      receiver.set_disconnect_handler(
++          base::BindOnce(&CookiePool::OnDisconnect, base::Unretained(pool), profile, generation));
 +    }
 +    void OnCookieChange(const net::CookieChangeInfo& change) override { pool->OnChange(this, change); }
 +
 +    raw_ptr<CookiePool> pool;
 +    raw_ptr<Profile> profile;
++    const int generation;  // callbacks meant for an older Member of the same profile do nothing
++    State state = State::kWaiting;
++    bool dirty = false;  // something changed on either side during this merge pass
++    int passes = 0;
++    base::Time pass_start, previous_pass_start;
 +    // Writes this pool made into this store, which the store reports back: they are not mirrored
-+    // again (that would ping-pong forever). Dropped when the write turns out to change nothing.
-+    std::multiset<EchoKey> echoes;
++    // again (that would ping-pong forever). Expire after kEchoLifetime.
++    std::multimap<EchoKey, base::TimeTicks> echoes;
 +    mojo::Receiver<network::mojom::CookieChangeListener> receiver{this};
 +  };
 +
-+  // `reloaded`: an ato of the pool that was already in it got loaded (not a switch just turned on).
-+  void Refresh(bool reloaded) {
++  Member* Find(Profile* profile, int generation) {
++    auto it = members_.find(profile);
++    return it != members_.end() && it->second->generation == generation ? it->second.get() : nullptr;
++  }
++  Member* AnyReady(const Member* except = nullptr) {
++    for (auto& [profile, member] : members_) {
++      if (member.get() != except && member->state == State::kReady) return member.get();
++    }
++    return nullptr;
++  }
++  int ReadyCount() {
++    return static_cast<int>(
++        std::ranges::count_if(members_, [](const auto& m) { return m.second->state == State::kReady; }));
++  }
++
++  void RefreshSoon() {
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE, base::BindOnce(&CookiePool::Refresh, weak_.GetWeakPtr()));
++  }
++  void Refresh() {
 +    ProfileManager* manager = g_browser_process->profile_manager();
 +    if (!manager) return;
 +    for (Profile* profile : manager->GetLoadedProfiles()) {
 +      if (profile->IsOffTheRecord()) continue;
 +      const bool shared = AgensWindow::AtoSharesCookies(profile->GetPath());
 +      if (shared && !members_.contains(profile)) {
-+        Join(profile, reloaded);
++        members_[profile] = std::make_unique<Member>(this, profile, ++generation_);
++        profile_observations_.AddObservation(profile);
 +      } else if (!shared && members_.contains(profile)) {
 +        Leave(profile);  // keeps the cookies it has now
 +      }
 +    }
++    Kick();
 +  }
 +
-+  // shortcut: atos of the pool that are not loaded get nothing until they load, and then only
-+  // from a pool ato loaded at that moment; two pool atos never loaded together don't share, and
-+  // a cookie deleted while the other was asleep comes back from it. Upgrade when that matters:
-+  // load the asleep pool atos' cookie stores alone, without the whole profile.
-+  void Join(Profile* profile, bool reloaded) {
-+    Member* source = members_.empty() ? nullptr : members_.begin()->second.get();
-+    members_[profile] = std::make_unique<Member>(this, profile);
-+    profile_observations_.AddObservation(profile);
-+    if (!source) return;  // the first loaded ato of the pool: nothing to share yet
++  // Waiting members merge with a member that finished its own merge. With none ready and none
++  // merging, the first one waiting is the pool by itself (nothing loaded to merge with).
++  void Kick() {
++    for (auto& [profile, member] : members_) {
++      if (member->state != State::kWaiting) continue;
++      if (Member* source = AnyReady()) {
++        member->passes = 0;
++        StartPass(member.get(), source);
++      } else if (std::ranges::none_of(members_, [](const auto& m) { return m.second->state == State::kMerging; })) {
++        member->state = State::kReady;
++      }
++    }
++  }
++
++  // shortcut: atos of the pool that are not loaded get nothing until they load, so two pool atos
++  // never loaded together don't share (with "synced" they converge later without losing a
++  // logout). Upgrade when that matters: open the asleep pool atos' cookie stores without the profile.
++  void StartPass(Member* member, Member* source) {
++    member->state = State::kMerging;
++    member->dirty = false;
++    member->pass_start = base::Time::Now();
 +    CookiesOf(source->profile)
-+        ->GetAllCookies(base::BindOnce(&CookiePool::GotPool, weak_.GetWeakPtr(), profile, reloaded));
++        ->GetAllCookies(
++            base::BindOnce(&CookiePool::GotPool, weak_.GetWeakPtr(), member->profile.get(), member->generation));
 +  }
-+  void GotPool(Profile* profile, bool reloaded, const std::vector<net::CanonicalCookie>& pool) {
-+    if (!members_.contains(profile)) return;
++  void GotPool(Profile* profile, int generation, const std::vector<net::CanonicalCookie>& pool) {
++    if (!Find(profile, generation)) return;
 +    CookiesOf(profile)->GetAllCookies(
-+        base::BindOnce(&CookiePool::Merge, weak_.GetWeakPtr(), profile, reloaded, pool));
++        base::BindOnce(&CookiePool::Merge, weak_.GetWeakPtr(), profile, generation, pool));
 +  }
-+  // The pool's cookies go to the joining ato, its own that the pool lacks go to the pool. Same
-+  // cookie on both sides: the pool's wins; for an ato that was already in the pool and just
-+  // loaded, the newer one wins (it may have changed while the others slept).
++
++  // The rules, for the same cookie (name, domain, path, partition key) in the pool and here:
++  // - first join (no "synced"): on both sides the pool wins; on one side it is kept and copied;
++  // - reload ("synced" known): on both sides the newer wins; on one side, newer than "synced" is
++  //   new and copied, older means the other side deleted it while apart, so it goes here too;
++  // - another pass (something changed during the last one): like reload since the last pass's
++  //   start, but deleting nothing (a write a store refused must not turn into a deletion).
 +  void Merge(Profile* profile,
-+             bool reloaded,
++             int generation,
 +             const std::vector<net::CanonicalCookie>& pool,
 +             const std::vector<net::CanonicalCookie>& own) {
-+    auto it = members_.find(profile);
-+    if (it == members_.end()) return;
-+    Member* joining = it->second.get();
++    Member* joining = Find(profile, generation);
++    if (!joining) return;
++    const bool again = joining->passes > 0;
++    const std::optional<base::Time> since =
++        again ? std::optional(joining->previous_pass_start) : Synced(profile->GetPath());
 +    std::map<net::UniqueCookieKey, const net::CanonicalCookie*> mine;
 +    for (const net::CanonicalCookie& cookie : own) mine[cookie.LegacyUniqueKey()] = &cookie;
 +    for (const net::CanonicalCookie& cookie : pool) {
 +      auto same = mine.find(cookie.LegacyUniqueKey());
-+      const net::CanonicalCookie* other = same == mine.end() ? nullptr : same->second;
-+      if (other) mine.erase(same);
-+      if (other && reloaded && other->LastUpdateDate() > cookie.LastUpdateDate()) {
-+        Mirror(joining, *other, /*deletion=*/false);
-+      } else {
++      if (same != mine.end()) {
++        const net::CanonicalCookie* other = same->second;
++        mine.erase(same);
++        if (other->Value() == cookie.Value() && other->ExpiryDate() == cookie.ExpiryDate()) continue;
++        if (since && Updated(*other) > Updated(cookie)) {
++          ToPool(joining, *other, /*deletion=*/false);
++        } else {
++          Write(joining, cookie);
++        }
++      } else if (!since || Updated(cookie) > *since) {
 +        Write(joining, cookie);
++      } else if (!again) {
++        ToPool(joining, cookie, /*deletion=*/true);  // deleted here while apart
 +      }
 +    }
-+    for (const auto& [key, cookie] : mine) Mirror(joining, *cookie, /*deletion=*/false);
++    for (const auto& [key, cookie] : mine) {
++      if (!since || Updated(*cookie) > *since) {
++        ToPool(joining, *cookie, /*deletion=*/false);
++      } else if (!again) {
++        Delete(joining, *cookie);  // deleted in the pool while apart
++      }
++    }
++    Member* source = AnyReady(joining);
++    if (joining->dirty && source && joining->passes + 1 < kMaxMergePasses) {
++      ++joining->passes;
++      joining->previous_pass_start = joining->pass_start;
++      StartPass(joining, source);
++      return;
++    }
++    joining->state = State::kReady;
++    if (source) SetSynced(profile->GetPath());
++    Kick();
 +  }
 +
 +  void Leave(Profile* profile) {
-+    if (members_.erase(profile)) profile_observations_.RemoveObservation(profile);
++    auto it = members_.find(profile);
++    if (it == members_.end()) return;
++    Member* member = it->second.get();
++    // Unloading (or quitting) while another loaded ato is in sync: both were in sync until now.
++    if (member->state == State::kReady && ReadyCount() > 1) {
++      SetSynced(profile->GetPath());
++      if (ReadyCount() == 2) SetSynced(AnyReady(member)->profile->GetPath());
++    }
++    members_.erase(it);
++    profile_observations_.RemoveObservation(profile);
++    Kick();  // a member that waited for this one
++  }
++
++  void OnDisconnect(Profile* profile, int generation) {
++    if (!Find(profile, generation)) return;
++    Leave(profile);
++    // Joins again (a reload merge) once the new network service is up.
++    base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
++        FROM_HERE, base::BindOnce(&CookiePool::Refresh, weak_.GetWeakPtr()), base::Seconds(1));
 +  }
 +
 +  void OnChange(Member* member, const net::CookieChangeInfo& change) {
@@ -3375,19 +3506,44 @@ index 0000000000..fd0899a40a
 +                           cause == Cause::INSERTED_NO_VALUE_CHANGE_OVERWRITE;
 +    // OVERWRITE is followed by the insertion; EXPIRED and EVICTED happen in each store by itself.
 +    if (!deletion && !insertion) return;
++    const base::TimeTicks now = base::TimeTicks::Now();
++    std::erase_if(member->echoes, [&](const auto& echo) { return now - echo.second > kEchoLifetime; });
 +    auto echo = member->echoes.find(KeyOf(change.cookie, deletion));
 +    if (echo != member->echoes.end()) {
 +      member->echoes.erase(echo);
 +      return;
 +    }
 +    if (cause == Cause::INSERTED_NO_CHANGE_OVERWRITE) return;  // nothing changed
++    if (member->state != State::kReady) {
++      member->dirty = true;  // its merge reads it again
++      return;
++    }
 +    Mirror(member, change.cookie, deletion);
 +  }
 +
-+  // To every other loaded ato of the pool.
++  // A change in a ready member, to the other ready members; the ones merging read again.
 +  void Mirror(Member* from, const net::CanonicalCookie& cookie, bool deletion) {
 +    for (auto& [profile, member] : members_) {
 +      if (member.get() == from) continue;
++      if (member->state != State::kReady) {
++        member->dirty = true;
++      } else if (deletion) {
++        Delete(member.get(), cookie);
++      } else {
++        Write(member.get(), cookie);
++      }
++    }
++    if (base::Time::Now() - last_synced_ > kSyncedEvery && ReadyCount() > 1) {
++      last_synced_ = base::Time::Now();
++      for (auto& [profile, member] : members_) {
++        if (member->state == State::kReady) SetSynced(profile->GetPath());
++      }
++    }
++  }
++  // From a member merging to the pool (the ready members).
++  void ToPool(Member* from, const net::CanonicalCookie& cookie, bool deletion) {
++    for (auto& [profile, member] : members_) {
++      if (member.get() == from || member->state != State::kReady) continue;
 +      if (deletion) {
 +        Delete(member.get(), cookie);
 +      } else {
@@ -3397,40 +3553,46 @@ index 0000000000..fd0899a40a
 +  }
 +  // As it is: httpOnly, SameSite, session-only and partitioned included.
 +  void Write(Member* to, const net::CanonicalCookie& cookie) {
-+    to->echoes.insert(KeyOf(cookie, false));
++    to->echoes.emplace(KeyOf(cookie, false), base::TimeTicks::Now());
 +    const bool secure = cookie.IsSecure() || cookie.SourceScheme() == net::CookieSourceScheme::kSecure;
 +    CookiesOf(to->profile)
-+        ->SetCanonicalCookie(cookie, net::cookie_util::SimulatedCookieSource(cookie, secure ? "https" : "http"),
++        ->SetCanonicalCookie(Stamped(cookie),
++                             net::cookie_util::SimulatedCookieSource(cookie, secure ? "https" : "http"),
 +                             net::CookieOptions::MakeAllInclusive(),
 +                             base::BindOnce(
-+                                 [](base::WeakPtr<CookiePool> pool, Profile* profile, EchoKey key,
++                                 [](base::WeakPtr<CookiePool> pool, Profile* profile, int generation, EchoKey key,
 +                                    net::CookieAccessResult result) {
-+                                   if (pool && !result.status.IsInclude()) pool->DropEcho(profile, key);
++                                   if (pool && !result.status.IsInclude()) pool->DropEcho(profile, generation, key);
 +                                 },
-+                                 weak_.GetWeakPtr(), to->profile.get(), KeyOf(cookie, false)));
++                                 weak_.GetWeakPtr(), to->profile.get(), to->generation, KeyOf(cookie, false)));
 +  }
 +  // Only the same cookie with the same value goes (CookieManager::DeleteCanonicalCookie).
 +  void Delete(Member* to, const net::CanonicalCookie& cookie) {
-+    to->echoes.insert(KeyOf(cookie, true));
++    to->echoes.emplace(KeyOf(cookie, true), base::TimeTicks::Now());
 +    CookiesOf(to->profile)
-+        ->DeleteCanonicalCookie(cookie, base::BindOnce(
-+                                            [](base::WeakPtr<CookiePool> pool, Profile* profile, EchoKey key,
-+                                               bool deleted) {
-+                                              if (pool && !deleted) pool->DropEcho(profile, key);
-+                                            },
-+                                            weak_.GetWeakPtr(), to->profile.get(), KeyOf(cookie, true)));
++        ->DeleteCanonicalCookie(
++            cookie, base::BindOnce(
++                        [](base::WeakPtr<CookiePool> pool, Profile* profile, int generation, EchoKey key, bool deleted) {
++                          if (pool && !deleted) pool->DropEcho(profile, generation, key);
++                        },
++                        weak_.GetWeakPtr(), to->profile.get(), to->generation, KeyOf(cookie, true)));
 +  }
 +  // The store refused or had nothing to change, so it will not report this write.
-+  void DropEcho(Profile* profile, const EchoKey& key) {
-+    auto it = members_.find(profile);
-+    if (it == members_.end()) return;
-+    auto echo = it->second->echoes.find(key);
-+    if (echo != it->second->echoes.end()) it->second->echoes.erase(echo);
++  void DropEcho(Profile* profile, int generation, const EchoKey& key) {
++    Member* member = Find(profile, generation);
++    if (!member) return;
++    auto echo = member->echoes.find(key);
++    if (echo != member->echoes.end()) member->echoes.erase(echo);
 +  }
 +
 +  // ProfileManagerObserver:
-+  void OnProfileAdded(Profile* profile) override { Refresh(/*reloaded=*/true); }
++  void OnProfileAdded(Profile* profile) override { Refresh(); }
 +  void OnProfileManagerDestroying() override {
++    if (ReadyCount() > 1) {
++      for (auto& [profile, member] : members_) {
++        if (member->state == State::kReady) SetSynced(profile->GetPath());
++      }
++    }
 +    members_.clear();
 +    profile_observations_.RemoveAllObservations();
 +    manager_observation_.Reset();
@@ -3440,6 +3602,8 @@ index 0000000000..fd0899a40a
 +  void OnProfileWillBeDestroyed(Profile* profile) override { Leave(profile); }
 +
 +  bool started_ = false;
++  int generation_ = 0;
++  base::Time last_synced_;
 +  std::map<Profile*, std::unique_ptr<Member>> members_;
 +  PrefChangeRegistrar prefs_;
 +  base::ScopedObservation<ProfileManager, ProfileManagerObserver> manager_observation_{this};
@@ -3477,7 +3641,7 @@ index 0000000000..19eb43705a
 +
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_COOKIE_POOL_H_
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
-index 9d0bf4646d..672e042457 100644
+index 9d0bf4646d..83e2a0f0ad 100644
 --- a/chrome/browser/agens/embed/agens_embed.h
 +++ b/chrome/browser/agens/embed/agens_embed.h
 @@ -36,6 +36,7 @@ typedef struct {
@@ -3497,21 +3661,22 @@ index 9d0bf4646d..672e042457 100644
  
  // Address suggestions, from local sources only (history, bookmarks, the typed search); remote
  // search suggestions stay off. Call suggest on every edit, with "" to stop.
-@@ -109,9 +112,13 @@ typedef struct {
+@@ -109,9 +112,14 @@ typedef struct {
    const char* name;  // UTF-8
    int active;        // this window's ato
    int asleep;        // not loaded in memory right now
 +  int color;         // index in the UI's ato palette (0-4)
 +  int shared;        // "Compartilhar cookies" on: shares cookies with the other atos that have it on
++  const char* id;    // the profile folder name: stable while the list moves
  } AgensAto;
  typedef void (*AgensAtosChanged)(void* context, const AgensAto* atos, int count);
  void agens_window_set_atos_observer(AgensWindow* window, AgensAtosChanged observer, void* context);
 +// Only the person turns this on (the UI asks first); no socket op changes it.
-+void agens_window_set_ato_shared(AgensWindow* window, int index, int shared);
++void agens_window_set_ato_shared(AgensWindow* window, const char* id, int shared);
  // Opens that ato's window over this one (each ato keeps its own window and tabs).
  void agens_window_switch_ato(AgensWindow* window, int index);
  void agens_window_new_ato(AgensWindow* window);
-@@ -279,6 +286,16 @@ typedef enum {
+@@ -279,6 +287,16 @@ typedef enum {
  } AgensPermissionAnswer;
  void agens_window_permission_answer(AgensWindow* window, AgensPermissionAnswer answer);
  
@@ -3528,7 +3693,7 @@ index 9d0bf4646d..672e042457 100644
  // The site of the active page, for the panel behind the site icon. `pattern` is what
  // agens_site_exception_set takes for this site. Strings valid until the next call.
  typedef struct {
-@@ -358,6 +375,9 @@ float agens_ui_card_radius(void* chrome);
+@@ -358,6 +376,9 @@ float agens_ui_card_radius(void* chrome);
  float agens_ui_titlebar_height(void* chrome);
  void agens_ui_permission_prompt(void* chrome, const char* site, const char* const* asks, int count);
  void agens_ui_permission_prompt_close(void* chrome);
@@ -3539,7 +3704,7 @@ index 9d0bf4646d..672e042457 100644
  
  #ifdef __cplusplus
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
-index 268d4dc7bd..d2c9cbf13d 100644
+index 268d4dc7bd..153be18fca 100644
 --- a/chrome/browser/agens/embed/agens_window.h
 +++ b/chrome/browser/agens/embed/agens_window.h
 @@ -15,7 +15,9 @@
@@ -3584,7 +3749,7 @@ index 268d4dc7bd..d2c9cbf13d 100644
      if (bookmark_model) bookmark_model->RemoveObserver(this);
      Storage().RemoveObserver(this);
      for (download::DownloadItem* item : downloads) item->RemoveObserver(this);
-@@ -284,7 +296,79 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -284,7 +296,81 @@ struct AgensWindow : public TabStripModelObserver,
      return g_browser_process->profile_manager()->GetProfileAttributesStorage();
    }
  
@@ -3625,6 +3790,7 @@ index 268d4dc7bd..d2c9cbf13d 100644
 +      extras->Set("shared", true);
 +    } else {
 +      extras->Remove("shared");
++      extras->Remove("synced");  // turned on again later, it joins afresh (AgensCookiePool)
 +    }
 +  }
 +  static std::string AtoTag(const ProfileAttributesEntry* entry) {
@@ -3648,13 +3814,14 @@ index 268d4dc7bd..d2c9cbf13d 100644
 +  }
 +  // A folder no ato uses. Our own: Chromium's CreateMultiProfileAsync picks "Profile N" from a
 +  // counter and stops on a folder already in use (seen on the second "+").
-+  static base::FilePath FreeAtoDir() {
++  // `taken`: folders someone already picked (an import running at the same time).
++  static base::FilePath FreeAtoDir(const std::set<base::FilePath>& taken = {}) {
 +    ProfileManager* manager = g_browser_process->profile_manager();
 +    base::FilePath dir;
 +    for (int i = 1;; ++i) {
 +      dir = manager->user_data_dir().AppendASCII(base::StringPrintf("Profile %d", i));
 +      // A folder with extras may be one the socket is creating right now.
-+      if (!manager->GetProfileByPath(dir) && !Storage().GetProfileAttributesWithPath(dir) &&
++      if (!taken.contains(dir) && !manager->GetProfileByPath(dir) && !Storage().GetProfileAttributesWithPath(dir) &&
 +          !g_browser_process->local_state()->GetDict(kAtosPref).contains(dir.BaseName().AsUTF8Unsafe())) {
 +        return dir;
 +      }
@@ -3665,27 +3832,33 @@ index 268d4dc7bd..d2c9cbf13d 100644
      // Creation order, so an ato keeps its place and color: Chromium names profile folders
      // "Default", then "Profile 1", "Profile 2"…
      std::vector<ProfileAttributesEntry*> atos;
-@@ -307,16 +391,11 @@ struct AgensWindow : public TabStripModelObserver,
-     std::vector<std::string> names;
+@@ -304,19 +390,18 @@ struct AgensWindow : public TabStripModelObserver,
+   void NotifyAtos() {
+     if (!atos_observer) return;
+     std::vector<ProfileAttributesEntry*> entries = Atos();
+-    std::vector<std::string> names;
++    std::vector<std::string> names, ids;
      std::vector<AgensAto> atos;
      const base::FilePath current = browser->GetProfile()->GetOriginalProfile()->GetPath();
--    for (ProfileAttributesEntry* entry : entries) {
+     for (ProfileAttributesEntry* entry : entries) {
 -      // Chromium's first profile has a generated name ("Pessoa 1"); ours is the personal ato.
 -      names.push_back(entry->IsUsingDefaultName() &&
 -                              entry->GetPath().BaseName().AsUTF8Unsafe() == chrome::kInitialProfile
 -                          ? "Pessoal"
 -                          : base::UTF16ToUTF8(entry->GetLocalProfileName()));
--    }
-+    for (ProfileAttributesEntry* entry : entries) names.push_back(AtoName(entry));
++      names.push_back(AtoName(entry));
++      ids.push_back(entry->GetPath().BaseName().AsUTF8Unsafe());
+     }
      for (size_t i = 0; i < entries.size(); ++i) {
        atos.push_back({names[i].c_str(), entries[i]->GetPath() == current,
 -                      !g_browser_process->profile_manager()->GetProfileByPath(entries[i]->GetPath())});
 +                      !g_browser_process->profile_manager()->GetProfileByPath(entries[i]->GetPath()),
-+                      AtoColor(entries[i], static_cast<int>(i)), AtoSharesCookies(entries[i]->GetPath())});
++                      AtoColor(entries[i], static_cast<int>(i)), AtoSharesCookies(entries[i]->GetPath()),
++                      ids[i].c_str()});
      }
      atos_observer(atos_context, atos.data(), static_cast<int>(atos.size()));
    }
-@@ -330,14 +409,9 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -330,14 +415,9 @@ struct AgensWindow : public TabStripModelObserver,
    }
  
    void NewAto() {
@@ -3702,7 +3875,7 @@ index 268d4dc7bd..d2c9cbf13d 100644
      const gfx::Rect bounds = browser->GetWindow()->GetBounds();
      const std::u16string name = base::UTF8ToUTF16(base::StringPrintf("Ato %zu", Atos().size() + 1));
      manager->CreateProfileAsync(
-@@ -362,7 +436,10 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -362,7 +442,10 @@ struct AgensWindow : public TabStripModelObserver,
  
    // ProfileAttributesStorage::Observer:
    void OnProfileAdded(const base::FilePath&) override { NotifyAtos(); }
@@ -3714,7 +3887,7 @@ index 268d4dc7bd..d2c9cbf13d 100644
    void OnProfileNameChanged(const base::FilePath&, const std::u16string&) override { NotifyAtos(); }
  
    TabStripModel* model() { return browser->GetTabStripModel(); }
-@@ -406,7 +483,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -406,7 +489,7 @@ struct AgensWindow : public TabStripModelObserver,
      const int count = model()->count();
      bookmarks::BookmarkModel* bookmarks =
          BookmarkModelFactory::GetForBrowserContextIfExists(browser->GetProfile());
@@ -3723,7 +3896,7 @@ index 268d4dc7bd..d2c9cbf13d 100644
      std::vector<std::vector<uint8_t>> icons(count);
      std::vector<AgensTab> tabs(count);
      struct Split { int layout = 0, first = 0; double ratio = 0.5; };
-@@ -455,6 +532,8 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -455,6 +538,8 @@ struct AgensWindow : public TabStripModelObserver,
                   zoom::ZoomController::FromWebContents(contents)
                       ? zoom::ZoomController::FromWebContents(contents)->GetZoomPercent()
                       : 100};
@@ -3732,7 +3905,7 @@ index 268d4dc7bd..d2c9cbf13d 100644
      }
      observer(context, tabs.data(), static_cast<int>(tabs.size()));
    }
-@@ -582,6 +661,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -582,6 +667,7 @@ struct AgensWindow : public TabStripModelObserver,
    raw_ptr<void> downloads_context = nullptr;
    base::CallbackListSubscription search_loaded_;
    base::CancelableTaskTracker history_tracker;
@@ -3740,7 +3913,7 @@ index 268d4dc7bd..d2c9cbf13d 100644
    raw_ptr<void> ui = nullptr;  // the chrome (agens_ui_*), set by the platform shell
    raw_ptr<views::View> extensions_anchor = nullptr;  // under the UI's extensions button
    AgensExtensionButtonsChanged extension_buttons_observer = nullptr;
-@@ -647,6 +727,8 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -647,6 +733,8 @@ struct AgensWindow : public TabStripModelObserver,
      }
    }
    base::WeakPtr<permissions::PermissionPrompt::Delegate> permission_delegate;
@@ -3749,8 +3922,40 @@ index 268d4dc7bd..d2c9cbf13d 100644
    AgensFindChanged find_observer = nullptr;
    raw_ptr<void> find_context = nullptr;
    base::ScopedObservation<find_in_page::FindTabHelper, find_in_page::FindResultObserver> find_observation{this};
+diff --git a/chrome/browser/agens/embed/import_writer.cc b/chrome/browser/agens/embed/import_writer.cc
+index 4eb24ab895..436be6abd7 100644
+--- a/chrome/browser/agens/embed/import_writer.cc
++++ b/chrome/browser/agens/embed/import_writer.cc
+@@ -11,6 +11,7 @@
+ #include "base/strings/stringprintf.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/task/single_thread_task_runner.h"
++#include "chrome/browser/agens/embed/agens_window.h"
+ #include "chrome/browser/agens/embed/import_internal.h"
+ #include "chrome/browser/bookmarks/bookmark_model_factory.h"
+ #include "chrome/browser/browser_process.h"
+@@ -72,15 +73,11 @@ class Job : public base::RefCounted<Job> {
+       if (e->GetLocalProfileName() == name) dir = e->GetPath();
+     }
+     bool created = false;
+-    if (dir.empty()) {  // same free-folder scheme as AgensWindow::NewAto
++    if (dir.empty()) {  // as AgensWindow::NewAto
+       created = true;
+-      for (int i = 1;; ++i) {
+-        dir = manager->user_data_dir().AppendASCII(base::StringPrintf("Profile %d", i));
+-        if (!manager->GetProfileByPath(dir) && !storage.GetProfileAttributesWithPath(dir) &&
+-            Claimed().insert(dir).second) {
+-          break;  // Claimed(): two imports running at once must not pick the same folder
+-        }
+-      }
++      dir = AgensWindow::FreeAtoDir(Claimed());  // Claimed(): two imports at once must not pick the same folder
++      Claimed().insert(dir);
++      AgensWindow::SetAtoExtras(dir, std::nullopt);  // nothing left from an ato that had this folder (e.g. shared)
+     }
+     progress_.Run(0, created ? "Criando o ato " + ato + "…" : "Usando o ato " + ato + "…");
+     manager->CreateProfileAsync(
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
-index cfdc014cf4..8ec75763f5 100644
+index cfdc014cf4..36f1a335e2 100644
 --- a/chrome/browser/agens/embed/native_shell.cc
 +++ b/chrome/browser/agens/embed/native_shell.cc
 @@ -61,6 +61,7 @@
@@ -3761,20 +3966,21 @@ index cfdc014cf4..8ec75763f5 100644
  
  namespace {
  base::flat_set<const StatusBubble*>& NativeBubbles() {
-@@ -93,6 +94,12 @@ void agens_window_set_atos_observer(AgensWindow* w, AgensAtosChanged observer, v
+@@ -93,6 +94,13 @@ void agens_window_set_atos_observer(AgensWindow* w, AgensAtosChanged observer, v
    w->atos_context = context;
    w->NotifyAtos();
  }
-+void agens_window_set_ato_shared(AgensWindow* w, int index, int shared) {
-+  std::vector<ProfileAttributesEntry*> atos = w->Atos();
-+  if (index >= 0 && static_cast<size_t>(index) < atos.size()) {
-+    AgensWindow::SetAtoSharesCookies(atos[index]->GetPath(), shared);  // the pool follows the pref
++void agens_window_set_ato_shared(AgensWindow* w, const char* id, int shared) {
++  for (ProfileAttributesEntry* entry : w->Atos()) {
++    if (id && entry->GetPath().BaseName().AsUTF8Unsafe() == id) {
++      AgensWindow::SetAtoSharesCookies(entry->GetPath(), shared);  // the pool follows the pref
++    }
 +  }
 +}
  void agens_window_switch_ato(AgensWindow* w, int index) {
    w->SwitchAto(index);
  }
-@@ -473,6 +480,9 @@ void agens_password_remove(AgensWindow* w, int index) {
+@@ -473,6 +481,9 @@ void agens_password_remove(AgensWindow* w, int index) {
    saved->logins.erase(saved->logins.begin() + index);
  }
  
@@ -3784,7 +3990,7 @@ index cfdc014cf4..8ec75763f5 100644
  void agens_window_permission_answer(AgensWindow* w, AgensPermissionAnswer answer) {
    base::WeakPtr<permissions::PermissionPrompt::Delegate> delegate = std::move(w->permission_delegate);
    if (!delegate) return;
-@@ -707,6 +717,18 @@ void agens_window_unsplit(AgensWindow* w, int index) {
+@@ -707,6 +718,18 @@ void agens_window_unsplit(AgensWindow* w, int index) {
  void agens_window_set_pinned(AgensWindow* w, int index, int pinned) {
    if (w->model()->ContainsIndex(index)) w->model()->SetTabPinned(index, pinned);
  }
@@ -3803,7 +4009,7 @@ index cfdc014cf4..8ec75763f5 100644
  void agens_window_toggle_mute(AgensWindow* w, int index) {
    if (!w->model()->ContainsIndex(index)) return;
    content::WebContents* contents = w->model()->GetWebContentsAt(index);
-@@ -814,6 +836,9 @@ void NativeTabStateChanged(views::Widget*) {}
+@@ -814,6 +837,9 @@ void NativeTabStateChanged(views::Widget*) {}
  void ConfirmCloseWithDownloads(views::Widget*, int, base::OnceCallback<void(bool)> callback) {
    std::move(callback).Run(true);
  }
@@ -3886,7 +4092,7 @@ index 5d7ca90415..3d238795f6 100644
    if (!IsNativeShellEnabled() || !browser->GetWindow()) return false;
    views::Widget* widget = views::Widget::GetWidgetForNativeWindow(browser->GetWindow()->GetNativeWindow());
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
-index 3c18c4eab1..6c9c5e553b 100644
+index 3c18c4eab1..360d8d923b 100644
 --- a/chrome/browser/agens/ui/chrome_mac.mm
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
 @@ -525,6 +525,7 @@ @implementation AgensTabRow {
@@ -3933,15 +4139,16 @@ index 3c18c4eab1..6c9c5e553b 100644
    self.accessibilityLabel = self.toolTip;
    self.selected = ato.active;
  }
-@@ -1015,6 +1027,7 @@ - (void)toggleSidebar;
+@@ -1015,6 +1027,8 @@ - (void)toggleSidebar;
  - (BOOL)tabsOnTop;
  - (void)toggleTabsPosition;
  - (NSArray<NSString*>*)atoNamesForSettings;
 +- (NSArray<NSNumber*>*)atoSharedForSettings;  // "Compartilhar cookies", per ato, same order
++- (NSArray<NSString*>*)atoIdsForSettings;      // the profile folders, same order
  - (NSImage*)extensionIcon:(NSString*)extensionId;
  @end
  
-@@ -1432,6 +1445,7 @@ - (void)showSection:(NSString*)key {
+@@ -1432,6 +1446,7 @@ - (void)showSection:(NSString*)key {
      NSButton* proxy = [NSButton buttonWithTitle:@"Abrir…" target:self action:@selector(openProxy:)];
      y = [self option:@"Configurações de proxy" detail:@"Usa as do macOS." control:proxy y:y];
      y = [self option:@"Restaurar as configurações originais" detail:nil control:[self subButton:@"Restaurar…" key:@"restaurar"] y:y];
@@ -3949,21 +4156,24 @@ index 3c18c4eab1..6c9c5e553b 100644
    } else if ([key isEqualToString:@"sobre"]) {
      NSString* version = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"";
      y = [self info:product detail:[NSString stringWithFormat:@"Versão %@ · SugiyamaLabs", version] note:@"" y:y];
-@@ -1602,6 +1616,7 @@ static void EnginesListed(void* context, const AgensSearchEngine* engines, int c
+@@ -1602,7 +1617,9 @@ static void EnginesListed(void* context, const AgensSearchEngine* engines, int c
  - (CGFloat)fillAtos:(CGFloat)y {
    // The atos list comes from the chrome (it already observes them); rename in place.
    NSArray<NSString*>* names = [_chrome atoNamesForSettings];
+-  for (NSUInteger i = 0; i < names.count; ++i) {
 +  NSArray<NSNumber*>* shares = [_chrome atoSharedForSettings];
-   for (NSUInteger i = 0; i < names.count; ++i) {
++  NSArray<NSString*>* ids = [_chrome atoIdsForSettings];
++  for (NSUInteger i = 0; i < names.count && i < ids.count; ++i) {
      NSTextField* field = [NSTextField textFieldWithString:names[i]];
      field.tag = i;
-@@ -1610,12 +1625,18 @@ - (CGFloat)fillAtos:(CGFloat)y {
+     field.delegate = self;
+@@ -1610,12 +1627,18 @@ - (CGFloat)fillAtos:(CGFloat)y {
      field.action = @selector(renameAto:);
      field.frame = NSMakeRect(0, 0, 220, 24);
      y = [self option:[NSString stringWithFormat:@"Ato %lu", (unsigned long)i + 1] detail:nil control:field y:y];
 +    NSSwitch* shared = [[NSSwitch alloc] init];
 +    shared.state = i < shares.count && shares[i].boolValue ? NSControlStateValueOn : NSControlStateValueOff;
-+    shared.tag = i;
++    shared.identifier = ids[i];  // the folder, not the place: the list can move while the sheet is up
 +    shared.target = self;
 +    shared.action = @selector(toggleAtoShared:);
 +    y = [self option:@"Compartilhar cookies" detail:@"Os logins valem nos outros atos que também ligaram." control:shared y:y];
@@ -3977,25 +4187,27 @@ index 3c18c4eab1..6c9c5e553b 100644
    note.frame = NSMakeRect(32, y + 44, NSWidth(_pane.bounds) - 64, 16);
    [_pane addSubview:note];
    return y + 70;
-@@ -1818,6 +1839,46 @@ - (void)setEngine:(NSPopUpButton*)popup {
+@@ -1818,6 +1841,48 @@ - (void)setEngine:(NSPopUpButton*)popup {
  - (void)renameAto:(NSTextField*)field {
    if (_browser && field.stringValue.length) agens_window_rename_ato(_browser, (int)field.tag, field.stringValue.UTF8String);
  }
 +// Turning it off only isolates the ato again; turning it on asks first.
 +- (void)toggleAtoShared:(NSSwitch*)sw {
-+  const int index = (int)sw.tag;
-+  if (!_browser) return;
++  NSString* ato = sw.identifier;
++  if (!_browser || !ato) return;
 +  if (sw.state == NSControlStateValueOff) {
-+    agens_window_set_ato_shared(_browser, index, 0);
++    agens_window_set_ato_shared(_browser, ato.UTF8String, 0);
 +    return;
 +  }
 +  sw.state = NSControlStateValueOff;  // until confirmed
 +  NSArray<NSString*>* names = [_chrome atoNamesForSettings];
 +  NSArray<NSNumber*>* shares = [_chrome atoSharedForSettings];
-+  if (index < 0 || index >= (int)names.count) return;
++  NSArray<NSString*>* ids = [_chrome atoIdsForSettings];
++  const NSUInteger index = [ids indexOfObject:ato];
++  if (index == NSNotFound || index >= names.count) return;
 +  NSMutableArray<NSString*>* others = [NSMutableArray array];
 +  for (NSUInteger i = 0; i < names.count && i < shares.count; ++i) {
-+    if ((int)i != index && shares[i].boolValue) [others addObject:names[i]];
++    if (i != index && shares[i].boolValue) [others addObject:names[i]];
 +  }
 +  NSString* name = names[index];
 +  NSString* list = others.count < 2
@@ -4010,21 +4222,21 @@ index 3c18c4eab1..6c9c5e553b 100644
 +                       ? [NSString stringWithFormat:@"Os logins de %@ passam a valer também em %@, e os deles em %@.", name, list, name]
 +                       : [NSString stringWithFormat:@"Por enquanto nada é compartilhado: os logins de %@ só passam a valer em outro ato quando ele também ligar esta opção.", name];
 +  alert.informativeText = [what stringByAppendingString:
-+      @" Só cookies: senhas, histórico e dados dos sites continuam separados. Enquanto estiver ligado, apps conectados ao navegador não recebem sessões nem controlam abas deste ato."];
++      @" No mesmo site, o login dos outros atos substitui o deste. Apagar cookies num ato que compartilha apaga nos outros também. Só cookies: senhas, histórico e dados dos sites continuam separados. Enquanto estiver ligado, apps conectados ao navegador não recebem sessões nem controlam abas deste ato."];
 +  [alert addButtonWithTitle:@"Compartilhar"];
 +  [alert addButtonWithTitle:@"Cancelar"];
 +  __weak AgensSettings* weak = self;
 +  [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
 +    AgensSettings* strong = weak;
 +    if (r != NSAlertFirstButtonReturn || !strong || !strong->_browser) return;
-+    agens_window_set_ato_shared(strong->_browser, index, 1);
++    agens_window_set_ato_shared(strong->_browser, ato.UTF8String, 1);  // by folder: still this ato
 +    sw.state = NSControlStateValueOn;
 +  }];
 +}
  - (void)newAto:(id)sender {
    if (_browser) agens_window_new_ato(_browser);
  }
-@@ -2634,7 +2695,7 @@ - (void)showStep:(int)step {
+@@ -2634,7 +2699,7 @@ - (void)showStep:(int)step {
        _atoName = [NSTextField textFieldWithString:@"Pessoal"];
        _atoName.frame = NSMakeRect(170, y + 30, 300, 26);
        NSTextField* cookies = Label(12, NSFontWeightRegular, kDim);
@@ -4033,15 +4245,16 @@ index 3c18c4eab1..6c9c5e553b 100644
        cookies.frame = NSMakeRect(90, y + 76, 460, 16);
        cookies.alignment = NSTextAlignmentCenter;
        for (NSView* v in @[ label, _atoName, cookies ]) [_body addSubview:v];
-@@ -3625,6 +3686,7 @@ @implementation AgensChrome {
+@@ -3625,6 +3690,8 @@ @implementation AgensChrome {
    AgensDragView* _tabsDoc;
    AgensToolButton* _moreAtos;  // "⋯" when the atos don't fit
    NSMutableArray<NSString*>* _atoNames;
 +  NSMutableArray<NSNumber*>* _atoShared;
++  NSMutableArray<NSString*>* _atoIds;
    int _activeAto;
    NSView* _atosLine;
    NSMutableArray<AgensAtoButton*>* _atoButtons;
-@@ -3691,6 +3753,13 @@ @implementation AgensChrome {
+@@ -3691,6 +3758,13 @@ @implementation AgensChrome {
    NSString* _url;
    BOOL _loading;
    NSRect _page;
@@ -4055,15 +4268,16 @@ index 3c18c4eab1..6c9c5e553b 100644
  }
  
  - (instancetype)initWithWindow:(AgensWindow*)window {
-@@ -3859,6 +3928,7 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3859,6 +3933,8 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
      _tabsDoc = [[AgensDragView alloc] init];
      _tabsScroll.documentView = _tabsDoc;
      _atoNames = [NSMutableArray array];
 +    _atoShared = [NSMutableArray array];
++    _atoIds = [NSMutableArray array];
      _moreAtos = [[AgensToolButton alloc] initWithSymbol:@"ellipsis" label:@"Todos os atos" size:13];
      _moreAtos.onPress = ^{ [weak showAtosMenu]; };
      _addAto = [[AgensToolButton alloc] initWithSymbol:@"plus" label:@"Novo ato"];
-@@ -3969,6 +4039,38 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3969,6 +4045,38 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
                           _atosLine, _addAto, _atoDot, _strip, _bar, _history, _bookmarksPage, _ntp2, _ntp2Click, _ntp, _error, _find, _loadbar, _statusPill, _suggest ]) {
        [self addSubview:v];
      }
@@ -4102,7 +4316,7 @@ index 3c18c4eab1..6c9c5e553b 100644
      [self refreshTheme];
      ApplyAppearance(agens_window_color_mode(_window));  // the saved choice, from the first window on
      agens_window_set_tabs_observer(_window, TabsChanged, (__bridge void*)self);
-@@ -4009,6 +4111,11 @@ - (void)refreshTheme {
+@@ -4009,6 +4117,11 @@ - (void)refreshTheme {
    _atoDot.layer.backgroundColor = CG(kLight3, self);
    _statusPill.layer.backgroundColor = CG(kFloat, self);
    _statusPill.layer.borderColor = CG(kLine, self);
@@ -4114,7 +4328,7 @@ index 3c18c4eab1..6c9c5e553b 100644
    SyncGlass(_suggest, 12 * Round());
    [self runLoadbar];  // the glow's color
  }
-@@ -4338,6 +4445,7 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4338,6 +4451,7 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
      page = [self roomForBar:page];
    }
  
@@ -4122,7 +4336,7 @@ index 3c18c4eab1..6c9c5e553b 100644
    _page = page;
    // Our pages over the card (new tab, errors…) cover the active tab's pane only; the engine splits
    // the card the same way (8 pt gap, the split's ratio).
-@@ -4431,6 +4539,8 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+@@ -4431,6 +4545,8 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
      [_rows removeLastObject];
    }
    int activeTab = -1;
@@ -4131,7 +4345,7 @@ index 3c18c4eab1..6c9c5e553b 100644
    _pinnedCount = 0;
    _partner = -1;
    BOOL partnerIsNewTab = NO;
-@@ -4480,6 +4590,13 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+@@ -4480,6 +4596,13 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
      _bookmarked = tabs[i].bookmarked;
      _back.enabled = tabs[i].can_go_back;
      _forward.enabled = tabs[i].can_go_forward;
@@ -4145,7 +4359,7 @@ index 3c18c4eab1..6c9c5e553b 100644
    }
    if (_loadbar.hidden == _loading) {
      _loadbar.hidden = !_loading;
-@@ -4505,6 +4622,8 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+@@ -4505,6 +4628,8 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
    _ntp.hidden = _url.length > 0;
    if (!_ntp.hidden && !wasNTP) _ntp.field.stringValue = @"";
    [self relayout];
@@ -4154,15 +4368,17 @@ index 3c18c4eab1..6c9c5e553b 100644
    if (activeTab >= 0 && _rows[activeTab].superview == _tabsDoc) [_tabsDoc scrollRectToVisible:_rows[activeTab].frame];
  }
  
-@@ -4539,14 +4658,16 @@ - (void)setAtos:(const AgensAto*)atos count:(int)count {
+@@ -4539,14 +4664,18 @@ - (void)setAtos:(const AgensAto*)atos count:(int)count {
      [_atoButtons removeLastObject];
    }
    [_atoNames removeAllObjects];
 +  [_atoShared removeAllObjects];
++  [_atoIds removeAllObjects];
    for (int i = 0; i < count; ++i) {
      [_atoButtons[i] updateWith:atos[i] index:i];
      [_atoNames addObject:@(atos[i].name)];
 +    [_atoShared addObject:@(atos[i].shared != 0)];
++    [_atoIds addObject:@(atos[i].id)];
      if (!atos[i].active) continue;
      _activeAto = i;
      _atoName.stringValue = @(atos[i].name);
@@ -4172,17 +4388,20 @@ index 3c18c4eab1..6c9c5e553b 100644
    }
    [self relayout];
  }
-@@ -4854,6 +4975,9 @@ - (BOOL)collapsed {
+@@ -4854,6 +4983,12 @@ - (BOOL)collapsed {
  - (NSArray<NSString*>*)atoNamesForSettings {
    return [_atoNames copy];
  }
 +- (NSArray<NSNumber*>*)atoSharedForSettings {
 +  return [_atoShared copy];
 +}
++- (NSArray<NSString*>*)atoIdsForSettings {
++  return [_atoIds copy];
++}
  - (void)toggleSidebar {
    _collapsed = !_collapsed;
    [NSUserDefaults.standardUserDefaults setBool:_collapsed forKey:kCollapsedKey];
-@@ -5094,6 +5218,23 @@ - (NSRect)roomForBar:(NSRect)page {
+@@ -5094,6 +5229,23 @@ - (NSRect)roomForBar:(NSRect)page {
    page.size.height -= 32;
    return page;
  }
@@ -4206,7 +4425,7 @@ index 3c18c4eab1..6c9c5e553b 100644
  - (void)toggleBookmarkBar {
    [NSUserDefaults.standardUserDefaults setBool:!_barShown forKey:kBookmarkBarKey];
    [NSNotificationCenter.defaultCenter postNotificationName:kThemeChanged object:nil];  // every window
-@@ -5204,6 +5345,31 @@ - (void)answerPermission:(NSButton*)button {
+@@ -5204,6 +5356,31 @@ - (void)answerPermission:(NSButton*)button {
    if (_window) agens_window_permission_answer(_window, (AgensPermissionAnswer)button.tag);
    [self closeMenu];
  }
@@ -4238,7 +4457,7 @@ index 3c18c4eab1..6c9c5e553b 100644
  - (void)permissionGone {
    if (!_permissionAsked) return;
    _permissionAsked = NO;  // nothing to answer any more
-@@ -5412,6 +5578,9 @@ void agens_ui_permission_prompt(void* chrome, const char* site, const char* cons
+@@ -5412,6 +5589,9 @@ void agens_ui_permission_prompt(void* chrome, const char* site, const char* cons
    for (int i = 0; i < count; ++i) [list addObject:@(asks[i])];
    [(__bridge AgensChrome*)chrome askPermission:@(site) asks:list];
  }
