@@ -4410,10 +4410,10 @@ index 0000000000..8d10fddb69
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..76f8c5eaac
+index 0000000000..5fc998ed56
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,5149 @@
+@@ -0,0 +1,5337 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -6893,19 +6893,31 @@ index 0000000000..76f8c5eaac
 +}
 +
 +// ---------------------------------------------------------------------------------------------
-+// Primeira instalação (prototipos/primeiro-uso.html): one window, once. v1 steps: boas-vindas,
-+// atos, visual, privacidade, navegador padrão, pronto. Importing from other browsers comes later.
++// Primeira instalação (prototipos/primeiro-uso.html): one window, once. Steps: boas-vindas,
++// atos, trazer de outro navegador (into the ato just named), visual, privacidade, navegador
++// padrão, pronto.
 +
 +static NSString* const kFirstRunKey = @"AgensFirstRunDone";
 +
 +@interface AgensFirstRun : NSWindowController <NSWindowDelegate>
-++ (void)showIfNeededFor:(AgensWindow*)window;
+++ (void)showIfNeededFor:(AgensWindow*)window browserWindow:(NSWindow*)browserWindow;
++- (void)setSources:(const AgensImportSource*)sources count:(int)count;
++- (void)importState:(int)state message:(const char*)message;
 +@end
 +
 +static AgensFirstRun* g_first_run;
++static constexpr int kFirstRunSteps = 7;
++// Import callbacks can arrive after the window closed: only the live first run gets them.
++static void FirstRunSources(void* context, const AgensImportSource* sources, int count) {
++  if (g_first_run && (__bridge void*)g_first_run == context) [g_first_run setSources:sources count:count];
++}
++static void FirstRunImportProgress(void* context, const char*, int state, const char* message) {
++  if (g_first_run && (__bridge void*)g_first_run == context) [g_first_run importState:state message:message];
++}
 +
 +@implementation AgensFirstRun {
 +  AgensWindow* _browser;
++  __weak NSWindow* _browserWindow;  // hidden while the first steps are open, shown when they close
 +  int _step;
 +  AgensFlippedView* _body;
 +  NSButton* _back;
@@ -6913,12 +6925,25 @@ index 0000000000..76f8c5eaac
 +  NSView* _dots;
 +  NSTextField* _atoName;
 +  BOOL _madeDefault;
++  NSButton* _skip;
++  // Trazer: one row per browser profile that has something; the pick goes into the first ato.
++  BOOL _searched;
++  std::vector<std::tuple<std::string, std::string, int>> _sources;  // id, label, available
++  int _pick;
++  int _what;
++  BOOL _importing;
++  BOOL _importDone;
++  BOOL _importFailed;
++  NSString* _importStatus;
++  std::vector<std::string> _importCounts;
 +}
 +
-++ (void)showIfNeededFor:(AgensWindow*)window {
+++ (void)showIfNeededFor:(AgensWindow*)window browserWindow:(NSWindow*)browserWindow {
 +  if (g_first_run || [NSUserDefaults.standardUserDefaults boolForKey:kFirstRunKey]) return;
 +  g_first_run = [[AgensFirstRun alloc] init];
 +  g_first_run->_browser = window;
++  g_first_run->_browserWindow = browserWindow;
++  [browserWindow orderOut:nil];
 +  [g_first_run showStep:0];
 +  [g_first_run.window center];
 +  [g_first_run showWindow:nil];
@@ -6946,16 +6971,21 @@ index 0000000000..76f8c5eaac
 +    [root addSubview:_body];
 +    _back = [NSButton buttonWithTitle:@"Voltar" target:self action:@selector(back:)];
 +    _next = [NSButton buttonWithTitle:@"Continuar" target:self action:@selector(next:)];
++    _skip = [NSButton buttonWithTitle:@"Começar do zero" target:self action:@selector(skip:)];
 +    _next.keyEquivalent = @"\r";
 +    _back.frame = NSMakeRect(32, 486, 100, 30);
 +    _next.frame = NSMakeRect(640 - 32 - 130, 486, 130, 30);
-+    _dots = [[NSView alloc] initWithFrame:NSMakeRect(270, 497, 100, 8)];
-+    for (NSView* v in @[ _back, _next, _dots ]) [root addSubview:v];
++    _skip.frame = NSMakeRect(640 - 32 - 130 - 8 - 140, 486, 140, 30);
++    _dots = [[NSView alloc] initWithFrame:NSMakeRect(274, 497, 91, 8)];
++    for (NSView* v in @[ _back, _skip, _next, _dots ]) [root addSubview:v];
++    _what = kAgensImportBookmarks | kAgensImportHistory | kAgensImportPasswords | kAgensImportCookies |
++            kAgensImportExtensions;
 +  }
 +  return self;
 +}
 +- (void)windowWillClose:(NSNotification*)note {
 +  [NSUserDefaults.standardUserDefaults setBool:YES forKey:kFirstRunKey];  // closing also counts
++  [_browserWindow makeKeyAndOrderFront:nil];
 +  g_first_run = nil;
 +}
 +
@@ -7020,7 +7050,10 @@ index 0000000000..76f8c5eaac
 +      for (NSView* v in @[ label, _atoName, cookies ]) [_body addSubview:v];
 +      break;
 +    }
-+    case 2: {
++    case 2:
++      [self importStep];
++      break;
++    case 3: {
 +      y = [self title:@"Do seu jeito" lead:@"Muda a qualquer hora em Configurações › Aparência, sem reiniciar."];
 +      NSSegmentedControl* theme = [NSSegmentedControl segmentedControlWithLabels:@[ @"Grafite", @"Brasa" ]
 +                                                                     trackingMode:NSSegmentSwitchTrackingSelectOne
@@ -7038,7 +7071,7 @@ index 0000000000..76f8c5eaac
 +      [_body addSubview:mode];
 +      break;
 +    }
-+    case 3:
++    case 4:
 +      y = [self title:@"Sua privacidade já está no máximo" lead:@"Não precisa ligar nada. Se um site quebrar, você libera só ele."];
 +      y = [self line:@"Bloqueio de rastreadores e cookies de terceiros" y:y];
 +      y = [self line:@"Pedido de não rastrear (GPC e Do Not Track)" y:y];
@@ -7046,7 +7079,7 @@ index 0000000000..76f8c5eaac
 +      y = [self line:@"Localização e notificações bloqueadas; câmera e microfone perguntam" y:y];
 +      [self line:@"Nenhuma telemetria: parado, o navegador não faz conexão nenhuma" y:y];
 +      break;
-+    case 4: {
++    case 5: {
 +      y = [self title:@"Abrir os links no AgensBrowser?" lead:@"Links do Slack, do e-mail e de outros apps passam a abrir aqui."];
 +      NSButton* yes = [NSButton buttonWithTitle:_madeDefault ? @"Pronto, é o padrão" : @"Usar como navegador padrão"
 +                                         target:self
@@ -7061,10 +7094,21 @@ index 0000000000..76f8c5eaac
 +      break;
 +  }
 +  _back.hidden = step == 0;
-+  _next.title = step == 5 ? @"Começar" : step == 4 && !_madeDefault ? @"Agora não" : @"Continuar";
++  const BOOL offerImport = step == 2 && !_importing && !_sources.empty();
++  _skip.hidden = !offerImport;
++  [_skip sizeToFit];
++  _skip.frame = NSMakeRect(NSMinX(_next.frame) - 8 - NSWidth(_skip.frame), 486, NSWidth(_skip.frame), 30);
++  // The dots sit centered in the free space between Voltar and the buttons on the right.
++  const CGFloat right = offerImport ? NSMinX(_skip.frame) : NSMinX(_next.frame);
++  _dots.frame = NSMakeRect(round((NSMaxX(_back.frame) + right) / 2 - 7 * 13 / 2.0), 497, 7 * 13, 8);
++  _next.enabled = !offerImport || _what != 0;
++  _next.title = step == kFirstRunSteps - 1 ? @"Começar"
++                : offerImport               ? @"Importar"
++                : step == 5 && !_madeDefault ? @"Agora não"
++                                             : @"Continuar";
 +  for (NSView* v in [_dots.subviews copy]) [v removeFromSuperview];
-+  for (int i = 0; i < 6; ++i) {
-+    NSView* dot = [[NSView alloc] initWithFrame:NSMakeRect(14 + i * 13, 0, 7, 7)];
++  for (int i = 0; i < kFirstRunSteps; ++i) {
++    NSView* dot = [[NSView alloc] initWithFrame:NSMakeRect(3 + i * 13, 0, 7, 7)];
 +    dot.wantsLayer = YES;
 +    dot.layer.cornerRadius = 3.5;
 +    dot.layer.backgroundColor = i == step ? CG(kLight3, root) : CG(kLineStrong, root);
@@ -7073,11 +7117,152 @@ index 0000000000..76f8c5eaac
 +}
 +- (void)next:(id)sender {
 +  if (_step == 1 && _browser && _atoName.stringValue.length) agens_window_rename_ato(_browser, 0, _atoName.stringValue.UTF8String);
-+  if (_step == 5) {
++  if (_step == 2 && !_importing && !_sources.empty()) {
++    [self startImport];
++    return;
++  }
++  if (_step == kFirstRunSteps - 1) {
 +    [self close];
 +    return;
 +  }
 +  [self showStep:_step + 1];
++}
++- (void)skip:(id)sender {
++  [self showStep:_step + 1];
++}
++
++// Trazer o que você já tem: pick one browser profile and what to bring; it fills the first ato
++// (named one step before) and keeps running while the person goes on.
++- (NSString*)firstAtoName {
++  NSString* name = [_atoName.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
++  return name.length ? name : @"Pessoal";
++}
++- (void)importStep {
++  if (!_searched) {
++    _searched = YES;
++    agens_import_sources(FirstRunSources, (__bridge void*)self);
++  }
++  CGFloat y = [self title:@"Trazer o que você já tem?"
++                     lead:_importFailed ? @"Dá para tentar de novo depois, em Configurações › Atos."
++                          : _importDone ? [NSString stringWithFormat:@"Veio tudo para o ato %@.", [self firstAtoName]]
++                          : _importing ? [NSString stringWithFormat:@"Vai tudo para o ato %@. Pode continuar: a importação segue sozinha.", [self firstAtoName]]
++                          : _sources.empty() && _searched && _importStatus
++                              ? @"Nenhum outro navegador neste Mac. Dá para importar depois, em Configurações › Atos."
++                              : @"Achamos estes navegadores no seu Mac. A importação acontece aqui, sem passar por servidor nenhum."];
++  if (_importing) {
++    NSTextField* status = [NSTextField wrappingLabelWithString:_importStatus ?: @"Começando…"];
++    status.font = [NSFont systemFontOfSize:13];
++    status.textColor = kInk.color();
++    status.alignment = NSTextAlignmentCenter;
++    status.frame = NSMakeRect(90, y + 6, 460, 60);
++    [_body addSubview:status];
++    return;
++  }
++  if (_sources.empty()) {
++    if (!_importStatus) {  // still looking
++      NSTextField* looking = Label(13, NSFontWeightRegular, kMute);
++      looking.stringValue = @"Procurando navegadores…";
++      looking.alignment = NSTextAlignmentCenter;
++      looking.frame = NSMakeRect(90, y + 6, 460, 18);
++      [_body addSubview:looking];
++    }
++    return;
++  }
++  static NSString* const kNames[] = {@"favoritos", @"histórico", @"senhas", @"cookies", @"extensões"};
++  const size_t shown = std::min<size_t>(_sources.size(), 4);
++  for (size_t i = 0; i < shown; ++i) {
++    const auto& [id, label, available] = _sources[i];
++    NSButton* radio = [NSButton radioButtonWithTitle:@(label.c_str()) target:self action:@selector(pickSource:)];
++    radio.tag = (NSInteger)i;
++    radio.state = (int)i == _pick ? NSControlStateValueOn : NSControlStateValueOff;
++    radio.frame = NSMakeRect(150, y, 360, 18);
++    NSMutableArray<NSString*>* has = [NSMutableArray array];
++    for (int b = 0; b < 5; ++b) {
++      if (available & (1 << b)) [has addObject:kNames[b]];
++    }
++    NSTextField* detail = Label(12, NSFontWeightRegular, kDim);
++    detail.stringValue = [has componentsJoinedByString:@", "];
++    detail.frame = NSMakeRect(170, y + 19, 340, 16);
++    [_body addSubview:radio];
++    [_body addSubview:detail];
++    y += 42;
++  }
++  // What to bring, as a row of checkboxes centered under the list.
++  static const struct {
++    int bit;
++    NSString* label;
++  } kKinds[] = {{kAgensImportBookmarks, @"Favoritos"}, {kAgensImportHistory, @"Histórico"},
++                {kAgensImportPasswords, @"Senhas"},    {kAgensImportCookies, @"Cookies"},
++                {kAgensImportExtensions, @"Extensões"}};
++  NSMutableArray<NSButton*>* boxes = [NSMutableArray array];
++  CGFloat width = 0;
++  for (const auto& k : kKinds) {
++    NSButton* box = [NSButton checkboxWithTitle:k.label target:self action:@selector(setWhat:)];
++    box.tag = k.bit;
++    box.state = (_what & k.bit) ? NSControlStateValueOn : NSControlStateValueOff;
++    [box sizeToFit];
++    width += NSWidth(box.frame) + (boxes.count ? 14 : 0);
++    [boxes addObject:box];
++  }
++  CGFloat x = (640 - width) / 2;
++  for (NSButton* box in boxes) {
++    box.frame = NSMakeRect(x, y + 8, NSWidth(box.frame), NSHeight(box.frame));
++    x += NSWidth(box.frame) + 14;
++    [_body addSubview:box];
++  }
++  NSTextField* note = [NSTextField wrappingLabelWithString:
++      @"Senhas do Chrome, Brave, Arc e Edge: o macOS pede uma vez a sua senha do Mac. Dá para importar outros depois, em Configurações › Atos."];
++  note.font = [NSFont systemFontOfSize:12];
++  note.textColor = kDim.color();
++  note.alignment = NSTextAlignmentCenter;
++  note.frame = NSMakeRect(90, y + 40, 460, 32);
++  [_body addSubview:note];
++}
++- (void)setSources:(const AgensImportSource*)sources count:(int)count {
++  _sources.clear();
++  for (int i = 0; i < count; ++i) {
++    if (!sources[i].available) continue;  // nothing to bring (e.g. Safari without Full Disk Access)
++    std::string label = sources[i].browser;
++    if (sources[i].profile && sources[i].profile[0]) label += std::string(" — ") + sources[i].profile;
++    _sources.emplace_back(sources[i].id, label, sources[i].available);
++  }
++  _pick = 0;
++  if (_sources.empty()) _importStatus = @"";  // searched, nothing found
++  if (_step == 2) [self showStep:2];
++}
++- (void)pickSource:(NSButton*)radio {
++  _pick = (int)radio.tag;
++}
++- (void)setWhat:(NSButton*)box {
++  _what = box.state == NSControlStateValueOn ? (_what | (int)box.tag) : (_what & ~(int)box.tag);
++  _next.enabled = _what != 0;
++}
++- (void)startImport {
++  if (!_browser || _pick < 0 || (size_t)_pick >= _sources.size() || !_what) return;
++  _importing = YES;
++  _importStatus = nil;
++  _importCounts.clear();
++  [self showStep:2];
++  agens_import_run(_browser, std::get<0>(_sources[_pick]).c_str(), [self firstAtoName].UTF8String,
++                   _what & std::get<2>(_sources[_pick]), FirstRunImportProgress, (__bridge void*)self);
++}
++// Same wording as Configurações › Atos › Trazer: steps while working, the counts at the end.
++- (void)importState:(int)state message:(const char*)message {
++  std::string text = message ? message : "";
++  // Counts only; "Extensões: 2 (instalando da loja)" is a step, its count comes at the end.
++  if (state == 0 && text.find(':') != std::string::npos && text.find('(') == std::string::npos) {
++    _importCounts.push_back(text);
++  }
++  if (state == 1) _importDone = YES;
++  if (state < 0) _importFailed = YES;
++  if (state == 1) {
++    text = "Pronto";
++    for (const std::string& c : _importCounts) text += " · " + c;
++  } else if (state < 0) {
++    text = "Não deu: " + text;
++  }
++  _importStatus = @(text.c_str());
++  if (_step == 2) [self showStep:2];
 +}
 +- (void)back:(id)sender {
 +  if (_step > 0) [self showStep:_step - 1];
@@ -8131,7 +8316,10 @@ index 0000000000..76f8c5eaac
 +    agens_window_set_tabs_observer(_window, TabsChanged, (__bridge void*)self);
 +    agens_window_set_atos_observer(_window, AtosChanged, (__bridge void*)self);
 +    AgensWindow* opened = _window;
-+    dispatch_async(dispatch_get_main_queue(), ^{ [AgensFirstRun showIfNeededFor:opened]; });
++    __weak AgensChrome* weakChrome = self;
++    dispatch_async(dispatch_get_main_queue(), ^{
++      [AgensFirstRun showIfNeededFor:opened browserWindow:weakChrome.window];
++    });
 +    agens_window_set_status_observer(_window, StatusChanged, (__bridge void*)self);
 +    agens_window_set_downloads_observer(_window, DownloadsChanged, (__bridge void*)self);
 +    agens_window_set_bookmarks_observer(_window, BookmarksChanged, (__bridge void*)self);
