@@ -2561,10 +2561,10 @@ index 0000000000..18ec90466e
 +}  // namespace agens::import
 diff --git a/chrome/browser/agens/embed/import_writer.cc b/chrome/browser/agens/embed/import_writer.cc
 new file mode 100644
-index 0000000000..de72c6db64
+index 0000000000..4eb24ab895
 --- /dev/null
 +++ b/chrome/browser/agens/embed/import_writer.cc
-@@ -0,0 +1,329 @@
+@@ -0,0 +1,307 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Puts imported data into an ato (a Chromium profile named `ato_name`), creating it if needed.
 +
@@ -2583,6 +2583,9 @@ index 0000000000..de72c6db64
 +#include "chrome/browser/browser_process.h"
 +#include "chrome/browser/extensions/extension_service.h"
 +#include "chrome/browser/extensions/updater/extension_updater.h"
++#include "extensions/browser/disable_reason.h"
++#include "extensions/browser/extension_prefs.h"
++#include "extensions/browser/extension_registrar.h"
 +#include "extensions/browser/extension_registry.h"
 +#include "extensions/browser/pending_extension_manager.h"
 +#include "extensions/common/extension_urls.h"
@@ -2829,6 +2832,13 @@ index 0000000000..de72c6db64
 +    auto* registry = extensions::ExtensionRegistry::Get(profile_);
 +    size_t installed = 0, enabled = 0;
 +    for (const std::string& id : wanted_) {
++      // The silent (Sync-style) install leaves new extensions disabled for "permissions increase"
++      // because nothing granted them; the person asked for this import, so grant and enable.
++      if (const extensions::Extension* e = registry->disabled_extensions().GetByID(id);
++          e && extensions::ExtensionPrefs::Get(profile_)->GetDisableReasons(id) ==
++                   extensions::DisableReasonSet{extensions::disable_reason::DISABLE_PERMISSIONS_INCREASE}) {
++        extensions::ExtensionRegistrar::Get(profile_)->GrantPermissionsAndEnableExtension(*e);
++      }
 +      installed += !!registry->GetInstalledExtension(id);
 +      enabled += !!registry->enabled_extensions().GetByID(id);
 +    }
@@ -2862,38 +2872,6 @@ index 0000000000..de72c6db64
 +}
 +
 +}  // namespace agens::import
-+
-+// TEMP-TEST-HOOK begin
-+#include <cstdlib>
-+#include <thread>
-+#include "base/command_line.h"
-+#include "base/logging.h"
-+#include "chrome/browser/agens/embed/agens_import.h"
-+#include "content/public/browser/browser_thread.h"
-+namespace {
-+void OnSrc(void*, const AgensImportSource* s, int n) {
-+  const char* want = getenv("AGENS_TEST_IMPORT_EXT");
-+  for (int i = 0; i < n; ++i) {
-+    LOG(ERROR) << "AGTEST source " << s[i].id << " avail=" << s[i].available;
-+    if (want && std::string(s[i].id) == want)
-+      agens_import_run(nullptr, s[i].id, "Teste Extensões", kAgensImportExtensions,
-+                       [](void*, const char*, int st, const char* m) { LOG(ERROR) << "AGTEST " << st << " " << m; }, nullptr);
-+  }
-+}
-+struct Hook {
-+  Hook() {
-+    if (!getenv("AGENS_TEST_IMPORT_EXT")) return;
-+    std::thread([] {
-+      std::this_thread::sleep_for(std::chrono::seconds(20));
-+      content::GetUIThreadTaskRunner({})->PostTask(FROM_HERE, base::BindOnce([] {
-+        if (base::CommandLine::ForCurrentProcess()->HasSwitch("agens-import-test-root"))
-+          agens_import_sources(&OnSrc, nullptr);
-+      }));
-+    }).detach();
-+  }
-+} g_hook;
-+}  // namespace
-+// TEMP-TEST-HOOK end
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
 new file mode 100644
 index 0000000000..204b5147c0
