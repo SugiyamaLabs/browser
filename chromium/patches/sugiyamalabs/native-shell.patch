@@ -986,10 +986,10 @@ index 0000000000..ee2f209a38
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
 new file mode 100644
-index 0000000000..4fd9c04664
+index 0000000000..e2b1fac68e
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.cc
-@@ -0,0 +1,759 @@
+@@ -0,0 +1,762 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The embed API (agens_embed.h) on top of AgensWindow. Same code on every platform.
 +
@@ -1723,6 +1723,9 @@ index 0000000000..4fd9c04664
 +  NOTREACHED();
 +}
 +void FocusNativeLocationBar(views::Widget*) {}
++ExtensionInstallPrompt::ShowDialogCallback NativeInstallDialogCallback() {
++  return ExtensionInstallPrompt::ShowDialogCallback();
++}
 +std::unique_ptr<permissions::PermissionPrompt> CreateNativePermissionPrompt(
 +    content::WebContents*,
 +    permissions::PermissionPrompt::Delegate*) {
@@ -1751,10 +1754,10 @@ index 0000000000..4fd9c04664
 +}  // namespace agens
 diff --git a/chrome/browser/agens/embed/native_shell.h b/chrome/browser/agens/embed/native_shell.h
 new file mode 100644
-index 0000000000..9b81aa73ae
+index 0000000000..a063b72c46
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.h
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,49 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Glue between Chromium's Webium window (WebUIBrowserWindow, without its HTML page) and the
 +// agens_embed.h interface.
@@ -1765,6 +1768,7 @@ index 0000000000..9b81aa73ae
 +
 +#include "base/feature_list.h"
 +#include "base/functional/callback_forward.h"
++#include "chrome/browser/extensions/extension_install_prompt.h"
 +#include "components/permissions/permission_prompt.h"
 +
 +class BrowserWindowInterface;
@@ -1788,6 +1792,8 @@ index 0000000000..9b81aa73ae
 +    permissions::PermissionPrompt::Delegate* delegate);
 +// Where the window's traffic lights center (the shell's toolbar or tab strip height).
 +float NativeTitlebarHeight(views::Widget* widget);
++// "Adicionar extensão?" as a native sheet on the browser window.
++ExtensionInstallPrompt::ShowDialogCallback NativeInstallDialogCallback();
 +// Lets the native shell take a browser command (IDC_*) before Chromium runs it. True if it did.
 +bool HandleNativeCommand(BrowserWindowInterface* browser, int command_id);
 +// The window's status bubble (link URL), or null when the native shell isn't in this widget.
@@ -1803,10 +1809,10 @@ index 0000000000..9b81aa73ae
 +#endif  // CHROME_BROWSER_AGENS_EMBED_NATIVE_SHELL_H_
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
 new file mode 100644
-index 0000000000..8b6190d29a
+index 0000000000..5f5ecbcfbd
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
-@@ -0,0 +1,271 @@
+@@ -0,0 +1,308 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The macOS host: the views::View that fills the Webium window, puts the UI's chrome (an NSView)
 +// over it and the active tab in the page card. Everything else is shared (agens_window.h,
@@ -1817,6 +1823,9 @@ index 0000000000..8b6190d29a
 +#import <AppKit/AppKit.h>
 +
 +#include "chrome/browser/agens/embed/agens_window.h"
++#include "base/strings/sys_string_conversions.h"
++#include "chrome/browser/extensions/extension_install_prompt_show_params.h"
++#include "extensions/browser/install_prompt_data.h"
 +#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
 +#include "components/permissions/permission_request.h"
 +#include "ui/base/metadata/metadata_header_macros.h"
@@ -2060,6 +2069,40 @@ index 0000000000..8b6190d29a
 +                       : nullptr;
 +  if (!shell) return nullptr;
 +  return std::make_unique<NativePermissionPrompt>(shell->window(), delegate);
++}
++
++namespace {
++void ShowNativeInstallDialog(std::unique_ptr<ExtensionInstallPromptShowParams> params,
++                             ExtensionInstallPrompt::DoneCallback done,
++                             std::unique_ptr<extensions::InstallPromptData> prompt) {
++  NSAlert* alert = [[NSAlert alloc] init];
++  alert.messageText = base::SysUTF16ToNSString(prompt->GetDialogTitle());
++  NSMutableArray<NSString*>* asks = [NSMutableArray array];
++  for (size_t i = 0; i < prompt->GetPermissionCount(); ++i) {
++    [asks addObject:[@"·  " stringByAppendingString:base::SysUTF16ToNSString(prompt->GetPermission(i))]];
++  }
++  alert.informativeText = asks.count ? [@"Ela pode:\n" stringByAppendingString:[asks componentsJoinedByString:@"\n"]]
++                                     : @"Ela não pede acesso especial.";
++  NSString* accept = base::SysUTF16ToNSString(prompt->GetAcceptButtonLabel());
++  [alert addButtonWithTitle:accept.length ? accept : @"Adicionar extensão"];
++  [alert addButtonWithTitle:@"Cancelar"];
++  __block ExtensionInstallPrompt::DoneCallback answer = std::move(done);
++  void (^finish)(NSModalResponse) = ^(NSModalResponse response) {
++    std::move(answer).Run(ExtensionInstallPrompt::DoneCallbackPayload(
++        response == NSAlertFirstButtonReturn ? ExtensionInstallPrompt::Result::ACCEPTED
++                                             : ExtensionInstallPrompt::Result::USER_CANCELED));
++  };
++  NSWindow* parent = params->GetParentWindow().GetNativeNSWindow();
++  if (parent) {
++    [alert beginSheetModalForWindow:parent completionHandler:finish];
++  } else {
++    finish([alert runModal]);
++  }
++}
++}  // namespace
++
++ExtensionInstallPrompt::ShowDialogCallback NativeInstallDialogCallback() {
++  return base::BindRepeating(&ShowNativeInstallDialog);
 +}
 +
 +float NativeTitlebarHeight(views::Widget* widget) {
@@ -6887,6 +6930,28 @@ index 886649ae98..3adfa8a130 100644
      return StartupProfileMode::kBrowserWindow;
    }
  
+diff --git a/chrome/browser/ui/views/extensions/extension_install_dialog_view.cc b/chrome/browser/ui/views/extensions/extension_install_dialog_view.cc
+index 83ce5b59c1..71aaf5ca2e 100644
+--- a/chrome/browser/ui/views/extensions/extension_install_dialog_view.cc
++++ b/chrome/browser/ui/views/extensions/extension_install_dialog_view.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "chrome/browser/ui/views/extensions/extension_install_dialog_view.h"
+ 
++#include "chrome/browser/agens/embed/native_shell.h"
++
+ #include <memory>
+ #include <string>
+ #include <utility>
+@@ -732,5 +734,8 @@ END_METADATA
+ // static
+ ExtensionInstallPrompt::ShowDialogCallback
+ ExtensionInstallPrompt::GetDefaultShowDialogCallback() {
++  if (agens::IsNativeShellEnabled()) {
++    return agens::NativeInstallDialogCallback();  // agens: a native sheet
++  }
+   return base::BindRepeating(&ShowExtensionInstallDialogImpl);
+ }
 diff --git a/chrome/browser/ui/views/permissions/permission_prompt_factory.cc b/chrome/browser/ui/views/permissions/permission_prompt_factory.cc
 index 12bb0ac5fb..52735f7a84 100644
 --- a/chrome/browser/ui/views/permissions/permission_prompt_factory.cc
