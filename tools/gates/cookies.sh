@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# Gate for "Compartilhar cookies" per ato: B and C share, A does not. Three launches on the same
+# Gate for "Compartilhar cookies" per ato: B and C share, A does not. Four launches on the same
 # profile, because no socket op sets the flag: it is edited in Local State while the browser is
-# closed. Usage: BROWSER_WORK=~/browser-work-2 tools/gates/cookies.sh
+# closed. Atos log in and out by opening the test site with `atos open`, and the site itself says
+# whether a request carried the login cookie (/whoami, /seen).
+# Usage: BROWSER_WORK=~/browser-work-4 tools/gates/cookies.sh
 source "$(dirname "$0")/lib.sh"
 SITE=http://127.0.0.1:8765
 python3 "$REPO/tools/sites-teste/serve.py" 8765 >/dev/null 2>&1 & site=$!
 trap 'kill $site 2>/dev/null' EXIT
 sleep 1
 fails=0
+pass() { echo "PASS $1"; }
+fail() { echo "FAIL $1"; fails=$((fails+1)); }
 
 # lib.sh's start/stop throw the profile away; these keep it between launches.
 relaunch() {
@@ -18,39 +22,62 @@ relaunch() {
   echo "FAIL: no socket after 30 s"; stop; exit 1
 }
 quit() { kill "$BROWSER_PID" 2>/dev/null; wait "$BROWSER_PID" 2>/dev/null; sleep 1; }   # by PID; Local State is written on exit
-# shared FOLDER true|false, with the browser closed.
-shared() {
-  python3 - "$PROFILE/Local State" "$1" "$2" <<'EOF'
+# With the browser closed: state shared FOLDER true|false, or state reopen FOLDER (the only ato
+# whose windows come back at the next launch, so the others start asleep).
+state() {
+  python3 - "$PROFILE/Local State" "$@" <<'EOF'
 import json, sys
-path, ato, on = sys.argv[1], sys.argv[2], sys.argv[3] == "true"
+path, what, ato = sys.argv[1], sys.argv[2], sys.argv[3]
 state = json.load(open(path))
-extras = state.setdefault("agens", {}).setdefault("atos", {}).setdefault(ato, {})
-if on:
-    extras["shared"] = True
+if what == "shared":
+    extras = state.setdefault("agens", {}).setdefault("atos", {}).setdefault(ato, {})
+    if sys.argv[4] == "true":
+        extras["shared"] = True
+    else:
+        extras.pop("shared", None)
 else:
-    extras.pop("shared", None)
+    profile = state.setdefault("profile", {})
+    profile["last_active_profiles"] = [ato]
+    profile["last_used"] = ato
 json.dump(state, open(path, "w"))
 EOF
 }
-# expect ok|timeout "what it shows" agensctl args...
-expect() {
-  local want=$1 what=$2; shift 2
-  local out got
-  out="$(python3 "$REPO/tools/agensctl" "$@" 2>&1)"
-  if echo "$out" | grep -q '"ok": true'; then got=ok; elif echo "$out" | grep -q "timed out"; then got=timeout; else got=error; fi
-  if [ "$got" = "$want" ]; then echo "PASS $what"; else echo "FAIL $what (wanted $want, got $got): agensctl $*"; echo "$out" | head -5; fails=$((fails+1)); fi
+ctl() { python3 "$REPO/tools/agensctl" --timeout 20 "$@"; }
+open_in() { ctl atos open "$1" "$2" >/dev/null || fail "atos open $1 $2"; }
+# true|false: whether ATO sends the login cookie (sid, httpOnly) to the site right now.
+logged() {
+  local tag="t$SECONDS-$RANDOM$RANDOM"   # runs in $(...): no counter survives, so a random tag
+  open_in "$1" "$SITE/whoami?tag=$tag" >&2
+  for _ in $(seq 40); do
+    local seen; seen="$(curl -s "$SITE/seen?tag=$tag")"
+    case "$seen" in *'"seen": true, "logged_in": true'*) echo true; return;; *'"seen": true'*) echo false; return;; esac
+    sleep 0.25
+  done
+  echo none
 }
-logged_in() { expect "$1" "$2" --timeout "${3:-5}" login --ato "$4" --url "$SITE/login" --done "cookie:$SITE:sid"; }   # sid is httpOnly
-login() { expect ok "$2" --timeout 20 login --ato "$1" --url "$SITE/login?auto=1" --done "url_prefix:$SITE/app/"; }
-logout() { expect ok "$2" --timeout 20 login --ato "$1" --url "$SITE/logout" --done "url_prefix:$SITE/login"; }
-new_ato() { python3 "$REPO/tools/agensctl" --timeout 20 atos create "$1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["ato"])'; }
-list_shared() {   # prints "A=false B=true C=true"
-  python3 "$REPO/tools/agensctl" --timeout 10 atos list | python3 -c '
+# eventually ATO true|false "what": polls up to ~15 s (a mirrored change or a merge takes a moment).
+eventually() {
+  local got
+  for _ in $(seq 10); do got="$(logged "$1")"; [ "$got" = "$2" ] && { pass "$3"; return; }; sleep 1; done
+  fail "$3 (wanted logged in=$2, got $got)"
+}
+# still ATO true|false "what": after a settle time, so a wrong mirror would have arrived.
+still() { sleep 3; local got; got="$(logged "$1")"; [ "$got" = "$2" ] && pass "$3" || fail "$3 (wanted logged in=$2, got $got)"; }
+login_on() { open_in "$1" "$SITE/login?auto=1"; eventually "$1" true "$2"; }
+logout_on() { open_in "$1" "$SITE/logout"; eventually "$1" false "$2"; }
+new_ato() { ctl atos create "$1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["ato"])'; }
+# check_list "A=false B=true C=true" [asleep_letter]: shared per ato, and that one ato is asleep.
+check_list() {
+  local got
+  got="$(ctl atos list | python3 -c '
 import json, sys
 ids = dict(zip(sys.argv[1:4], "ABC"))
-print(" ".join("%s=%s" % (ids[a["id"]], str(a.get("shared")).lower()) for a in json.load(sys.stdin)["atos"] if a["id"] in ids))' "$A" "$B" "$C"
+atos = [a for a in json.load(sys.stdin)["atos"] if a["id"] in ids]
+print(" ".join("%s=%s" % (ids[a["id"]], str(a.get("shared")).lower()) for a in atos), end="")
+print("".join(" %s:asleep" % ids[a["id"]] for a in atos if a.get("asleep") and ids[a["id"]] == sys.argv[4]))' "$A" "$B" "$C" "${2:-}")"
+  local want="$1"; [ -n "${2:-}" ] && want="$want $2:asleep"
+  [ "$got" = "$want" ] && pass "atos list: $got" || fail "atos list: wanted '$want', got '$got'"
 }
-check_list() { local got; got="$(list_shared)"; [ "$got" = "$1" ] && echo "PASS atos list: $got" || { echo "FAIL atos list: wanted '$1', got '$got'"; fails=$((fails+1)); }; }
 
 # Launch 1: the three atos, none shared.
 start
@@ -60,37 +87,44 @@ echo "atos: A=$A B=$B C=$C"
 check_list "A=false B=false C=false"
 quit
 
-# Launch 2: B and C share.
-shared "$B" true; shared "$C" true
+# Launch 2: B and C share. B logs in while C sleeps, then both loaded.
+state shared "$B" true; state shared "$C" true; state reopen Default
 relaunch
-check_list "A=false B=true C=true"
-expect ok "A open (loaded while B logs in)" --timeout 20 atos open "$A"
-login "$B" "login on B"
-logged_in ok "C logged in after the login on B (C loaded afterwards)" 20 "$C"
-logged_in timeout "A still logged out" 5 "$A"
-logout "$C" "logout on C"
-sleep 1
-logged_in timeout "B logged out by the logout on C" 5 "$B"
-login "$B" "login on B again (C loaded now)"
-sleep 1
-logged_in ok "C logged in by the login on B (both loaded)" 5 "$C"
-logged_in timeout "A still logged out" 5 "$A"
+check_list "A=false B=true C=true" C
+open_in "$A" "$SITE/other"   # A loaded while B logs in
+login_on "$B" "login on B"
+eventually "$C" true "C logged in after the login on B (C loaded afterwards)"
+still "$A" false "A still logged out"
+logout_on "$C" "logout on C"
+eventually "$B" false "B logged out by the logout on C"
+login_on "$B" "login on B again (C loaded now)"
+eventually "$C" true "C logged in by the login on B (both loaded)"
+still "$A" false "A still logged out"
 shot shared
 quit
 
-# Launch 3: C leaves the pool (keeps what it has).
-shared "$C" false
+# Launch 3: B logs out while C sleeps; when C loads, the logout must not come back.
+state reopen "$B"
+relaunch
+check_list "A=false B=true C=true" C
+logout_on "$B" "logout on B while C sleeps"
+eventually "$C" false "C logged out too once it loads"
+still "$B" false "B stays logged out"
+login_on "$B" "login on B (both loaded)"
+eventually "$C" true "C logged in by it"
+quit
+
+# Launch 4: C leaves the pool (keeps what it has).
+state shared "$C" false
 relaunch
 check_list "A=false B=true C=false"
-expect ok "C open" --timeout 20 atos open "$C"
-logged_in ok "C kept its login after leaving" 20 "$C"
-logout "$C" "logout on C (outside the pool)"
-sleep 1
-logged_in ok "B still logged in" 20 "$B"
-logout "$B" "logout on B"
-login "$B" "new login on B"
-sleep 1
-logged_in timeout "C not reached by the new login on B" 5 "$C"
+still "$C" true "C kept its login after leaving"
+logout_on "$C" "logout on C (outside the pool)"
+still "$B" true "B still logged in"
+logout_on "$B" "logout on B"
+login_on "$B" "new login on B"
+still "$C" false "C not reached by the new login on B"
 stop
+grep -q -e "sid-fake-123" -e "fake-d-cookie-456" "$OUT/browser.log" && fail "a cookie value is in the browser log" || pass "no cookie value in the browser log"
 [ "$fails" = 0 ] && echo "PASS cookies gate" || echo "FAIL cookies gate: $fails check(s)"
 echo "output: $OUT"

@@ -12,6 +12,9 @@ check '"ok": true' login --ato Default --url "$SITE/login" --done "cookie:$SITE:
 check '"ok": true' login --ato Default --url "$SITE/logout" --done "url_prefix:$SITE/login"   # logs out again
 check bad_request login --ato Default --url "file:///etc/hosts" --done "url_prefix:file:///"
 check not_found login --ato Nope --url "$SITE/login" --done "url_prefix:$SITE/app/"
+# The done rule must be about the site it opens (else it tells whether the person is logged in elsewhere).
+check bad_request login --ato Default --url "$SITE/login" --done "cookie:http://localhost:8765:d"
+check bad_request login --ato Default --url "$SITE/login" --done "url_prefix:http://localhost:8765/app/"
 check unknown_op session --ato Default --need "cookie:$SITE:d" --reason gate
 sleep 1; shot after-login      # look: no login tab left open
 stop

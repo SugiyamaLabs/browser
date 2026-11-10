@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Local test sites for the AgensBrowser socket phases. Binds 127.0.0.1 only. Usage: serve.py [PORT]"""
-import http.server, sys
+import http.server, json, sys, urllib.parse
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PAGES = {"/login": "login.html", "/app/": "app.html", "/form": "form.html", "/other": "other.html"}
 SID = "sid-fake-123"  # fake test values only
+SEEN = {}  # /whoami tag -> whether that request carried the login cookie (in memory only)
 
 
 class H(http.server.BaseHTTPRequestHandler):
@@ -35,6 +36,13 @@ class H(http.server.BaseHTTPRequestHandler):
             return self.redirect("/login")
         if path == "/logout":
             return self.redirect("/login", ["sid=; Path=/; Max-Age=0; HttpOnly", "d=; Path=/; Max-Age=0"])
+        if path in ("/whoami", "/seen"):
+            tag = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("tag", [""])[0]
+            if path == "/whoami":
+                SEEN[tag] = self.logged_in()
+                return self.reply(200, b"<p>whoami</p>")
+            return self.reply(200, json.dumps({"seen": tag in SEEN, "logged_in": SEEN.get(tag, False)}).encode(),
+                              ctype="application/json")
         if path == "/api/ping":
             auth = self.headers.get("Authorization", "")
             return self.reply(200, ('{"ok": true, "bearer": %s}' % str(auth == "Bearer test-bearer-123").lower()).encode(),
