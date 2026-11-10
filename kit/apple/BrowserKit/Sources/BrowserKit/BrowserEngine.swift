@@ -1,0 +1,230 @@
+import Foundation
+import Observation
+
+/// A request from the engine for the person's approval (`approval.ask`). The host draws it.
+public struct ApprovalRequest: Sendable, Equatable {
+  /// The engine's id for this request, echoed back in the answer.
+  public let ask: JSON
+  public let title: String
+  public let detail: String
+  /// Whether "always" may be offered.
+  public let offerAlways: Bool
+}
+
+/// The browser engine as a hidden child process of the host app: starts it, connects, says
+/// `hello` and `host.attach`, and routes what comes back to the tab model, the page views and the
+/// host. If it exits, the state says so and the host calls `start()` again when it wants.
+@MainActor @Observable public final class BrowserEngine {
+  public enum State: Equatable, Sendable {
+    case stopped
+    case starting
+    case ready(protocol: Int, browser: String)
+    case failed(String)
+    /// It was running and went away (crash, or the socket closed). Tab ids are no longer valid.
+    case exited
+    /// It answered but speaks an older protocol than this kit needs.
+    case versionTooOld(protocol: Int, browser: String)
+  }
+
+  /// The lowest `hello.protocol` this kit works with.
+  public static let minimumProtocol = 1
+  /// How long `start()` waits for the socket.
+  public static let startTimeout: TimeInterval = 30
+
+  public let executable: URL
+  public let dataDirectory: URL
+  public let arguments: [String]
+
+  public private(set) var state: State = .stopped {
+    didSet { if state != oldValue { onStateChange?(state) } }
+  }
+  public let tabs = BrowserTabs()
+  /// The live connection while `ready`, for the typed and raw operations.
+  public private(set) var connection: BrowserConnection?
+
+  @ObservationIgnored public var onStateChange: ((State) -> Void)?
+  /// Approval requests. Without a handler the kit answers `deny`.
+  @ObservationIgnored public var onApproval: ((ApprovalRequest) async -> ApprovalAnswer)?
+  /// Every event, after the kit has handled the ones it knows.
+  @ObservationIgnored public var onEvent: ((String, [String: JSON]) -> Void)?
+
+  @ObservationIgnored private var process: Process?
+  @ObservationIgnored private var generation = 0
+  @ObservationIgnored private var views: [String: WeakView] = [:]
+
+  /// - Parameters:
+  ///   - executable: the engine binary, e.g. `Contents/Helpers/AgensBrowser.app/Contents/MacOS/AgensBrowser`.
+  ///   - dataDirectory: the engine's profile folder; the socket is `agens.sock` inside it.
+  ///   - arguments: extra engine arguments (e.g. `--agens-accept-unsigned` in development).
+  public init(executable: URL, dataDirectory: URL, arguments: [String] = []) {
+    self.executable = executable
+    self.dataDirectory = dataDirectory
+    self.arguments = arguments
+  }
+
+  public var socketPath: String { dataDirectory.appendingPathComponent("agens.sock").path }
+
+  /// Starts the engine and returns when it is ready or has failed (see `state`). Does nothing
+  /// while starting or ready.
+  public func start() async {
+    switch state {
+    case .starting, .ready: return
+    default: break
+    }
+    generation += 1
+    let generation = generation
+    state = .starting
+    do {
+      try BrowserConnection.checkSocketPath(socketPath)
+      try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
+    } catch {
+      state = .failed("\(error)")
+      return
+    }
+
+    let process = Process()
+    process.executableURL = executable
+    process.arguments = ["--agens-embedded", "--user-data-dir=\(dataDirectory.path)"] + arguments
+    process.terminationHandler = { [weak self] process in
+      let status = process.terminationStatus
+      DispatchQueue.main.async { MainActor.assumeIsolated { self?.processExited(generation, status: status) } }
+    }
+    do {
+      try process.run()
+    } catch {
+      state = .failed("could not start \(executable.path): \(error.localizedDescription)")
+      return
+    }
+    self.process = process
+
+    // A socket left by an earlier run may exist before the engine listens: retry until it connects.
+    let deadline = Date().addingTimeInterval(Self.startTimeout)
+    var connection: BrowserConnection?
+    while connection == nil {
+      guard self.generation == generation, state == .starting else { return }
+      do {
+        connection = try BrowserConnection(socketPath: socketPath)
+      } catch {
+        if Date() > deadline {
+          fail(generation, "the engine did not open \(socketPath) in \(Int(Self.startTimeout)) s")
+          return
+        }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+      }
+    }
+    guard let connection else { return }
+    attach(connection)
+    do {
+      let hello = try await connection.hello()
+      guard self.generation == generation else { return }
+      guard hello.protocol >= Self.minimumProtocol else {
+        tearDown()
+        state = .versionTooOld(protocol: hello.protocol, browser: hello.browser)
+        return
+      }
+      do {
+        try await connection.hostAttach()
+      } catch where error.code == "unknown_op" {
+        // An engine that does not know phase 5 is too old for the kit, whatever its number says.
+        tearDown()
+        state = .versionTooOld(protocol: hello.protocol, browser: hello.browser)
+        return
+      }
+      guard self.generation == generation else { return }
+      state = .ready(protocol: hello.protocol, browser: hello.browser)
+    } catch {
+      fail(generation, "\(error)")
+    }
+  }
+
+  /// Terminates the engine. Call it when the app quits: the engine does not outlive its host by itself.
+  public func stop() {
+    tearDown()
+    state = .stopped
+  }
+
+  /// Wires a connection to the model and the views (also used by the tests, without a process).
+  func attach(_ connection: BrowserConnection) {
+    self.connection = connection
+    tabs.connection = connection
+    connection.onEvent = { [weak self] in self?.handle($0, $1) }
+    let generation = generation
+    connection.onClose = { [weak self] in self?.connectionClosed(generation) }
+  }
+
+  func register(_ view: BrowserTabView, tab: String) {
+    views = views.filter { $0.value.view != nil }
+    views[tab] = WeakView(view: view)
+  }
+
+  private func handle(_ event: String, _ message: [String: JSON]) {
+    if !tabs.handle(event, message) {
+      switch event {
+      case "view.layer":
+        if let tab = message["tab"]?.string, let context = message["context"]?.double {
+          views[tab]?.view?.show(context: UInt32(context))
+        }
+      case "approval.ask":
+        answer(message)
+      default:
+        break
+      }
+    }
+    onEvent?(event, message)
+  }
+
+  private func answer(_ message: [String: JSON]) {
+    let request = ApprovalRequest(
+      ask: message["ask"] ?? .null, title: message["title"]?.string ?? "", detail: message["detail"]?.string ?? "",
+      offerAlways: message["offer_always"]?.bool ?? false)
+    Task {
+      let answer = await onApproval?(request) ?? .deny
+      try? await connection?.answerApproval(request.ask, answer: answer)
+    }
+  }
+
+  private func processExited(_ generation: Int, status: Int32) {
+    guard generation == self.generation else { return }
+    if state == .starting {
+      fail(generation, "the engine exited with status \(status) while starting")
+    } else {
+      wentAway(generation)
+    }
+  }
+
+  private func connectionClosed(_ generation: Int) {
+    guard generation == self.generation else { return }
+    if state == .starting {
+      fail(generation, "the engine closed the connection while starting")
+    } else {
+      wentAway(generation)
+    }
+  }
+
+  private func wentAway(_ generation: Int) {
+    guard case .ready = state else { return }
+    tearDown()
+    state = .exited
+  }
+
+  private func fail(_ generation: Int, _ reason: String) {
+    guard generation == self.generation else { return }
+    tearDown()
+    state = .failed(reason)
+  }
+
+  private func tearDown() {
+    generation += 1
+    connection?.close()
+    connection = nil
+    tabs.connection = nil
+    tabs.reset()
+    views = [:]
+    if let process, process.isRunning { process.terminate() }
+    process = nil
+  }
+}
+
+private struct WeakView {
+  weak var view: BrowserTabView?
+}
