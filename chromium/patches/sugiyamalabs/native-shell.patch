@@ -4410,10 +4410,10 @@ index 0000000000..8d10fddb69
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..5fc998ed56
+index 0000000000..2dd562bbf6
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,5337 @@
+@@ -0,0 +1,5371 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -4428,6 +4428,7 @@ index 0000000000..5fc998ed56
 +
 +#include <algorithm>
 +#include <map>
++#include <set>
 +#include <tuple>
 +#include <string>
 +#include <vector>
@@ -6902,7 +6903,7 @@ index 0000000000..5fc998ed56
 +@interface AgensFirstRun : NSWindowController <NSWindowDelegate>
 ++ (void)showIfNeededFor:(AgensWindow*)window browserWindow:(NSWindow*)browserWindow;
 +- (void)setSources:(const AgensImportSource*)sources count:(int)count;
-+- (void)importState:(int)state message:(const char*)message;
++- (void)importFrom:(const char*)sourceId state:(int)state message:(const char*)message;
 +@end
 +
 +static AgensFirstRun* g_first_run;
@@ -6911,8 +6912,8 @@ index 0000000000..5fc998ed56
 +static void FirstRunSources(void* context, const AgensImportSource* sources, int count) {
 +  if (g_first_run && (__bridge void*)g_first_run == context) [g_first_run setSources:sources count:count];
 +}
-+static void FirstRunImportProgress(void* context, const char*, int state, const char* message) {
-+  if (g_first_run && (__bridge void*)g_first_run == context) [g_first_run importState:state message:message];
++static void FirstRunImportProgress(void* context, const char* source_id, int state, const char* message) {
++  if (g_first_run && (__bridge void*)g_first_run == context) [g_first_run importFrom:source_id state:state message:message];
 +}
 +
 +@implementation AgensFirstRun {
@@ -6926,16 +6927,19 @@ index 0000000000..5fc998ed56
 +  NSTextField* _atoName;
 +  BOOL _madeDefault;
 +  NSButton* _skip;
-+  // Trazer: one row per browser profile that has something; the pick goes into the first ato.
++  // Trazer: one row per browser profile that has something. Each one ticked becomes an ato: the
++  // first into the ato named one step before, the others into new atos named after the profile.
 +  BOOL _searched;
-+  std::vector<std::tuple<std::string, std::string, int>> _sources;  // id, label, available
-+  int _pick;
++  BOOL _noneFound;
++  std::vector<std::tuple<std::string, std::string, int, std::string>> _sources;  // id, label, available, ato
++  std::set<size_t> _picked;
 +  int _what;
 +  BOOL _importing;
-+  BOOL _importDone;
-+  BOOL _importFailed;
-+  NSString* _importStatus;
-+  std::vector<std::string> _importCounts;
++  std::vector<std::string> _runs;                            // source ids, in list order
++  std::map<std::string, std::string> _runAto;                // source id -> ato it fills
++  std::map<std::string, int> _runState;                      // 0 working, 1 done, -1 failed
++  std::map<std::string, std::string> _runText;               // latest step, or the summary
++  std::map<std::string, std::vector<std::string>> _runCounts;
 +}
 +
 ++ (void)showIfNeededFor:(AgensWindow*)window browserWindow:(NSWindow*)browserWindow {
@@ -7101,7 +7105,7 @@ index 0000000000..5fc998ed56
 +  // The dots sit centered in the free space between Voltar and the buttons on the right.
 +  const CGFloat right = offerImport ? NSMinX(_skip.frame) : NSMinX(_next.frame);
 +  _dots.frame = NSMakeRect(round((NSMaxX(_back.frame) + right) / 2 - 7 * 13 / 2.0), 497, 7 * 13, 8);
-+  _next.enabled = !offerImport || _what != 0;
++  _next.enabled = !offerImport || (_what != 0 && !_picked.empty());
 +  _next.title = step == kFirstRunSteps - 1 ? @"Começar"
 +                : offerImport               ? @"Importar"
 +                : step == 5 && !_madeDefault ? @"Agora não"
@@ -7137,53 +7141,70 @@ index 0000000000..5fc998ed56
 +  NSString* name = [_atoName.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
 +  return name.length ? name : @"Pessoal";
 +}
++// Where source i goes: the first ticked one fills the person's first ato, the rest get their own.
++- (std::string)atoFor:(size_t)i {
++  return !_picked.empty() && i == *_picked.begin() ? std::string([self firstAtoName].UTF8String)
++                                                    : std::get<3>(_sources[i]);
++}
++- (void)centered:(NSString*)text size:(CGFloat)size color:(NSColor*)color y:(CGFloat)y height:(CGFloat)h {
++  NSTextField* l = [NSTextField wrappingLabelWithString:text];
++  l.font = [NSFont systemFontOfSize:size];
++  l.textColor = color;
++  l.alignment = NSTextAlignmentCenter;
++  l.frame = NSMakeRect(40, y, 560, h);
++  [_body addSubview:l];
++}
 +- (void)importStep {
 +  if (!_searched) {
 +    _searched = YES;
 +    agens_import_sources(FirstRunSources, (__bridge void*)self);
 +  }
-+  CGFloat y = [self title:@"Trazer o que você já tem?"
-+                     lead:_importFailed ? @"Dá para tentar de novo depois, em Configurações › Atos."
-+                          : _importDone ? [NSString stringWithFormat:@"Veio tudo para o ato %@.", [self firstAtoName]]
-+                          : _importing ? [NSString stringWithFormat:@"Vai tudo para o ato %@. Pode continuar: a importação segue sozinha.", [self firstAtoName]]
-+                          : _sources.empty() && _searched && _importStatus
-+                              ? @"Nenhum outro navegador neste Mac. Dá para importar depois, em Configurações › Atos."
-+                              : @"Achamos estes navegadores no seu Mac. A importação acontece aqui, sem passar por servidor nenhum."];
-+  if (_importing) {
-+    NSTextField* status = [NSTextField wrappingLabelWithString:_importStatus ?: @"Começando…"];
-+    status.font = [NSFont systemFontOfSize:13];
-+    status.textColor = kInk.color();
-+    status.alignment = NSTextAlignmentCenter;
-+    status.frame = NSMakeRect(90, y + 6, 460, 60);
-+    [_body addSubview:status];
++  int working = 0, failed = 0;
++  for (const std::string& id : _runs) {
++    working += _runState[id] == 0;
++    failed += _runState[id] < 0;
++  }
++  NSString* lead = !_importing ? (_noneFound ? @"Nenhum outro navegador neste Mac. Dá para importar depois, em Configurações › Atos."
++                                             : @"Achamos estes navegadores no seu Mac. Cada perfil marcado vira um ato, e nada passa por servidor nenhum.")
++                   : working   ? @"Pode continuar: a importação segue sozinha."
++                   : failed    ? @"Parte não veio. Dá para tentar de novo em Configurações › Atos."
++                               : @"Pronto. Cada perfil virou um ato.";
++  CGFloat y = [self title:@"Trazer o que você já tem?" lead:lead];
++  if (_importing) {  // one line per profile: where it went and how it is going
++    for (const std::string& id : _runs) {
++      size_t i = 0;
++      while (i < _sources.size() && std::get<0>(_sources[i]) != id) ++i;
++      if (i == _sources.size()) continue;
++      NSString* head = [NSString stringWithFormat:@"%@ → ato %@", @(std::get<1>(_sources[i]).c_str()), @(_runAto[id].c_str())];
++      [self centered:head size:13 color:kInk.color() y:y height:18];
++      [self centered:@(_runText[id].c_str()) size:12 color:kMute.color() y:y + 19 height:32];
++      y += 58;
++    }
 +    return;
 +  }
 +  if (_sources.empty()) {
-+    if (!_importStatus) {  // still looking
-+      NSTextField* looking = Label(13, NSFontWeightRegular, kMute);
-+      looking.stringValue = @"Procurando navegadores…";
-+      looking.alignment = NSTextAlignmentCenter;
-+      looking.frame = NSMakeRect(90, y + 6, 460, 18);
-+      [_body addSubview:looking];
-+    }
++    if (!_noneFound) [self centered:@"Procurando navegadores…" size:13 color:kMute.color() y:y + 6 height:18];
 +    return;
 +  }
 +  static NSString* const kNames[] = {@"favoritos", @"histórico", @"senhas", @"cookies", @"extensões"};
 +  const size_t shown = std::min<size_t>(_sources.size(), 4);
 +  for (size_t i = 0; i < shown; ++i) {
-+    const auto& [id, label, available] = _sources[i];
-+    NSButton* radio = [NSButton radioButtonWithTitle:@(label.c_str()) target:self action:@selector(pickSource:)];
-+    radio.tag = (NSInteger)i;
-+    radio.state = (int)i == _pick ? NSControlStateValueOn : NSControlStateValueOff;
-+    radio.frame = NSMakeRect(150, y, 360, 18);
++    const int available = std::get<2>(_sources[i]);
++    NSButton* box = [NSButton checkboxWithTitle:@(std::get<1>(_sources[i]).c_str()) target:self action:@selector(pickSource:)];
++    box.tag = (NSInteger)i;
++    box.state = _picked.count(i) ? NSControlStateValueOn : NSControlStateValueOff;
++    box.frame = NSMakeRect(150, y, 360, 18);
 +    NSMutableArray<NSString*>* has = [NSMutableArray array];
 +    for (int b = 0; b < 5; ++b) {
 +      if (available & (1 << b)) [has addObject:kNames[b]];
 +    }
 +    NSTextField* detail = Label(12, NSFontWeightRegular, kDim);
-+    detail.stringValue = [has componentsJoinedByString:@", "];
-+    detail.frame = NSMakeRect(170, y + 19, 340, 16);
-+    [_body addSubview:radio];
++    detail.stringValue = _picked.count(i)
++        ? [NSString stringWithFormat:@"Vai para o ato %@", @([self atoFor:i].c_str())]
++        : [has componentsJoinedByString:@", "];
++    detail.lineBreakMode = NSLineBreakByTruncatingTail;
++    detail.frame = NSMakeRect(170, y + 19, 380, 16);
++    [_body addSubview:box];
 +    [_body addSubview:detail];
 +    y += 42;
 +  }
@@ -7210,13 +7231,11 @@ index 0000000000..5fc998ed56
 +    x += NSWidth(box.frame) + 14;
 +    [_body addSubview:box];
 +  }
-+  NSTextField* note = [NSTextField wrappingLabelWithString:
-+      @"Senhas do Chrome, Brave, Arc e Edge: o macOS pede uma vez a sua senha do Mac. Dá para importar outros depois, em Configurações › Atos."];
-+  note.font = [NSFont systemFontOfSize:12];
-+  note.textColor = kDim.color();
-+  note.alignment = NSTextAlignmentCenter;
-+  note.frame = NSMakeRect(90, y + 40, 460, 32);
-+  [_body addSubview:note];
++  [self centered:@"Senhas do Chrome, Brave, Arc e Edge: o macOS pede uma vez a sua senha do Mac. Dá para importar outros depois, em Configurações › Atos."
++            size:12
++           color:kDim.color()
++               y:y + 40
++          height:32];
 +}
 +- (void)setSources:(const AgensImportSource*)sources count:(int)count {
 +  _sources.clear();
@@ -7224,44 +7243,59 @@ index 0000000000..5fc998ed56
 +    if (!sources[i].available) continue;  // nothing to bring (e.g. Safari without Full Disk Access)
 +    std::string label = sources[i].browser;
 +    if (sources[i].profile && sources[i].profile[0]) label += std::string(" — ") + sources[i].profile;
-+    _sources.emplace_back(sources[i].id, label, sources[i].available);
++    _sources.emplace_back(sources[i].id, label, sources[i].available,
++                          sources[i].ato && sources[i].ato[0] ? sources[i].ato : label);
 +  }
-+  _pick = 0;
-+  if (_sources.empty()) _importStatus = @"";  // searched, nothing found
++  _picked.clear();
++  if (!_sources.empty()) _picked.insert(0);
++  _noneFound = _sources.empty();
 +  if (_step == 2) [self showStep:2];
 +}
-+- (void)pickSource:(NSButton*)radio {
-+  _pick = (int)radio.tag;
++- (void)pickSource:(NSButton*)box {
++  if (box.state == NSControlStateValueOn) {
++    _picked.insert((size_t)box.tag);
++  } else {
++    _picked.erase((size_t)box.tag);
++  }
++  [self showStep:2];  // the "vai para o ato" lines follow which one is first
 +}
 +- (void)setWhat:(NSButton*)box {
 +  _what = box.state == NSControlStateValueOn ? (_what | (int)box.tag) : (_what & ~(int)box.tag);
-+  _next.enabled = _what != 0;
++  _next.enabled = _what != 0 && !_picked.empty();
 +}
 +- (void)startImport {
-+  if (!_browser || _pick < 0 || (size_t)_pick >= _sources.size() || !_what) return;
++  if (!_browser || _picked.empty() || !_what) return;
 +  _importing = YES;
-+  _importStatus = nil;
-+  _importCounts.clear();
++  for (size_t i : _picked) {
++    const std::string& id = std::get<0>(_sources[i]);
++    _runs.push_back(id);
++    _runAto[id] = [self atoFor:i];
++    _runState[id] = 0;
++    _runText[id] = "Começando…";
++  }
 +  [self showStep:2];
-+  agens_import_run(_browser, std::get<0>(_sources[_pick]).c_str(), [self firstAtoName].UTF8String,
-+                   _what & std::get<2>(_sources[_pick]), FirstRunImportProgress, (__bridge void*)self);
++  for (size_t i : _picked) {  // concurrent imports are fine: the writer never gives two the same folder
++    const std::string& id = std::get<0>(_sources[i]);
++    agens_import_run(_browser, id.c_str(), _runAto[id].c_str(), _what & std::get<2>(_sources[i]),
++                     FirstRunImportProgress, (__bridge void*)self);
++  }
 +}
 +// Same wording as Configurações › Atos › Trazer: steps while working, the counts at the end.
-+- (void)importState:(int)state message:(const char*)message {
++- (void)importFrom:(const char*)sourceId state:(int)state message:(const char*)message {
++  const std::string id = sourceId ? sourceId : "";
 +  std::string text = message ? message : "";
 +  // Counts only; "Extensões: 2 (instalando da loja)" is a step, its count comes at the end.
 +  if (state == 0 && text.find(':') != std::string::npos && text.find('(') == std::string::npos) {
-+    _importCounts.push_back(text);
++    _runCounts[id].push_back(text);
 +  }
-+  if (state == 1) _importDone = YES;
-+  if (state < 0) _importFailed = YES;
 +  if (state == 1) {
 +    text = "Pronto";
-+    for (const std::string& c : _importCounts) text += " · " + c;
++    for (const std::string& c : _runCounts[id]) text += " · " + c;
 +  } else if (state < 0) {
 +    text = "Não deu: " + text;
 +  }
-+  _importStatus = @(text.c_str());
++  _runState[id] = state;
++  _runText[id] = text;
 +  if (_step == 2) [self showStep:2];
 +}
 +- (void)back:(id)sender {
