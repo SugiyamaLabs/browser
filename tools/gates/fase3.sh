@@ -36,19 +36,24 @@ class Conn:  # one connection: control belongs to it
         self.s = socket.socket(socket.AF_UNIX)
         self.s.connect(SOCK)
         self.f = self.s.makefile("r")
-        self.n, self.events = 0, []
-    def ask(self, op, timeout=45, **params):
+        self.n, self.events, self.replies = 0, [], {}
+    def send(self, op, **params):  # without waiting: requests pipelined on the connection
         self.n += 1
         self.s.sendall((json.dumps({"id": self.n, "op": op, **params}) + "\n").encode())
+        return self.n
+    def wait(self, rid, timeout=45):
         self.s.settimeout(timeout)
-        while True:
+        while rid not in self.replies:
             line = self.f.readline()
-            if not line: raise SystemExit(f"FAIL: connection closed during {op}")
+            if not line: raise SystemExit(f"FAIL: connection closed waiting for request {rid}")
             msg = json.loads(line)
             if "event" in msg:
                 self.events.append(msg)
-            elif msg.get("id") == self.n:
-                return msg
+            else:
+                self.replies[msg.get("id")] = msg
+        return self.replies.pop(rid)
+    def ask(self, op, timeout=45, **params):
+        return self.wait(self.send(op, **params), timeout)
     def close(self):
         self.s.close()
 
@@ -99,6 +104,12 @@ check("snapshot lists the form fields (text, password, checkbox, select, button,
       all([text, pw, box, sel, show, link]), [n["role"] + ":" + n["name"] for n in nodes][:40])
 check("snapshot: the password field is flagged and has no value", bool(pw) and pw.get("password") is True and "value" not in pw, pw)
 check("snapshot: checkbox carries checked=false", bool(box) and box.get("checked") is False, box)
+if box:
+    for want in (True, False):
+        c.ask("page.click", tab=tab, ref=box["ref"])
+        r = snapshot(c, tab, lambda ns: (find(ns, "checkBox") or {}).get("checked") is want, wait=4)
+        b2 = find(r.get("nodes", []), "checkBox") if r else None
+        check(f"click on the checkbox: snapshot says checked={want}", bool(b2) and b2.get("checked") is want, b2)
 shot("controlled")  # look: warm border around the card, strip "Controlado pelo … · Parar", mark on the tab
 
 if text and show:
@@ -120,6 +131,14 @@ if pw:
     check("page.key meta+v (paste) is denied", code(r) == "denied", r)
     r = c.ask("page.key", tab=tab, key="Tab")
     check("page.key Tab while the password field has the focus is allowed", code(r) == "ok", r)
+if text and pw:
+    # Pipelined, no wait between them: Tab moves the focus from Text to Password, so the "a"
+    # sent right after must be checked against the focus after the Tab.
+    c.ask("page.click", tab=tab, ref=text["ref"])
+    t_id, a_id = c.send("page.key", tab=tab, key="Tab"), c.send("page.key", tab=tab, key="a")
+    rt, ra = c.wait(t_id), c.wait(a_id)
+    check("pipelined Tab then a: Tab ok, a denied (focus landed on the password field)",
+          code(rt) == "ok" and code(ra) == "denied", (rt, ra))
 check("page.key with an unknown key is bad_request", code(c.ask("page.key", tab=tab, key="Hyper")) == "bad_request")
 check("page.type with a newline is bad_request", code(c.ask("page.type", tab=tab, ref=text["ref"] if text else "e1", text="a\nb")) == "bad_request")
 
@@ -146,6 +165,14 @@ else:
     p2 = find(r.get("nodes", []), "textField", "PIN")
     check("revealed PIN stays a password: flagged, no value", bool(p2) and p2.get("password") is True and "value" not in p2, p2)
     check("revealed PIN: its value is nowhere in the snapshot", "pin-secret-42" not in json.dumps(r))
+    # Hide it again, then pipeline "show" and a screenshot: the screenshot must see the click.
+    c.ask("page.click", tab=tab, ref=eye["ref"])
+    time.sleep(0.5)
+    check("screenshot with the PIN hidden works", code(c.ask("page.screenshot", tab=tab)) == "ok")
+    e_id, s_id = c.send("page.click", tab=tab, ref=eye["ref"]), c.send("page.screenshot", tab=tab)
+    re_, rs = c.wait(e_id), c.wait(s_id)
+    check("pipelined click on Mostrar senha then screenshot: screenshot denied",
+          code(re_) == "ok" and code(rs) == "denied", (re_, {k: v for k, v in rs.items() if k != "png"}))
     check("page.type into the revealed PIN is denied", code(c.ask("page.type", tab=tab, ref=pin["ref"], text="x")) == "denied")
     check("page.screenshot while the PIN shows its text is denied", code(c.ask("page.screenshot", tab=tab)) == "denied")
     c.ask("page.click", tab=tab, ref=pin["ref"])
