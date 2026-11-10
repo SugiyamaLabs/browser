@@ -62,10 +62,10 @@ index 0000000000..392ac29938
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_BRIDGE_H_
 diff --git a/chrome/browser/agens/bridge/bridge_mac.mm b/chrome/browser/agens/bridge/bridge_mac.mm
 new file mode 100644
-index 0000000000..dca941eddd
+index 0000000000..9ddb5d65f5
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/bridge_mac.mm
-@@ -0,0 +1,495 @@
+@@ -0,0 +1,567 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The socket server on macOS: a Unix socket in the user data dir, the peer's code signature read
 +// from its audit token, and the approval of the person before a signed client gets in.
@@ -128,6 +128,12 @@ index 0000000000..dca941eddd
 +constexpr char kTeamId[] = "TEAM_ID_PLACEHOLDER";
 +
 +constexpr char kSocketName[] = "agens.sock";
++
++// Same-user DoS bounds: requests held while the approval is pending, replies the client hasn't
++// read, and open connections.
++constexpr size_t kMaxWaitingBytes = 64 * 1024;
++constexpr size_t kMaxPendingOutput = 1 << 20;
++constexpr size_t kMaxConnections = 16;
 +
 +// --- Who is on the other side (thread pool: the Security calls may block).
 +
@@ -204,7 +210,8 @@ index 0000000000..dca941eddd
 +
 +struct Ask {
 +  Peer peer;
-+  Decision done;
++  uint64_t connection;
++  Decision done;  // null once that connection closed (its sheet may still be up)
 +};
 +std::deque<Ask>& Asks() {
 +  static base::NoDestructor<std::deque<Ask>> asks;
@@ -219,16 +226,29 @@ index 0000000000..dca941eddd
 +
 +void AskNext();
 +
++// Runs (and removes) every queued ask of `identity`: one sheet answers all of that app's waiting
++// connections, so an app never has more than one sheet pending.
++void Resolve(const std::string& identity, const char* error) {
++  std::vector<Decision> dones;
++  for (auto it = Asks().begin(); it != Asks().end();) {
++    if (it->peer.identity != identity) {
++      ++it;
++      continue;
++    }
++    if (it->done) dones.push_back(std::move(it->done));
++    it = Asks().erase(it);
++  }
++  for (Decision& done : dones) std::move(done).Run(error);  // each only posts to the IO thread
++}
++
 +void Answered(AgensClientAnswer answer) {
 +  g_asking = false;
 +  if (Asks().empty()) return;
-+  Ask ask = std::move(Asks().front());
-+  Asks().pop_front();
-+  if (answer == kAgensClientAllowAlways && !AlwaysAllowed(ask.peer.identity)) {
-+    ScopedListPrefUpdate(g_browser_process->local_state(), kAllowedClientsPref)
-+        ->Append(ask.peer.identity);
++  const std::string identity = Asks().front().peer.identity;
++  if (answer == kAgensClientAllowAlways && !AlwaysAllowed(identity)) {
++    ScopedListPrefUpdate(g_browser_process->local_state(), kAllowedClientsPref)->Append(identity);
 +  }
-+  std::move(ask.done).Run(answer == kAgensClientDeny ? kDenied : nullptr);
++  Resolve(identity, answer == kAgensClientDeny ? kDenied : nullptr);
 +  AskNext();
 +}
 +
@@ -236,18 +256,31 @@ index 0000000000..dca941eddd
 +void AskNext() {
 +  while (!g_asking && !Asks().empty()) {
 +    if (AlwaysAllowed(Asks().front().peer.identity)) {
-+      Ask ask = std::move(Asks().front());
-+      Asks().pop_front();
-+      std::move(ask.done).Run(nullptr);
++      Resolve(Asks().front().peer.identity, nullptr);
 +      continue;
 +    }
 +    g_asking = true;
-+    // May answer right away (no window to ask on): Answered then pops this one.
++    // May answer right away (no window to ask on): Answered then resolves this one.
 +    agens::AskClientApproval(Asks().front().peer.name, base::BindOnce(&Answered));
 +  }
 +}
 +
-+void Decide(Peer peer, Decision done) {
++// The connection closed before the person answered: no sheet for it. One already showing stays
++// up (there is no hook to take it down); its answer then only reaches the app's other waiting
++// connections, if any.
++void CancelAsk(uint64_t connection) {
++  for (auto it = Asks().begin(); it != Asks().end();) {
++    if (it->connection != connection) {
++      ++it;
++    } else if (g_asking && it == Asks().begin()) {
++      (it++)->done.Reset();
++    } else {
++      it = Asks().erase(it);
++    }
++  }
++}
++
++void Decide(Peer peer, uint64_t connection, Decision done) {
 +  if (!g_browser_process || g_browser_process->IsShuttingDown()) {
 +    std::move(done).Run(kDenied);
 +    return;
@@ -257,7 +290,7 @@ index 0000000000..dca941eddd
 +    std::move(done).Run(accept ? nullptr : kUnauthorized);
 +    return;
 +  }
-+  Asks().push_back({std::move(peer), std::move(done)});
++  Asks().push_back({std::move(peer), connection, std::move(done)});
 +  AskNext();
 +}
 +
@@ -267,7 +300,10 @@ index 0000000000..dca941eddd
 +
 +class Connection : public base::MessagePumpForIO::FdWatcher {
 + public:
-+  Connection(Server* server, base::ScopedFD fd) : server_(server), fd_(std::move(fd)) {}
++  Connection(Server* server, base::ScopedFD fd) : server_(server), fd_(std::move(fd)) {
++    static uint64_t next_id = 0;  // IO thread only
++    id_ = ++next_id;
++  }
 +
 +  void Start();
 +  void Send(std::string line);
@@ -275,6 +311,7 @@ index 0000000000..dca941eddd
 + private:
 +  enum class State { kChecking, kAllowed, kClosing };
 +
++  void Checked(Peer peer);
 +  void Authorized(const char* error);
 +  void Handle(std::string line);
 +  void Flush();
@@ -286,9 +323,11 @@ index 0000000000..dca941eddd
 +
 +  raw_ptr<Server> server_;
 +  base::ScopedFD fd_;
++  uint64_t id_;
 +  State state_ = State::kChecking;
 +  LineFramer framer_;
 +  std::vector<std::string> waiting_;  // lines read before the client was let in
++  size_t waiting_bytes_ = 0;
 +  std::string out_;
 +  base::MessagePumpForIO::FdWatchController read_watch_{FROM_HERE};
 +  base::MessagePumpForIO::FdWatchController write_watch_{FROM_HERE};
@@ -312,6 +351,7 @@ index 0000000000..dca941eddd
 +    // Not now: we may be inside one of its watcher callbacks.
 +    base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE, std::move(it->second));
 +    connections_.erase(it);
++    ResumeAccept();  // its descriptor is about to be free
 +  }
 +
 +  void Broadcast(const std::string& line) {
@@ -326,11 +366,19 @@ index 0000000000..dca941eddd
 +    for (;;) {
 +      base::ScopedFD client(HANDLE_EINTR(accept(fd_.get(), nullptr, nullptr)));
 +      if (!client.is_valid()) {
-+        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != ECONNABORTED) {
++        if (errno == EMFILE || errno == ENFILE) {
++          // The pending connection keeps the socket readable: stop watching or this spins.
++          PLOG(ERROR) << "agens bridge: accept";
++          watch_.StopWatchingFileDescriptor();
++          paused_ = true;
++          base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
++              FROM_HERE, base::BindOnce(&Server::ResumeAccept, weak_.GetWeakPtr()), base::Seconds(1));
++        } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != ECONNABORTED) {
 +          PLOG(ERROR) << "agens bridge: accept";
 +        }
 +        return;
 +      }
++      if (connections_.size() >= kMaxConnections) continue;  // refused: closed right away
 +      const int one = 1;
 +      setsockopt(client.get(), SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
 +      if (fcntl(client.get(), F_SETFL, fcntl(client.get(), F_GETFL) | O_NONBLOCK) != 0) continue;
@@ -342,9 +390,19 @@ index 0000000000..dca941eddd
 +  }
 +  void OnFileCanWriteWithoutBlocking(int) override {}
 +
++  void ResumeAccept() {
++    if (!paused_) return;
++    paused_ = false;
++    base::CurrentIOThread::Get()->WatchFileDescriptor(fd_.get(), /*persistent=*/true,
++                                                      base::MessagePumpForIO::WATCH_READ, &watch_, this);
++  }
++
 +  base::ScopedFD fd_;
 +  base::MessagePumpForIO::FdWatchController watch_{FROM_HERE};
++  bool paused_ = false;
++  // Before weak_: connections go first, then pending ResumeAccept tasks are cancelled.
 +  std::map<Connection*, std::unique_ptr<Connection>> connections_;
++  base::WeakPtrFactory<Server> weak_{this};
 +};
 +
 +void Connection::Start() {
@@ -361,13 +419,16 @@ index 0000000000..dca941eddd
 +  // Signature (thread pool) → decision (UI) → back here.
 +  base::ThreadPool::PostTaskAndReplyWithResult(
 +      FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_VISIBLE}, base::BindOnce(&CheckPeer, token),
-+      base::BindOnce(
-+          [](Decision done, Peer peer) {
-+            content::GetUIThreadTaskRunner({})->PostTask(
-+                FROM_HERE, base::BindOnce(&Decide, std::move(peer), std::move(done)));
-+          },
-+          base::BindPostTask(content::GetIOThreadTaskRunner({}),
-+                             base::BindOnce(&Connection::Authorized, weak_.GetWeakPtr()))));
++      base::BindOnce(&Connection::Checked, weak_.GetWeakPtr()));
++}
++
++// Back on IO; skipped when the connection closed meanwhile. A close after this posts CancelAsk
++// behind Decide, so the UI drops the ask.
++void Connection::Checked(Peer peer) {
++  content::GetUIThreadTaskRunner({})->PostTask(
++      FROM_HERE, base::BindOnce(&Decide, std::move(peer), id_,
++                                base::BindPostTask(content::GetIOThreadTaskRunner({}),
++                                                   base::BindOnce(&Connection::Authorized, weak_.GetWeakPtr()))));
 +}
 +
 +void Connection::Authorized(const char* error) {
@@ -409,6 +470,10 @@ index 0000000000..dca941eddd
 +void Connection::Send(std::string line) {
 +  if (state_ == State::kClosing) return;
 +  out_ += line;
++  if (out_.size() > kMaxPendingOutput) {
++    Close();  // the client stopped reading
++    return;
++  }
 +  Flush();
 +}
 +
@@ -437,6 +502,9 @@ index 0000000000..dca941eddd
 +}
 +
 +void Connection::Close() {
++  if (state_ == State::kChecking) {
++    content::GetUIThreadTaskRunner({})->PostTask(FROM_HERE, base::BindOnce(&CancelAsk, id_));
++  }
 +  read_watch_.StopWatchingFileDescriptor();
 +  write_watch_.StopWatchingFileDescriptor();
 +  writing_ = false;
@@ -461,13 +529,17 @@ index 0000000000..dca941eddd
 +    }
 +    for (std::string& line : lines) {
 +      if (state_ == State::kChecking) {
++        waiting_bytes_ += line.size();
++        if (waiting_bytes_ > kMaxWaitingBytes) {
++          Close();
++          return;
++        }
 +        waiting_.push_back(std::move(line));
 +      } else if (state_ == State::kAllowed) {
 +        Handle(std::move(line));
 +      }
 +    }
 +    if (state_ == State::kClosing) return;
-+    // shortcut: requests queued while the approval sheet is up are not capped beyond the line cap.
 +  }
 +}
 +
@@ -563,10 +635,10 @@ index 0000000000..dca941eddd
 +}  // namespace agens::bridge
 diff --git a/chrome/browser/agens/bridge/ops.cc b/chrome/browser/agens/bridge/ops.cc
 new file mode 100644
-index 0000000000..43f03b70e1
+index 0000000000..30c401b7dc
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ops.cc
-@@ -0,0 +1,187 @@
+@@ -0,0 +1,192 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/ops.h"
@@ -584,6 +656,9 @@ index 0000000000..43f03b70e1
 +
 +// An internal step went wrong (e.g. Chromium could not create the profile).
 +constexpr char kFailed[] = "failed";
++
++constexpr size_t kMaxNameChars = 256;
++constexpr size_t kMaxTagChars = 1024;
 +
 +// The ato whose folder is `id`, among the atos the UI lists; `index` is its place in that list.
 +// Only ids from this list are accepted, so a client never names a path.
@@ -628,8 +703,10 @@ index 0000000000..43f03b70e1
 +  std::optional<std::string> name = StringParam(request.body, "name");
 +  std::optional<std::string> color;
 +  const base::Value* tag = request.body.Find("tag");
-+  if (!name || name->empty() || !ReadColor(request, /*optional=*/true, color) || (tag && !tag->is_string())) {
-+    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs name; color and tag are optional strings"));
++  if (!name || name->empty() || !AtMostChars(*name, kMaxNameChars) || !ReadColor(request, /*optional=*/true, color) ||
++      (tag && (!tag->is_string() || !AtMostChars(tag->GetString(), kMaxTagChars)))) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest,
++                                    "needs name (up to 256 characters); color and tag (up to 1024) are optional strings"));
 +    return;
 +  }
 +  const base::FilePath dir = AgensWindow::FreeAtoDir();
@@ -659,8 +736,8 @@ index 0000000000..43f03b70e1
 +void AtosRename(const Request& request, ReplyCallback reply) {
 +  std::optional<std::string> id = StringParam(request.body, "ato");
 +  std::optional<std::string> name = StringParam(request.body, "name");
-+  if (!id || !name || name->empty()) {
-+    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs ato and name"));
++  if (!id || !name || name->empty() || !AtMostChars(*name, kMaxNameChars)) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs ato and name (up to 256 characters)"));
 +    return;
 +  }
 +  ProfileAttributesEntry* entry = FindAto(*id);
@@ -736,7 +813,7 @@ index 0000000000..43f03b70e1
 +    result.Set("protocol", kProtocolVersion);
 +    result.Set("browser", version_info::GetVersionNumber());
 +    std::move(reply).Run(OkReply(request.id, std::move(result)));
-+  } else if (!g_browser_process->profile_manager()) {
++  } else if (!g_browser_process || !g_browser_process->profile_manager()) {
 +    std::move(reply).Run(ErrorReply(&request.id, kFailed, "the browser is shutting down"));
 +  } else if (op == "atos.list") {
 +    AtosList(request, std::move(reply));
@@ -781,10 +858,10 @@ index 0000000000..869202bb01
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_OPS_H_
 diff --git a/chrome/browser/agens/bridge/protocol.cc b/chrome/browser/agens/bridge/protocol.cc
 new file mode 100644
-index 0000000000..2ec7ddec6d
+index 0000000000..4cd937924e
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/protocol.cc
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,94 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/protocol.h"
@@ -865,6 +942,14 @@ index 0000000000..2ec7ddec6d
 +  return Line(std::move(fields));
 +}
 +
++bool AtMostChars(std::string_view utf8, size_t max) {
++  size_t count = 0;
++  for (unsigned char c : utf8) {
++    if ((c & 0xC0) != 0x80 && ++count > max) return false;  // continuation bytes don't count
++  }
++  return true;
++}
++
 +std::optional<std::string> StringParam(const base::DictValue& body, std::string_view key) {
 +  const std::string* s = body.FindString(key);
 +  return s ? std::optional<std::string>(*s) : std::nullopt;
@@ -873,10 +958,10 @@ index 0000000000..2ec7ddec6d
 +}  // namespace agens::bridge
 diff --git a/chrome/browser/agens/bridge/protocol.h b/chrome/browser/agens/bridge/protocol.h
 new file mode 100644
-index 0000000000..895c9468b3
+index 0000000000..1647ec285f
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/protocol.h
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,61 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The socket's wire format (docs/agens.md, "O socket"): one JSON object per line. Pure logic, no
 +// sockets or threads, so protocol_selfcheck.cc can exercise it with only //base.
@@ -932,16 +1017,18 @@ index 0000000000..895c9468b3
 +
 +// Param helpers: the string at `key`, or nullopt when missing or not a string.
 +std::optional<std::string> StringParam(const base::DictValue& body, std::string_view key);
++// True when the UTF-8 text has at most `max` characters (code points).
++bool AtMostChars(std::string_view utf8, size_t max);
 +
 +}  // namespace agens::bridge
 +
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_PROTOCOL_H_
 diff --git a/chrome/browser/agens/bridge/protocol_selfcheck.cc b/chrome/browser/agens/bridge/protocol_selfcheck.cc
 new file mode 100644
-index 0000000000..119cff55d0
+index 0000000000..6684ee0021
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/protocol_selfcheck.cc
-@@ -0,0 +1,95 @@
+@@ -0,0 +1,106 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Assert-based check of the wire format (protocol.h). Build and run:
 +//   ninja -C out/Dev agens_bridge_selfcheck && out/Dev/agens_bridge_selfcheck
@@ -1034,6 +1121,17 @@ index 0000000000..119cff55d0
 +    base::DictValue ev = Parse(EventLine("session.lost"));
 +    CHECK_TRUE(*ev.FindString("event") == "session.lost" && !ev.Find("id"));
 +  }
++  // Character caps count code points, not bytes.
++  {
++    CHECK_TRUE(AtMostChars("", 0));
++    CHECK_TRUE(AtMostChars(std::string(256, 'a'), 256));
++    CHECK_TRUE(!AtMostChars(std::string(257, 'a'), 256));
++    std::string accents;
++    for (int i = 0; i < 256; ++i) accents += "\xC3\xA7";  // "ç", 2 bytes each
++    CHECK_TRUE(AtMostChars(accents, 256));
++    CHECK_TRUE(!AtMostChars(accents + "a", 256));
++    CHECK_TRUE(AtMostChars("\xF0\x9F\x98\x80", 1));  // one emoji, 4 bytes
++  }
 +  std::printf("agens bridge protocol: ok\n");
 +  return 0;
 +}
@@ -1075,7 +1173,7 @@ index 9d0bf4646d..3b294ce550 100644
  
  #ifdef __cplusplus
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
-index 268d4dc7bd..301e50976a 100644
+index 268d4dc7bd..d9d7f081d7 100644
 --- a/chrome/browser/agens/embed/agens_window.h
 +++ b/chrome/browser/agens/embed/agens_window.h
 @@ -48,7 +48,9 @@
@@ -1097,15 +1195,19 @@ index 268d4dc7bd..301e50976a 100644
      PreferDuckDuckGo();
      if (content::DownloadManager* manager = browser->GetProfile()->GetDownloadManager()) {
        downloads_manager = manager;
-@@ -230,6 +234,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -230,6 +234,11 @@ struct AgensWindow : public TabStripModelObserver,
      }
    }
    ~AgensWindow() override {
-+    if (client_answer) std::move(client_answer).Run(kAgensClientDeny);  // closed while asking
++    // Closed while asking. Posted: run here, the next ask could pick this dying window.
++    if (client_answer) {
++      base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++          FROM_HERE, base::BindOnce(std::move(client_answer), kAgensClientDeny));
++    }
      if (bookmark_model) bookmark_model->RemoveObserver(this);
      Storage().RemoveObserver(this);
      for (download::DownloadItem* item : downloads) item->RemoveObserver(this);
-@@ -284,7 +289,62 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -284,7 +293,62 @@ struct AgensWindow : public TabStripModelObserver,
      return g_browser_process->profile_manager()->GetProfileAttributesStorage();
    }
  
@@ -1169,7 +1271,7 @@ index 268d4dc7bd..301e50976a 100644
      // Creation order, so an ato keeps its place and color: Chromium names profile folders
      // "Default", then "Profile 1", "Profile 2"…
      std::vector<ProfileAttributesEntry*> atos;
-@@ -307,16 +367,11 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -307,16 +371,11 @@ struct AgensWindow : public TabStripModelObserver,
      std::vector<std::string> names;
      std::vector<AgensAto> atos;
      const base::FilePath current = browser->GetProfile()->GetOriginalProfile()->GetPath();
@@ -1189,7 +1291,7 @@ index 268d4dc7bd..301e50976a 100644
      }
      atos_observer(atos_context, atos.data(), static_cast<int>(atos.size()));
    }
-@@ -330,14 +385,9 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -330,14 +389,9 @@ struct AgensWindow : public TabStripModelObserver,
    }
  
    void NewAto() {
@@ -1206,7 +1308,7 @@ index 268d4dc7bd..301e50976a 100644
      const gfx::Rect bounds = browser->GetWindow()->GetBounds();
      const std::u16string name = base::UTF8ToUTF16(base::StringPrintf("Ato %zu", Atos().size() + 1));
      manager->CreateProfileAsync(
-@@ -362,7 +412,10 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -362,7 +416,10 @@ struct AgensWindow : public TabStripModelObserver,
  
    // ProfileAttributesStorage::Observer:
    void OnProfileAdded(const base::FilePath&) override { NotifyAtos(); }
@@ -1218,7 +1320,7 @@ index 268d4dc7bd..301e50976a 100644
    void OnProfileNameChanged(const base::FilePath&, const std::u16string&) override { NotifyAtos(); }
  
    TabStripModel* model() { return browser->GetTabStripModel(); }
-@@ -582,6 +635,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -582,6 +639,7 @@ struct AgensWindow : public TabStripModelObserver,
    raw_ptr<void> downloads_context = nullptr;
    base::CallbackListSubscription search_loaded_;
    base::CancelableTaskTracker history_tracker;
@@ -1226,7 +1328,7 @@ index 268d4dc7bd..301e50976a 100644
    raw_ptr<void> ui = nullptr;  // the chrome (agens_ui_*), set by the platform shell
    raw_ptr<views::View> extensions_anchor = nullptr;  // under the UI's extensions button
    AgensExtensionButtonsChanged extension_buttons_observer = nullptr;
-@@ -647,6 +701,8 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -647,6 +705,8 @@ struct AgensWindow : public TabStripModelObserver,
      }
    }
    base::WeakPtr<permissions::PermissionPrompt::Delegate> permission_delegate;
@@ -1282,7 +1384,7 @@ index d81488f053..7e1d14a14d 100644
  void ConfirmCloseWithDownloads(views::Widget* widget, int count, base::OnceCallback<void(bool)> callback);
  
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
-index 5d7ca90415..e5d47cf8b2 100644
+index 5d7ca90415..d20fb1b148 100644
 --- a/chrome/browser/agens/embed/native_shell_mac.mm
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
 @@ -15,6 +15,7 @@
@@ -1293,19 +1395,27 @@ index 5d7ca90415..e5d47cf8b2 100644
  #include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
  #include "components/permissions/permission_request.h"
  #include "ui/base/metadata/metadata_header_macros.h"
-@@ -360,6 +361,23 @@ bool HandleNativeCommand(BrowserWindowInterface* browser, int command_id) {
+@@ -360,6 +361,31 @@ bool HandleNativeCommand(BrowserWindowInterface* browser, int command_id) {
    return shell && shell->Command(*command);
  }
  
 +void AskClientApproval(const std::string& client, base::OnceCallback<void(AgensClientAnswer)> done) {
-+  BrowserWindowInterface* browser = GetLastActiveBrowserWindowInterfaceWithAnyProfile();
-+  views::Widget* widget = browser && browser->GetWindow()
-+                              ? views::Widget::GetWidgetForNativeWindow(browser->GetWindow()->GetNativeWindow())
-+                              : nullptr;
-+  auto* shell = IsNativeShellEnabled() && widget
-+                    ? views::AsViewClass<NativeShellView>(widget->GetRootView()->GetViewByID(NativeShellView::kViewId))
-+                    : nullptr;
-+  if (!shell || !shell->window()->ui || shell->window()->client_answer) {
++  // The most recently active window that isn't closing and isn't already asking.
++  BrowserWindowInterface* browser = nullptr;
++  NativeShellView* shell = nullptr;
++  if (IsNativeShellEnabled()) {
++    ForEachCurrentBrowserWindowInterfaceOrderedByActivation([&](BrowserWindowInterface* b) {
++      if (b->IsDeleteScheduled() || !b->GetWindow() || b->GetTabStripModel()->closing_all()) return true;
++      views::Widget* widget = views::Widget::GetWidgetForNativeWindow(b->GetWindow()->GetNativeWindow());
++      if (!widget || widget->IsClosed()) return true;
++      auto* s = views::AsViewClass<NativeShellView>(widget->GetRootView()->GetViewByID(NativeShellView::kViewId));
++      if (!s || !s->window()->ui || s->window()->client_answer) return true;
++      browser = b;
++      shell = s;
++      return false;
++    });
++  }
++  if (!shell) {
 +    std::move(done).Run(kAgensClientDeny);
 +    return;
 +  }
@@ -1318,7 +1428,7 @@ index 5d7ca90415..e5d47cf8b2 100644
    if (!IsNativeShellEnabled() || !browser->GetWindow()) return false;
    views::Widget* widget = views::Widget::GetWidgetForNativeWindow(browser->GetWindow()->GetNativeWindow());
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
-index 3c18c4eab1..99ea93d49c 100644
+index 3c18c4eab1..77b206bc89 100644
 --- a/chrome/browser/agens/ui/chrome_mac.mm
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
 @@ -766,7 +766,7 @@ - (void)layout {
@@ -1347,7 +1457,7 @@ index 3c18c4eab1..99ea93d49c 100644
    }
    [self relayout];
  }
-@@ -5204,6 +5205,28 @@ - (void)answerPermission:(NSButton*)button {
+@@ -5204,6 +5205,31 @@ - (void)answerPermission:(NSButton*)button {
    if (_window) agens_window_permission_answer(_window, (AgensPermissionAnswer)button.tag);
    [self closeMenu];
  }
@@ -1361,12 +1471,15 @@ index 3c18c4eab1..99ea93d49c 100644
 +  NSAlert* alert = [[NSAlert alloc] init];
 +  alert.messageText = [NSString stringWithFormat:@"O %@ quer usar o AgensBrowser", client];
 +  alert.informativeText = @"Ele poderá ver, criar e abrir os seus atos.";
-+  [alert addButtonWithTitle:@"Permitir"];
++  // Return answers Não permitir: the sheet comes up while the person may be typing elsewhere.
++  [alert addButtonWithTitle:@"Permitir"].keyEquivalent = @"";
 +  [alert addButtonWithTitle:@"Permitir sempre"];
-+  [alert addButtonWithTitle:@"Não permitir"].keyEquivalent = @"\033";
++  [alert addButtonWithTitle:@"Não permitir"].keyEquivalent = @"\r";
 +  __weak AgensChrome* weak = self;
 +  [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
 +    AgensChrome* strong = weak;
++    // No window to answer through: it closed, and closing it already answered Não permitir
++    // (~AgensWindow posts the deny).
 +    if (!strong || !strong->_window) return;
 +    agens_window_client_answer(strong->_window, r == NSAlertFirstButtonReturn    ? kAgensClientAllow
 +                                                : r == NSAlertSecondButtonReturn ? kAgensClientAllowAlways
@@ -1376,7 +1489,7 @@ index 3c18c4eab1..99ea93d49c 100644
  - (void)permissionGone {
    if (!_permissionAsked) return;
    _permissionAsked = NO;  // nothing to answer any more
-@@ -5412,6 +5435,9 @@ void agens_ui_permission_prompt(void* chrome, const char* site, const char* cons
+@@ -5412,6 +5438,9 @@ void agens_ui_permission_prompt(void* chrome, const char* site, const char* cons
    for (int i = 0; i < count; ++i) [list addObject:@(asks[i])];
    [(__bridge AgensChrome*)chrome askPermission:@(site) asks:list];
  }
@@ -1387,7 +1500,7 @@ index 3c18c4eab1..99ea93d49c 100644
    [(__bridge AgensChrome*)chrome permissionGone];
  }
 diff --git a/chrome/browser/browser_process_impl.cc b/chrome/browser/browser_process_impl.cc
-index 433fa42fa4..b56fd96460 100644
+index 433fa42fa4..65017e0702 100644
 --- a/chrome/browser/browser_process_impl.cc
 +++ b/chrome/browser/browser_process_impl.cc
 @@ -85,6 +85,9 @@
@@ -1410,7 +1523,18 @@ index 433fa42fa4..b56fd96460 100644
  
    features_->PostMainMessageLoopRun();
    metrics_services_manager_client_ = nullptr;
-@@ -1345,6 +1351,11 @@ BuildState* BrowserProcessImpl::GetBuildState() {
+@@ -882,6 +888,10 @@ void RequestProxyResolvingSocketFactory(
+ }  // namespace
+ 
+ void BrowserProcessImpl::EndSession() {
++#if BUILDFLAG(IS_MAC)
++  // SugiyamaLabs: SIGTERM and logout end here and exit without StartTearDown.
++  agens::bridge::Stop();
++#endif
+   // Mark all the profiles as clean.
+   ProfileManager* pm = profile_manager();
+   scoped_refptr<RundownTaskCounter> rundown_counter =
+@@ -1345,6 +1355,11 @@ BuildState* BrowserProcessImpl::GetBuildState() {
  // static
  void BrowserProcessImpl::RegisterPrefs(PrefRegistrySimple* registry) {
    sugiyamalabs::adblock::RegisterPrefs(registry);  // SugiyamaLabs
@@ -1422,7 +1546,7 @@ index 433fa42fa4..b56fd96460 100644
  
    registry->RegisterBooleanPref(prefs::kDefaultBrowserSettingEnabled, false);
  
-@@ -1706,6 +1717,9 @@ void BrowserProcessImpl::PreMainMessageLoopRun() {
+@@ -1706,6 +1721,9 @@ void BrowserProcessImpl::PreMainMessageLoopRun() {
  
    features_->PreMainMessageLoopRun();
    platform_part_->PreMainMessageLoopRun();
