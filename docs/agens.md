@@ -58,10 +58,10 @@ Os dois saem do mesmo repositório e do mesmo build, empacotados de dois jeitos,
 | Operação | O que faz |
 |---|---|
 | `hello {client}` | Versão do protocolo e do navegador. |
-| `atos.list` | `[{id, name, color, tag, asleep}]`. O `id` é estável (a pasta do perfil). |
-| `atos.create {name, color, tag}` | Cria o ato e devolve o `id`. `tag` é uma etiqueta opaca do cliente (o Agens põe o id do time): o navegador só guarda e devolve. Assim o Agens acha o ato do time mesmo se a pessoa o renomear. |
-| `atos.rename {id, name}` / `atos.color {id, color}` | Renomeia e troca a cor. |
-| `atos.open {id, url?}` | Abre o ato, opcionalmente numa URL. No Agens, num painel. No AgensBrowser, na janela dele. |
+| `atos.list` | `{atos: [{id, name, color, tag, asleep}]}`. O `id` é estável (a pasta do perfil). |
+| `atos.create {name, color, tag}` | Cria o ato e devolve `{ato}`, o id dele (o campo `id` da mensagem já é o da correlação). `tag` é uma etiqueta opaca do cliente (o Agens põe o id do time): o navegador só guarda e devolve. Assim o Agens acha o ato do time mesmo se a pessoa o renomear. |
+| `atos.rename {ato, name}` / `atos.color {ato, color}` | Renomeia e troca a cor. |
+| `atos.open {ato, url?}` | Abre o ato, opcionalmente numa URL. No Agens, num painel. No AgensBrowser, na janela dele. |
 
 - Um pedido para um ato dormindo acorda o ato sozinho. Os atos que dormem (#9) precisam respeitar isso: um ato com uma operação do socket em andamento não dorme.
 - Apagar ato não entra na v1. É irreversível e fica só na interface, com confirmação.

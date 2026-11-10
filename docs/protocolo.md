@@ -1,0 +1,201 @@
+# Protocolo do socket (v1)
+
+Referência para quem escreve um cliente (o time do Agens, em Go). O plano e o porquê estão em [agens.md](agens.md).
+
+## O que existe hoje
+
+| Fase | Operações | Estado |
+|---|---|---|
+| 1 | `hello`, `atos.*` | em construção agora |
+| 2 | `login`, `session`, `renew`, evento `session.lost` | especificado, **não implementado** |
+| 3 | `control.*`, `tab.*`, `page.*` | especificado, **não implementado** |
+
+Um navegador de fase 1 responde `unknown_op` às demais. Trate `unknown_op` como "este navegador ainda não faz isso".
+
+## Onde fica o socket
+
+Socket Unix, permissão `0600`, na pasta de dados do produto:
+
+- AgensBrowser sozinho: `~/Library/Application Support/AgensBrowser/agens.sock`
+- Dentro do Agens: `~/Library/Application Support/Agens/Browser/agens.sock`
+
+Os dois produtos têm dados e sockets separados.
+
+## Quem pode conectar
+
+O navegador lê o processo do outro lado (`LOCAL_PEERTOKEN`) e confere a assinatura de código.
+
+- Dentro do Agens: só o próprio Agens (mesmo Team ID e bundle id).
+- AgensBrowser sozinho: apps assinados com o nosso Team ID, depois da folha "O Agens quer usar o AgensBrowser" (**Permitir**, **Permitir sempre**, **Não permitir**).
+- Desenvolvimento: **Configurações › Sistema › Aceitar apps sem assinatura**. Vem desligado. O `agensctl` precisa dele enquanto não estiver assinado.
+
+## Formato
+
+UTF-8, um objeto JSON por linha (`\n`). Parâmetros ficam no mesmo objeto, sem aninhar.
+
+```
+→ {"id": 1, "op": "atos.list"}
+← {"id": 1, "ok": true, "atos": [...]}
+← {"id": 1, "ok": false, "error": "not_found", "message": "texto opcional"}
+← {"event": "session.lost", "ato": "...", "from": "...", "name": "..."}
+```
+
+- `id` é do cliente e volta igual na resposta. Eventos não têm `id` e podem chegar entre um pedido e a resposta dele.
+- `error` é um código fixo em `snake_case`; `message` é só para exibir.
+- A resposta pode demorar (a folha de aprovação espera a pessoa). Não ponha timeout curto em `login`, `session` e `control.start`.
+- **O campo `id` de correlação ocupa o nome `id`.** Por isso, onde a spec original punha um `id` de ato no pedido ou no resultado, este documento usa `ato` (`atos.create`, `atos.rename`, `atos.color`, `atos.open`). Só os itens de `atos.list` mantêm `id`, porque ficam aninhados.
+
+## Versão
+
+`hello` devolve `protocol` (inteiro). Mudança que quebra cliente sobe esse número. Se `protocol` for menor que o necessário, o cliente avisa "Atualize o navegador". `client` é um nome livre, só para diagnóstico.
+
+## Operações
+
+### hello
+
+```
+→ {"id": 1, "op": "hello", "client": "agens-engine"}
+← {"id": 1, "ok": true, "protocol": 1, "browser": "1.4.0"}
+```
+
+### atos (fase 1)
+
+Um pedido para um ato dormindo acorda o ato. `tag` é uma etiqueta opaca do cliente: o navegador só guarda e devolve. Apagar ato não existe na v1.
+
+```
+→ {"id": 2, "op": "atos.create", "name": "Cliente A", "color": "azul", "tag": "time-123"}
+← {"id": 2, "ok": true, "ato": "p7f3a"}
+
+→ {"id": 3, "op": "atos.list"}
+← {"id": 3, "ok": true, "atos": [{"id": "p7f3a", "name": "Cliente A", "color": "azul", "tag": "time-123", "asleep": false}]}
+
+→ {"id": 4, "op": "atos.rename", "ato": "p7f3a", "name": "Cliente B"}
+→ {"id": 5, "op": "atos.color", "ato": "p7f3a", "color": "verde"}
+→ {"id": 6, "op": "atos.open", "ato": "p7f3a", "url": "https://example.com"}
+← {"id": 6, "ok": true}
+```
+
+### login (fase 2)
+
+Abre o site no ato; a pessoa entra como sempre. A aba fecha quando `done` acontece. `done` é a regra que a ponte conhece: o navegador não adivinha.
+
+```
+→ {"id": 7, "op": "login", "ato": "p7f3a", "url": "https://app.slack.com", "done": {"cookie": "d", "from": "https://app.slack.com"}}
+→ {"id": 7, "op": "login", "ato": "p7f3a", "url": "https://outlook.office.com", "done": {"url_prefix": "https://outlook.office.com/mail/"}}
+← {"id": 7, "ok": true}
+← {"id": 7, "ok": false, "error": "cancelled"}
+```
+
+### session (fase 2)
+
+Mostra a folha "Entregar ao Agens: cookie `d` de app.slack.com…" com o motivo e os itens exatos. Só com **Permitir** (ou **Permitir sempre**) os valores saem.
+
+```
+→ {"id": 8, "op": "session", "ato": "p7f3a", "reason": "Ponte do Slack",
+   "need": [{"type": "cookie", "from": "https://app.slack.com", "name": "d"}]}
+← {"id": 8, "ok": true, "items": [{"type": "cookie", "from": "https://app.slack.com", "name": "d", "value": "..."}]}
+```
+
+Tipos de `need`:
+- `cookie`: lido no cookie store do ato, inclusive httpOnly.
+- `localStorage`: lido numa aba do ato aberta naquela origem.
+- `header`: capturado das requisições que a própria página faz para `from`; só dura enquanto o pedido está aberto.
+
+### renew (fase 2)
+
+Pega de novo sem janela, numa aba escondida do ato.
+
+```
+→ {"id": 9, "op": "renew", "ato": "p7f3a", "need": [...]}
+← {"id": 9, "ok": true, "items": [...]}
+← {"id": 9, "ok": false, "error": "needs_login"}
+```
+
+### control, tab, page (fase 3)
+
+O controle vale **para a conexão**: quando o cliente desconecta, o controle acaba. Um fluxo de vários passos usa uma conexão só.
+
+```
+→ {"id": 1, "op": "control.start", "ato": "p7f3a", "reason": "Preencher o formulário"}
+← {"id": 1, "ok": true}
+→ {"id": 2, "op": "tab.open", "ato": "p7f3a", "url": "https://example.com"}
+← {"id": 2, "ok": true, "tab": "t1"}
+→ {"id": 3, "op": "page.snapshot", "tab": "t1"}
+← {"id": 3, "ok": true, "nodes": [{"ref": "e1", "role": "textbox", "name": "Text", "value": ""}, ...]}
+→ {"id": 4, "op": "page.type", "tab": "t1", "ref": "e1", "text": "olá"}
+→ {"id": 5, "op": "page.click", "tab": "t1", "ref": "e4"}
+→ {"id": 6, "op": "page.key", "tab": "t1", "key": "Enter"}
+→ {"id": 7, "op": "page.screenshot", "tab": "t1"}
+← {"id": 7, "ok": true, "png": "<base64>"}
+→ {"id": 8, "op": "tab.navigate", "tab": "t1", "url": "https://example.com/b"}
+→ {"id": 9, "op": "tab.close", "tab": "t1"}
+→ {"id": 10, "op": "control.stop"}
+```
+
+## Erros
+
+| Código | Quando |
+|---|---|
+| `bad_request` | JSON inválido, campo faltando ou com tipo errado. |
+| `unknown_op` | Operação que o navegador não conhece (inclusive fases ainda não implementadas). |
+| `not_found` | Ato, aba ou `ref` que não existe. |
+| `unauthorized` | O cliente não passou na checagem de assinatura ou de aprovação, ou usou `tab`/`page` sem `control.start` nesta conexão. |
+| `denied` | A pessoa tocou em **Não permitir**, ou a operação é proibida (ex.: `page.type` em campo de senha). |
+| `cancelled` | `login`: a pessoa fechou a aba antes do fim. |
+| `needs_login` | `renew`: o site pediu login; use `login`. |
+| `isolation_off` | "Compartilhar cookies entre atos" está ligado: `session` e `control` são recusados até desligar. |
+
+## Eventos
+
+| Evento | Campos | Quando |
+|---|---|---|
+| `session.lost` | `ato`, `from`, `name` | Um item de sessão vigiado sumiu ou expirou no cookie store do ato. |
+
+Quando a pessoa toca em "Parar" na faixa, o controle acaba e o cliente é avisado. O nome do evento ainda não foi definido.
+
+## Regras de segurança que o cliente sente
+
+- **Valores nunca em log.** Os valores de `session`/`renew` só passam pelo socket. Guarde no Keychain; não escreva em log nem em mensagem de erro.
+- **Só os itens exatos do `need`.** Nunca o cookie jar inteiro. Item novo é aprovação nova.
+- **Aprovação.** `session` e `control.start` esperam a pessoa. "Permitir sempre" vale por app, ato e itens exatos.
+- **Controle só vê as abas que ele abriu**, no ato aprovado. As abas da pessoa não aparecem.
+- **Senha é recusada.** O snapshot traz campo de senha sem valor, e `page.type` nele dá `denied`. Cookies e senhas salvas ficam fora do controle.
+- **Faixa visível** nas abas controladas: "Controlado pelo Agens · Parar".
+- **`isolation_off`.** Com "Compartilhar cookies entre atos" ligado o isolamento entre times acabou, então `session` e `control` respondem erro. Mostre o motivo à pessoa.
+
+## Testando com agensctl
+
+`tools/agensctl` (`--socket PATH` ou `AGENS_SOCK`). Sai com 0 se `ok`, 1 se `ok:false`, 2 se não conseguiu falar com o navegador.
+
+```
+agensctl hello
+agensctl atos create "Cliente A" --cor azul --tag time-123
+agensctl atos list
+agensctl atos rename ID "Cliente B"
+agensctl atos color ID verde
+agensctl atos open ID https://example.com
+agensctl login --ato ID --url http://127.0.0.1:8765/login --done cookie:http://127.0.0.1:8765:d
+agensctl login --ato ID --url http://127.0.0.1:8765/login --done url_prefix:http://127.0.0.1:8765/app/
+agensctl session --ato ID --need cookie:http://127.0.0.1:8765:d --reason "teste"
+agensctl renew --ato ID --need header:http://127.0.0.1:8765:Authorization
+agensctl listen
+```
+
+`--need` é `TIPO:ORIGEM:NOME`. A origem tem `:` (porta), então o tipo é o que vem antes do primeiro `:` e o nome o que vem depois do último.
+
+Cada subcomando abre uma conexão e fecha ao responder, então o controle acabaria junto. Para controle use `raw`, que manda uma linha por vez na mesma conexão e imprime cada resposta e evento. Ele lê do stdin, então dá para digitar a linha seguinte depois de ver o `tab` devolvido:
+
+```
+agensctl raw
+{"id": 1, "op": "control.start", "ato": "ID", "reason": "teste"}
+{"id": 2, "op": "tab.open", "ato": "ID", "url": "http://127.0.0.1:8765/form"}
+{"id": 3, "op": "page.snapshot", "tab": "t1"}
+```
+
+Ao fechar o stdin (Ctrl-D) a conexão cai e o controle acaba. Pedido sem `id` não espera resposta. Os subcomandos `control`, `tab` e `page` (`agensctl page screenshot T1 --out a.png`) servem para um passo só, por exemplo para ver o `unauthorized` sem controle aberto.
+
+Sites de teste locais (login com cookie httpOnly, Bearer, formulário): [tools/sites-teste](../tools/sites-teste/README.md).
+
+## Pontos em aberto
+
+- Nome do evento de "Parar" na faixa.
