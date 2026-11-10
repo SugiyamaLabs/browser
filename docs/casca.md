@@ -39,6 +39,9 @@ janela do Chromium            WebUIBrowserWindow (Webium), sem a página HTML
 
 ![Lateral recolhida](casca-recolhida.png)
 
+- **Abas em cima ou na lateral:** **⌘⇧S** ou Configurações › Aparência › Abas. Em cima: as abas viram pílulas numa faixa ao lado dos semáforos, com o "+" no fim, e os atos vão para a barra, antes do menu. A escolha vale para todas as janelas e fica salva.
+- **Abas fixadas:** botão direito na aba › Fixar aba. Na lateral aberta, viram ladrilhos de 4 por linha acima da nova aba; recolhida, ícones; em cima, pílulas só com o ícone. Ficam sempre no começo (regra do Chromium) e não se arrastam.
+- **Som:** aba tocando mostra o alto-falante na aba e no endereço; clicar silencia (fica laranja e cortado) ou devolve o som. Também pelo botão direito na aba.
 - **Sem o seletor de perfis do Chromium:** com mais de um ato, o navegador abre direto no último usado; trocar de ato é pela coluna.
 - **Muitas abas e atos:** a lista de abas rola entre "Nova aba" e o pé, com uma barra fina (some na lateral recolhida). O pé mostra até 6 atos (5 recolhida); além disso, "⋯" abre a lista completa, e o ato atual nunca sai do pé.
 - **Barra:** estrela de favoritar dentro do endereço e menu "⋯" (Nova aba, Favoritos, Histórico, Configurações); por enquanto essas três abrem as páginas do Chromium.
