@@ -1,0 +1,766 @@
+diff --git a/chrome/browser/agens/embed/embed_host.h b/chrome/browser/agens/embed/embed_host.h
+new file mode 100644
+index 0000000000..dcb05ac877
+--- /dev/null
++++ b/chrome/browser/agens/embed/embed_host.h
+@@ -0,0 +1,24 @@
++// Copyright 2026 SugiyamaLabs.
++// The page of a window shown by another app (docs/poc/embed.md). Off unless the engine was
++// started with --agens-embed-socket=<path>.
++#ifndef CHROME_BROWSER_AGENS_EMBED_EMBED_HOST_H_
++#define CHROME_BROWSER_AGENS_EMBED_EMBED_HOST_H_
++
++struct AgensWindow;
++namespace content {
++class WebContents;
++}
++
++namespace agens {
++
++// The shell tells which windows exist; the first one is what a client attaches to.
++void EmbedAddWindow(AgensWindow* window);
++void EmbedRemoveWindow(AgensWindow* window);
++// True while another app shows this window's page: the shell keeps the tabs out of its views.
++bool EmbedShowsPage(AgensWindow* window);
++// Makes `active` the tab the other app shows: visible, at that app's size, drawing by itself.
++void EmbedShowTab(content::WebContents* active);
++
++}  // namespace agens
++
++#endif  // CHROME_BROWSER_AGENS_EMBED_EMBED_HOST_H_
+diff --git a/chrome/browser/agens/embed/embed_host_mac.cc b/chrome/browser/agens/embed/embed_host_mac.cc
+new file mode 100644
+index 0000000000..58146a8110
+--- /dev/null
++++ b/chrome/browser/agens/embed/embed_host_mac.cc
+@@ -0,0 +1,320 @@
++// Copyright 2026 SugiyamaLabs.
++// Proof of the embed (docs/poc/embed.md): one client on a Unix socket, one JSON message per
++// line. The client attaches to a window, gets the CAContext id of its active tab ("layer"
++// events) to host in a CALayerHost, and sends its view's size, focus and NSEvents.
++//
++// shortcut: no check of who connects (code signature, approval) and one window only; that is
++// the socket of docs/agens.md, which replaces this file's transport.
++
++#include "chrome/browser/agens/embed/embed_host.h"
++
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <sys/un.h>
++#include <unistd.h>
++
++#include <algorithm>
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "base/base64.h"
++#include "base/command_line.h"
++#include "base/json/json_reader.h"
++#include "base/json/json_writer.h"
++#include "base/logging.h"
++#include "base/no_destructor.h"
++#include "base/posix/eintr_wrapper.h"
++#include "base/task/thread_pool.h"
++#include "chrome/browser/agens/embed/agens_window.h"
++#include "content/public/browser/agens_embed_mac.h"
++
++namespace agens {
++
++namespace {
++
++const char kSocketSwitch[] = "agens-embed-socket";
++constexpr size_t kMaxLine = 1 << 20;  // a client that sends more without a newline is dropped
++
++class EmbedHost : public TabStripModelObserver {
++ public:
++  static EmbedHost* Get() {
++    static base::NoDestructor<EmbedHost> host;
++    return host.get();
++  }
++
++  void AddWindow(AgensWindow* window) {
++    windows_.push_back(window);
++    if (!started_) Start();
++  }
++  void RemoveWindow(AgensWindow* window) {
++    if (attached_ == window) Detach(/*window_closing=*/true);
++    std::erase(windows_, window);
++  }
++  bool ShowsPage(AgensWindow* window) { return attached_ && attached_ == window; }
++
++  void ShowTab(content::WebContents* active) {
++    content::WebContents* was = shown_.get();
++    if (was && was != active) {
++      content::AgensEmbedSetFocus(was, false);
++      was->UpdateWebContentsVisibility(content::Visibility::HIDDEN);
++    }
++    shown_ = active ? active->GetWeakPtr() : nullptr;
++    if (!active) return;
++    active->Resize(gfx::Rect(size_));
++    active->UpdateWebContentsVisibility(content::Visibility::VISIBLE);
++    if (was != active) {
++      sent_context_ = 0;  // the new tab's layer goes out even if the id repeats
++      if (focused_) content::AgensEmbedSetFocus(active, true);
++    }
++  }
++
++ private:
++  friend class base::NoDestructor<EmbedHost>;
++  EmbedHost() = default;
++
++  void Start() {
++    started_ = true;
++    const std::string path =
++        base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(kSocketSwitch);
++    if (path.empty()) return;
++    sockaddr_un address = {};
++    address.sun_family = AF_UNIX;
++    if (path.size() >= sizeof(address.sun_path)) {
++      LOG(ERROR) << "agens embed: socket path too long";
++      return;
++    }
++    path.copy(address.sun_path, path.size());
++    const int listener = socket(AF_UNIX, SOCK_STREAM, 0);
++    unlink(path.c_str());
++    // Only this user: the mode is set before anyone can connect (listen comes after).
++    if (listener < 0 || bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0 ||
++        chmod(path.c_str(), 0600) < 0 || listen(listener, 1) < 0) {
++      PLOG(ERROR) << "agens embed: cannot listen on " << path;
++      if (listener >= 0) close(listener);
++      return;
++    }
++    content::SetAgensEmbedLayerCallback(
++        base::BindRepeating(&EmbedHost::OnLayer, base::Unretained(this)));
++    base::ThreadPool::PostTask(
++        FROM_HERE, {base::MayBlock(), base::TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN},
++        base::BindOnce(&EmbedHost::Serve, listener, base::SequencedTaskRunner::GetCurrentDefault()));
++    LOG(WARNING) << "agens embed: listening on " << path;
++  }
++
++  // On a pool thread, forever: one client at a time. The UI thread owns and closes the client's
++  // descriptor, after this loop is done reading from it.
++  static void Serve(int listener, scoped_refptr<base::SequencedTaskRunner> ui) {
++    EmbedHost* host = Get();  // never destroyed
++    for (;;) {
++      const int client = HANDLE_EINTR(accept(listener, nullptr, nullptr));
++      if (client < 0) return;
++      const int on = 1;
++      setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
++      ui->PostTask(FROM_HERE,
++                   base::BindOnce(&EmbedHost::OnConnected, base::Unretained(host), client));
++      std::string pending;
++      char buffer[1 << 16];
++      for (;;) {
++        const ssize_t count = HANDLE_EINTR(read(client, buffer, sizeof(buffer)));
++        if (count <= 0) break;
++        pending.append(buffer, static_cast<size_t>(count));
++        for (size_t end; (end = pending.find('\n')) != std::string::npos;) {
++          ui->PostTask(FROM_HERE, base::BindOnce(&EmbedHost::OnLine, base::Unretained(host), client,
++                                                 pending.substr(0, end)));
++          pending.erase(0, end + 1);
++        }
++        if (pending.size() > kMaxLine) break;
++      }
++      ui->PostTask(FROM_HERE,
++                   base::BindOnce(&EmbedHost::OnDisconnected, base::Unretained(host), client));
++    }
++  }
++
++  void OnConnected(int client) {
++    client_ = client;
++    LOG(WARNING) << "agens embed: client connected";
++  }
++
++  void OnDisconnected(int client) {
++    if (client_ == client) {
++      client_ = -1;
++      Detach();
++      LOG(WARNING) << "agens embed: client gone";
++    }
++    close(client);
++  }
++
++  void Attach(const gfx::Size& size) {
++    if (attached_ || windows_.empty()) return;
++    attached_ = windows_.front();
++    size_ = size;
++    attached_->model()->AddObserver(this);
++    attached_->relayout.Run();  // the shell lets go of the tabs and calls ShowTab
++    SendTabs();
++  }
++
++  // The page goes back to the window's own views (the shell lays out again).
++  void Detach(bool window_closing = false) {
++    if (!attached_) return;
++    AgensWindow* window = attached_;
++    attached_ = nullptr;
++    TabStripModelObserver::StopObservingAll(this);
++    shown_ = nullptr;
++    focused_ = false;
++    sent_context_ = 0;
++    if (window_closing) return;
++    if (content::WebContents* active = window->model()->GetActiveWebContents()) {
++      content::AgensEmbedSetFocus(active, false);
++    }
++    window->relayout.Run();
++  }
++
++  void OnLine(int client, const std::string& line) {
++    if (client != client_) return;
++    std::optional<base::DictValue> message = base::JSONReader::ReadDict(line, base::JSON_PARSE_RFC);
++    const std::string* op = message ? message->FindString("op") : nullptr;
++    if (!op) return;
++    if (*op == "attach" || *op == "resize") {
++      // Sizes come from outside: keep them sane before they reach the compositor.
++      const gfx::Size size(std::clamp(message->FindInt("width").value_or(0), 1, 16384),
++                           std::clamp(message->FindInt("height").value_or(0), 1, 16384));
++      if (*op == "attach") {
++        Attach(size);
++      } else if (attached_) {
++        size_ = size;
++        if (shown_) shown_->Resize(gfx::Rect(size_));
++      }
++      return;
++    }
++    if (!attached_) return;
++    AgensWindow* window = attached_;
++    if (*op == "navigate") {
++      const std::string* text = message->FindString("text");
++      if (text) agens_window_navigate(window, text->c_str());
++    } else if (*op == "tab.new") {
++      agens_window_new_tab(window);
++    } else if (*op == "tab.activate") {
++      agens_window_activate_tab(window, message->FindInt("index").value_or(-1));
++    } else if (*op == "tab.close") {
++      agens_window_close_tab(window, message->FindInt("index").value_or(-1));
++    } else if (*op == "back") {
++      agens_window_back(window);
++    } else if (*op == "forward") {
++      agens_window_forward(window);
++    } else if (*op == "reload") {
++      agens_window_reload(window);
++    } else if (content::WebContents* tab = shown_.get()) {
++      Input(tab, *op, *message);
++    }
++  }
++
++  void Input(content::WebContents* tab, const std::string& op, const base::DictValue& message) {
++    const std::string* data = message.FindString("data");
++    std::vector<uint8_t> event =
++        data ? base::Base64Decode(*data).value_or(std::vector<uint8_t>()) : std::vector<uint8_t>();
++    const gfx::PointF point(message.FindDouble("x").value_or(0), message.FindDouble("y").value_or(0));
++    if (op == "focus") {
++      focused_ = message.FindBool("on").value_or(false);
++      content::AgensEmbedSetFocus(tab, focused_);
++    } else if (op == "mouse") {
++      content::AgensEmbedMouse(tab, event, point);
++    } else if (op == "mouse.leave") {
++      content::AgensEmbedMouseLeave(tab);
++    } else if (op == "wheel") {
++      content::AgensEmbedWheel(tab, event, point);
++    } else if (op == "edit") {
++      const std::string* command = message.FindString("command");
++      if (command) content::AgensEmbedEdit(tab, *command);
++    } else if (op == "key") {
++      content::AgensEmbedKey key;
++      key.native_event = std::move(event);
++      if (const std::string* text = message.FindString("text")) key.text = base::UTF8ToUTF16(*text);
++      if (const std::string* marked = message.FindString("marked")) key.marked = base::UTF8ToUTF16(*marked);
++      if (const base::ListValue* selectors = message.FindList("commands")) {
++        for (const base::Value& selector : *selectors) {
++          if (selector.is_string()) key.selectors.push_back(selector.GetString());
++        }
++      }
++      const int length = static_cast<int>(key.marked.length());
++      key.selection_start = std::clamp(message.FindInt("sel_start").value_or(length), 0, length);
++      key.selection_end = std::clamp(message.FindInt("sel_end").value_or(length), key.selection_start, length);
++      key.had_marked = message.FindBool("had_marked").value_or(false);
++      key.unmarked = message.FindBool("unmarked").value_or(false);
++      content::AgensEmbedKeyEvent(tab, key);
++    }
++  }
++
++  void OnLayer(content::WebContents* contents, uint32_t context, const gfx::Size& pixels, float scale) {
++    if (client_ < 0 || contents != shown_.get()) return;
++    if (context == sent_context_ && pixels == sent_pixels_) return;  // this runs every frame
++    sent_context_ = context;
++    sent_pixels_ = pixels;
++    Send(base::DictValue()
++             .Set("event", "layer")
++             .Set("context", static_cast<double>(context))  // 32 bits unsigned: past an int
++             .Set("width", pixels.width())
++             .Set("height", pixels.height())
++             .Set("scale", static_cast<double>(scale)));
++  }
++
++  void SendTabs() {
++    if (client_ < 0 || !attached_) return;
++    TabStripModel* model = attached_->model();
++    base::ListValue list;
++    for (int i = 0; i < model->count(); ++i) {
++      content::WebContents* contents = model->GetWebContentsAt(i);
++      list.Append(base::DictValue()
++                      .Set("title", base::UTF16ToUTF8(contents->GetTitle()))
++                      .Set("url", contents->GetVisibleURL().spec())
++                      .Set("active", i == model->active_index())
++                      .Set("loading", contents->IsLoading()));
++    }
++    Send(base::DictValue().Set("event", "tabs").Set("tabs", std::move(list)));
++  }
++
++  // shortcut: a blocking write on the UI thread; fine for a few small lines to a local client,
++  // not for the real protocol.
++  void Send(const base::DictValue& message) {
++    std::string line = base::WriteJson(message).value_or("{}") + "\n";
++    for (size_t sent = 0; sent < line.size();) {
++      const ssize_t count = HANDLE_EINTR(write(client_, line.data() + sent, line.size() - sent));
++      if (count <= 0) return;  // the reader notices the closed socket and cleans up
++      sent += static_cast<size_t>(count);
++    }
++  }
++
++  // TabStripModelObserver (the attached window):
++  void OnTabStripModelChanged(TabStripModel*, const TabStripModelChange&,
++                              const TabStripSelectionChange&) override {
++    SendTabs();
++  }
++  void OnTabChangedAt(tabs::TabInterface*, TabChangeType) override { SendTabs(); }
++
++  bool started_ = false;
++  std::vector<raw_ptr<AgensWindow>> windows_;
++  raw_ptr<AgensWindow> attached_ = nullptr;
++  base::WeakPtr<content::WebContents> shown_;
++  gfx::Size size_;
++  bool focused_ = false;
++  int client_ = -1;
++  uint32_t sent_context_ = 0;
++  gfx::Size sent_pixels_;
++};
++
++}  // namespace
++
++void EmbedAddWindow(AgensWindow* window) {
++  EmbedHost::Get()->AddWindow(window);
++}
++void EmbedRemoveWindow(AgensWindow* window) {
++  EmbedHost::Get()->RemoveWindow(window);
++}
++bool EmbedShowsPage(AgensWindow* window) {
++  return EmbedHost::Get()->ShowsPage(window);
++}
++void EmbedShowTab(content::WebContents* active) {
++  EmbedHost::Get()->ShowTab(active);
++}
++
++}  // namespace agens
+diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
+index 5d7ca90415..53e25a77e2 100644
+--- a/chrome/browser/agens/embed/native_shell_mac.mm
++++ b/chrome/browser/agens/embed/native_shell_mac.mm
+@@ -8,6 +8,7 @@
+ #import <AppKit/AppKit.h>
+ 
+ #include "chrome/browser/agens/embed/agens_window.h"
++#include "chrome/browser/agens/embed/embed_host.h"
+ #include "components/split_tabs/split_tab_visual_data.h"
+ #include "components/tabs/public/split_tab_data.h"
+ #include "ui/base/cursor/cursor.h"
+@@ -122,8 +123,10 @@ explicit NativeShellView(BrowserWindowInterface* browser)
+     chrome_ = (__bridge_transfer NSView*)agens_ui_create_chrome(window_.get());
+     window_->ui = (__bridge void*)chrome_;
+     window_->extensions_anchor = extensions_anchor_;
++    EmbedAddWindow(window_.get());
+   }
+   ~NativeShellView() override {
++    EmbedRemoveWindow(window_.get());
+     agens_ui_destroy_chrome((__bridge void*)chrome_);
+     [chrome_ removeFromSuperview];
+     contents_->SetWebContents(nullptr);
+@@ -171,6 +174,13 @@ void Layout(PassKey) override {
+         split = nullptr;
+       }
+     }
++    // Another app shows the page (docs/poc/embed.md): the tabs stay out of this window's views,
++    // so the active one draws by itself and the other app hosts what it draws.
++    const bool embedded = EmbedShowsPage(window_.get());
++    if (embedded) {
++      first = second = nullptr;
++      split = nullptr;
++    }
+     // Chromium keeps every tab but the active one hidden (no painting); a split shows two.
+     for (views::WebView* pane : {contents_.get(), contents2_.get()}) {
+       content::WebContents* was = pane->GetWebContents();
+@@ -180,6 +190,7 @@ void Layout(PassKey) override {
+     }
+     if (contents_->GetWebContents() != first) contents_->SetWebContents(first);
+     if (contents2_->GetWebContents() != second) contents2_->SetWebContents(second);
++    if (embedded) EmbedShowTab(active);  // after the views let go of it: detaching hides it
+     for (content::WebContents* shown : {first, second}) {
+       if (shown && shown != active) shown->UpdateWebContentsVisibility(content::Visibility::VISIBLE);
+     }
+diff --git a/chrome/browser/ui/webui_browser/BUILD.gn b/chrome/browser/ui/webui_browser/BUILD.gn
+index 98ada3ff32..b1fba147be 100644
+--- a/chrome/browser/ui/webui_browser/BUILD.gn
++++ b/chrome/browser/ui/webui_browser/BUILD.gn
+@@ -97,6 +97,8 @@ source_set("impl") {
+ 
+   if (is_mac) {
+     sources += [
++      "//chrome/browser/agens/embed/embed_host.h",
++      "//chrome/browser/agens/embed/embed_host_mac.cc",
+       "//chrome/browser/agens/embed/native_shell_mac.mm",
+       "//chrome/browser/agens/embed/import_chromium_keychain_mac.mm",
+       "//chrome/browser/agens/ui/chrome_mac.mm",
+diff --git a/content/browser/BUILD.gn b/content/browser/BUILD.gn
+index 901df80d0d..ecbb202f98 100644
+--- a/content/browser/BUILD.gn
++++ b/content/browser/BUILD.gn
+@@ -2733,6 +2733,8 @@ source_set("browser") {
+       "renderer_host/input/synthetic_gesture_target_mac.mm",
+       "renderer_host/popup_menu_helper_mac.h",
+       "renderer_host/popup_menu_helper_mac.mm",
++      "renderer_host/agens_embed_internal_mac.h",  # agens: a tab shown by another app
++      "renderer_host/agens_embed_mac.mm",
+       "renderer_host/render_widget_host_view_mac.h",
+       "renderer_host/render_widget_host_view_mac.mm",
+       "renderer_host/render_widget_host_view_mac_editcommand_helper.h",
+diff --git a/content/browser/renderer_host/agens_embed_internal_mac.h b/content/browser/renderer_host/agens_embed_internal_mac.h
+new file mode 100644
+index 0000000000..e2781f696f
+--- /dev/null
++++ b/content/browser/renderer_host/agens_embed_internal_mac.h
+@@ -0,0 +1,18 @@
++// Copyright 2026 SugiyamaLabs.
++#ifndef CONTENT_BROWSER_RENDERER_HOST_AGENS_EMBED_INTERNAL_MAC_H_
++#define CONTENT_BROWSER_RENDERER_HOST_AGENS_EMBED_INTERNAL_MAC_H_
++
++namespace gfx {
++struct CALayerParams;
++}
++
++namespace content {
++
++class RenderWidgetHostViewMac;
++
++// From RenderWidgetHostViewMac, for every frame it gets from its own compositor.
++void AgensEmbedLayerUpdated(RenderWidgetHostViewMac* view, const gfx::CALayerParams& params);
++
++}  // namespace content
++
++#endif  // CONTENT_BROWSER_RENDERER_HOST_AGENS_EMBED_INTERNAL_MAC_H_
+diff --git a/content/browser/renderer_host/agens_embed_mac.mm b/content/browser/renderer_host/agens_embed_mac.mm
+new file mode 100644
+index 0000000000..5a505b7272
+--- /dev/null
++++ b/content/browser/renderer_host/agens_embed_mac.mm
+@@ -0,0 +1,206 @@
++// Copyright 2026 SugiyamaLabs.
++
++#include "content/public/browser/agens_embed_mac.h"
++
++#import <AppKit/AppKit.h>
++
++#include "base/no_destructor.h"
++#include "base/strings/string_util.h"
++#include "base/strings/sys_string_conversions.h"
++#include "components/input/native_web_keyboard_event.h"
++#include "components/input/web_input_event_builders_mac.h"
++#include "content/browser/renderer_host/agens_embed_internal_mac.h"
++#include "content/browser/renderer_host/render_widget_host_impl.h"
++#include "content/browser/renderer_host/render_widget_host_view_mac.h"
++#include "content/browser/renderer_host/render_widget_host_view_mac_editcommand_helper.h"
++#include "content/public/browser/render_view_host.h"
++#include "content/public/browser/web_contents.h"
++#include "third_party/blink/public/mojom/input/input_handler.mojom.h"
++#include "ui/events/cocoa/cocoa_event_utils.h"
++#include "ui/gfx/ca_layer_params.h"
++#include "ui/latency/latency_info.h"
++
++namespace content {
++
++namespace {
++
++AgensEmbedLayerCallback& LayerCallback() {
++  static base::NoDestructor<AgensEmbedLayerCallback> callback;
++  return *callback;
++}
++
++// The tab's own view. Null while the tab has none (crashed, or still being set up).
++RenderWidgetHostViewMac* ViewFor(WebContents* contents) {
++  return contents ? static_cast<RenderWidgetHostViewMac*>(contents->GetRenderWidgetHostView())
++                  : nullptr;
++}
++
++ui::LatencyInfo Latency() {
++  ui::LatencyInfo latency;
++  latency.AddLatencyNumber(ui::INPUT_EVENT_LATENCY_UI_COMPONENT);
++  return latency;
++}
++
++}  // namespace
++
++AgensEmbedKey::AgensEmbedKey() = default;
++AgensEmbedKey::~AgensEmbedKey() = default;
++
++void SetAgensEmbedLayerCallback(AgensEmbedLayerCallback callback) {
++  LayerCallback() = std::move(callback);
++}
++
++void AgensEmbedLayerUpdated(RenderWidgetHostViewMac* view, const gfx::CALayerParams& params) {
++  if (!LayerCallback() || !params.ca_context_id) return;
++  // Only a page's main view: popups (a <select>'s list) have no RenderViewHost.
++  RenderViewHost* rvh = RenderViewHost::From(view->host());
++  WebContents* contents = rvh ? WebContents::FromRenderViewHost(rvh) : nullptr;
++  if (contents) {
++    LayerCallback().Run(contents, params.ca_context_id, params.pixel_size, params.scale_factor);
++  }
++}
++
++void AgensEmbedSetFocus(WebContents* contents, bool focused) {
++  RenderWidgetHostViewMac* view = ViewFor(contents);
++  if (!view) return;
++  // The same two notifications the NSView sends, in the order that makes the page active and
++  // focused (see RenderWidgetHostViewMac::OnFirstResponderChanged).
++  if (focused) {
++    view->OnFirstResponderChanged(true);
++    view->OnWindowIsKeyChanged(true);
++  } else {
++    view->OnWindowIsKeyChanged(false);
++    view->OnFirstResponderChanged(false);
++  }
++}
++
++void AgensEmbedMouse(WebContents* contents,
++                     base::span<const uint8_t> native_event,
++                     const gfx::PointF& point) {
++  RenderWidgetHostViewMac* view = ViewFor(contents);
++  NSEvent* event = ui::EventFromData(native_event);
++  if (!view || !event) return;
++  blink::WebMouseEvent mouse =
++      input::WebMouseEventBuilder::Build(event, view->GetNativeView().GetNativeNSView());
++  // The event's own location belongs to the other app's window.
++  mouse.SetPositionInWidget(point);
++  // shortcut: the screen position is the view's; popups placed from it land wrong until the other
++  // app also sends where its view is on screen.
++  mouse.SetPositionInScreen(point);
++  view->RouteOrProcessMouseEvent(mouse);
++}
++
++void AgensEmbedMouseLeave(WebContents* contents) {
++  RenderWidgetHostViewMac* view = ViewFor(contents);
++  if (!view) return;
++  view->RouteOrProcessMouseEvent(blink::WebMouseEvent(
++      blink::WebInputEvent::Type::kMouseLeave, 0, base::TimeTicks::Now()));
++}
++
++void AgensEmbedWheel(WebContents* contents,
++                     base::span<const uint8_t> native_event,
++                     const gfx::PointF& point) {
++  RenderWidgetHostViewMac* view = ViewFor(contents);
++  NSEvent* event = ui::EventFromData(native_event);
++  if (!view || !event || event.type != NSEventTypeScrollWheel) return;
++  blink::WebMouseWheelEvent wheel =
++      input::WebMouseWheelEventBuilder::Build(event, view->GetNativeView().GetNativeNSView());
++  wheel.SetPositionInWidget(point);
++  wheel.SetPositionInScreen(point);
++  view->RouteOrProcessWheelEvent(wheel);
++}
++
++// The part of -[RenderWidgetHostViewCocoa keyEvent:wasKeyEquivalent:] that runs after
++// -interpretKeyEvents:; the other app did that step and sent what came out of it.
++// shortcut: no key equivalents, keyboard lock or "delay the key until the composition ends"
++// (crbug.com/48161); add them when a real IME shows the difference.
++void AgensEmbedKeyEvent(WebContents* contents, const AgensEmbedKey& key) {
++  RenderWidgetHostViewMac* view = ViewFor(contents);
++  NSEvent* ns_event = ui::EventFromData(key.native_event);
++  if (!view || !ns_event) return;
++  const NSEventType type = ns_event.type;
++  if (type != NSEventTypeKeyDown && type != NSEventTypeKeyUp && type != NSEventTypeFlagsChanged) {
++    return;
++  }
++  input::NativeWebKeyboardEvent event((base::apple::OwnedNSEvent(ns_event)));
++  const ui::LatencyInfo latency = Latency();
++
++  view->BeginKeyboardEvent();
++  if (type != NSEventTypeKeyDown) {
++    view->ForwardKeyboardEvent(event, latency);
++    view->EndKeyboardEvent();
++    return;
++  }
++
++  // Commands that insert characters are left out, as upstream does (Tab would insert a tab
++  // instead of moving to the next field); the key then goes on as a keypress below.
++  std::vector<blink::mojom::EditCommandPtr> commands;
++  bool has_commands = false;
++  for (const std::string& selector : key.selectors) {
++    if (selector == "noop:") continue;
++    has_commands = true;
++    const std::string command =
++        base::SysNSStringToUTF8(RenderWidgetHostViewMacEditCommandHelper::CommandNameForSelector(
++            NSSelectorFromString(base::SysUTF8ToNSString(selector))));
++    if (!base::StartsWith(command, "insert", base::CompareCase::INSENSITIVE_ASCII)) {
++      commands.push_back(blink::mojom::EditCommand::New(command, ""));
++    }
++  }
++  const bool commands_empty = commands.empty();
++  const bool has_marked = !key.marked.empty();
++
++  if (has_marked || key.had_marked || key.text.length() > 1) {
++    input::NativeWebKeyboardEvent fake = event;
++    fake.windows_key_code = 0xE5;  // VKEY_PROCESSKEY: an input method is composing
++    fake.skip_if_unhandled = true;
++    view->ForwardKeyboardEvent(fake, latency);
++  } else {
++    view->ForwardKeyboardEventWithCommands(event, latency, std::move(commands));
++  }
++
++  bool inserted = false;
++  if (key.text.length() > ((has_marked || key.had_marked) ? 0u : 1u)) {
++    view->ImeCommitText(key.text, gfx::Range::InvalidRange());
++    inserted = true;
++  }
++  if (has_marked) {
++    view->ImeSetComposition(key.marked, {}, gfx::Range::InvalidRange(), key.selection_start,
++                            key.selection_end);
++  } else if (key.had_marked && !inserted) {
++    if (key.unmarked) {
++      view->ImeFinishComposingText();
++    } else {
++      view->ImeCancelCompositionFromCocoa();
++    }
++  }
++
++  if (!has_marked) {
++    const NSEventModifierFlags kCtrlCmd = NSEventModifierFlagControl | NSEventModifierFlagCommand;
++    if (!inserted && key.text.length() == 1) {
++      event.SetType(blink::WebInputEvent::Type::kChar);
++      event.text[0] = key.text[0];
++      event.text[1] = 0;
++      event.skip_if_unhandled = true;
++      view->ForwardKeyboardEvent(event, latency);
++    } else if (!inserted && event.text[0] != '\0' &&
++               ((ns_event.modifierFlags & kCtrlCmd) || (has_commands && commands_empty))) {
++      event.SetType(blink::WebInputEvent::Type::kChar);
++      event.skip_if_unhandled = true;
++      view->ForwardKeyboardEvent(event, latency);
++    }
++  }
++  view->EndKeyboardEvent();
++}
++
++void AgensEmbedEdit(WebContents* contents, const std::string& command) {
++  RenderWidgetHostViewMac* view = ViewFor(contents);
++  if (!view) return;
++  if (command == "cut") view->Cut();
++  else if (command == "copy") view->Copy();
++  else if (command == "paste") view->Paste();
++  else if (command == "selectAll") view->SelectAll();
++  else if (command == "undo") view->Undo();
++  else if (command == "redo") view->Redo();
++}
++
++}  // namespace content
+diff --git a/content/browser/renderer_host/render_widget_host_view_mac.mm b/content/browser/renderer_host/render_widget_host_view_mac.mm
+index f99512647a..5c8292cbe5 100644
+--- a/content/browser/renderer_host/render_widget_host_view_mac.mm
++++ b/content/browser/renderer_host/render_widget_host_view_mac.mm
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "content/browser/renderer_host/render_widget_host_view_mac.h"
++#include "content/browser/renderer_host/agens_embed_internal_mac.h"  // agens
+ 
+ #import <Carbon/Carbon.h>
+ 
+@@ -216,6 +217,8 @@ void SendVisibleTimeRequestToDelegatedFrameHost(
+   // before the frame is up.
+   SetBackgroundLayerColor(last_frame_root_background_color_);
+ 
++  AgensEmbedLayerUpdated(this, ca_layer_params);  // agens: a tab shown by another app
++
+   // Update the contents that the NSView is displaying.
+   ns_view_->SetCALayerParams(std::move(ca_layer_params));
+ }
+diff --git a/content/public/browser/BUILD.gn b/content/public/browser/BUILD.gn
+index 790d665707..19074293c5 100644
+--- a/content/public/browser/BUILD.gn
++++ b/content/public/browser/BUILD.gn
+@@ -712,6 +712,7 @@ source_set("browser_sources") {
+ 
+   if (is_mac) {
+     sources += [
++      "agens_embed_mac.h",  # agens: a tab shown by another app
+       "ax_inspect_factory_mac.mm",
+       "native_event_processor_mac.h",
+       "native_event_processor_observer_mac.h",
+diff --git a/content/public/browser/agens_embed_mac.h b/content/public/browser/agens_embed_mac.h
+new file mode 100644
+index 0000000000..a1599b2b23
+--- /dev/null
++++ b/content/public/browser/agens_embed_mac.h
+@@ -0,0 +1,64 @@
++// Copyright 2026 SugiyamaLabs.
++// A tab shown by another app (docs/poc/embed.md). The tab is not in any window here: its
++// compositor draws into a CAContext, the other app hosts that context in a CALayerHost and sends
++// its NSEvents back. This is the browser side of what RenderWidgetHostViewCocoa does for an app
++// shim, without Chromium code in the other app.
++#ifndef CONTENT_PUBLIC_BROWSER_AGENS_EMBED_MAC_H_
++#define CONTENT_PUBLIC_BROWSER_AGENS_EMBED_MAC_H_
++
++#include <stdint.h>
++
++#include <string>
++#include <vector>
++
++#include "base/containers/span.h"
++#include "base/functional/callback.h"
++#include "content/common/content_export.h"
++#include "ui/gfx/geometry/point_f.h"
++#include "ui/gfx/geometry/size.h"
++
++namespace content {
++
++class WebContents;
++
++// Runs on the UI thread for every frame of a tab that draws by itself (not inside a views
++// window). `ca_context_id` is what the other app gives to its CALayerHost.
++using AgensEmbedLayerCallback = base::RepeatingCallback<
++    void(WebContents*, uint32_t ca_context_id, const gfx::Size& pixel_size, float scale)>;
++CONTENT_EXPORT void SetAgensEmbedLayerCallback(AgensEmbedLayerCallback callback);
++
++// The other app's view became (or stopped being) the first responder of its key window.
++CONTENT_EXPORT void AgensEmbedSetFocus(WebContents* contents, bool focused);
++
++// `native_event` is the NSEvent as CGEventCreateData gives it; `point` is where it happened in
++// the other app's view, in points from the top left.
++CONTENT_EXPORT void AgensEmbedMouse(WebContents* contents,
++                                    base::span<const uint8_t> native_event,
++                                    const gfx::PointF& point);
++CONTENT_EXPORT void AgensEmbedMouseLeave(WebContents* contents);
++CONTENT_EXPORT void AgensEmbedWheel(WebContents* contents,
++                                    base::span<const uint8_t> native_event,
++                                    const gfx::PointF& point);
++
++// A key event and what the other app's text input system made of it (its NSTextInputClient
++// calls during -interpretKeyEvents:).
++struct CONTENT_EXPORT AgensEmbedKey {
++  AgensEmbedKey();
++  ~AgensEmbedKey();
++  std::vector<uint8_t> native_event;
++  std::u16string text;                 // -insertText:
++  std::vector<std::string> selectors;  // -doCommandBySelector:, e.g. "deleteBackward:"
++  std::u16string marked;               // -setMarkedText: (the composition now)
++  int selection_start = 0;             // inside `marked`
++  int selection_end = 0;
++  bool had_marked = false;  // there was a composition before this key
++  bool unmarked = false;    // -unmarkText was called
++};
++CONTENT_EXPORT void AgensEmbedKeyEvent(WebContents* contents, const AgensEmbedKey& key);
++
++// "cut", "copy", "paste", "selectAll", "undo", "redo" (the other app's Edit menu).
++CONTENT_EXPORT void AgensEmbedEdit(WebContents* contents, const std::string& command);
++
++}  // namespace content
++
++#endif  // CONTENT_PUBLIC_BROWSER_AGENS_EMBED_MAC_H_
