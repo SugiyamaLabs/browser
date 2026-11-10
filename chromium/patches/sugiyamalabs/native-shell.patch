@@ -276,10 +276,10 @@ index 0000000000..2d34d88232
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_CREDITS_H_
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
 new file mode 100644
-index 0000000000..eb7e1852a5
+index 0000000000..809e6c505b
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embed.h
-@@ -0,0 +1,350 @@
+@@ -0,0 +1,352 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The boundary between the engine and any interface (the browser's own chrome today, the Agens
 +// app later). Plain C on purpose: no Chromium or C++ types cross it, Swift imports it as is, and
@@ -364,6 +364,8 @@ index 0000000000..eb7e1852a5
 +  const char* text;    // what to show: the address or the search terms
 +  const char* detail;  // page title, or empty for a search
 +  int is_search;
++  const unsigned char* favicon_png;  // the page's icon from local history, or null
++  int favicon_png_size;
 +} AgensSuggestion;
 +typedef void (*AgensSuggestionsChanged)(void* context, const AgensSuggestion* suggestions,
 +                                        int count);
@@ -776,10 +778,10 @@ index 0000000000..6d06705a23
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_IMPORT_H_
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
 new file mode 100644
-index 0000000000..b8668ee717
+index 0000000000..9a9afecf39
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_window.h
-@@ -0,0 +1,664 @@
+@@ -0,0 +1,702 @@
 +// Copyright 2026 SugiyamaLabs.
 +// One browser window as the embed API sees it (agens_embed.h): tabs, suggestions, atos, search
 +// default, bookmarks. Platform-neutral; each platform's shell (native_shell_mac.mm, later
@@ -844,6 +846,9 @@ index 0000000000..b8668ee717
 +#include "chrome/browser/ui/tabs/tab_strip_model.h"
 +#include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
 +#include "components/favicon/content/content_favicon_driver.h"
++#include "chrome/browser/favicon/favicon_service_factory.h"
++#include "components/favicon/core/favicon_service.h"
++#include "components/keyed_service/core/service_access_type.h"
 +#include "components/omnibox/browser/autocomplete_classifier.h"
 +#include "components/omnibox/browser/autocomplete_controller.h"
 +#include "components/omnibox/browser/autocomplete_input.h"
@@ -1262,6 +1267,7 @@ index 0000000000..b8668ee717
 +  void PublishSuggestions() {
 +    if (!suggestions_observer) return;
 +    std::vector<std::string> texts, details;
++    std::vector<const std::vector<uint8_t>*> icons;
 +    std::vector<AgensSuggestion> out;
 +    const AutocompleteResult& result = autocomplete->result();
 +    const size_t count = std::min<size_t>(result.size(), 6);
@@ -1272,12 +1278,44 @@ index 0000000000..b8668ee717
 +      const bool search = AutocompleteMatch::IsSearchType(match.type);
 +      texts.push_back(base::UTF16ToUTF8(search ? match.contents : match.contents));
 +      details.push_back(search ? std::string() : base::UTF16ToUTF8(match.description));
++      const std::vector<uint8_t>* icon = nullptr;
++      if (!search && match.destination_url.is_valid()) {
++        auto it = suggestion_icons.find(match.destination_url.spec());
++        if (it == suggestion_icons.end()) {
++          LoadSuggestionIcon(match.destination_url);
++        } else if (!it->second.empty()) {
++          icon = &it->second;
++        }
++      }
++      icons.push_back(icon);
 +    }
 +    for (size_t i = 0; i < count; ++i) {
 +      out.push_back({texts[i].c_str(), details[i].c_str(),
-+                     AutocompleteMatch::IsSearchType(result.match_at(i).type)});
++                     AutocompleteMatch::IsSearchType(result.match_at(i).type),
++                     icons[i] ? icons[i]->data() : nullptr,
++                     icons[i] ? static_cast<int>(icons[i]->size()) : 0});
 +    }
 +    suggestions_observer(suggestions_context, out.data(), static_cast<int>(out.size()));
++  }
++
++  // The page's favicon from the local favicon database (never the network); cached per URL,
++  // an empty entry meaning "none stored" or "still loading".
++  void LoadSuggestionIcon(const GURL& url) {
++    suggestion_icons[url.spec()];
++    favicon::FaviconService* service = FaviconServiceFactory::GetForProfile(
++        browser->GetProfile(), ServiceAccessType::EXPLICIT_ACCESS);
++    if (!service) return;
++    service->GetRawFaviconForPageURL(
++        url, {favicon_base::IconType::kFavicon}, 32, /*fallback_to_host=*/true,
++        base::BindOnce(
++            [](base::WeakPtr<AgensWindow> self, std::string key,
++               const favicon_base::FaviconRawBitmapResult& result) {
++              if (!self || !result.is_valid()) return;
++              self->suggestion_icons[key].assign(result.bitmap_data->begin(), result.bitmap_data->end());
++              if (self->autocomplete) self->PublishSuggestions();
++            },
++            weak.GetWeakPtr(), url.spec()),
++        &suggestion_icon_tracker);
 +  }
 +
 +  // AutocompleteController::Observer:
@@ -1291,6 +1329,8 @@ index 0000000000..b8668ee717
 +  AgensSuggestionsChanged suggestions_observer = nullptr;
 +  raw_ptr<void> suggestions_context = nullptr;
 +  std::unique_ptr<AutocompleteController> autocomplete;
++  std::map<std::string, std::vector<uint8_t>> suggestion_icons;
++  base::CancelableTaskTracker suggestion_icon_tracker;
 +  base::RepeatingClosure relayout;
 +  bool notify_pending = false;
 +  AgensStatusBubble status_bubble;
@@ -4370,10 +4410,10 @@ index 0000000000..8d10fddb69
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..41f41959dd
+index 0000000000..76f8c5eaac
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,5144 @@
+@@ -0,0 +1,5149 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -5103,7 +5143,12 @@ index 0000000000..41f41959dd
 +- (void)updateWith:(const AgensSuggestion&)suggestion {
 +  _text.stringValue = @(suggestion.text);
 +  _detail.stringValue = @(suggestion.detail);
-+  _icon.image = Symbol(suggestion.is_search ? @"magnifyingglass" : @"globe", 13);
++  NSImage* favicon = suggestion.favicon_png
++      ? [[NSImage alloc] initWithData:[NSData dataWithBytes:suggestion.favicon_png
++                                                     length:suggestion.favicon_png_size]]
++      : nil;
++  favicon.size = NSMakeSize(16, 16);
++  _icon.image = favicon ?: Symbol(suggestion.is_search ? @"magnifyingglass" : @"globe", 13);
 +  self.accessibilityLabel = suggestion.detail[0]
 +      ? [NSString stringWithFormat:@"%@, %@", _text.stringValue, _detail.stringValue]
 +      : _text.stringValue;
