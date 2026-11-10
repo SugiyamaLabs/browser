@@ -323,10 +323,10 @@ index 0000000000..858411a1b7
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EMBED_H_
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
 new file mode 100644
-index 0000000000..f1beed8297
+index 0000000000..f7a51ac64b
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_window.h
-@@ -0,0 +1,525 @@
+@@ -0,0 +1,560 @@
 +// Copyright 2026 SugiyamaLabs.
 +// One browser window as the embed API sees it (agens_embed.h): tabs, suggestions, atos, search
 +// default, bookmarks. Platform-neutral; each platform's shell (native_shell_mac.mm, later
@@ -392,6 +392,9 @@ index 0000000000..f1beed8297
 +#include "content/public/browser/web_contents_observer.h"
 +#include "content/public/browser/web_contents_user_data.h"
 +#include "net/base/net_errors.h"
++#include "chrome/common/chrome_isolated_world_ids.h"
++#include "content/public/browser/render_frame_host.h"
++#include "extensions/common/extension_urls.h"
 +#include "chrome/browser/ui/status_bubble.h"
 +#include "components/download/public/common/download_item.h"
 +#include "components/url_formatter/url_formatter.h"
@@ -443,6 +446,38 @@ index 0000000000..f1beed8297
 + public:
 +  int error = 0;
 +  // content::WebContentsObserver:
++  // The store's button says our name (as Brave's says "Add to Brave"). The page is Google's, so
++  // this rewrites its text after it loads; if the store changes its words, the button just keeps
++  // Google's.
++  void DOMContentLoaded(content::RenderFrameHost* frame) override {
++    if (frame != web_contents()->GetPrimaryMainFrame() ||
++        frame->GetLastCommittedURL().host() != extension_urls::GetNewWebstoreLaunchURL().host()) {
++      return;
++    }
++    static const char16_t kRename[] = uR"((() => {
++      const names = {'Usar no Chrome': 'Instalar no AgensBrowser', 'Adicionar ao Chrome': 'Instalar no AgensBrowser',
++                     'Add to Chrome': 'Install in AgensBrowser', 'Remover do Chrome': 'Remover do AgensBrowser',
++                     'Remove from Chrome': 'Remove from AgensBrowser'};
++      // The store's "switch to Chrome" asks: the smallest block that holds the sentence goes.
++      const promos = [/^Mudar para o Chrome\?$/, /^Mude para o Chrome/, /^Switch to Chrome/];
++      const fix = () => {
++        for (const el of document.querySelectorAll('button, button span')) {
++          const name = names[el.textContent.trim()];
++          if (name && el.childElementCount === 0) el.textContent = name;
++        }
++        for (const el of document.querySelectorAll('h1, h2, h3, div, span, p')) {
++          if (el.childElementCount || !promos.some(r => r.test(el.textContent.trim()))) continue;
++          let box = el;
++          while (box.parentElement && box.parentElement.textContent.length < 300 &&
++                 box.parentElement !== document.body) box = box.parentElement;
++          box.style.display = 'none';
++        }
++      };
++      fix();
++      new MutationObserver(fix).observe(document.documentElement, {subtree: true, childList: true});
++    })())";
++    frame->ExecuteJavaScriptInIsolatedWorld(kRename, base::NullCallback(), ISOLATED_WORLD_ID_CHROME_INTERNAL);
++  }
 +  void DidFinishNavigation(content::NavigationHandle* handle) override {
 +    if (!handle->IsInPrimaryMainFrame() || !handle->HasCommitted() || handle->IsSameDocument()) return;
 +    error = handle->IsErrorPage() ? handle->GetNetErrorCode() : 0;
@@ -1889,10 +1924,10 @@ index 0000000000..ff40eeab47
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..096011f6b4
+index 0000000000..757dbff48c
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,4416 @@
+@@ -0,0 +1,4422 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -3169,7 +3204,13 @@ index 0000000000..096011f6b4
 +    y = [self info:@"Reduzir movimento e transparência" detail:@"Segue os ajustes do macOS." note:@"Automático" y:y];
 +  } else if ([key isEqualToString:@"extensoes"]) {
 +    y = [self fillExtensions:y];
-+    y = [self info:@"Instalar da Chrome Web Store" detail:@"O ungoogled bloqueia por padrão." note:@"Ainda não" y:y];
++    // Like Brave: installs and updates come from Google's store (the only Google service we use).
++    y = [self option:@"Chrome Web Store" detail:@"Instalar abre a loja do Google; o download vem de lá."
++             control:[self linkButton:@"Abrir a loja…" url:@"https://chromewebstore.google.com/category/extensions"]
++                   y:y];
++    y = [self option:@"Atualizar extensões sozinhas" detail:@"Pergunta à loja do Google por versões novas de tempos em tempos."
++             control:[self prefSwitch:"agens.extensions.auto_update"]
++                   y:y];
 +  } else if ([key isEqualToString:@"sistema"]) {
 +    y = [self option:@"Aceleração por hardware" detail:@"Vale ao reabrir." control:[self prefSwitch:"hardware_acceleration_mode.enabled"] y:y];
 +    NSButton* proxy = [NSButton buttonWithTitle:@"Abrir…" target:self action:@selector(openProxy:)];
