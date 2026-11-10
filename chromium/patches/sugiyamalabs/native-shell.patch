@@ -4370,10 +4370,10 @@ index 0000000000..8d10fddb69
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..e113937855
+index 0000000000..41f41959dd
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,5137 @@
+@@ -0,0 +1,5144 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -8708,6 +8708,13 @@ index 0000000000..e113937855
 +  }
 +  if (command == @selector(insertNewline:) && _selected >= 0) {
 +    [self openSuggestion:_selected];
++    return YES;
++  }
++  // Navigate here, while editing: if the field's action ran instead, ending the edit would first
++  // put the current page's URL back in the address bar and Enter would reload that page.
++  if (command == @selector(insertNewline:)) {
++    [self go:(NSTextField*)control];
++    [control.window makeFirstResponder:nil];
 +    return YES;
 +  }
 +  return NO;
