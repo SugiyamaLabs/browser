@@ -1,3 +1,153 @@
+diff --git a/chrome/browser/agens/embed/agens_adblock.cc b/chrome/browser/agens/embed/agens_adblock.cc
+new file mode 100644
+index 0000000000..cf65d95e50
+--- /dev/null
++++ b/chrome/browser/agens/embed/agens_adblock.cc
+@@ -0,0 +1,90 @@
++// Copyright 2026 SugiyamaLabs.
++// agens_adblock.h on top of chrome/browser/sugiyamalabs/adblock.h and the ADS content setting.
++
++#include "chrome/browser/agens/embed/agens_adblock.h"
++
++#include <string>
++#include <vector>
++
++#include "base/strings/string_util.h"
++#include "chrome/browser/agens/embed/agens_window.h"
++#include "chrome/browser/browser_process.h"
++#include "chrome/browser/content_settings/host_content_settings_map_factory.h"
++#include "chrome/browser/sugiyamalabs/adblock.h"
++#include "components/content_settings/core/browser/content_settings_registry.h"
++#include "components/content_settings/core/browser/host_content_settings_map.h"
++#include "components/content_settings/core/common/content_settings.h"
++#include "components/content_settings/core/common/content_settings_pattern.h"
++#include "components/prefs/pref_service.h"
++#include "url/gurl.h"
++
++namespace {
++namespace ab = sugiyamalabs::adblock;
++
++constexpr char kWildcard[] = "[*.]";
++
++HostContentSettingsMap* MapOf(AgensWindow* w) {
++  return HostContentSettingsMapFactory::GetForProfile(w->browser->GetProfile()->GetOriginalProfile());
++}
++
++// "https://www.Example.com/x", "example.com" -> "example.com"; "" when there is no host.
++std::string HostOf(const char* site) {
++  std::string text = site ? site : "";
++  if (text.find("://") == std::string::npos) text = "https://" + text;
++  GURL url(text);
++  std::string host = url.is_valid() ? std::string(url.host()) : "";
++  if (base::StartsWith(host, "www.")) host = host.substr(4);
++  return host;
++}
++}  // namespace
++
++extern "C" {
++
++int agens_adblock_level(void) { return ab::GetLevel(); }
++void agens_adblock_set_level(int level) { ab::SetLevel(level); }
++int agens_adblock_auto_update(void) { return ab::GetAutoUpdate(); }
++void agens_adblock_set_auto_update(int enabled) { ab::SetAutoUpdate(enabled != 0); }
++double agens_adblock_last_update(void) {
++  const base::Time t = ab::GetLastUpdate();
++  return t.is_null() ? 0 : t.InSecondsFSinceUnixEpoch();
++}
++int agens_adblock_hide_cookie_notices(void) {
++  return g_browser_process->local_state()->GetBoolean(ab::kHideCookieNoticesPref);
++}
++void agens_adblock_set_hide_cookie_notices(int enabled) {
++  g_browser_process->local_state()->SetBoolean(ab::kHideCookieNoticesPref, enabled != 0);
++}
++
++void agens_adblock_update_now(AgensAdblockUpdateDone done, void* context) {
++  ab::UpdateNow(base::BindOnce(
++      [](AgensAdblockUpdateDone done, void* context, bool ok, std::string message) {
++        if (done) done(context, ok, message.c_str());
++      },
++      done, context));
++}
++
++void agens_adblock_allowed_sites(AgensWindow* w, AgensAdblockSites fn, void* context) {
++  std::vector<std::string> hosts;
++  for (const ContentSettingPatternSource& rule : MapOf(w)->GetSettingsForOneType(ContentSettingsType::ADS)) {
++    if (rule.GetContentSetting() != CONTENT_SETTING_ALLOW) continue;
++    std::string host = rule.primary_pattern.ToString();
++    if (base::StartsWith(host, kWildcard)) host = host.substr(4);
++    hosts.push_back(host);
++  }
++  std::vector<const char*> out;
++  for (const auto& h : hosts) out.push_back(h.c_str());
++  fn(context, out.data(), static_cast<int>(out.size()));
++}
++
++int agens_adblock_allow_site(AgensWindow* w, const char* site, int allow) {
++  const std::string host = HostOf(site);
++  if (host.empty()) return 0;
++  // Domain pattern: the site and its subdomains, any scheme and port.
++  const auto pattern = ContentSettingsPattern::FromString(kWildcard + host);
++  if (!pattern.IsValid()) return 0;
++  MapOf(w)->SetContentSettingCustomScope(pattern, ContentSettingsPattern::Wildcard(), ContentSettingsType::ADS,
++                                         allow ? CONTENT_SETTING_ALLOW : CONTENT_SETTING_DEFAULT);
++  return 1;
++}
++
++}  // extern "C"
+diff --git a/chrome/browser/agens/embed/agens_adblock.h b/chrome/browser/agens/embed/agens_adblock.h
+new file mode 100644
+index 0000000000..e62a9f607e
+--- /dev/null
++++ b/chrome/browser/agens/embed/agens_adblock.h
+@@ -0,0 +1,48 @@
++// Copyright 2026 SugiyamaLabs.
++// Ad blocker settings for the native Settings page, as a plain C API (no Chromium types).
++// Call everything on the UI thread. Pref names, for reference: agens.adblock.level,
++// agens.adblock.auto_update, agens.adblock.last_update, agens.adblock.hide_cookie_notices
++// (Local State).
++#ifndef CHROME_BROWSER_AGENS_EMBED_AGENS_ADBLOCK_H_
++#define CHROME_BROWSER_AGENS_EMBED_AGENS_ADBLOCK_H_
++
++#include "chrome/browser/agens/embed/agens_embed.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++// 0 off, 1 Padrao (EasyList + EasyPrivacy), 2 Forte (adds uBlock filters, uBlock privacy and the
++// EasyList Cookie List). Default 2. A change applies to the next page load; the rules of the new
++// level are indexed in the background (about 2 s the first time).
++int agens_adblock_level(void);
++void agens_adblock_set_level(int level);
++
++// Daily download of the lists from our GitHub (nothing else is contacted). Default on.
++int agens_adblock_auto_update(void);
++void agens_adblock_set_auto_update(int enabled);
++// Seconds since the Unix epoch of the last successful update, 0 if never.
++double agens_adblock_last_update(void);
++
++// Hides cookie notices on pages (read by the cosmetic filter). Default on.
++int agens_adblock_hide_cookie_notices(void);
++void agens_adblock_set_hide_cookie_notices(int enabled);
++
++// Downloads, converts and applies the lists now. `done` runs once on the UI thread. `message` is
++// pt-BR text for the person and is only valid during the call.
++typedef void (*AgensAdblockUpdateDone)(void* context, int ok, const char* message);
++void agens_adblock_update_now(AgensAdblockUpdateDone done, void* context);
++
++// Sites liberados of the window's ato: hosts such as "example.com" (subdomains included) where
++// the blocker is off. The array and strings are only valid during the call.
++typedef void (*AgensAdblockSites)(void* context, const char* const* sites, int count);
++void agens_adblock_allowed_sites(AgensWindow* window, AgensAdblockSites fn, void* context);
++// Allows (allow = 1) or blocks again (0) a site, given as a host or any URL of it. Returns 0 if
++// `site` is not a valid host.
++int agens_adblock_allow_site(AgensWindow* window, const char* site, int allow);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_ADBLOCK_H_
 diff --git a/chrome/browser/agens/embed/agens_credits.cc b/chrome/browser/agens/embed/agens_credits.cc
 new file mode 100644
 index 0000000000..111a386ad0
@@ -480,6 +630,150 @@ index 0000000000..eb7e1852a5
 +#endif
 +
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EMBED_H_
+diff --git a/chrome/browser/agens/embed/agens_import.cc b/chrome/browser/agens/embed/agens_import.cc
+new file mode 100644
+index 0000000000..76015f844f
+--- /dev/null
++++ b/chrome/browser/agens/embed/agens_import.cc
+@@ -0,0 +1,88 @@
++// Copyright 2026 SugiyamaLabs.
++// agens_import.h on top of the readers and the writer (import_internal.h).
++
++#include "chrome/browser/agens/embed/agens_import.h"
++
++#include <memory>
++
++#include "base/memory/raw_ptr.h"
++#include "base/no_destructor.h"
++#include "base/task/thread_pool.h"
++#include "chrome/browser/agens/embed/import_internal.h"
++
++namespace agens::import {
++std::string AtoNameFor(const Source& source) {
++  return source.profile.empty() ? source.browser : source.browser + " — " + source.profile;
++}
++}  // namespace agens::import
++
++namespace {
++std::vector<agens::import::Source>& Known() {
++  static base::NoDestructor<std::vector<agens::import::Source>> sources;
++  return *sources;
++}
++std::vector<agens::import::Source> FindAll() {
++  std::vector<agens::import::Source> all = agens::import::FindChromiumSources();
++  for (auto& s : agens::import::FindSafariFirefoxSources()) all.push_back(std::move(s));
++  return all;
++}
++}  // namespace
++
++extern "C" {
++
++void agens_import_sources(AgensImportSourcesFn fn, void* context) {
++  base::ThreadPool::PostTaskAndReplyWithResult(
++      FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_VISIBLE}, base::BindOnce(&FindAll),
++      base::BindOnce(
++          [](AgensImportSourcesFn fn, void* context, std::vector<agens::import::Source> sources) {
++            Known() = sources;
++            std::vector<std::string> atos;
++            for (const auto& s : sources) atos.push_back(agens::import::AtoNameFor(s));
++            std::vector<AgensImportSource> out;
++            for (size_t i = 0; i < sources.size(); ++i) {
++              out.push_back({sources[i].id.c_str(), sources[i].browser.c_str(), sources[i].profile.c_str(),
++                             atos[i].c_str(), sources[i].available, sources[i].note.c_str()});
++            }
++            fn(context, out.data(), static_cast<int>(out.size()));
++          },
++          fn, context));
++}
++
++void agens_import_run(AgensWindow*, const char* source_id, const char* ato, int what, AgensImportProgressFn fn,
++                      void* context) {
++  const std::string id = source_id ? source_id : "";
++  const agens::import::Source* found = nullptr;
++  for (const auto& s : Known()) {
++    if (s.id == id) found = &s;
++  }
++  if (!found) {
++    fn(context, id.c_str(), -1, "Origem não encontrada; procure de novo.");
++    return;
++  }
++  const agens::import::Source source = *found;
++  const std::string ato_name = ato && *ato ? std::string(ato) : agens::import::AtoNameFor(source);
++  auto progress = base::BindRepeating(
++      [](AgensImportProgressFn fn, void* context, std::string id, int state, const std::string& message) {
++        fn(context, id.c_str(), state, message.c_str());
++      },
++      fn, context, id);
++  progress.Run(0, "Lendo " + source.browser + "…");
++  auto write = base::BindOnce(
++      [](agens::import::Source source, std::string ato_name, agens::import::ProgressCallback progress,
++         agens::import::Data data) {
++        if (!data.error.empty() && data.bookmarks.empty() && data.history.empty() && data.logins.empty() &&
++            data.cookies.empty() && data.extension_ids.empty()) {
++          progress.Run(-1, data.error);
++          return;
++        }
++        agens::import::WriteIntoAto(ato_name, source.browser, std::move(data), progress);
++      },
++      source, ato_name, progress);
++  if (id.starts_with("chromium:")) {
++    agens::import::ReadChromium(source, what, std::move(write));
++  } else {
++    agens::import::ReadSafariFirefox(source, what, std::move(write));
++  }
++}
++
++}  // extern "C"
+diff --git a/chrome/browser/agens/embed/agens_import.h b/chrome/browser/agens/embed/agens_import.h
+new file mode 100644
+index 0000000000..6d06705a23
+--- /dev/null
++++ b/chrome/browser/agens/embed/agens_import.h
+@@ -0,0 +1,44 @@
++// Copyright 2026 SugiyamaLabs.
++// Importing from other browsers (Chrome, Brave, Arc, Edge, Safari, Firefox). Plain C for the UI.
++// Each source is one profile of one browser; importing it fills an ato named after it
++// ("Chrome — Pessoal"), created if needed.
++#ifndef CHROME_BROWSER_AGENS_EMBED_AGENS_IMPORT_H_
++#define CHROME_BROWSER_AGENS_EMBED_AGENS_IMPORT_H_
++
++#include "chrome/browser/agens/embed/agens_embed.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++enum {
++  kAgensImportBookmarks = 1 << 0,
++  kAgensImportHistory = 1 << 1,
++  kAgensImportPasswords = 1 << 2,  // Chromium-family browsers: macOS asks once for their Keychain key
++  kAgensImportCookies = 1 << 3,    // logins stay signed in
++  kAgensImportExtensions = 1 << 4, // Chromium-family only: the same Chrome Web Store extensions, installed from the store
++};
++
++typedef struct {
++  const char* id;       // opaque, pass back to agens_import_run
++  const char* browser;  // "Chrome", "Brave", "Arc", "Edge", "Safari", "Firefox"
++  const char* profile;  // the browser's own profile name ("Pessoal", "Default"…)
++  const char* ato;      // the ato it goes into
++  int available;        // what it has: a mask of kAgensImport*
++  const char* note;     // why something is missing (e.g. Safari needs Full Disk Access), or ""
++} AgensImportSource;
++typedef void (*AgensImportSourcesFn)(void* context, const AgensImportSource* sources, int count);
++// Finds installed browsers and their profiles. Calls `fn` later, once, on the UI thread.
++void agens_import_sources(AgensImportSourcesFn fn, void* context);
++
++// state: 0 working (message says what), 1 done, -1 failed (message says why).
++typedef void (*AgensImportProgressFn)(void* context, const char* source_id, int state, const char* message);
++// `ato`: the name of the ato to create or fill; null or "" uses the suggested one (AgensImportSource.ato).
++void agens_import_run(AgensWindow* window, const char* source_id, const char* ato, int what,
++                      AgensImportProgressFn fn, void* context);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_IMPORT_H_
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
 new file mode 100644
 index 0000000000..91603c7c4d
@@ -1146,6 +1440,1438 @@ index 0000000000..91603c7c4d
 +};
 +
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
+diff --git a/chrome/browser/agens/embed/import_chromium.cc b/chrome/browser/agens/embed/import_chromium.cc
+new file mode 100644
+index 0000000000..5731ad244c
+--- /dev/null
++++ b/chrome/browser/agens/embed/import_chromium.cc
+@@ -0,0 +1,338 @@
++// Copyright 2026 SugiyamaLabs.
++// Reader for Chromium-family browsers (Chrome, Brave, Arc, Edge, Chromium, Vivaldi, Opera): finds their
++// profiles and reads bookmarks, history, saved passwords and cookies. See import_internal.h.
++//
++// Test-only switches (harmless unless passed): --agens-import-test-root=<dir> replaces
++// ~/Library/Application Support, --agens-import-test-key=<password> replaces the Keychain read.
++
++#include <array>
++#include <optional>
++#include <set>
++
++#include "base/command_line.h"
++#include "base/files/file_util.h"
++#include "base/files/scoped_temp_dir.h"
++#include "base/json/json_reader.h"
++#include "base/path_service.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/task/thread_pool.h"
++#include "base/values.h"
++#include "chrome/browser/agens/embed/agens_import.h"
++#include "chrome/browser/agens/embed/import_internal.h"
++#include "crypto/aes_cbc.h"
++#include "crypto/hash.h"
++#include "sql/database.h"
++#include "sql/statement.h"
++#include "third_party/boringssl/src/include/openssl/evp.h"
++
++namespace agens::import {
++
++std::string ReadSafeStoragePassword(const std::string& service, const std::string& account);  // .mm
++
++namespace {
++
++struct Family {
++  const char* browser;
++  const char* dir;      // under Application Support
++  const char* service;  // Keychain service; the account is `account`
++  const char* account;
++};
++constexpr Family kFamilies[] = {
++    {"Chrome", "Google/Chrome", "Chrome Safe Storage", "Chrome"},
++    {"Brave", "BraveSoftware/Brave-Browser", "Brave Safe Storage", "Brave"},
++    {"Arc", "Arc/User Data", "Arc Safe Storage", "Arc"},
++    {"Edge", "Microsoft Edge", "Microsoft Edge Safe Storage", "Microsoft Edge"},
++    {"Chromium", "Chromium", "Chromium Safe Storage", "Chromium"},
++    {"Vivaldi", "Vivaldi", "Vivaldi Safe Storage", "Vivaldi"},
++    {"Opera", "com.operasoftware.Opera", "Opera Safe Storage", "Opera"},
++};
++
++base::FilePath AppSupport() {
++  const base::CommandLine* cl = base::CommandLine::ForCurrentProcess();
++  if (cl->HasSwitch("agens-import-test-root")) return cl->GetSwitchValuePath("agens-import-test-root");
++  base::FilePath dir;
++  base::PathService::Get(base::DIR_APP_DATA, &dir);  // ~/Library/Application Support
++  return dir;
++}
++
++base::FilePath CookiesFile(const base::FilePath& profile) {
++  base::FilePath network = profile.AppendASCII("Network").AppendASCII("Cookies");
++  return base::PathExists(network) ? network : profile.AppendASCII("Cookies");
++}
++
++std::vector<std::string> StoreExtensionIds(const base::FilePath& profile);
++
++int Available(const base::FilePath& p) {
++  int mask = 0;
++  if (base::PathExists(p.AppendASCII("Bookmarks"))) mask |= kAgensImportBookmarks;
++  if (base::PathExists(p.AppendASCII("History"))) mask |= kAgensImportHistory;
++  if (base::PathExists(p.AppendASCII("Login Data"))) mask |= kAgensImportPasswords;
++  if (base::PathExists(CookiesFile(p))) mask |= kAgensImportCookies;
++  if (!StoreExtensionIds(p).empty()) mask |= kAgensImportExtensions;
++  return mask;
++}
++
++// Chrome Web Store extensions of a profile (`extensions.settings.<id>` in Preferences and Secure
++// Preferences). Keeps ids from the store; drops component/policy/unpacked/default ones.
++// Returns the ids (sorted, unique). Keys checked on Chrome, Brave, Edge: location 1 = INTERNAL,
++// from_webstore, manifest.update_url.
++std::vector<std::string> StoreExtensionIds(const base::FilePath& profile) {
++  std::set<std::string> ids;
++  for (const char* file : {"Preferences", "Secure Preferences"}) {
++    std::string json;
++    if (!base::ReadFileToString(profile.AppendASCII(file), &json)) continue;
++    std::optional<base::DictValue> prefs = base::JSONReader::ReadDict(json, base::JSON_PARSE_RFC);
++    const base::DictValue* settings = prefs ? prefs->FindDictByDottedPath("extensions.settings") : nullptr;
++    if (!settings) continue;
++    for (auto [id, value] : *settings) {
++      const base::DictValue* e = value.GetIfDict();
++      if (!e || id.size() != 32) continue;
++      std::optional<int> location = e->FindInt("location");
++      if (!location) continue;
++      if (*location != 1 && *location != 5 && *location != 10) continue;  // INTERNAL, EXTERNAL_PREF, EXTERNAL_PREF_DOWNLOAD; not unpacked/component/policy
++      if (e->FindDictByDottedPath("manifest.app")) continue;  // Chrome Apps are gone
++      const std::string* update_url = e->FindStringByDottedPath("manifest.update_url");
++      bool store = e->FindBool("from_webstore").value_or(false) ||
++                   (update_url && update_url->find("clients2.google.com/service/update2/crx") != std::string::npos);
++      if (store) ids.insert(id);
++    }
++  }
++  return {ids.begin(), ids.end()};
++}
++
++base::Time FromWebKit(int64_t micros) {
++  return micros > 0 ? base::Time::FromDeltaSinceWindowsEpoch(base::Microseconds(micros)) : base::Time();
++}
++
++// ---- bookmarks ----
++void WalkBookmarks(const base::DictValue& node, bool in_bar, std::vector<std::u16string>& path, Data& out) {
++  const std::string* type = node.FindString("type");
++  if (!type) return;
++  if (*type == "url") {
++    const std::string* url = node.FindString("url");
++    const std::string* name = node.FindString("name");
++    GURL gurl(url ? *url : "");
++    if (!gurl.is_valid() || !gurl.SchemeIsHTTPOrHTTPS()) return;
++    Bookmark b;
++    b.title = base::UTF8ToUTF16(name ? *name : "");
++    b.url = gurl;
++    b.folders = path;
++    b.in_bar = in_bar;
++    int64_t added = 0;
++    if (const std::string* s = node.FindString("date_added")) base::StringToInt64(*s, &added);
++    b.added = FromWebKit(added);
++    out.bookmarks.push_back(std::move(b));
++  } else if (*type == "folder") {
++    if (const base::ListValue* kids = node.FindList("children")) {
++      for (const base::Value& kid : *kids) {
++        if (const base::DictValue* d = kid.GetIfDict()) WalkBookmarks(*d, in_bar, path, out);
++      }
++    }
++  }
++}
++void ReadBookmarks(const base::FilePath& profile, Data& out) {
++  std::string json;
++  if (!base::ReadFileToString(profile.AppendASCII("Bookmarks"), &json)) return;
++  std::optional<base::DictValue> root = base::JSONReader::ReadDict(json, base::JSON_PARSE_RFC);
++  const base::DictValue* roots = root ? root->FindDict("roots") : nullptr;
++  if (!roots) return;
++  // Top-level folders of each root: their own names are the bar/other roots, so start one level below.
++  for (const char* key : {"bookmark_bar", "other"}) {
++    const base::DictValue* r = roots->FindDict(key);
++    const base::ListValue* kids = r ? r->FindList("children") : nullptr;
++    if (!kids) continue;
++    for (const base::Value& kid : *kids) {
++      std::vector<std::u16string> path;
++      if (const base::DictValue* d = kid.GetIfDict()) {
++        const std::string* type = d->FindString("type");
++        if (type && *type == "folder") {
++          const std::string* name = d->FindString("name");
++          path.push_back(base::UTF8ToUTF16(name ? *name : ""));
++        }
++        WalkBookmarks(*d, std::string(key) == "bookmark_bar", path, out);
++      }
++    }
++  }
++}
++
++// ---- databases ----
++// Opens a COPY (the browser may be running and holding locks). `dir` owns the copy.
++bool OpenCopy(const base::FilePath& file, base::ScopedTempDir& dir, sql::Database& db) {
++  if (!dir.CreateUniqueTempDir()) return false;
++  const base::FilePath copy = dir.GetPath().AppendASCII("db");
++  if (!base::CopyFile(file, copy)) return false;
++  for (const char* suffix : {"-wal", "-journal"}) {
++    const base::FilePath side(file.value() + suffix);
++    if (base::PathExists(side)) base::CopyFile(side, base::FilePath(copy.value() + suffix));
++  }
++  return db.Open(copy);
++}
++
++void ReadHistory(const base::FilePath& profile, Data& out) {
++  base::ScopedTempDir tmp;
++  sql::Database db(sql::DatabaseOptions(), "FirefoxImporter");
++  if (!OpenCopy(profile.AppendASCII("History"), tmp, db)) return;
++  sql::Statement s(db.GetUniqueStatement("SELECT url, title, visit_count, last_visit_time FROM urls"));
++  while (s.Step()) {
++    GURL url(s.ColumnString(0));
++    if (!url.is_valid() || !url.SchemeIsHTTPOrHTTPS()) continue;
++    Visit v;
++    v.url = url;
++    v.title = base::UTF8ToUTF16(s.ColumnString(1));
++    v.visit_count = std::max(1, static_cast<int>(s.ColumnInt(2)));
++    v.last_visit = FromWebKit(s.ColumnInt64(3));
++    if (v.last_visit.is_null()) continue;
++    out.history.push_back(std::move(v));
++  }
++}
++
++// ---- decryption ----
++std::optional<std::array<uint8_t, 16>> SafeStorageKey(const Family& f) {
++  const base::CommandLine* cl = base::CommandLine::ForCurrentProcess();
++  std::string password = cl->HasSwitch("agens-import-test-key")
++                             ? cl->GetSwitchValueASCII("agens-import-test-key")
++                             : ReadSafeStoragePassword(f.service, f.account);  // the one Keychain prompt
++  if (password.empty()) return std::nullopt;
++  std::array<uint8_t, 16> key;
++  static constexpr char kSalt[] = "saltysalt";
++  if (!PKCS5_PBKDF2_HMAC(password.data(), password.size(), reinterpret_cast<const uint8_t*>(kSalt), 9, 1003,
++                         EVP_sha1(), key.size(), key.data())) {
++    return std::nullopt;
++  }
++  return key;
++}
++
++// "v10" + AES-128-CBC(IV = 16 spaces). nullopt when not v10 or the padding is wrong.
++std::optional<std::string> Decrypt(const std::array<uint8_t, 16>& key, base::span<const uint8_t> blob) {
++  if (blob.size() < 3 + 16 || blob[0] != 'v' || blob[1] != '1' || blob[2] != '0') return std::nullopt;
++  std::array<uint8_t, 16> iv;
++  iv.fill(' ');
++  auto plain = crypto::aes_cbc::Decrypt(key, iv, blob.subspan(3u));
++  if (!plain) return std::nullopt;
++  return std::string(plain->begin(), plain->end());
++}
++
++void ReadLogins(const base::FilePath& profile, const std::array<uint8_t, 16>& key, Data& out) {
++  base::ScopedTempDir tmp;
++  sql::Database db(sql::DatabaseOptions(), "FirefoxImporter");
++  if (!OpenCopy(profile.AppendASCII("Login Data"), tmp, db)) return;
++  sql::Statement s(db.GetUniqueStatement(
++      "SELECT origin_url, username_value, password_value, signon_realm, date_created FROM logins "
++      "WHERE blacklisted_by_user = 0"));
++  while (s.Step()) {
++    GURL url(s.ColumnString(0));
++    auto password = Decrypt(key, s.ColumnBlob(2));
++    if (!url.is_valid() || !password || password->empty()) continue;
++    Login l;
++    l.url = url;
++    l.signon_realm = s.ColumnString(3);
++    l.username = base::UTF8ToUTF16(s.ColumnString(1));
++    l.password = base::UTF8ToUTF16(*password);
++    l.created = FromWebKit(s.ColumnInt64(4));
++    out.logins.push_back(std::move(l));
++  }
++}
++
++void ReadCookies(const base::FilePath& profile, const std::array<uint8_t, 16>& key, Data& out) {
++  base::ScopedTempDir tmp;
++  sql::Database db(sql::DatabaseOptions(), "FirefoxImporter");
++  if (!OpenCopy(CookiesFile(profile), tmp, db)) return;
++  sql::Statement s(db.GetUniqueStatement(
++      "SELECT host_key, name, value, encrypted_value, path, expires_utc, is_secure, is_httponly, samesite, "
++      "creation_utc, last_access_utc FROM cookies"));
++  while (s.Step()) {
++    Cookie c;
++    c.domain = s.ColumnString(0);
++    c.name = s.ColumnString(1);
++    c.value = s.ColumnString(2);
++    base::span<const uint8_t> enc = s.ColumnBlob(3);
++    if (c.value.empty() && !enc.empty()) {
++      auto plain = Decrypt(key, enc);
++      if (!plain) continue;
++      // Newer versions prepend SHA256(host_key) to the value.
++      const auto hash = crypto::hash::Sha256(c.domain);
++      if (plain->size() >= hash.size() &&
++          std::equal(hash.begin(), hash.end(), plain->begin(), [](uint8_t a, char b) { return a == static_cast<uint8_t>(b); })) {
++        plain->erase(0, hash.size());
++      }
++      c.value = std::move(*plain);
++    }
++    c.path = s.ColumnString(4);
++    c.expiry = FromWebKit(s.ColumnInt64(5));
++    c.secure = s.ColumnBool(6);
++    c.http_only = s.ColumnBool(7);
++    c.same_site = s.ColumnInt(8);
++    c.creation = FromWebKit(s.ColumnInt64(9));
++    c.last_access = FromWebKit(s.ColumnInt64(10));
++    out.cookies.push_back(std::move(c));
++  }
++}
++
++Data ReadAll(Source source, int what) {
++  Data data;
++  const Family* family = nullptr;
++  for (const Family& f : kFamilies) {
++    if (source.browser == f.browser) family = &f;
++  }
++  if (what & kAgensImportBookmarks) ReadBookmarks(source.path, data);
++  if (what & kAgensImportHistory) ReadHistory(source.path, data);
++  if (what & kAgensImportExtensions) data.extension_ids = StoreExtensionIds(source.path);
++  if (family && (what & (kAgensImportPasswords | kAgensImportCookies)) &&
++      (source.available & (kAgensImportPasswords | kAgensImportCookies))) {
++    auto key = SafeStorageKey(*family);
++    if (!key) {
++      data.error = "Sem acesso à chave do " + source.browser + " no Keychain; senhas e cookies ficaram de fora.";
++    } else {
++      if (what & kAgensImportPasswords) ReadLogins(source.path, *key, data);
++      if (what & kAgensImportCookies) ReadCookies(source.path, *key, data);
++    }
++  }
++  return data;
++}
++
++}  // namespace
++
++std::vector<Source> FindChromiumSources() {
++  std::vector<Source> out;
++  const base::FilePath support = AppSupport();
++  for (const Family& f : kFamilies) {
++    const base::FilePath root = support.AppendASCII(f.dir);
++    std::vector<std::pair<std::string, std::string>> profiles;  // dir name, display name
++    std::string json;
++    if (base::ReadFileToString(root.AppendASCII("Local State"), &json)) {
++      std::optional<base::DictValue> state = base::JSONReader::ReadDict(json, base::JSON_PARSE_RFC);
++      const base::DictValue* cache = state ? state->FindDictByDottedPath("profile.info_cache") : nullptr;
++      if (cache) {
++        for (auto [dir, value] : *cache) {
++          const base::DictValue* d = value.GetIfDict();
++          const std::string* name = d ? d->FindString("name") : nullptr;
++          profiles.emplace_back(dir, name && !name->empty() ? *name : dir);
++        }
++      }
++    }
++    if (profiles.empty() && Available(root)) profiles.emplace_back("", f.browser);  // Opera-style: data in the root
++    for (const auto& [dir, name] : profiles) {
++      Source s;
++      s.browser = f.browser;
++      s.profile = name;
++      s.path = dir.empty() ? root : root.AppendASCII(dir);
++      s.available = Available(s.path);
++      if (!s.available) continue;
++      s.id = std::string("chromium:") + f.browser + ":" + dir;
++      if (s.available & (kAgensImportPasswords | kAgensImportCookies)) {
++        s.note = std::string("Senhas e cookies: o macOS pede uma vez para liberar a chave do ") + f.browser + ".";
++      }
++      out.push_back(std::move(s));
++    }
++  }
++  return out;
++}
++
++void ReadChromium(const Source& source, int what, base::OnceCallback<void(Data)> done) {
++  base::ThreadPool::PostTaskAndReplyWithResult(
++      FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_VISIBLE}, base::BindOnce(&ReadAll, source, what),
++      std::move(done));
++}
++
++}  // namespace agens::import
+diff --git a/chrome/browser/agens/embed/import_chromium_keychain_mac.mm b/chrome/browser/agens/embed/import_chromium_keychain_mac.mm
+new file mode 100644
+index 0000000000..512e6d3150
+--- /dev/null
++++ b/chrome/browser/agens/embed/import_chromium_keychain_mac.mm
+@@ -0,0 +1,23 @@
++// Copyright 2026 SugiyamaLabs.
++// Reads another Chromium browser's "<Browser> Safe Storage" Keychain item. macOS asks the person once.
++#include <Security/Security.h>
++
++#include <string>
++
++namespace agens::import {
++
++// Returns the item's password, or "" when missing or denied. Never log the result.
++std::string ReadSafeStoragePassword(const std::string& service, const std::string& account) {
++  UInt32 length = 0;
++  void* data = nullptr;
++  // Deprecated but it is what every Chromium-family browser uses, and it keeps the prompt wording simple.
++  OSStatus status = SecKeychainFindGenericPassword(nullptr, static_cast<UInt32>(service.size()), service.data(),
++                                                   static_cast<UInt32>(account.size()), account.data(), &length,
++                                                   &data, nullptr);
++  if (status != errSecSuccess || !data) return std::string();
++  std::string out(static_cast<const char*>(data), length);
++  SecKeychainItemFreeContent(nullptr, data);
++  return out;
++}
++
++}  // namespace agens::import
+diff --git a/chrome/browser/agens/embed/import_internal.h b/chrome/browser/agens/embed/import_internal.h
+new file mode 100644
+index 0000000000..b66ffba6b7
+--- /dev/null
++++ b/chrome/browser/agens/embed/import_internal.h
+@@ -0,0 +1,80 @@
++// Copyright 2026 SugiyamaLabs.
++// The contract between the importers (readers, one file per browser family) and the writer
++// (puts the data into an ato). Readers never touch our profile; the writer never reads files.
++#ifndef CHROME_BROWSER_AGENS_EMBED_IMPORT_INTERNAL_H_
++#define CHROME_BROWSER_AGENS_EMBED_IMPORT_INTERNAL_H_
++
++#include <string>
++#include <vector>
++
++#include "base/files/file_path.h"
++#include "base/functional/callback.h"
++#include "base/time/time.h"
++#include "url/gurl.h"
++
++namespace agens::import {
++
++struct Source {
++  std::string id;       // "<family>:<anything>" — the family picks the reader
++  std::string browser;  // "Chrome", "Brave", "Arc", "Edge", "Safari", "Firefox"
++  std::string profile;  // the browser's profile name
++  base::FilePath path;  // its profile directory (or data file)
++  int available = 0;    // kAgensImport* mask
++  std::string note;
++};
++
++struct Bookmark {
++  std::u16string title;
++  GURL url;
++  std::vector<std::u16string> folders;  // path under the bar/other root, outermost first
++  bool in_bar = true;                    // bookmarks bar (true) or "other bookmarks" (false)
++  base::Time added;
++};
++struct Visit {
++  GURL url;
++  std::u16string title;
++  base::Time last_visit;
++  int visit_count = 1;
++};
++struct Login {
++  GURL url;                 // the page the login is for
++  std::string signon_realm; // usually the origin with a trailing slash
++  std::u16string username;
++  std::u16string password;  // plaintext in memory only, never logged
++  base::Time created;
++};
++struct Cookie {
++  std::string name, value, domain, path;  // domain as stored (leading dot for domain cookies)
++  base::Time creation, expiry, last_access;  // null expiry: session cookie
++  bool secure = false, http_only = false;
++  int same_site = -1;  // -1 unspecified, 0 none, 1 lax, 2 strict
++};
++struct Data {
++  std::vector<Bookmark> bookmarks;
++  std::vector<Visit> history;
++  std::vector<Login> logins;
++  std::vector<Cookie> cookies;
++  std::vector<std::string> extension_ids;  // Chrome Web Store ids installed in the source profile
++  std::string error;  // a reader fills this when it couldn't read something (shown to the person)
++};
++
++using ProgressCallback = base::RepeatingCallback<void(int state, const std::string& message)>;
++
++// Readers. Find* may block (call on a thread pool). Read* reads what `what` asks (kAgensImport*)
++// off the UI thread and replies on the UI thread.
++std::vector<Source> FindChromiumSources();       // import_chromium.cc: Chrome, Brave, Arc, Edge
++std::vector<Source> FindSafariFirefoxSources();  // import_safari_firefox.cc
++void ReadChromium(const Source& source, int what, base::OnceCallback<void(Data)> done);
++void ReadSafariFirefox(const Source& source, int what, base::OnceCallback<void(Data)> done);
++
++// Writer (import_writer.cc): creates (or reuses) the ato called `ato_name`, then adds the
++// bookmarks (under a folder "Importados do <browser>"), history, logins and cookies to it.
++// Calls `progress` with 0 while working and 1/-1 at the end, on the UI thread.
++void WriteIntoAto(const std::string& ato_name, const std::string& browser, Data data, ProgressCallback progress);
++
++// The ato a source goes into: "<browser> — <profile>" (just "<browser>" for single-profile ones).
++std::string AtoNameFor(const Source& source);
++
++}  // namespace agens::import
++
++#endif  // CHROME_BROWSER_AGENS_EMBED_IMPORT_INTERNAL_H_
+diff --git a/chrome/browser/agens/embed/import_safari_firefox.cc b/chrome/browser/agens/embed/import_safari_firefox.cc
+new file mode 100644
+index 0000000000..18ec90466e
+--- /dev/null
++++ b/chrome/browser/agens/embed/import_safari_firefox.cc
+@@ -0,0 +1,654 @@
++// Copyright 2026 SugiyamaLabs.
++// Readers for Safari (bookmarks, history, cookies) and Firefox (bookmarks, history, cookies and
++// passwords decrypted with NSS's key4.db scheme, done here with BoringSSL). See import_internal.h.
++// All reading is synchronous inside ReadSource(); Read* just moves it to a thread pool.
++
++#include <CoreFoundation/CoreFoundation.h>
++
++#include <algorithm>
++#include <cstring>
++#include <map>
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "base/apple/scoped_cftyperef.h"
++#include "base/base64.h"
++#include "base/command_line.h"
++#include "base/files/file.h"
++#include "base/files/file_util.h"
++#include "base/files/scoped_temp_dir.h"
++#include "base/json/json_reader.h"
++#include "base/path_service.h"
++#include "base/strings/cstring_view.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_split.h"
++#include "base/strings/string_util.h"
++#include "base/strings/sys_string_conversions.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/task/thread_pool.h"
++#include "base/values.h"
++#include "chrome/browser/agens/embed/agens_import.h"
++#include "chrome/browser/agens/embed/import_internal.h"
++#include "sql/database.h"
++#include "sql/statement.h"
++#include "third_party/boringssl/src/include/openssl/bytestring.h"
++#include "third_party/boringssl/src/include/openssl/cipher.h"
++#include "third_party/boringssl/src/include/openssl/digest.h"
++#include "third_party/boringssl/src/include/openssl/evp.h"
++#include "third_party/boringssl/src/include/openssl/hmac.h"
++#include "third_party/boringssl/src/include/openssl/mem.h"
++#include "third_party/boringssl/src/include/openssl/sha.h"
++
++namespace agens::import {
++namespace {
++
++constexpr char kDenied[] =
++    "O macOS precisa de Acesso Total ao Disco para o AgensBrowser ler o Safari "
++    "(Ajustes do Sistema › Privacidade e Segurança).";
++constexpr char kSafariPasswords[] =
++    " Senhas do Safari: o macOS não deixa outro app ler; exporte um CSV no app Senhas e importe o arquivo.";
++constexpr char kPrimaryPassword[] =
++    "O Firefox tem senha principal; tire-a no Firefox para importar as senhas.";
++constexpr char kTestHomeSwitch[] = "agens-import-test-home";  // test-only: replaces the home directory
++constexpr char kPasswordCheck[] = "password-check";
++constexpr int64_t kMacEpochToUnix = 978307200;  // 2001-01-01 in Unix seconds
++
++inline constexpr sql::Database::Tag kDbTag{"FirefoxImporter"};  // an existing tag: new ones need a histograms.xml entry;
++
++base::FilePath Home() {
++  auto* cl = base::CommandLine::ForCurrentProcess();
++  if (cl->HasSwitch(kTestHomeSwitch)) return cl->GetSwitchValuePath(kTestHomeSwitch);
++  base::FilePath home;
++  base::PathService::Get(base::DIR_HOME, &home);
++  return home;
++}
++
++bool IsDenied(const base::FilePath& path) {
++  base::File f(path, base::File::FLAG_OPEN | base::File::FLAG_READ);
++  return !f.IsValid() && f.error_details() == base::File::FILE_ERROR_ACCESS_DENIED;
++}
++bool Readable(const base::FilePath& path) {
++  base::File f(path, base::File::FLAG_OPEN | base::File::FLAG_READ);
++  return f.IsValid();
++}
++
++// Copies a SQLite file (and its -wal/-shm) so the browser's own lock does not matter.
++base::FilePath CopyDb(const base::FilePath& src, base::ScopedTempDir& dir) {
++  if (!dir.IsValid() && !dir.CreateUniqueTempDir()) return {};
++  const base::FilePath dst = dir.GetPath().Append(src.BaseName());
++  if (!base::CopyFile(src, dst)) return {};
++  for (const char* suffix : {"-wal", "-shm"}) {
++    const base::FilePath side(src.value() + suffix);
++    if (base::PathExists(side)) base::CopyFile(side, base::FilePath(dst.value() + suffix));
++  }
++  return dst;
++}
++
++// Runs `query` on a copy of `file`; `row` gets each row. Returns false if it couldn't open/prepare.
++template <typename Fn>
++bool QueryCopy(const base::FilePath& file, base::cstring_view query, Fn row) {
++  base::ScopedTempDir dir;
++  const base::FilePath copy = CopyDb(file, dir);
++  if (copy.empty()) return false;
++  sql::Database db(kDbTag);
++  if (!db.Open(copy)) return false;
++  sql::Statement s(db.GetUniqueStatement(query));
++  if (!s.is_valid()) return false;
++  while (s.Step()) row(s);
++  return true;
++}
++
++base::Time FromMicrosUnix(int64_t us) {
++  return us > 0 ? base::Time::UnixEpoch() + base::Microseconds(us) : base::Time();
++}
++
++// ------------------------------------------------------------------ Safari
++
++std::string CfString(CFDictionaryRef d, CFStringRef key) {
++  CFTypeRef v = d ? CFDictionaryGetValue(d, key) : nullptr;
++  return v && CFGetTypeID(v) == CFStringGetTypeID() ? base::SysCFStringRefToUTF8(static_cast<CFStringRef>(v))
++                                                    : std::string();
++}
++
++void WalkSafari(CFDictionaryRef node, std::vector<std::u16string>& folders, bool in_bar, int depth,
++                std::vector<Bookmark>& out) {
++  if (depth > 32) return;
++  const std::string type = CfString(node, CFSTR("WebBookmarkType"));
++  if (type == "WebBookmarkTypeLeaf") {
++    GURL url(CfString(node, CFSTR("URLString")));
++    if (!url.is_valid()) return;
++    CFTypeRef uri = CFDictionaryGetValue(node, CFSTR("URIDictionary"));
++    Bookmark b;
++    b.url = url;
++    b.title = base::UTF8ToUTF16(uri && CFGetTypeID(uri) == CFDictionaryGetTypeID()
++                                    ? CfString(static_cast<CFDictionaryRef>(uri), CFSTR("title"))
++                                    : std::string());
++    b.folders = folders;
++    b.in_bar = in_bar;
++    out.push_back(std::move(b));
++  } else if (type == "WebBookmarkTypeList") {
++    CFTypeRef kids = CFDictionaryGetValue(node, CFSTR("Children"));
++    if (!kids || CFGetTypeID(kids) != CFArrayGetTypeID()) return;
++    for (CFIndex i = 0; i < CFArrayGetCount(static_cast<CFArrayRef>(kids)); ++i) {
++      CFTypeRef kid = CFArrayGetValueAtIndex(static_cast<CFArrayRef>(kids), i);
++      if (kid && CFGetTypeID(kid) == CFDictionaryGetTypeID()) {
++        auto d = static_cast<CFDictionaryRef>(kid);
++        folders.push_back(base::UTF8ToUTF16(CfString(d, CFSTR("Title"))));
++        WalkSafari(d, folders, in_bar, depth + 1, out);
++        folders.pop_back();
++      }
++    }
++  }
++}
++
++void ReadSafariBookmarks(const base::FilePath& file, Data& data) {
++  std::string bytes;
++  if (!base::ReadFileToString(file, &bytes)) return;
++  base::apple::ScopedCFTypeRef<CFDataRef> cf(
++      CFDataCreate(nullptr, reinterpret_cast<const UInt8*>(bytes.data()), bytes.size()));
++  base::apple::ScopedCFTypeRef<CFPropertyListRef> plist(
++      CFPropertyListCreateWithData(nullptr, cf.get(), kCFPropertyListImmutable, nullptr, nullptr));
++  if (!plist || CFGetTypeID(plist.get()) != CFDictionaryGetTypeID()) return;
++  CFTypeRef kids = CFDictionaryGetValue(static_cast<CFDictionaryRef>(plist.get()), CFSTR("Children"));
++  if (!kids || CFGetTypeID(kids) != CFArrayGetTypeID()) return;
++  for (CFIndex i = 0; i < CFArrayGetCount(static_cast<CFArrayRef>(kids)); ++i) {
++    CFTypeRef kid = CFArrayGetValueAtIndex(static_cast<CFArrayRef>(kids), i);
++    if (!kid || CFGetTypeID(kid) != CFDictionaryGetTypeID()) continue;
++    auto root = static_cast<CFDictionaryRef>(kid);
++    const std::string title = CfString(root, CFSTR("Title"));
++    if (title == "com.apple.ReadingList") continue;
++    std::vector<std::u16string> folders;  // the root itself (bar/menu) is not a folder
++    WalkSafari(root, folders, title == "BookmarksBar", 0, data.bookmarks);
++  }
++}
++
++void ReadSafariHistory(const base::FilePath& file, Data& data) {
++  QueryCopy(file,
++            "SELECT i.url, MAX(v.title), MAX(v.visit_time), i.visit_count FROM history_items i "
++            "JOIN history_visits v ON v.history_item = i.id GROUP BY i.id",
++            [&](sql::Statement& s) {
++              GURL url(s.ColumnString(0));
++              if (!url.is_valid()) return;
++              Visit v;
++              v.url = url;
++              v.title = s.ColumnString16(1);
++              v.last_visit = base::Time::FromSecondsSinceUnixEpoch(s.ColumnDouble(2) + kMacEpochToUnix);
++              v.visit_count = std::max(1, static_cast<int>(s.ColumnInt64(3)));
++              data.history.push_back(std::move(v));
++            });
++}
++
++uint32_t Le32(const uint8_t* p) { return p[0] | p[1] << 8 | p[2] << 16 | uint32_t{p[3]} << 24; }
++uint32_t Be32(const uint8_t* p) { return p[3] | p[2] << 8 | p[1] << 16 | uint32_t{p[0]} << 24; }
++double LeDouble(const uint8_t* p) {
++  uint64_t u = uint64_t{Le32(p)} | uint64_t{Le32(p + 4)} << 32;
++  double d;
++  memcpy(&d, &u, 8);
++  return d;
++}
++// A NUL-terminated string at `off` inside [rec, rec+size).
++std::string CString(const uint8_t* rec, uint32_t size, uint32_t off) {
++  if (off >= size) return {};
++  const char* s = reinterpret_cast<const char*>(rec + off);
++  return std::string(s, strnlen(s, size - off));
++}
++
++// Cookies.binarycookies: "cook", BE page count, BE page sizes, then LE pages of LE cookie records.
++void ParseBinaryCookies(const std::string& file, Data& data) {
++  const auto* b = reinterpret_cast<const uint8_t*>(file.data());
++  const size_t n = file.size();
++  if (n < 8 || memcmp(b, "cook", 4) != 0) return;
++  const uint32_t pages = Be32(b + 4);
++  if (pages > 100000 || 8 + size_t{pages} * 4 > n) return;
++  size_t page_off = 8 + size_t{pages} * 4;
++  for (uint32_t p = 0; p < pages; ++p) {
++    const uint32_t psize = Be32(b + 8 + p * 4);
++    if (page_off + psize > n || psize < 8) return;
++    const uint8_t* page = b + page_off;
++    page_off += psize;
++    const uint32_t count = Le32(page + 4);
++    if (8 + size_t{count} * 4 > psize) continue;
++    for (uint32_t c = 0; c < count; ++c) {
++      const uint32_t off = Le32(page + 8 + c * 4);
++      if (off + 56 > psize) continue;
++      const uint8_t* rec = page + off;
++      const uint32_t rsize = std::min<uint32_t>(Le32(rec), psize - off);
++      if (rsize < 56) continue;
++      Cookie ck;
++      const uint32_t flags = Le32(rec + 8);
++      ck.secure = flags & 1;
++      ck.http_only = flags & 4;
++      ck.domain = CString(rec, rsize, Le32(rec + 16));
++      ck.name = CString(rec, rsize, Le32(rec + 20));
++      ck.path = CString(rec, rsize, Le32(rec + 24));
++      ck.value = CString(rec, rsize, Le32(rec + 28));
++      const double expiry = LeDouble(rec + 40), creation = LeDouble(rec + 48);
++      if (ck.name.empty() || ck.domain.empty()) continue;
++      ck.expiry = base::Time::FromSecondsSinceUnixEpoch(expiry + kMacEpochToUnix);
++      ck.creation = base::Time::FromSecondsSinceUnixEpoch(creation + kMacEpochToUnix);
++      ck.last_access = ck.creation;
++      if (ck.expiry <= base::Time::Now()) continue;
++      data.cookies.push_back(std::move(ck));
++    }
++  }
++}
++
++base::FilePath SafariCookiesPath(const base::FilePath& home) {
++  for (const char* rel : {"Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies",
++                          "Library/Cookies/Cookies.binarycookies"}) {
++    base::FilePath p = home.AppendASCII(rel);
++    if (base::PathExists(p) || IsDenied(p)) return p;
++  }
++  return {};
++}
++
++Data ReadSafari(int what) {
++  Data data;
++  const base::FilePath home = Home();
++  const base::FilePath dir = home.AppendASCII("Library/Safari");
++  if (what & kAgensImportBookmarks) {
++    ReadSafariBookmarks(dir.AppendASCII("Bookmarks.plist"), data);
++  }
++  if (what & kAgensImportHistory) {
++    ReadSafariHistory(dir.AppendASCII("History.db"), data);
++  }
++  if (what & kAgensImportCookies) {
++    const base::FilePath cookies = SafariCookiesPath(home);
++    std::string bytes;
++    if (!cookies.empty() && base::ReadFileToString(cookies, &bytes)) ParseBinaryCookies(bytes, data);
++  }
++  if (data.bookmarks.empty() && data.history.empty() && data.cookies.empty() &&
++      (IsDenied(dir.AppendASCII("Bookmarks.plist")) || IsDenied(dir.AppendASCII("History.db")))) {
++    data.error = kDenied;
++  }
++  return data;
++}
++
++std::vector<Source> FindSafari() {
++  const base::FilePath home = Home();
++  const base::FilePath dir = home.AppendASCII("Library/Safari");
++  if (!base::PathExists(dir)) return {};
++  const base::FilePath bm = dir.AppendASCII("Bookmarks.plist"), hist = dir.AppendASCII("History.db");
++  const base::FilePath cookies = SafariCookiesPath(home);
++  Source s;
++  s.id = "safari:";
++  s.browser = "Safari";
++  s.path = dir;
++  if (Readable(bm)) s.available |= kAgensImportBookmarks;
++  if (Readable(hist)) s.available |= kAgensImportHistory;
++  if (!cookies.empty() && Readable(cookies)) s.available |= kAgensImportCookies;
++  const bool denied = IsDenied(bm) || IsDenied(hist) || (!cookies.empty() && IsDenied(cookies));
++  if (!s.available && !denied) return {};
++  s.note = denied ? std::string(kDenied) : std::string();
++  s.note += kSafariPasswords;
++  return {s};
++}
++
++// ------------------------------------------------------------------ Firefox (NSS key4.db)
++
++using Bytes = std::vector<uint8_t>;
++
++Bytes Sha1(const Bytes& a, const Bytes& b) {
++  Bytes out(SHA_DIGEST_LENGTH);
++  SHA_CTX c;
++  SHA1_Init(&c);
++  SHA1_Update(&c, a.data(), a.size());
++  SHA1_Update(&c, b.data(), b.size());
++  SHA1_Final(out.data(), &c);
++  return out;
++}
++Bytes HmacSha1(const Bytes& key, const Bytes& a, const Bytes& b) {
++  Bytes msg = a;
++  msg.insert(msg.end(), b.begin(), b.end());
++  Bytes out(SHA_DIGEST_LENGTH);
++  unsigned len = 0;
++  HMAC(EVP_sha1(), key.data(), key.size(), msg.data(), msg.size(), out.data(), &len);
++  return out;
++}
++
++// CBC decrypt without padding checks, then strips PKCS#7 if it looks valid.
++bool CbcDecrypt(const EVP_CIPHER* cipher, const Bytes& key, const Bytes& iv, const Bytes& in, Bytes* out) {
++  if (in.empty() || in.size() % EVP_CIPHER_block_size(cipher) || key.size() != EVP_CIPHER_key_length(cipher) ||
++      iv.size() != EVP_CIPHER_iv_length(cipher)) {
++    return false;
++  }
++  bssl::ScopedEVP_CIPHER_CTX ctx;
++  out->assign(in.size() + 16, 0);
++  int n1 = 0, n2 = 0;
++  if (!EVP_DecryptInit_ex(ctx.get(), cipher, nullptr, key.data(), iv.data()) ||
++      !EVP_CIPHER_CTX_set_padding(ctx.get(), 0) ||
++      !EVP_DecryptUpdate(ctx.get(), out->data(), &n1, in.data(), in.size()) ||
++      !EVP_DecryptFinal_ex(ctx.get(), out->data() + n1, &n2)) {
++    return false;
++  }
++  out->resize(n1 + n2);
++  const uint8_t pad = out->back();
++  if (pad >= 1 && pad <= EVP_CIPHER_block_size(cipher) && pad <= out->size() &&
++      std::all_of(out->end() - pad, out->end(), [&](uint8_t b) { return b == pad; })) {
++    out->resize(out->size() - pad);
++  }
++  return true;
++}
++
++bool OidIs(CBS oid, const char* text) {
++  bssl::UniquePtr<char> t(CBS_asn1_oid_to_text(&oid));
++  return t && std::string_view(t.get()) == text;
++}
++
++// Decrypts the DER blob NSS stores in key4.db (metaData item2, nssPrivate a11): PBES2 with
++// PBKDF2-HMAC-SHA256 + AES-256-CBC (current), or the legacy PKCS#12 3DES one.
++bool DecryptNssBlob(const Bytes& der, const Bytes& global_salt, const std::string& password, Bytes* out) {
++  CBS in, seq, algo, oid, params, ct;
++  CBS_init(&in, der.data(), der.size());
++  if (!CBS_get_asn1(&in, &seq, CBS_ASN1_SEQUENCE) || !CBS_get_asn1(&seq, &algo, CBS_ASN1_SEQUENCE) ||
++      !CBS_get_asn1(&seq, &ct, CBS_ASN1_OCTETSTRING) || !CBS_get_asn1(&algo, &oid, CBS_ASN1_OBJECT) ||
++      !CBS_get_asn1(&algo, &params, CBS_ASN1_SEQUENCE)) {
++    return false;
++  }
++  const Bytes cipher_text(CBS_data(&ct), CBS_data(&ct) + CBS_len(&ct));
++  const Bytes pw(password.begin(), password.end());
++  const Bytes hp = Sha1(global_salt, pw);
++  if (OidIs(oid, "1.2.840.113549.1.5.13")) {  // PBES2
++    CBS kdf, kdf_oid, kdf_params, salt, enc, enc_oid, iv;
++    uint64_t iterations = 0;
++    if (!CBS_get_asn1(&params, &kdf, CBS_ASN1_SEQUENCE) || !CBS_get_asn1(&params, &enc, CBS_ASN1_SEQUENCE) ||
++        !CBS_get_asn1(&kdf, &kdf_oid, CBS_ASN1_OBJECT) || !CBS_get_asn1(&kdf, &kdf_params, CBS_ASN1_SEQUENCE) ||
++        !CBS_get_asn1(&kdf_params, &salt, CBS_ASN1_OCTETSTRING) ||
++        !CBS_get_asn1_uint64(&kdf_params, &iterations) || iterations == 0 || iterations > 10'000'000 ||
++        !CBS_get_asn1(&enc, &enc_oid, CBS_ASN1_OBJECT) || !CBS_get_asn1(&enc, &iv, CBS_ASN1_OCTETSTRING)) {
++      return false;
++    }
++    // shortcut: the PRF is assumed to be HMAC-SHA256 (what Firefox writes), not read from the DER.
++    Bytes key(32);
++    if (!PKCS5_PBKDF2_HMAC(reinterpret_cast<const char*>(hp.data()), hp.size(), CBS_data(&salt), CBS_len(&salt),
++                           static_cast<unsigned>(iterations), EVP_sha256(), key.size(), key.data())) {
++      return false;
++    }
++    Bytes ivb(CBS_data(&iv), CBS_data(&iv) + CBS_len(&iv));
++    if (ivb.size() == 14) ivb.insert(ivb.begin(), {0x04, 0x0e});  // NSS stores the IV as a 14-byte DER tail
++    return CbcDecrypt(EVP_aes_256_cbc(), key, ivb, cipher_text, out);
++  }
++  if (OidIs(oid, "1.2.840.113549.1.12.5.1.3")) {  // pbeWithSHA1And3-KeyTripleDES-CBC
++    CBS salt;
++    if (!CBS_get_asn1(&params, &salt, CBS_ASN1_OCTETSTRING)) return false;
++    const Bytes es(CBS_data(&salt), CBS_data(&salt) + CBS_len(&salt));
++    Bytes pes = es;
++    pes.resize(20, 0);
++    const Bytes chp = Sha1(hp, es);
++    const Bytes k1 = HmacSha1(chp, pes, es);
++    const Bytes tk = HmacSha1(chp, pes, {});
++    const Bytes k2 = HmacSha1(chp, tk, es);
++    Bytes k = k1;
++    k.insert(k.end(), k2.begin(), k2.end());
++    return CbcDecrypt(EVP_des_ede3_cbc(), Bytes(k.begin(), k.begin() + 24), Bytes(k.end() - 8, k.end()),
++                      cipher_text, out);
++  }
++  return false;
++}
++
++struct NssKey {
++  Bytes id, key;
++};
++enum class KeyStatus { kOk, kNone, kPrimaryPassword };
++
++KeyStatus LoadNssKeys(const base::FilePath& profile, std::vector<NssKey>* keys) {
++  const base::FilePath file = profile.AppendASCII("key4.db");
++  if (!base::PathExists(file)) return KeyStatus::kNone;
++  Bytes global_salt, check;
++  bool have_meta = false;
++  QueryCopy(file, "SELECT item1, item2 FROM metaData WHERE id = 'password'", [&](sql::Statement& s) {
++    global_salt = s.ColumnBlobAsVector(0);
++    check = s.ColumnBlobAsVector(1);
++    have_meta = true;
++  });
++  if (!have_meta) return KeyStatus::kNone;
++  Bytes plain;
++  if (!DecryptNssBlob(check, global_salt, "", &plain) ||
++      std::string(plain.begin(), plain.end()).rfind(kPasswordCheck, 0) != 0) {
++    return KeyStatus::kPrimaryPassword;
++  }
++  QueryCopy(file, "SELECT a11, a102 FROM nssPrivate", [&](sql::Statement& s) {
++    Bytes key;
++    if (DecryptNssBlob(s.ColumnBlobAsVector(0), global_salt, "", &key)) keys->push_back({s.ColumnBlobAsVector(1), key});
++  });
++  return keys->empty() ? KeyStatus::kNone : KeyStatus::kOk;
++}
++
++// logins.json fields: base64 of DER { keyId, { cipher OID, IV }, ciphertext }.
++std::string DecryptLoginField(const std::string& b64, const std::vector<NssKey>& keys) {
++  std::string raw;
++  if (!base::Base64Decode(b64, &raw)) return {};
++  CBS in, seq, id, algo, oid, iv, ct;
++  CBS_init(&in, reinterpret_cast<const uint8_t*>(raw.data()), raw.size());
++  if (!CBS_get_asn1(&in, &seq, CBS_ASN1_SEQUENCE) || !CBS_get_asn1(&seq, &id, CBS_ASN1_OCTETSTRING) ||
++      !CBS_get_asn1(&seq, &algo, CBS_ASN1_SEQUENCE) || !CBS_get_asn1(&seq, &ct, CBS_ASN1_OCTETSTRING) ||
++      !CBS_get_asn1(&algo, &oid, CBS_ASN1_OBJECT) || !CBS_get_asn1(&algo, &iv, CBS_ASN1_OCTETSTRING)) {
++    return {};
++  }
++  const NssKey* k = nullptr;
++  for (const auto& c : keys) {
++    if (c.id.size() == CBS_len(&id) && std::equal(c.id.begin(), c.id.end(), CBS_data(&id))) k = &c;
++  }
++  if (!k) k = &keys[0];
++  const bool aes = OidIs(oid, "2.16.840.1.101.3.4.1.42");
++  const size_t klen = aes ? 32 : 24;
++  if (k->key.size() < klen) return {};
++  Bytes out;
++  if (!CbcDecrypt(aes ? EVP_aes_256_cbc() : EVP_des_ede3_cbc(), Bytes(k->key.begin(), k->key.begin() + klen),
++                  Bytes(CBS_data(&iv), CBS_data(&iv) + CBS_len(&iv)), Bytes(CBS_data(&ct), CBS_data(&ct) + CBS_len(&ct)),
++                  &out)) {
++    return {};
++  }
++  return std::string(out.begin(), out.end());
++}
++
++void ReadFirefoxLogins(const base::FilePath& profile, Data& data) {
++  std::string json;
++  if (!base::ReadFileToString(profile.AppendASCII("logins.json"), &json)) return;
++  std::vector<NssKey> keys;
++  const KeyStatus st = LoadNssKeys(profile, &keys);
++  if (st == KeyStatus::kPrimaryPassword) {
++    data.error = kPrimaryPassword;
++    return;
++  }
++  if (st != KeyStatus::kOk) return;
++  std::optional<base::Value> root = base::JSONReader::Read(json, base::JSON_PARSE_RFC);
++  const base::ListValue* logins = root && root->is_dict() ? root->GetDict().FindList("logins") : nullptr;
++  if (!logins) return;
++  for (const auto& item : *logins) {
++    if (!item.is_dict()) continue;
++    const auto& d = item.GetDict();
++    const std::string* host = d.FindString("hostname");
++    const std::string* eu = d.FindString("encryptedUsername");
++    const std::string* ep = d.FindString("encryptedPassword");
++    if (!host || !eu || !ep) continue;
++    GURL url(*host);
++    if (!url.is_valid() || !url.SchemeIsHTTPOrHTTPS()) continue;
++    Login l;
++    l.url = url;
++    l.signon_realm = url.DeprecatedGetOriginAsURL().spec();
++    l.username = base::UTF8ToUTF16(DecryptLoginField(*eu, keys));
++    l.password = base::UTF8ToUTF16(DecryptLoginField(*ep, keys));
++    if (l.password.empty()) continue;
++    l.created = FromMicrosUnix(d.FindDouble("timeCreated").value_or(0) * 1000);
++    data.logins.push_back(std::move(l));
++  }
++}
++
++struct FfRow {
++  int64_t id;
++  int type;
++  std::u16string title;
++  std::string url;
++  base::Time added;
++};
++void WalkFirefoxFolder(int64_t id, bool in_bar, std::vector<std::u16string>& folders, int depth,
++                       const std::multimap<int64_t, FfRow>& kids, std::vector<Bookmark>& out) {
++  if (depth > 32) return;
++  auto range = kids.equal_range(id);
++  for (auto it = range.first; it != range.second; ++it) {
++    const FfRow& r = it->second;
++    if (r.type == 2) {
++      folders.push_back(r.title);
++      WalkFirefoxFolder(r.id, in_bar, folders, depth + 1, kids, out);
++      folders.pop_back();
++    } else if (r.type == 1) {
++      GURL url(r.url);
++      if (!url.is_valid() || url.SchemeIs("place")) continue;
++      Bookmark b;
++      b.url = url;
++      b.title = r.title;
++      b.folders = folders;
++      b.in_bar = in_bar;
++      b.added = r.added;
++      out.push_back(std::move(b));
++    }
++  }
++}
++
++void ReadFirefoxBookmarks(const base::FilePath& file, Data& data) {
++  std::multimap<int64_t, FfRow> kids;  // parent -> children, in position order
++  std::map<std::string, int64_t> roots;
++  QueryCopy(file,
++            "SELECT b.id, b.type, b.parent, b.title, b.dateAdded, b.guid, p.url FROM moz_bookmarks b "
++            "LEFT JOIN moz_places p ON b.fk = p.id ORDER BY b.position",
++            [&](sql::Statement& s) {
++              FfRow r{s.ColumnInt64(0), static_cast<int>(s.ColumnInt64(1)), s.ColumnString16(3),
++                      s.ColumnString(6), FromMicrosUnix(s.ColumnInt64(4))};
++              roots[s.ColumnString(5)] = r.id;
++              kids.emplace(s.ColumnInt64(2), std::move(r));
++            });
++  std::vector<std::u16string> folders;
++  for (const auto& [guid, bar] : {std::pair<const char*, bool>{"toolbar_____", true},
++                                  {"menu________", false},
++                                  {"unfiled_____", false},
++                                  {"mobile______", false}}) {
++    auto it = roots.find(guid);
++    if (it != roots.end()) WalkFirefoxFolder(it->second, bar, folders, 0, kids, data.bookmarks);
++  }
++}
++
++void ReadFirefoxHistory(const base::FilePath& file, Data& data) {
++  QueryCopy(file,
++            "SELECT url, title, visit_count, last_visit_date FROM moz_places "
++            "WHERE visit_count > 0 AND last_visit_date IS NOT NULL AND hidden = 0",
++            [&](sql::Statement& s) {
++              GURL url(s.ColumnString(0));
++              if (!url.is_valid() || url.SchemeIs("place") || url.SchemeIs("about")) return;
++              Visit v;
++              v.url = url;
++              v.title = s.ColumnString16(1);
++              v.visit_count = std::max(1, static_cast<int>(s.ColumnInt64(2)));
++              v.last_visit = FromMicrosUnix(s.ColumnInt64(3));
++              data.history.push_back(std::move(v));
++            });
++}
++
++void ReadFirefoxCookies(const base::FilePath& file, Data& data) {
++  QueryCopy(file,
++            "SELECT name, value, host, path, expiry, lastAccessed, creationTime, isSecure, isHttpOnly, "
++            "sameSite FROM moz_cookies",
++            [&](sql::Statement& s) {
++              Cookie c;
++              c.name = s.ColumnString(0);
++              c.value = s.ColumnString(1);
++              c.domain = s.ColumnString(2);
++              c.path = s.ColumnString(3);
++              int64_t expiry = s.ColumnInt64(4);
++              if (expiry > 100'000'000'000) expiry /= 1000;  // newer profiles may store milliseconds
++              c.expiry = base::Time::FromSecondsSinceUnixEpoch(expiry);
++              c.last_access = FromMicrosUnix(s.ColumnInt64(5));
++              c.creation = FromMicrosUnix(s.ColumnInt64(6));
++              c.secure = s.ColumnInt64(7) != 0;
++              c.http_only = s.ColumnInt64(8) != 0;
++              c.same_site = std::clamp(static_cast<int>(s.ColumnInt64(9)), -1, 2);
++              if (c.name.empty() || c.domain.empty() || c.expiry <= base::Time::Now()) return;
++              data.cookies.push_back(std::move(c));
++            });
++}
++
++Data ReadFirefox(const Source& source, int what) {
++  Data data;
++  const base::FilePath& dir = source.path;
++  if (what & kAgensImportBookmarks) ReadFirefoxBookmarks(dir.AppendASCII("places.sqlite"), data);
++  if (what & kAgensImportHistory) ReadFirefoxHistory(dir.AppendASCII("places.sqlite"), data);
++  if (what & kAgensImportCookies) ReadFirefoxCookies(dir.AppendASCII("cookies.sqlite"), data);
++  if (what & kAgensImportPasswords) ReadFirefoxLogins(dir, data);
++  return data;
++}
++
++struct IniProfile {
++  std::string name, path;
++  bool relative = true;
++};
++
++std::vector<IniProfile> ParseProfilesIni(const std::string& text) {
++  std::vector<IniProfile> out;
++  bool in_profile = false;
++  for (std::string_view line : base::SplitStringPiece(text, "\n", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY)) {
++    if (line.front() == '[') {
++      in_profile = line.starts_with("[Profile");
++      if (in_profile) out.emplace_back();
++      continue;
++    }
++    const size_t eq = line.find('=');
++    if (!in_profile || eq == std::string_view::npos) continue;
++    const std::string_view k = line.substr(0, eq), v = line.substr(eq + 1);
++    if (k == "Name") out.back().name = std::string(v);
++    if (k == "Path") out.back().path = std::string(v);
++    if (k == "IsRelative") out.back().relative = v != "0";
++  }
++  return out;
++}
++
++std::vector<Source> FindFirefox() {
++  const base::FilePath root = Home().AppendASCII("Library/Application Support/Firefox");
++  std::string ini;
++  if (!base::ReadFileToString(root.AppendASCII("profiles.ini"), &ini)) return {};
++  std::vector<Source> out;
++  for (const auto& p : ParseProfilesIni(ini)) {
++    if (p.path.empty()) continue;
++    const base::FilePath dir = p.relative ? root.AppendASCII(p.path) : base::FilePath(p.path);
++    if (!base::DirectoryExists(dir)) continue;
++    Source s;
++    s.id = "firefox:" + dir.value();
++    s.browser = "Firefox";
++    s.profile = p.name.empty() ? dir.BaseName().value() : p.name;
++    s.path = dir;
++    if (base::PathExists(dir.AppendASCII("places.sqlite"))) s.available |= kAgensImportBookmarks | kAgensImportHistory;
++    if (base::PathExists(dir.AppendASCII("cookies.sqlite"))) s.available |= kAgensImportCookies;
++    if (base::PathExists(dir.AppendASCII("logins.json"))) {
++      std::vector<NssKey> keys;
++      const KeyStatus st = LoadNssKeys(dir, &keys);
++      if (st == KeyStatus::kOk) s.available |= kAgensImportPasswords;
++      if (st == KeyStatus::kPrimaryPassword) s.note = kPrimaryPassword;
++    }
++    if (s.available) out.push_back(std::move(s));
++  }
++  return out;
++}
++
++Data ReadSource(const Source& source, int what) {
++  if (source.id.starts_with("safari:")) return ReadSafari(what);
++  if (source.id.starts_with("firefox:")) return ReadFirefox(source, what);
++  Data d;
++  d.error = "Origem desconhecida.";
++  return d;
++}
++
++}  // namespace
++
++std::vector<Source> FindSafariFirefoxSources() {
++  std::vector<Source> all = FindSafari();
++  for (auto& s : FindFirefox()) all.push_back(std::move(s));
++  return all;
++}
++
++void ReadSafariFirefox(const Source& source, int what, base::OnceCallback<void(Data)> done) {
++  base::ThreadPool::PostTaskAndReplyWithResult(
++      FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_VISIBLE}, base::BindOnce(&ReadSource, source, what),
++      std::move(done));
++}
++
++}  // namespace agens::import
+diff --git a/chrome/browser/agens/embed/import_writer.cc b/chrome/browser/agens/embed/import_writer.cc
+new file mode 100644
+index 0000000000..4eb24ab895
+--- /dev/null
++++ b/chrome/browser/agens/embed/import_writer.cc
+@@ -0,0 +1,307 @@
++// Copyright 2026 SugiyamaLabs.
++// Puts imported data into an ato (a Chromium profile named `ato_name`), creating it if needed.
++
++#include <memory>
++#include <set>
++
++#include "base/functional/bind.h"
++#include "base/memory/ref_counted.h"
++#include "base/no_destructor.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/stringprintf.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/task/single_thread_task_runner.h"
++#include "chrome/browser/agens/embed/import_internal.h"
++#include "chrome/browser/bookmarks/bookmark_model_factory.h"
++#include "chrome/browser/browser_process.h"
++#include "chrome/browser/extensions/extension_service.h"
++#include "chrome/browser/extensions/updater/extension_updater.h"
++#include "extensions/browser/disable_reason.h"
++#include "extensions/browser/extension_prefs.h"
++#include "extensions/browser/extension_registrar.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/browser/pending_extension_manager.h"
++#include "extensions/common/extension_urls.h"
++#include "chrome/browser/history/history_service_factory.h"
++#include "chrome/browser/importer/profile_writer.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/profiles/profile_attributes_entry.h"
++#include "chrome/browser/profiles/profile_attributes_storage.h"
++#include "chrome/browser/profiles/profile_manager.h"
++#include "components/bookmarks/browser/bookmark_model.h"
++#include "components/bookmarks/browser/bookmark_node.h"
++#include "components/history/core/browser/history_service.h"
++#include "components/password_manager/core/browser/password_form.h"
++#include "content/public/browser/browser_context.h"
++#include "content/public/browser/storage_partition.h"
++#include "base/memory/raw_ptr.h"
++#include "net/cookies/canonical_cookie.h"
++#include "net/cookies/cookie_access_result.h"
++#include "net/cookies/cookie_options.h"
++#include "services/network/public/mojom/cookie_manager.mojom.h"
++
++namespace agens::import {
++namespace {
++
++// 5400 -> "5.400" (pt-BR).
++std::string N(size_t n) {
++  std::string s = base::NumberToString(n), out;
++  for (size_t i = 0; i < s.size(); ++i) {
++    if (i && (s.size() - i) % 3 == 0) out += '.';
++    out += s[i];
++  }
++  return out;
++}
++
++std::set<base::FilePath>& Claimed() {
++  static base::NoDestructor<std::set<base::FilePath>> claimed;
++  return *claimed;
++}
++
++class Job : public base::RefCounted<Job> {
++ public:
++  Job(std::string browser, Data data, ProgressCallback progress)
++      : browser_(std::move(browser)), data_(std::move(data)), progress_(std::move(progress)) {}
++
++  void Start(const std::string& ato) {
++    ProfileManager* manager = g_browser_process->profile_manager();
++    ProfileAttributesStorage& storage = manager->GetProfileAttributesStorage();
++    const std::u16string name = base::UTF8ToUTF16(ato);
++    base::FilePath dir;
++    for (ProfileAttributesEntry* e : storage.GetAllProfilesAttributes()) {
++      if (e->GetLocalProfileName() == name) dir = e->GetPath();
++    }
++    bool created = false;
++    if (dir.empty()) {  // same free-folder scheme as AgensWindow::NewAto
++      created = true;
++      for (int i = 1;; ++i) {
++        dir = manager->user_data_dir().AppendASCII(base::StringPrintf("Profile %d", i));
++        if (!manager->GetProfileByPath(dir) && !storage.GetProfileAttributesWithPath(dir) &&
++            Claimed().insert(dir).second) {
++          break;  // Claimed(): two imports running at once must not pick the same folder
++        }
++      }
++    }
++    progress_.Run(0, created ? "Criando o ato " + ato + "…" : "Usando o ato " + ato + "…");
++    manager->CreateProfileAsync(
++        dir, base::BindOnce(&Job::OnProfile, base::WrapRefCounted(this), created, name));
++  }
++
++ private:
++  friend class base::RefCounted<Job>;
++  ~Job() = default;
++
++  void Fail(const std::string& why) { progress_.Run(-1, why); }
++
++  void OnProfile(bool created, const std::u16string& name, Profile* profile) {
++    if (!profile) return Fail("Não consegui criar o ato.");
++    if (created) {
++      if (ProfileAttributesEntry* e = g_browser_process->profile_manager()
++                                          ->GetProfileAttributesStorage()
++                                          .GetProfileAttributesWithPath(profile->GetPath())) {
++        e->SetLocalProfileName(name, /*is_default_name=*/false);
++      }
++    }
++    profile_ = profile;
++    WaitForBookmarks(0);
++  }
++
++  // shortcut: polls instead of observing the model, fine for a one-shot import.
++  void WaitForBookmarks(int tries) {
++    bookmarks::BookmarkModel* model = BookmarkModelFactory::GetForBrowserContext(profile_);
++    if (!model->loaded() && tries < 100) {
++      base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++          FROM_HERE, base::BindOnce(&Job::WaitForBookmarks, base::WrapRefCounted(this), tries + 1),
++          base::Milliseconds(200));
++      return;
++    }
++    if (!model->loaded()) return Fail("Os favoritos do ato não carregaram.");
++    WriteBookmarks(model);
++    WriteHistory();
++    WritePasswords();
++    WriteCookies();
++  }
++
++  static const bookmarks::BookmarkNode* Folder(bookmarks::BookmarkModel* model, const bookmarks::BookmarkNode* parent,
++                                               const std::u16string& title) {
++    for (const auto& child : parent->children()) {
++      if (child->is_folder() && child->GetTitle() == title) return child.get();
++    }
++    return model->AddFolder(parent, parent->children().size(), title);
++  }
++
++  void WriteBookmarks(bookmarks::BookmarkModel* model) {
++    if (data_.bookmarks.empty()) return;
++    const bookmarks::BookmarkNode* bar =
++        model->account_bookmark_bar_node() ? model->account_bookmark_bar_node() : model->bookmark_bar_node();
++    const bookmarks::BookmarkNode* other =
++        model->account_other_node() ? model->account_other_node() : model->other_node();
++    const std::u16string top = u"Importados do " + base::UTF8ToUTF16(browser_);
++    size_t added = 0;
++    model->BeginExtensiveChanges();
++    for (const Bookmark& b : data_.bookmarks) {
++      const bookmarks::BookmarkNode* parent = Folder(model, b.in_bar ? bar : other, top);
++      for (const std::u16string& f : b.folders) parent = Folder(model, parent, f);
++      bool dup = false;
++      for (const auto& child : parent->children()) dup |= child->is_url() && child->url() == b.url;
++      if (dup) continue;
++      model->AddURL(parent, parent->children().size(), b.title, b.url, nullptr, b.added);
++      ++added;
++    }
++    model->EndExtensiveChanges();
++    progress_.Run(0, "Favoritos: " + N(added));
++  }
++
++  void WriteHistory() {
++    if (data_.history.empty()) return;
++    history::URLRows rows;
++    size_t old = 0;
++    for (const Visit& v : data_.history) {
++      // HistoryBackend silently drops visits older than 90 days; don't count them as imported.
++      if (v.last_visit < base::Time::Now() - base::Days(89)) {
++        ++old;
++        continue;
++      }
++      history::URLRow row(v.url);
++      row.set_title(v.title);
++      row.set_visit_count(v.visit_count);
++      row.set_last_visit(v.last_visit);
++      rows.push_back(row);
++    }
++    if (rows.empty()) return progress_.Run(0, "Histórico: 0 (" + N(old) + " com mais de 90 dias, o Chromium descarta)");
++    auto* history = HistoryServiceFactory::GetForProfile(profile_, ServiceAccessType::EXPLICIT_ACCESS);
++    if (!history) return progress_.Run(0, "Histórico: indisponível neste ato");
++    history->AddPagesWithDetails(rows, history::SOURCE_FIREFOX_IMPORTED);
++    progress_.Run(0, "Histórico: " + N(rows.size()) +
++                            (old ? " (" + N(old) + " com mais de 90 dias ficaram de fora)" : ""));
++  }
++
++  void WritePasswords() {
++    if (data_.logins.empty()) return;
++    auto writer = base::MakeRefCounted<ProfileWriter>(profile_);
++    size_t n = 0;
++    for (const Login& l : data_.logins) {
++      if (l.password.empty() || !l.url.is_valid()) continue;
++      password_manager::PasswordForm form;
++      form.url = l.url;
++      form.signon_realm = l.signon_realm.empty() ? l.url.DeprecatedGetOriginAsURL().spec() : l.signon_realm;
++      form.username_value = l.username;
++      form.password_value = password_manager::PasswordString(std::u16string(l.password));
++      form.date_created = l.created;
++      form.scheme = password_manager::PasswordForm::Scheme::kHtml;
++      writer->AddPasswordForm(form);
++      ++n;
++    }
++    progress_.Run(0, "Senhas: " + N(n));
++  }
++
++  void WriteCookies() {
++    if (data_.cookies.empty()) return WriteExtensions();
++    cookie_manager_ = profile_->GetDefaultStoragePartition()->GetCookieManagerForBrowserProcess();
++    pending_ = data_.cookies.size();
++    for (const Cookie& c : data_.cookies) {
++      auto cookie = net::CanonicalCookie::FromStorage(
++          c.name, c.value, c.domain, c.path.empty() ? "/" : c.path, c.creation, c.expiry, c.last_access,
++          c.creation, c.secure, c.http_only,
++          c.same_site == 0   ? net::CookieSameSite::NO_RESTRICTION
++          : c.same_site == 1 ? net::CookieSameSite::LAX_MODE
++          : c.same_site == 2 ? net::CookieSameSite::STRICT_MODE
++                             : net::CookieSameSite::UNSPECIFIED,
++          net::COOKIE_PRIORITY_MEDIUM, std::nullopt, c.secure ? net::CookieSourceScheme::kSecure
++                                                              : net::CookieSourceScheme::kNonSecure,
++          url::PORT_UNSPECIFIED, net::CookieSourceType::kOther,
++          net::CanonicalCookieFromStorageCallSite::kCookieManager);
++      if (!cookie) {
++        ++failed_;
++        CookieDone(false);
++        continue;
++      }
++      std::string host = c.domain.starts_with('.') ? c.domain.substr(1) : c.domain;
++      GURL source(std::string(c.secure ? "https://" : "http://") + host + "/");
++      cookie_manager_->SetCanonicalCookie(
++          *cookie, source, net::CookieOptions::MakeAllInclusive(),
++          base::BindOnce(&Job::OnCookie, base::WrapRefCounted(this)));
++    }
++  }
++  void OnCookie(net::CookieAccessResult result) {
++    if (!result.status.IsInclude()) ++failed_;
++    CookieDone(result.status.IsInclude());
++  }
++  void CookieDone(bool ok) {
++    ok_ += ok;
++    if (--pending_) return;
++    std::string msg = "Cookies: " + N(ok_);
++    if (failed_) msg += " (" + N(failed_) + " falharam)";
++    progress_.Run(0, msg);
++    cookie_manager_->FlushCookieStore(base::BindOnce(&Job::WriteExtensions, base::WrapRefCounted(this)));
++  }
++
++  // Same path Chrome Sync uses for a new device: pending extension + update check; the updater
++  // downloads from the store and installs without a prompt.
++  static bool AllowInstall(const extensions::Extension*, content::BrowserContext*) { return true; }
++
++  void WriteExtensions() {
++    auto* registry = extensions::ExtensionRegistry::Get(profile_);
++    auto* pending = extensions::PendingExtensionManager::Get(profile_);
++    auto* updater = extensions::ExtensionUpdater::Get(profile_);
++    extensions::ExtensionUpdater::CheckParams params;
++    for (const std::string& id : data_.extension_ids) {
++      if (registry->GetInstalledExtension(id)) continue;
++      if (pending->AddFromSync(id, extension_urls::GetWebstoreUpdateUrl(), base::Version(), &Job::AllowInstall,
++                               /*remote_install=*/false)) {
++        wanted_.push_back(id);
++        params.ids.push_back(id);
++      }
++    }
++    if (wanted_.empty() || !updater) return Finish();
++    progress_.Run(0, "Extensões: " + N(wanted_.size()) + " (instalando da loja)");
++    params.install_immediately = true;
++    updater->CheckNow(std::move(params));
++    WaitForExtensions(0);
++  }
++
++  // shortcut: polls the registry, fine for a one-shot import; gives up after ~2 minutes.
++  void WaitForExtensions(int tries) {
++    auto* registry = extensions::ExtensionRegistry::Get(profile_);
++    size_t installed = 0, enabled = 0;
++    for (const std::string& id : wanted_) {
++      // The silent (Sync-style) install leaves new extensions disabled for "permissions increase"
++      // because nothing granted them; the person asked for this import, so grant and enable.
++      if (const extensions::Extension* e = registry->disabled_extensions().GetByID(id);
++          e && extensions::ExtensionPrefs::Get(profile_)->GetDisableReasons(id) ==
++                   extensions::DisableReasonSet{extensions::disable_reason::DISABLE_PERMISSIONS_INCREASE}) {
++        extensions::ExtensionRegistrar::Get(profile_)->GrantPermissionsAndEnableExtension(*e);
++      }
++      installed += !!registry->GetInstalledExtension(id);
++      enabled += !!registry->enabled_extensions().GetByID(id);
++    }
++    if (installed < wanted_.size() && tries < 120) {
++      base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++          FROM_HERE, base::BindOnce(&Job::WaitForExtensions, base::WrapRefCounted(this), tries + 1),
++          base::Seconds(1));
++      return;
++    }
++    std::string msg = "Extensões instaladas: " + N(installed) + " de " + N(wanted_.size());
++    if (installed > enabled) msg += " (" + N(installed - enabled) + " ficaram desativadas)";
++    progress_.Run(0, msg);
++    Finish();
++  }
++
++  void Finish() { progress_.Run(1, "Pronto."); }
++
++  std::string browser_;
++  Data data_;
++  ProgressCallback progress_;
++  raw_ptr<Profile> profile_ = nullptr;
++  raw_ptr<network::mojom::CookieManager> cookie_manager_ = nullptr;
++  std::vector<std::string> wanted_;
++  size_t pending_ = 0, ok_ = 0, failed_ = 0;
++};
++
++}  // namespace
++
++void WriteIntoAto(const std::string& ato_name, const std::string& browser, Data data, ProgressCallback progress) {
++  base::MakeRefCounted<Job>(browser, std::move(data), std::move(progress))->Start(ato_name);
++}
++
++}  // namespace agens::import
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
 new file mode 100644
 index 0000000000..204b5147c0
@@ -2640,10 +4366,10 @@ index 0000000000..8d10fddb69
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..34cab5a42a
+index 0000000000..e113937855
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,4891 @@
+@@ -0,0 +1,5137 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -2657,10 +4383,14 @@ index 0000000000..34cab5a42a
 +#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 +
 +#include <algorithm>
++#include <map>
++#include <tuple>
 +#include <string>
 +#include <vector>
 +
 +#include "chrome/browser/agens/embed/agens_embed.h"
++#include "chrome/browser/agens/embed/agens_import.h"
++#include "chrome/browser/agens/embed/agens_adblock.h"
 +#include "chrome/browser/agens/ui/logo_svg.h"
 +
 +// ---------------------------------------------------------------------------------------------
@@ -3697,6 +5427,15 @@ index 0000000000..34cab5a42a
 +  NSSearchField* _loginSearch;
 +  CGFloat _loginsY;
 +  NSString* _passwordStatus;
++  NSString* _adblockStatus;  // "Atualizando…", or the last update's result
++  // Importar
++  int _importWhat;
++  BOOL _importSearched;
++  std::vector<std::tuple<std::string, std::string, std::string, std::string, int, std::string>> _importSources;  // id, browser, profile, ato, available, note
++  std::map<std::string, std::string> _importStatus;  // per source id
++  std::map<std::string, std::vector<std::string>> _importCounts;  // "Favoritos: 4"… seen while working
++  std::map<std::string, std::string> _importAtoNames;  // the ato each source goes into, if renamed
++  NSMutableDictionary<NSNumber*, NSTextField*>* _importFields;  // row → its ato name field
 +}
 +
 +struct Section {
@@ -3735,8 +5474,12 @@ index 0000000000..34cab5a42a
 +    {@"senhas-salvas", @"Senhas salvas", @"senhas"},
 +    {@"restaurar", @"Restaurar as configurações originais", @"sistema"},
 +    {@"avisos", @"Avisos de código aberto", @"sobre"},
++    {@"importar", @"Importar de outro navegador", @"atos"},
 +};
 +static void ClearFinished(void* context);
++static void AdblockUpdated(void* context, int ok, const char* message);
++static void ImportSourcesFound(void* context, const AgensImportSource* sources, int count);
++static void ImportProgress(void* context, const char* source_id, int state, const char* message);
 +NSView* AgensCreditsPage(CGFloat width, BOOL withHeading);  // credits_mac.mm
 +static void ResetFinished(void* context);
 +static void LoginsListed(void* context, const AgensLogin* logins, int count);
@@ -3773,6 +5516,8 @@ index 0000000000..34cab5a42a
 +    w.delegate = self;
 +    _navRows = [NSMutableArray array];
 +    _clearWhat = kAgensClearHistory | kAgensClearCookies | kAgensClearCache;
++    _importWhat = kAgensImportBookmarks | kAgensImportHistory | kAgensImportPasswords | kAgensImportCookies |
++                  kAgensImportExtensions;
 +    _revealed = -1;
 +    AgensFlippedView* root = [[AgensFlippedView alloc] init];
 +    root.wantsLayer = YES;
@@ -3915,6 +5660,7 @@ index 0000000000..34cab5a42a
 +    _revealed = -1;
 +    _revealedPassword.clear();
 +    _clearStatus = _resetStatus = _passwordStatus = nil;
++    _importSearched = NO;
 +  }
 +  _section = key;
 +  for (NSView* v in [_pane.subviews copy]) [v removeFromSuperview];
@@ -3979,6 +5725,8 @@ index 0000000000..34cab5a42a
 +    y = [self neverSleepList:y];
 +  } else if ([key isEqualToString:@"atos"]) {
 +    y = [self fillAtos:y];
++    y = [self option:@"Trazer de outro navegador" detail:@"Chrome, Brave, Arc, Edge, Safari e Firefox. Cada perfil vira um ato."
++             control:[self subButton:@"Importar…" key:@"importar"] y:y];
 +  } else if ([key isEqualToString:@"busca"]) {
 +    _engines = [[NSPopUpButton alloc] init];
 +    _engines.target = self;
@@ -3997,11 +5745,7 @@ index 0000000000..34cab5a42a
 +    y = [self option:@"Apagar dados de navegação" detail:@"Histórico, cookies e cache." control:[self subButton:@"Apagar…" key:@"apagar"] y:y];
 +    y = [self info:@"Impressão digital, rastreadores nos links, DNS seguro" detail:nil note:@"Ainda não existem" y:y];
 +  } else if ([key isEqualToString:@"bloqueador"]) {
-+    y = [self info:@"Bloquear anúncios e rastreadores" detail:@"Em todos os atos e na janela anônima." note:@"Ligado" y:y];
-+    y = [self info:@"Listas" detail:@"EasyList e EasyPrivacy (GPLv3/CC BY-SA), filtros do uBlock Origin (GPLv3)." note:@"Com cada atualização" y:y];
-+    y = [self info:@"Atualizar as listas todo dia" detail:@"Do nosso GitHub, nada de servidor de terceiros (#63)." note:@"Em breve" y:y];
-+    y = [self info:@"Esconder espaços de anúncio e avisos de cookies" detail:nil note:@"Em breve" y:y];
-+    y = [self info:@"Sites liberados" detail:nil note:@"Ainda não existe" y:y];
++    y = [self adblockSection:y];
 +  } else if ([key isEqualToString:@"permissoes"]) {
 +    struct P { const char* kind; NSString* label; BOOL ask; } perms[] = {
 +        {"camera", @"Câmera", YES}, {"microphone", @"Microfone", YES}, {"location", @"Localização", YES},
@@ -4479,6 +6223,7 @@ index 0000000000..34cab5a42a
 +- (CGFloat)subPage:(NSString*)key y:(CGFloat)y {
 +  if ([key isEqualToString:@"apagar"]) return [self clearPage:y];
 +  if ([key isEqualToString:@"restaurar"]) return [self resetPage:y];
++  if ([key isEqualToString:@"importar"]) return [self importPage:y];
 +  if ([key isEqualToString:@"avisos"]) {  // credits_mac.mm: searchable, resizes _pane as rows open
 +    NSView* credits = AgensCreditsPage(NSWidth(_pane.bounds), NO);
 +    credits.frame = NSMakeRect(0, y, NSWidth(credits.frame), NSHeight(credits.frame));
@@ -4488,6 +6233,224 @@ index 0000000000..34cab5a42a
 +  if ([key isEqualToString:@"excecoes"]) return [self exceptionsPage:y];
 +  if ([key isEqualToString:@"senhas-salvas"]) return [self passwordsPage:y];
 +  return y;
++}
++
++// Bloqueador: level, cookie notices, sites allowed, the lists and their daily update.
++static void AdblockSitesListed(void* context, const char* const* sites, int count) {
++  auto* out = static_cast<std::vector<std::string>*>(context);
++  for (int i = 0; i < count; ++i) out->push_back(sites[i]);
++}
++- (CGFloat)adblockSection:(CGFloat)y {
++  y = [self option:@"Bloquear anúncios e rastreadores"
++            detail:@"Forte inclui os filtros do uBlock Origin."
++           control:[self segments:@[ @"Desligado", @"Padrão", @"Forte" ] selected:agens_adblock_level() action:@selector(setAdblockLevel:)]
++                 y:y];
++  NSSwitch* cookies = [[NSSwitch alloc] init];
++  cookies.state = agens_adblock_hide_cookie_notices() ? NSControlStateValueOn : NSControlStateValueOff;
++  cookies.target = self;
++  cookies.action = @selector(setHideCookieNotices:);
++  y = [self option:@"Esconder avisos de cookies" detail:@"Somem sem aceitar nada." control:cookies y:y];
++  // Sites liberados: the content setting ADS = allow, per site of this ato.
++  NSTextField* field = [NSTextField textFieldWithString:@""];
++  field.placeholderString = @"site.com.br";
++  field.frame = NSMakeRect(0, 0, 180, 24);
++  field.target = self;
++  field.action = @selector(addAllowedSite:);
++  NSButton* add = [self small:@"Liberar" action:@selector(addAllowedSiteButton:) tag:0];
++  objc_setAssociatedObject(add, "field", field, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
++  NSView* box = [self buttons:@[ add ]];
++  NSView* both = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 180 + 8 + NSWidth(box.frame), 24)];
++  box.frame = NSMakeRect(188, (24 - NSHeight(box.frame)) / 2, NSWidth(box.frame), NSHeight(box.frame));
++  [both addSubview:field];
++  [both addSubview:box];
++  y = [self option:@"Sites liberados" detail:@"Para apoiar um site ou se ele quebrar." control:both y:y];
++  std::vector<std::string> sites;
++  if (_browser) agens_adblock_allowed_sites(_browser, AdblockSitesListed, &sites);
++  for (size_t i = 0; i < sites.size(); ++i) {
++    NSButton* remove = [self small:@"Tirar" action:@selector(removeAllowedSite:) tag:(NSInteger)i];
++    remove.identifier = @(sites[i].c_str());
++    y = [self option:@(sites[i].c_str()) detail:nil control:[self buttons:@[ remove ]] y:y];
++  }
++  // Lists: credits, and the daily update from our GitHub.
++  NSSwitch* daily = [[NSSwitch alloc] init];
++  daily.state = agens_adblock_auto_update() ? NSControlStateValueOn : NSControlStateValueOff;
++  daily.target = self;
++  daily.action = @selector(setAdblockAutoUpdate:);
++  y = [self option:@"Atualizar as listas todo dia" detail:@"Baixa só do nosso GitHub."
++           control:daily y:y];
++  NSString* last = @"EasyList, EasyPrivacy, EasyList Cookie e uBlock Origin, as que vieram com o app.";
++  if (const double t = agens_adblock_last_update(); t > 0) {
++    NSDateFormatter* f = [[NSDateFormatter alloc] init];
++    f.locale = [NSLocale localeWithLocaleIdentifier:@"pt_BR"];
++    f.dateFormat = @"d 'de' MMMM, HH:mm";
++    last = [@"EasyList, EasyPrivacy, EasyList Cookie e uBlock Origin · atualizadas em " stringByAppendingString:[f stringFromDate:[NSDate dateWithTimeIntervalSince1970:t]]];
++  }
++  NSButton* now = [self small:@"Atualizar agora" action:@selector(updateAdblockNow:) tag:0];
++  now.enabled = ![_adblockStatus isEqualToString:@"Atualizando…"];
++  y = [self option:@"Listas"
++            detail:_adblockStatus ?: last
++           control:[self buttons:@[ now ]] y:y];
++  return y;
++}
++- (void)setAdblockLevel:(NSSegmentedControl*)seg {
++  agens_adblock_set_level((int)seg.selectedSegment);
++}
++- (void)setHideCookieNotices:(NSSwitch*)sw {
++  agens_adblock_set_hide_cookie_notices(sw.state == NSControlStateValueOn);
++}
++- (void)setAdblockAutoUpdate:(NSSwitch*)sw {
++  agens_adblock_set_auto_update(sw.state == NSControlStateValueOn);
++}
++- (void)addAllowedSiteButton:(NSButton*)button {
++  [self addAllowedSite:objc_getAssociatedObject(button, "field")];
++}
++- (void)addAllowedSite:(NSTextField*)field {
++  NSString* site = [field.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet].lowercaseString;
++  for (NSString* p in @[ @"https://", @"http://", @"www." ]) {
++    if ([site hasPrefix:p]) site = [site substringFromIndex:p.length];
++  }
++  site = [site componentsSeparatedByString:@"/"].firstObject;
++  if (!site.length || !_browser) return;
++  agens_adblock_allow_site(_browser, site.UTF8String, 1);
++  [self showSection:@"bloqueador"];
++}
++- (void)removeAllowedSite:(NSButton*)button {
++  if (_browser) agens_adblock_allow_site(_browser, button.identifier.UTF8String, 0);
++  [self showSection:@"bloqueador"];
++}
++- (void)updateAdblockNow:(id)sender {
++  _adblockStatus = @"Atualizando…";
++  [self showSection:@"bloqueador"];
++  agens_adblock_update_now(AdblockUpdated, (__bridge void*)self);
++}
++- (void)adblockUpdated:(BOOL)ok message:(const char*)message {
++  _adblockStatus = ok ? @"Atualizadas agora." : [@"Não deu: " stringByAppendingString:@(message ? message : "")];
++  if ([_section isEqualToString:@"bloqueador"]) [self showSection:@"bloqueador"];
++}
++
++// Importar: what to bring, then one row per browser profile (it goes into its own ato).
++- (CGFloat)importPage:(CGFloat)y {
++  if (!_importSearched) {
++    _importSearched = YES;
++    agens_import_sources(ImportSourcesFound, (__bridge void*)self);
++    return [self info:@"Procurando navegadores…" detail:nil note:@"" y:y];
++  }
++  struct Kind {
++    int bit;
++    NSString* label;
++    NSString* detail;
++  } kinds[] = {
++      {kAgensImportBookmarks, @"Favoritos", nil},
++      {kAgensImportHistory, @"Histórico", nil},
++      {kAgensImportPasswords, @"Senhas", @"Do Chrome, Brave, Arc e Edge o macOS pede uma vez a sua senha do Mac."},
++      {kAgensImportCookies, @"Cookies", @"Você continua logado nos sites."},
++      {kAgensImportExtensions, @"Extensões", @"As mesmas da Chrome Web Store, instaladas de lá. As do Firefox não rodam aqui."},
++  };
++  for (const Kind& k : kinds) {
++    NSSwitch* sw = [[NSSwitch alloc] init];
++    sw.state = (_importWhat & k.bit) ? NSControlStateValueOn : NSControlStateValueOff;
++    sw.tag = k.bit;
++    sw.target = self;
++    sw.action = @selector(setImportKind:);
++    y = [self option:k.label detail:k.detail control:sw y:y];
++  }
++  y += 12;
++  if (_importSources.empty()) {
++    return [self info:@"Nenhum outro navegador encontrado" detail:@"Chrome, Brave, Arc, Edge, Safari ou Firefox neste Mac." note:@"" y:y];
++  }
++  static NSString* const kNames[] = {@"favoritos", @"histórico", @"senhas", @"cookies", @"extensões"};
++  if (!_importFields) _importFields = [NSMutableDictionary dictionary];
++  [_importFields removeAllObjects];
++  for (size_t i = 0; i < _importSources.size(); ++i) {
++    const auto& [id, browser, profile, suggested, available, note] = _importSources[i];
++    auto renamed = _importAtoNames.find(id);
++    const std::string ato = renamed != _importAtoNames.end() ? renamed->second : suggested;
++    NSMutableArray<NSString*>* has = [NSMutableArray array];
++    for (int b = 0; b < 5; ++b) {
++      if (available & (1 << b)) [has addObject:kNames[b]];
++    }
++    NSString* label = profile.empty() ? @(browser.c_str()) : [NSString stringWithFormat:@"%@ — %@", @(browser.c_str()), @(profile.c_str())];
++    auto status = _importStatus.find(id);
++    // Where it goes and what it has; the browser's note (Keychain, Full Disk Access…) only when
++    // nothing can be brought, else in the tooltip.
++    NSString* detail = status != _importStatus.end() ? @(status->second.c_str())
++                       : has.count ? [NSString stringWithFormat:@"Vai para o ato %@ · %@", @(ato.c_str()), [has componentsJoinedByString:@", "]]
++                       : !note.empty() ? @(note.c_str())
++                                       : @"Nada para trazer";
++    NSButton* go = [self small:@"Importar" action:@selector(runImport:) tag:(NSInteger)i];
++    go.enabled = available != 0 && (status == _importStatus.end() || status->second.find("…") == std::string::npos);
++    go.toolTip = note.empty() ? nil : @(note.c_str());
++    // The ato's name, editable: "Chrome — Pessoal" can become "Trabalho".
++    NSTextField* name = [NSTextField textFieldWithString:@(ato.c_str())];
++    name.controlSize = NSControlSizeSmall;
++    name.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
++    name.toolTip = @"Nome do ato";
++    name.accessibilityLabel = [@"Nome do ato para " stringByAppendingString:label];
++    name.tag = (NSInteger)i;
++    name.delegate = self;
++    _importFields[@(i)] = name;
++    NSView* box = [self buttons:@[ go ]];
++    NSView* both = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 170 + 8 + NSWidth(box.frame), 22)];
++    name.frame = NSMakeRect(0, 0, 170, 22);
++    box.frame = NSMakeRect(178, (22 - NSHeight(box.frame)) / 2, NSWidth(box.frame), NSHeight(box.frame));
++    [both addSubview:name];
++    [both addSubview:box];
++    y = [self option:label detail:detail control:both y:y];
++  }
++  return y;
++}
++// Typing in an ato name field (import rows): remember it per source.
++- (void)controlTextDidChange:(NSNotification*)note {
++  NSTextField* field = note.object;
++  if (![field.toolTip isEqualToString:@"Nome do ato"] || (size_t)field.tag >= _importSources.size()) return;
++  NSString* name = [field.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
++  const std::string id = std::get<0>(_importSources[field.tag]);
++  if (name.length) {
++    _importAtoNames[id] = name.UTF8String;
++  } else {
++    _importAtoNames.erase(id);
++  }
++}
++- (void)setImportKind:(NSSwitch*)sw {
++  _importWhat = sw.state == NSControlStateValueOn ? (_importWhat | (int)sw.tag) : (_importWhat & ~(int)sw.tag);
++}
++- (void)setImportSources:(const AgensImportSource*)sources count:(int)count {
++  _importSources.clear();
++  for (int i = 0; i < count; ++i) {
++    _importSources.emplace_back(sources[i].id, sources[i].browser, sources[i].profile, sources[i].ato,
++                                sources[i].available, sources[i].note);
++  }
++  if ([_section isEqualToString:@"importar"]) [self showSection:@"importar"];
++}
++- (void)runImport:(NSButton*)button {
++  const size_t i = button.tag;
++  if (!_browser || i >= _importSources.size() || !_importWhat) return;
++  const std::string id = std::get<0>(_importSources[i]);
++  _importStatus[id] = "Começando…";
++  [self showSection:@"importar"];
++  NSString* typed = [_importFields[@(i)].stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
++  if (typed.length) _importAtoNames[id] = typed.UTF8String;
++  auto renamed = _importAtoNames.find(id);
++  const std::string ato = renamed != _importAtoNames.end() ? renamed->second : std::get<3>(_importSources[i]);
++  agens_import_run(_browser, id.c_str(), ato.c_str(), _importWhat, ImportProgress, (__bridge void*)self);
++}
++- (void)importProgress:(const char*)sourceId state:(int)state message:(const char*)message {
++  const std::string id = sourceId ? sourceId : "";
++  std::string text = message ? message : "";
++  auto& counts = _importCounts[id];
++  if (state == 0 && text.find(':') != std::string::npos) counts.push_back(text);  // a count, keep it for the end
++  if (state == 0 && text.find("…") == std::string::npos) text += "…";
++  if (state == 1) {  // "Pronto · Favoritos: 4 · Histórico: 5…"
++    text = "Pronto";
++    for (const std::string& c : counts) text += " · " + c;
++    counts.clear();
++  }
++  if (state == -1) {
++    text = "Não deu: " + text;
++    counts.clear();
++  }
++  _importStatus[id] = text;
++  if ([_section isEqualToString:@"importar"]) [self showSection:@"importar"];
 +}
 +
 +// Apagar dados de navegação: period, what, and the button.
@@ -4861,6 +6824,15 @@ index 0000000000..34cab5a42a
 +}
 +@end
 +
++static void ImportSourcesFound(void* context, const AgensImportSource* sources, int count) {
++  [(__bridge AgensSettings*)context setImportSources:sources count:count];
++}
++static void ImportProgress(void* context, const char* source_id, int state, const char* message) {
++  [(__bridge AgensSettings*)context importProgress:source_id state:state message:message];
++}
++static void AdblockUpdated(void* context, int ok, const char* message) {
++  [(__bridge AgensSettings*)context adblockUpdated:ok message:message];
++}
 +static void ClearFinished(void* context) {
 +  [(__bridge AgensSettings*)context clearFinished];
 +}
@@ -8307,20 +10279,28 @@ index 12bb0ac5fb..52735f7a84 100644
    if (ShouldIgnorePermissionRequest(web_contents, delegate)) {
      return nullptr;
 diff --git a/chrome/browser/ui/webui_browser/BUILD.gn b/chrome/browser/ui/webui_browser/BUILD.gn
-index db2aba2a32..60bdff1d4c 100644
+index db2aba2a32..98ada3ff32 100644
 --- a/chrome/browser/ui/webui_browser/BUILD.gn
 +++ b/chrome/browser/ui/webui_browser/BUILD.gn
-@@ -77,10 +77,25 @@ source_set("impl") {
+@@ -77,10 +77,37 @@ source_set("impl") {
      "webui_browser_window.cc",
      "webui_stub_location_bar.cc",
      "zoom_bubble_manager_webui_browser.cc",
 +
 +    # agens: the embed API and its platform-neutral side (docs/casca.md).
++    "//chrome/browser/agens/embed/agens_adblock.cc",
++    "//chrome/browser/agens/embed/agens_adblock.h",
 +    "//chrome/browser/agens/embed/agens_credits.cc",
 +    "//chrome/browser/agens/embed/agens_credits.h",
 +    "//chrome/browser/agens/embed/agens_embed.h",
 +    "//chrome/browser/agens/embed/agens_window.h",
 +    "//chrome/browser/agens/embed/native_shell.cc",
++    "//chrome/browser/agens/embed/agens_import.cc",
++    "//chrome/browser/agens/embed/agens_import.h",
++    "//chrome/browser/agens/embed/import_chromium.cc",
++    "//chrome/browser/agens/embed/import_internal.h",
++    "//chrome/browser/agens/embed/import_safari_firefox.cc",
++    "//chrome/browser/agens/embed/import_writer.cc",
 +    "//chrome/browser/agens/embed/native_shell.h",
    ]
  
@@ -8328,16 +10308,30 @@ index db2aba2a32..60bdff1d4c 100644
 -    sources += [ "webui_browser_window_mac.mm" ]
 +    sources += [
 +      "//chrome/browser/agens/embed/native_shell_mac.mm",
++      "//chrome/browser/agens/embed/import_chromium_keychain_mac.mm",
 +      "//chrome/browser/agens/ui/chrome_mac.mm",
 +      "//chrome/browser/agens/ui/credits_mac.mm",
 +      "//chrome/browser/agens/ui/logo_svg.h",
 +      "webui_browser_window_mac.mm",
 +    ]
-+    frameworks = [ "LocalAuthentication.framework" ]  # agens: Touch ID before showing a password
++    frameworks = [
++      "LocalAuthentication.framework",
++      "Security.framework",  # agens: importing from other browsers reads their Keychain key
++    ]  # agens: Touch ID before showing a password
    }
  
    deps = [
-@@ -121,6 +136,7 @@ source_set("impl") {
+@@ -88,6 +115,9 @@ source_set("impl") {
+     ":webui_browser",
+     "//base",
+     "//chrome/browser:browser_public_dependencies",
++    "//crypto",
++    "//sql",
++    "//third_party/boringssl",
+     "//chrome/browser/app_mode",
+     "//chrome/browser/bookmarks",
+     "//chrome/browser/contextual_search",
+@@ -121,6 +151,7 @@ source_set("impl") {
      "//chrome/browser/ui/tabs/tab_strip_api/controllers",
      "//chrome/browser/ui/toolbar",
      "//chrome/browser/ui/views:bubble_anchor_util_views",
