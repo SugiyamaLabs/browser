@@ -10,6 +10,7 @@ Referência para quem escreve um cliente (o time do Agens, em Go). O plano e o p
 | 2 | `login` | implementado |
 | 2 | `session`, `renew`, evento `session.lost` | especificado, **não implementado** |
 | 3 | `control.*`, `tab.*`, `page.*` | implementado |
+| 5 | `host.*`, `view.*` (a página dentro de outro app) | especificado, **não implementado** |
 
 Um navegador de fase 1 responde `unknown_op` às demais. Trate `unknown_op` como "este navegador ainda não faz isso".
 
@@ -153,6 +154,32 @@ O controle vale **para a conexão**: quando o cliente desconecta, o controle aca
 - **`page.screenshot`**: PNG da área visível da aba, a 1x. Funciona com a aba em segundo plano.
 - **Senha**: campo de senha vem com `password: true` e sem `value`, inclusive depois de "mostrar senha". `page.type` nele dá `denied`. Com o foco nele, `page.key` só aceita teclas que movem (Tab, Enter, Escape, setas). `page.screenshot` dá `denied` enquanto houver senha revelada na página.
 - Nas abas controladas não há senhas salvas, autofill nem downloads.
+
+### host e view (fase 5): a página dentro de outro app
+
+Só existem quando o motor roda **embutido** (aberto por outro app com `--agens-embedded`, sem ícone no Dock e sem janela). No AgensBrowser sozinho respondem `unknown_op`.
+
+Quem desenha a interface é o app hospedeiro: barra de endereço, abas, atos, o aviso do agente. O motor entrega a página e os dados.
+
+**Quem pode.** A conexão que manda `host.attach` vira a do hospedeiro. Tem de ser o processo que abriu o motor, e só pode haver uma. As outras conexões (a Engine, o MCP) seguem como clientes comuns e não usam `view.*`.
+
+```
+→ {"id": 1, "op": "host.attach"}
+← {"id": 1, "ok": true}
+→ {"id": 2, "op": "view.open", "ato": "Profile 1", "url": "https://example.com"}
+← {"id": 2, "ok": true, "tab": "v3"}
+→ {"id": 3, "op": "view.attach", "tab": "v3", "width": 1000, "height": 640, "scale": 2}
+← {"id": 3, "ok": true}
+← {"event": "view.layer", "tab": "v3", "context": 3626435823, "width": 1000, "height": 640, "scale": 2}
+← {"event": "view.tab", "tab": "v3", "ato": "Profile 1", "title": "Example Domain", "url": "https://example.com/", "loading": false, "audible": false, "can_back": false, "can_forward": false}
+```
+
+- **Abas.** `view.tabs {ato}` lista as abas do ato: `{tabs: [{tab, ato, title, url, loading, audible, can_back, can_forward, control?}]}`. O id `v…` vale enquanto a aba existir e inclui as abas que um agente abriu. `view.open {ato, url?}`, `view.close {tab}`, `view.navigate {tab, text}` (endereço ou busca, como na barra), `view.back`, `view.forward`, `view.reload`, `view.stop`. Eventos: `view.tab` a cada mudança, `view.closed {tab}` e `view.favicon {tab}` quando o ícone muda (`view.favicon {tab}` como pedido devolve `{png}`).
+- **Mostrar.** `view.attach {tab, width, height, scale}` faz a aba desenhar naquele tamanho (em pontos) e manda `view.layer {tab, context, width, height, scale}`: o app mostra o `context` num `CALayerHost`. O `context` muda ao trocar de processo ou de tamanho, e o evento vem de novo. `view.resize {tab, width, height, scale}` e `view.detach {tab}`. Várias abas podem estar ligadas ao mesmo tempo (painéis lado a lado).
+- **Entrada.** O app manda o que a vista recebeu: `view.focus {tab, on}`, `view.mouse {tab, data, x, y}`, `view.mouse.leave {tab}`, `view.wheel {tab, data, x, y}`, `view.key {tab, data, text, commands, marked, sel_start, sel_end, had_marked, unmarked}` e `view.edit {tab, command}` (`cut`, `copy`, `paste`, `selectAll`, `undo`, `redo`). `data` é o `NSEvent` serializado (`CGEventCreateData`, em base64); `x` e `y` contam do canto de cima da vista, em pontos. Sem `id`, o motor não responde.
+- **Aba com agente.** Quando um agente controla a aba, `view.tab` traz `control: {agent, title, detail, state}`, com `state` `"working"` ou `"paused"`, para o app desenhar o aviso. O app manda `view.control {tab, action}` com `take` (Assumir), `give` (Devolver) ou `end` (encerrar). A pessoa pode ver a aba do agente o tempo todo; com `take`, as teclas e os cliques dela passam a valer e os do agente respondem `paused`.
+- **Aprovações.** Embutido, o motor não mostra folha: manda `approval.ask {ask, title, detail, offer_always}` ao hospedeiro, que desenha e responde `approval.answer {ask, answer}` com `allow`, `always` ou `deny`. Sem hospedeiro ligado, a resposta é `denied`.
+- **Se o motor cair**, a conexão fecha. O app abre o motor de novo, refaz `host.attach` e religa as vistas; os ids `v…` antigos não valem mais.
 
 ## Erros
 
