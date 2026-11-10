@@ -21,6 +21,9 @@ if [ -f "$CHROMIUM_DIR/patches/series" ]; then   # our patches, applied last
   python3 "$main/utils/patches.py" apply "$SRC_DIR" "$CHROMIUM_DIR/patches"
 fi
 python3 "$main/utils/domain_substitution.py" apply -r "$main/domain_regex.list" -f "$main/domain_substitution.list" "$SRC_DIR"
+# ad blocker filter lists, built into the app by adblock.patch; copied after domain substitution so it never rewrites them
+mkdir -p "$SRC_DIR/third_party/sugiyamalabs_adblock/lists"
+cp "$CHROMIUM_DIR/adblock/lists/"*.txt "$SRC_DIR/third_party/sugiyamalabs_adblock/lists/"
 
 mkdir -p "$SRC_DIR/third_party/llvm-build/Release+Asserts" "$SRC_DIR/third_party/rust-toolchain/bin"
 "$UC_DIR/retrieve_and_unpack_resource.py" -p "$arch"   # prebuilt clang and rust toolchains
