@@ -1,9 +1,9 @@
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
 new file mode 100644
-index 0000000000..8cbfbecbca
+index 0000000000..feea358bbe
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embed.h
-@@ -0,0 +1,293 @@
+@@ -0,0 +1,305 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The boundary between the engine and any interface (the browser's own chrome today, the Agens
 +// app later). Plain C on purpose: no Chromium or C++ types cross it, Swift imports it as is, and
@@ -248,6 +248,16 @@ index 0000000000..8cbfbecbca
 +typedef enum { kAgensPasswordSave, kAgensPasswordNever, kAgensPasswordNotNow } AgensPasswordAnswer;
 +void agens_password_answer(AgensWindow* window, AgensPasswordAnswer answer);
 +
++// A site asks for permissions (camera, location…): agens_ui_permission_prompt shows them, the
++// UI answers once with agens_window_permission_answer; _close means the request went away.
++typedef enum {
++  kAgensPermissionAllow,
++  kAgensPermissionAllowOnce,
++  kAgensPermissionDeny,
++  kAgensPermissionDismiss,
++} AgensPermissionAnswer;
++void agens_window_permission_answer(AgensWindow* window, AgensPermissionAnswer answer);
++
 +// Histórico of this window's ato, newest first, one entry per page per day, at most 300.
 +// `text` filters by title and address ("" for all). Calls `fn` later, once.
 +typedef struct {
@@ -290,6 +300,8 @@ index 0000000000..8cbfbecbca
 +// lights center on it; it follows the density).
 +float agens_ui_card_radius(void* chrome);
 +float agens_ui_titlebar_height(void* chrome);
++void agens_ui_permission_prompt(void* chrome, const char* site, const char* const* asks, int count);
++void agens_ui_permission_prompt_close(void* chrome);
 +void agens_ui_destroy_chrome(void* chrome);
 +
 +#ifdef __cplusplus
@@ -299,10 +311,10 @@ index 0000000000..8cbfbecbca
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EMBED_H_
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
 new file mode 100644
-index 0000000000..9c82824c92
+index 0000000000..f1beed8297
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_window.h
-@@ -0,0 +1,522 @@
+@@ -0,0 +1,525 @@
 +// Copyright 2026 SugiyamaLabs.
 +// One browser window as the embed API sees it (agens_embed.h): tabs, suggestions, atos, search
 +// default, bookmarks. Platform-neutral; each platform's shell (native_shell_mac.mm, later
@@ -334,6 +346,7 @@ index 0000000000..9c82824c92
 +#include "components/bookmarks/common/bookmark_metrics.h"
 +#include "base/scoped_observation.h"
 +#include "components/find_in_page/find_result_observer.h"
++#include "components/permissions/permission_prompt.h"
 +#include "components/find_in_page/find_tab_helper.h"
 +#include "components/find_in_page/find_types.h"
 +#include "components/bookmarks/browser/bookmark_utils.h"
@@ -746,6 +759,8 @@ index 0000000000..9c82824c92
 +  raw_ptr<void> downloads_context = nullptr;
 +  base::CallbackListSubscription search_loaded_;
 +  base::CancelableTaskTracker history_tracker;
++  raw_ptr<void> ui = nullptr;  // the chrome (agens_ui_*), set by the platform shell
++  base::WeakPtr<permissions::PermissionPrompt::Delegate> permission_delegate;
 +  AgensFindChanged find_observer = nullptr;
 +  raw_ptr<void> find_context = nullptr;
 +  base::ScopedObservation<find_in_page::FindTabHelper, find_in_page::FindResultObserver> find_observation{this};
@@ -827,10 +842,10 @@ index 0000000000..9c82824c92
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
 new file mode 100644
-index 0000000000..416670812f
+index 0000000000..b05a2ea408
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.cc
-@@ -0,0 +1,666 @@
+@@ -0,0 +1,682 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The embed API (agens_embed.h) on top of AgensWindow. Same code on every platform.
 +
@@ -1266,6 +1281,17 @@ index 0000000000..416670812f
 +  saved->logins.erase(saved->logins.begin() + index);
 +}
 +
++void agens_window_permission_answer(AgensWindow* w, AgensPermissionAnswer answer) {
++  base::WeakPtr<permissions::PermissionPrompt::Delegate> delegate = std::move(w->permission_delegate);
++  if (!delegate) return;
++  const PromptOptions options = std::monostate();
++  switch (answer) {
++    case kAgensPermissionAllow: delegate->Accept(options); break;
++    case kAgensPermissionAllowOnce: delegate->AcceptThisTime(options); break;
++    case kAgensPermissionDeny: delegate->Deny(options); break;
++    case kAgensPermissionDismiss: delegate->Dismiss(options); break;
++  }
++}
 +void agens_window_set_find_observer(AgensWindow* w, AgensFindChanged observer, void* context) {
 +  w->find_observer = observer;
 +  w->find_context = context;
@@ -1476,6 +1502,11 @@ index 0000000000..416670812f
 +  NOTREACHED();
 +}
 +void FocusNativeLocationBar(views::Widget*) {}
++std::unique_ptr<permissions::PermissionPrompt> CreateNativePermissionPrompt(
++    content::WebContents*,
++    permissions::PermissionPrompt::Delegate*) {
++  return nullptr;
++}
 +float NativeTitlebarHeight(views::Widget*) {
 +  return 52;
 +}
@@ -1499,10 +1530,10 @@ index 0000000000..416670812f
 +}  // namespace agens
 diff --git a/chrome/browser/agens/embed/native_shell.h b/chrome/browser/agens/embed/native_shell.h
 new file mode 100644
-index 0000000000..04fb6f0162
+index 0000000000..9b81aa73ae
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.h
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,46 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Glue between Chromium's Webium window (WebUIBrowserWindow, without its HTML page) and the
 +// agens_embed.h interface.
@@ -1513,6 +1544,7 @@ index 0000000000..04fb6f0162
 +
 +#include "base/feature_list.h"
 +#include "base/functional/callback_forward.h"
++#include "components/permissions/permission_prompt.h"
 +
 +class BrowserWindowInterface;
 +class StatusBubble;
@@ -1529,6 +1561,10 @@ index 0000000000..04fb6f0162
 +
 +std::unique_ptr<views::View> CreateNativeShellView(BrowserWindowInterface* browser);
 +void FocusNativeLocationBar(views::Widget* widget);
++// Our permission prompt for a tab in a native-shell window; null elsewhere (Chromium's then).
++std::unique_ptr<permissions::PermissionPrompt> CreateNativePermissionPrompt(
++    content::WebContents* contents,
++    permissions::PermissionPrompt::Delegate* delegate);
 +// Where the window's traffic lights center (the shell's toolbar or tab strip height).
 +float NativeTitlebarHeight(views::Widget* widget);
 +// Lets the native shell take a browser command (IDC_*) before Chromium runs it. True if it did.
@@ -1546,10 +1582,10 @@ index 0000000000..04fb6f0162
 +#endif  // CHROME_BROWSER_AGENS_EMBED_NATIVE_SHELL_H_
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
 new file mode 100644
-index 0000000000..b5a81738bc
+index 0000000000..ff40eeab47
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
-@@ -0,0 +1,188 @@
+@@ -0,0 +1,245 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The macOS host: the views::View that fills the Webium window, puts the UI's chrome (an NSView)
 +// over it and the active tab in the page card. Everything else is shared (agens_window.h,
@@ -1560,6 +1596,8 @@ index 0000000000..b5a81738bc
 +#import <AppKit/AppKit.h>
 +
 +#include "chrome/browser/agens/embed/agens_window.h"
++#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
++#include "components/permissions/permission_request.h"
 +#include "ui/base/metadata/metadata_header_macros.h"
 +#include "ui/base/metadata/metadata_impl_macros.h"
 +#include "ui/gfx/codec/png_codec.h"
@@ -1604,6 +1642,7 @@ index 0000000000..b5a81738bc
 +        },
 +        base::Unretained(this));
 +    chrome_ = (__bridge_transfer NSView*)agens_ui_create_chrome(window_.get());
++    window_->ui = (__bridge void*)chrome_;
 +  }
 +  ~NativeShellView() override {
 +    agens_ui_destroy_chrome((__bridge void*)chrome_);
@@ -1613,6 +1652,7 @@ index 0000000000..b5a81738bc
 +
 +  void FocusAddress() { agens_ui_focus_address((__bridge void*)chrome_); }
 +  float TitlebarHeight() { return agens_ui_titlebar_height((__bridge void*)chrome_); }
++  AgensWindow* window() { return window_.get(); }
 +  bool Command(AgensCommand command) { return agens_ui_command((__bridge void*)chrome_, command); }
 +  StatusBubble* status_bubble() { return &window_->status_bubble; }
 +
@@ -1722,6 +1762,59 @@ index 0000000000..b5a81738bc
 +  return shell && shell->Command(*command);
 +}
 +
++// Shows the request in our panel (agens_ui_permission_prompt) and answers through the delegate
++// when the person picks (agens_window_permission_answer).
++class NativePermissionPrompt : public permissions::PermissionPrompt {
++ public:
++  NativePermissionPrompt(AgensWindow* window, Delegate* delegate) : window_(window->weak.GetWeakPtr()) {
++    window->permission_delegate = delegate->GetWeakPtr();
++    const GURL origin = delegate->GetRequestingOrigin();
++    const std::string site = origin.is_valid() ? std::string(origin.host()) : std::string();
++    std::vector<std::string> asks;
++    for (const auto& request : delegate->Requests()) {
++      asks.push_back(base::UTF16ToUTF8(request->GetMessageTextFragment()));
++    }
++    std::vector<const char*> pointers;
++    for (const std::string& a : asks) pointers.push_back(a.c_str());
++    delegate->SetPromptShown();
++    agens_ui_permission_prompt(window->ui, site.c_str(), pointers.data(), static_cast<int>(pointers.size()));
++  }
++  ~NativePermissionPrompt() override {
++    if (window_ && window_->ui) agens_ui_permission_prompt_close(window_->ui);
++  }
++  // permissions::PermissionPrompt:
++  bool UpdateAnchor() override { return true; }
++  TabSwitchingBehavior GetTabSwitchingBehavior() override {
++    return kDestroyPromptButKeepRequestPending;  // asks again when the tab comes back
++  }
++  permissions::PermissionPromptDisposition GetPromptDisposition() const override {
++    return permissions::PermissionPromptDisposition::ANCHORED_BUBBLE;
++  }
++  bool IsAskPrompt() const override { return true; }
++  std::optional<gfx::Rect> GetViewBoundsInScreen() const override { return std::nullopt; }
++  std::vector<permissions::ElementAnchoredBubbleVariant> GetPromptVariants() const override { return {}; }
++  std::optional<permissions::feature_params::PermissionElementPromptPosition> GetPromptPosition() const override {
++    return std::nullopt;
++  }
++
++ private:
++  base::WeakPtr<AgensWindow> window_;
++};
++
++std::unique_ptr<permissions::PermissionPrompt> CreateNativePermissionPrompt(
++    content::WebContents* contents,
++    permissions::PermissionPrompt::Delegate* delegate) {
++  if (!IsNativeShellEnabled()) return nullptr;
++  BrowserWindowInterface* browser = GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(contents);
++  if (!browser || !browser->GetWindow()) return nullptr;
++  views::Widget* widget = views::Widget::GetWidgetForNativeWindow(browser->GetWindow()->GetNativeWindow());
++  auto* shell = widget ? views::AsViewClass<NativeShellView>(
++                             widget->GetRootView()->GetViewByID(NativeShellView::kViewId))
++                       : nullptr;
++  if (!shell) return nullptr;
++  return std::make_unique<NativePermissionPrompt>(shell->window(), delegate);
++}
++
 +float NativeTitlebarHeight(views::Widget* widget) {
 +  auto* shell = widget && widget->GetRootView()
 +                    ? views::AsViewClass<NativeShellView>(
@@ -1740,10 +1833,10 @@ index 0000000000..b5a81738bc
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..e818150d5d
+index 0000000000..4cb65777de
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,4246 @@
+@@ -0,0 +1,4308 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -4703,6 +4796,7 @@ index 0000000000..e818150d5d
 +  AgensFindBar* _find;
 +  AgensErrorView* _error;
 +  BOOL _passwordAsked;  // our "save password?" panel is open and not answered yet
++  BOOL _permissionAsked;  // a site's permission request is open and not answered yet
 +  NSView* _bar;  // the bookmarks bar
 +  BOOL _barShown;
 +  NSView* _backdrop;  // under the whole window, for Vidro and Seu (glass, blur, image)
@@ -5625,6 +5719,10 @@ index 0000000000..e818150d5d
 +  }
 +}
 +- (void)closeMenu {
++  if (_permissionAsked) {  // closed without an answer
++    _permissionAsked = NO;
++    if (_window) agens_window_permission_answer(_window, kAgensPermissionDismiss);
++  }
 +  if (_passwordAsked) {  // closed without an answer
 +    _passwordAsked = NO;
 +    if (_window) agens_password_answer(_window, kAgensPasswordNotNow);
@@ -5882,6 +5980,55 @@ index 0000000000..e818150d5d
 +}
 +// "Salvar a senha?" under the address bar, on its right (where Chrome shows its key). Closing the
 +// panel any other way counts as "Agora não".
++// A site asks for permissions: a panel under the site icon (where Chrome's bubble points), with
++// what it wants, and Permitir / Só desta vez / Bloquear. Closing it any other way dismisses
++// (the site may ask again later).
++- (void)askPermission:(NSString*)site asks:(NSArray<NSString*>*)asks {
++  [self closeMenu];
++  const CGFloat w = 340, lineH = 20, h = 16 + 20 + 6 + asks.count * lineH + 16 + 24 + 14;
++  NSView* panel = [self popoverWidth:w height:h under:_omni];
++  panel.frame = NSMakeRect(NSMinX(_omni.frame), NSMaxY(_omni.frame) + 6, w, h);
++  panel.accessibilityRole = NSAccessibilityGroupRole;
++  NSTextField* title = Label(13.5, NSFontWeightSemibold, kInk);
++  title.stringValue = [NSString stringWithFormat:@"%@ quer:", site.length ? site : @"Este site"];
++  title.lineBreakMode = NSLineBreakByTruncatingMiddle;
++  title.frame = NSMakeRect(16, h - 16 - 20, w - 32, 20);
++  [panel addSubview:title];
++  CGFloat y = NSMinY(title.frame) - 6 - lineH;
++  for (NSString* ask in asks) {
++    NSTextField* line = Label(13, NSFontWeightRegular, kMute);
++    line.stringValue = [@"·  " stringByAppendingString:ask];
++    line.frame = NSMakeRect(16, y, w - 32, 18);
++    [panel addSubview:line];
++    y -= lineH;
++  }
++  NSButton* allow = [NSButton buttonWithTitle:@"Permitir" target:self action:@selector(answerPermission:)];
++  allow.tag = kAgensPermissionAllow;
++  NSButton* once = [NSButton buttonWithTitle:@"Só desta vez" target:self action:@selector(answerPermission:)];
++  once.tag = kAgensPermissionAllowOnce;
++  NSButton* deny = [NSButton buttonWithTitle:@"Bloquear" target:self action:@selector(answerPermission:)];
++  deny.tag = kAgensPermissionDeny;
++  CGFloat x = w - 16;
++  for (NSButton* b in @[ allow, once, deny ]) {
++    [b sizeToFit];
++    x -= NSWidth(b.frame);
++    b.frame = NSMakeRect(x, 14, NSWidth(b.frame), NSHeight(b.frame));
++    x -= 8;
++    [panel addSubview:b];
++  }
++  [self presentPopover:panel anchor:_omni];
++  _permissionAsked = YES;
++}
++- (void)answerPermission:(NSButton*)button {
++  _permissionAsked = NO;
++  if (_window) agens_window_permission_answer(_window, (AgensPermissionAnswer)button.tag);
++  [self closeMenu];
++}
++- (void)permissionGone {
++  if (!_permissionAsked) return;
++  _permissionAsked = NO;  // nothing to answer any more
++  [self closeMenu];
++}
 +- (void)askToSavePassword {
 +  AgensPasswordPrompt prompt;
 +  if (!_window || !agens_password_prompt(_window, &prompt)) return;
@@ -5975,6 +6122,14 @@ index 0000000000..e818150d5d
 +}
 +void agens_ui_colors(void* chrome, unsigned* window, unsigned* page, unsigned* line) {
 +  [(__bridge AgensChrome*)chrome colorsWindow:window page:page line:line];
++}
++void agens_ui_permission_prompt(void* chrome, const char* site, const char* const* asks, int count) {
++  NSMutableArray<NSString*>* list = [NSMutableArray array];
++  for (int i = 0; i < count; ++i) [list addObject:@(asks[i])];
++  [(__bridge AgensChrome*)chrome askPermission:@(site) asks:list];
++}
++void agens_ui_permission_prompt_close(void* chrome) {
++  [(__bridge AgensChrome*)chrome permissionGone];
 +}
 +float agens_ui_card_radius(void*) {
 +  return 12 * Round();
@@ -6137,6 +6292,29 @@ index 886649ae98..3adfa8a130 100644
      return StartupProfileMode::kBrowserWindow;
    }
  
+diff --git a/chrome/browser/ui/views/permissions/permission_prompt_factory.cc b/chrome/browser/ui/views/permissions/permission_prompt_factory.cc
+index 12bb0ac5fb..52735f7a84 100644
+--- a/chrome/browser/ui/views/permissions/permission_prompt_factory.cc
++++ b/chrome/browser/ui/views/permissions/permission_prompt_factory.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/ui/views/permissions/permission_prompt_factory.h"
++#include "chrome/browser/agens/embed/native_shell.h"
+ 
+ #include <algorithm>
+ #include <memory>
+@@ -296,6 +297,10 @@ std::unique_ptr<permissions::PermissionPrompt> CreatePermissionPrompt(
+       IsFullScreenMode(web_contents)) {
+     return nullptr;
+   }
++  // agens: our own prompt in the native shell's windows.
++  if (auto prompt = agens::CreateNativePermissionPrompt(web_contents, delegate)) {
++    return prompt;
++  }
+ 
+   if (ShouldIgnorePermissionRequest(web_contents, delegate)) {
+     return nullptr;
 diff --git a/chrome/browser/ui/webui_browser/BUILD.gn b/chrome/browser/ui/webui_browser/BUILD.gn
 index db2aba2a32..09328bfc13 100644
 --- a/chrome/browser/ui/webui_browser/BUILD.gn
