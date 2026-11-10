@@ -1,9 +1,9 @@
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
 new file mode 100644
-index 0000000000..3f067b4cc9
+index 0000000000..41507a640f
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embed.h
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,153 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The boundary between the engine and any interface (the browser's own chrome today, the Agens
 +// app later). Plain C on purpose: no Chromium or C++ types cross it, Swift imports it as is, and
@@ -137,6 +137,8 @@ index 0000000000..3f067b4cc9
 +void agens_window_rename_ato(AgensWindow* window, int index, const char* name);
 +// Opens a page (e.g. one of Chromium's settings pages) in a new tab of this window.
 +void agens_window_open_url(AgensWindow* window, const char* url);
++// Asks the system to make this browser the default for links (macOS shows its own prompt).
++void agens_window_set_default_browser(AgensWindow* window);
 +
 +// Implemented by the interface. The chrome is a platform view (NSView* on macOS) the size of the
 +// window, returned retained; it must let clicks through where the page sits. The engine puts the
@@ -569,10 +571,10 @@ index 0000000000..3a513e84ee
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
 new file mode 100644
-index 0000000000..87d73812a4
+index 0000000000..5e47e4bcb3
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.cc
-@@ -0,0 +1,229 @@
+@@ -0,0 +1,233 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The embed API (agens_embed.h) on top of AgensWindow. Same code on every platform.
 +
@@ -580,6 +582,7 @@ index 0000000000..87d73812a4
 +
 +#include "chrome/browser/agens/embed/agens_window.h"
 +#include "build/build_config.h"
++#include "chrome/browser/shell_integration.h"
 +#include "chrome/browser/themes/theme_service.h"
 +#include "chrome/browser/themes/theme_service_factory.h"
 +#include "ui/base/window_open_disposition.h"
@@ -694,6 +697,9 @@ index 0000000000..87d73812a4
 +}
 +void agens_window_open_url(AgensWindow* w, const char* url) {
 +  if (url) w->browser->OpenGURL(GURL(url), WindowOpenDisposition::NEW_FOREGROUND_TAB);
++}
++void agens_window_set_default_browser(AgensWindow*) {
++  shell_integration::SetAsDefaultBrowser();
 +}
 +void agens_window_suggest(AgensWindow* w, const char* text) {
 +  w->Suggest(text ? text : "");
@@ -1008,10 +1014,10 @@ index 0000000000..64f981ee02
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..e97b272f3b
+index 0000000000..fbf9987531
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,1909 @@
+@@ -0,0 +1,2119 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -2050,6 +2056,213 @@ index 0000000000..e97b272f3b
 +@end
 +
 +// ---------------------------------------------------------------------------------------------
++// Primeira instalação (prototipos/primeiro-uso.html): one window, once. v1 steps: boas-vindas,
++// atos, visual, privacidade, navegador padrão, pronto. Importing from other browsers comes later.
++
++static NSString* const kFirstRunKey = @"AgensFirstRunDone";
++
++@interface AgensFirstRun : NSWindowController <NSWindowDelegate>
+++ (void)showIfNeededFor:(AgensWindow*)window;
++@end
++
++static AgensFirstRun* g_first_run;
++
++@implementation AgensFirstRun {
++  AgensWindow* _browser;
++  int _step;
++  AgensFlippedView* _body;
++  NSButton* _back;
++  NSButton* _next;
++  NSView* _dots;
++  NSTextField* _atoName;
++  BOOL _madeDefault;
++}
++
+++ (void)showIfNeededFor:(AgensWindow*)window {
++  if (g_first_run || [NSUserDefaults.standardUserDefaults boolForKey:kFirstRunKey]) return;
++  g_first_run = [[AgensFirstRun alloc] init];
++  g_first_run->_browser = window;
++  [g_first_run showStep:0];
++  [g_first_run.window center];
++  [g_first_run showWindow:nil];
++}
+++ (void)forget:(AgensWindow*)window {
++  if (g_first_run && g_first_run->_browser == window) g_first_run->_browser = nullptr;
++}
++
++- (instancetype)init {
++  NSWindow* w = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 640, 540)
++                                            styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
++                                                      NSWindowStyleMaskFullSizeContentView
++                                              backing:NSBackingStoreBuffered
++                                                defer:YES];
++  w.titlebarAppearsTransparent = YES;
++  w.titleVisibility = NSWindowTitleHidden;
++  w.title = @"Boas-vindas ao Agens";
++  w.releasedWhenClosed = NO;
++  if ((self = [super initWithWindow:w])) {
++    w.delegate = self;
++    AgensFlippedView* root = [[AgensFlippedView alloc] init];
++    root.wantsLayer = YES;
++    w.contentView = root;
++    _body = [[AgensFlippedView alloc] initWithFrame:NSMakeRect(0, 0, 640, 470)];
++    [root addSubview:_body];
++    _back = [NSButton buttonWithTitle:@"Voltar" target:self action:@selector(back:)];
++    _next = [NSButton buttonWithTitle:@"Continuar" target:self action:@selector(next:)];
++    _next.keyEquivalent = @"\r";
++    _back.frame = NSMakeRect(32, 486, 100, 30);
++    _next.frame = NSMakeRect(640 - 32 - 130, 486, 130, 30);
++    _dots = [[NSView alloc] initWithFrame:NSMakeRect(270, 497, 100, 8)];
++    for (NSView* v in @[ _back, _next, _dots ]) [root addSubview:v];
++  }
++  return self;
++}
++- (void)windowWillClose:(NSNotification*)note {
++  [NSUserDefaults.standardUserDefaults setBool:YES forKey:kFirstRunKey];  // closing also counts
++  g_first_run = nil;
++}
++
++- (CGFloat)title:(NSString*)title lead:(NSString*)lead {
++  NSImageView* mark = [[NSImageView alloc] initWithFrame:NSMakeRect(288, 56, 64, 64)];
++  const char* svg = IsDark(_body.effectiveAppearance) ? kAgensMarkDarkSvg : kAgensMarkLightSvg;
++  mark.image = [[NSImage alloc] initWithData:[NSData dataWithBytes:svg length:strlen(svg)]];
++  mark.imageScaling = NSImageScaleProportionallyUpOrDown;
++  // Long titles wrap to two lines; the lead follows right under whatever height it took.
++  NSTextField* t = [NSTextField wrappingLabelWithString:title];
++  t.font = [NSFont systemFontOfSize:24 weight:NSFontWeightSemibold];
++  t.textColor = kInk.color();
++  t.alignment = NSTextAlignmentCenter;
++  t.preferredMaxLayoutWidth = 500;
++  CGFloat th = ceil([t sizeThatFits:NSMakeSize(500, 200)].height);
++  t.frame = NSMakeRect(70, 136, 500, th);
++  NSTextField* l = [NSTextField wrappingLabelWithString:lead];
++  l.font = [NSFont systemFontOfSize:14];
++  l.textColor = kMute.color();
++  l.alignment = NSTextAlignmentCenter;
++  l.preferredMaxLayoutWidth = 480;
++  CGFloat lh = ceil([l sizeThatFits:NSMakeSize(480, 200)].height);
++  l.frame = NSMakeRect(80, 136 + th + 10, 480, lh);
++  for (NSView* v in @[ mark, t, l ]) [_body addSubview:v];
++  return 136 + th + 10 + lh + 24;
++}
++- (CGFloat)line:(NSString*)text y:(CGFloat)y {
++  NSTextField* l = Label(13, NSFontWeightRegular, kInk);
++  l.stringValue = text;
++  l.frame = NSMakeRect(150, y, 400, 18);
++  NSImageView* check = [NSImageView imageViewWithImage:Symbol(@"checkmark", 12)];
++  check.contentTintColor = kLight3.color();
++  check.frame = NSMakeRect(126, y + 1, 16, 16);
++  [_body addSubview:check];
++  [_body addSubview:l];
++  return y + 28;
++}
++
++- (void)showStep:(int)step {
++  _step = step;
++  for (NSView* v in [_body.subviews copy]) [v removeFromSuperview];
++  NSView* root = self.window.contentView;
++  root.layer.backgroundColor = CG(kBg, root);
++  CGFloat y;
++  switch (step) {
++    case 0:
++      [self title:@"O navegador leve, bonito e que não conta nada a ninguém."
++             lead:@"Abas que dormem, atos separados e privacidade no máximo desde agora."];
++      break;
++    case 1: {
++      y = [self title:@"Seus atos"
++                 lead:@"Cada ato tem abas, logins, cookies e extensões só dele. Atos fora de uso dormem e não gastam memória."];
++      NSTextField* label = Label(13, NSFontWeightRegular, kMute);
++      label.stringValue = @"Nome do primeiro ato";
++      label.frame = NSMakeRect(170, y + 6, 300, 18);
++      _atoName = [NSTextField textFieldWithString:@"Pessoal"];
++      _atoName.frame = NSMakeRect(170, y + 30, 300, 26);
++      NSTextField* cookies = Label(12, NSFontWeightRegular, kDim);
++      cookies.stringValue = @"Compartilhar cookies entre atos: desligado. Dá para mudar em Configurações › Atos.";
++      cookies.frame = NSMakeRect(90, y + 76, 460, 16);
++      cookies.alignment = NSTextAlignmentCenter;
++      for (NSView* v in @[ label, _atoName, cookies ]) [_body addSubview:v];
++      break;
++    }
++    case 2: {
++      y = [self title:@"Do seu jeito" lead:@"Muda a qualquer hora em Configurações › Aparência, sem reiniciar."];
++      NSSegmentedControl* theme = [NSSegmentedControl segmentedControlWithLabels:@[ @"Grafite", @"Brasa" ]
++                                                                     trackingMode:NSSegmentSwitchTrackingSelectOne
++                                                                           target:self
++                                                                           action:@selector(setTheme:)];
++      theme.selectedSegment = Theme();
++      NSSegmentedControl* mode = [NSSegmentedControl segmentedControlWithLabels:@[ @"Sistema", @"Claro", @"Escuro" ]
++                                                                    trackingMode:NSSegmentSwitchTrackingSelectOne
++                                                                          target:self
++                                                                          action:@selector(setMode:)];
++      mode.selectedSegment = _browser ? agens_window_color_mode(_browser) : 0;
++      theme.frame = NSMakeRect((640 - theme.fittingSize.width) / 2, y + 10, theme.fittingSize.width, 24);
++      mode.frame = NSMakeRect((640 - mode.fittingSize.width) / 2, y + 50, mode.fittingSize.width, 24);
++      [_body addSubview:theme];
++      [_body addSubview:mode];
++      break;
++    }
++    case 3:
++      y = [self title:@"Sua privacidade já está no máximo" lead:@"Não precisa ligar nada. Se um site quebrar, você libera só ele."];
++      y = [self line:@"Bloqueio de rastreadores e cookies de terceiros" y:y];
++      y = [self line:@"Pedido de não rastrear (GPC e Do Not Track)" y:y];
++      y = [self line:@"Só HTTPS, e nada de pré-carregar páginas" y:y];
++      y = [self line:@"Localização e notificações bloqueadas; câmera e microfone perguntam" y:y];
++      [self line:@"Nenhuma telemetria: parado, o navegador não faz conexão nenhuma" y:y];
++      break;
++    case 4: {
++      y = [self title:@"Abrir os links no Agens?" lead:@"Links do Slack, do e-mail e de outros apps passam a abrir aqui."];
++      NSButton* yes = [NSButton buttonWithTitle:_madeDefault ? @"Pronto, é o padrão" : @"Usar como navegador padrão"
++                                         target:self
++                                         action:@selector(makeDefault:)];
++      yes.enabled = !_madeDefault;
++      yes.frame = NSMakeRect((640 - 240) / 2, y + 10, 240, 30);
++      [_body addSubview:yes];
++      break;
++    }
++    default:
++      [self title:@"Pronto." lead:@"Bom uso. Tudo isso fica em Configurações."];
++      break;
++  }
++  _back.hidden = step == 0;
++  _next.title = step == 5 ? @"Começar" : step == 4 && !_madeDefault ? @"Agora não" : @"Continuar";
++  for (NSView* v in [_dots.subviews copy]) [v removeFromSuperview];
++  for (int i = 0; i < 6; ++i) {
++    NSView* dot = [[NSView alloc] initWithFrame:NSMakeRect(14 + i * 13, 0, 7, 7)];
++    dot.wantsLayer = YES;
++    dot.layer.cornerRadius = 3.5;
++    dot.layer.backgroundColor = i == step ? CG(kLight3, root) : CG(kLineStrong, root);
++    [_dots addSubview:dot];
++  }
++}
++- (void)next:(id)sender {
++  if (_step == 1 && _browser && _atoName.stringValue.length) agens_window_rename_ato(_browser, 0, _atoName.stringValue.UTF8String);
++  if (_step == 5) {
++    [self close];
++    return;
++  }
++  [self showStep:_step + 1];
++}
++- (void)back:(id)sender {
++  if (_step > 0) [self showStep:_step - 1];
++}
++- (void)setTheme:(NSSegmentedControl*)seg {
++  g_theme = (int)seg.selectedSegment;
++  [NSUserDefaults.standardUserDefaults setInteger:g_theme forKey:kThemeKey];
++  if (g_theme == 1 && _browser) agens_window_set_color_mode(_browser, kAgensModeDark);
++  [NSNotificationCenter.defaultCenter postNotificationName:kThemeChanged object:nil];
++  [self showStep:_step];
++}
++- (void)setMode:(NSSegmentedControl*)seg {
++  if (_browser) agens_window_set_color_mode(_browser, (AgensColorMode)seg.selectedSegment);
++}
++- (void)makeDefault:(id)sender {
++  if (_browser) agens_window_set_default_browser(_browser);
++  _madeDefault = YES;
++  [self showStep:_step];
++}
++@end
++
++// ---------------------------------------------------------------------------------------------
 +// The chrome.
 +
 +@interface AgensChrome : AgensDragView <NSTextFieldDelegate, AgensSettingsHost>
@@ -2267,6 +2480,8 @@ index 0000000000..e97b272f3b
 +    [self refreshTheme];
 +    agens_window_set_tabs_observer(_window, TabsChanged, (__bridge void*)self);
 +    agens_window_set_atos_observer(_window, AtosChanged, (__bridge void*)self);
++    AgensWindow* opened = _window;
++    dispatch_async(dispatch_get_main_queue(), ^{ [AgensFirstRun showIfNeededFor:opened]; });
 +    agens_window_set_status_observer(_window, StatusChanged, (__bridge void*)self);
 +    agens_window_set_downloads_observer(_window, DownloadsChanged, (__bridge void*)self);
 +    [NSNotificationCenter.defaultCenter addObserver:self
@@ -2875,6 +3090,7 @@ index 0000000000..e97b272f3b
 +}
 +- (void)detach {
 +  [AgensSettings forget:_window];
++  [AgensFirstRun forget:_window];
 +  [NSNotificationCenter.defaultCenter removeObserver:self];
 +  [_sideTimer invalidate];
 +  [self closeMenu];
