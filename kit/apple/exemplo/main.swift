@@ -1,270 +1,55 @@
-// Proof of the embed (docs/poc/embed.md): a plain AppKit app, with no Chromium code, that shows
-// a tab of the engine running in another process. The engine draws the tab into a CAContext; this
-// app hosts it in a CALayerHost and sends its own NSEvents back over a Unix socket (one JSON
-// message per line).
+// The embed sample (docs/poc/embed.md, docs/kit.md): a plain AppKit app, with no Chromium code,
+// that shows tabs of the engine through BrowserKit. The kit starts the engine as a hidden child,
+// talks to it over its socket and gives one view per tab; this app only draws a bare toolbar and
+// tab row around it.
 //
-//   exemplo <socket>      run against an engine started with --agens-embed-socket=<socket>
+//   exemplo <engine executable> [data folder]
+//                         runs with a window
 //   exemplo --selftest    checks what can be checked without a window or an engine
-//   exemplo --autotest <socket> <page url> <folder>
+//   exemplo --autotest <engine executable> <data folder> <page url> <out folder> [engine args...]
 //                         drives its own view with synthetic events against teste.html and
 //                         prints PASS/FAIL per step (autoteste.sh runs it)
 
 import AppKit
+import BrowserKit
 import QuartzCore
 
-/// The engine's socket. Events arrive on the main thread.
-final class Engine {
-  private let fd: Int32
-  var onEvent: (([String: Any]) -> Void)?
-  var onClosed: (() -> Void)?
-
-  init?(path: String) {
-    fd = socket(AF_UNIX, SOCK_STREAM, 0)
-    var address = sockaddr_un()
-    address.sun_family = sa_family_t(AF_UNIX)
-    guard path.utf8.count < MemoryLayout.size(ofValue: address.sun_path) else { return nil }
-    withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: path.utf8) }
-    let connected = withUnsafePointer(to: &address) {
-      $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-        connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
-      }
-    }
-    guard fd >= 0, connected == 0 else { return nil }
-    var on: Int32 = 1
-    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
-    Thread.detachNewThread { [weak self, fd] in
-      var pending = Data()
-      var buffer = [UInt8](repeating: 0, count: 1 << 16)
-      while true {
-        let count = read(fd, &buffer, buffer.count)
-        if count <= 0 { break }
-        pending.append(buffer, count: count)
-        while let end = pending.firstIndex(of: 0x0A) {
-          let line = pending.subdata(in: pending.startIndex..<end)
-          pending.removeSubrange(pending.startIndex...end)
-          if let event = try? JSONSerialization.jsonObject(with: line) as? [String: Any] {
-            DispatchQueue.main.async { self?.onEvent?(event) }
-          }
-        }
-      }
-      DispatchQueue.main.async { self?.onClosed?() }
-    }
-  }
-
-  func send(_ message: [String: Any]) {
-    let line = Engine.line(message)
-    line.withUnsafeBytes { bytes in
-      var sent = 0
-      while sent < bytes.count {
-        let count = write(fd, bytes.baseAddress! + sent, bytes.count - sent)
-        if count <= 0 { return }
-        sent += count
-      }
-    }
-  }
-
-  static func line(_ message: [String: Any]) -> Data {
-    var data = (try? JSONSerialization.data(withJSONObject: message)) ?? Data("{}".utf8)
-    data.append(0x0A)
-    return data
-  }
-}
-
-/// The NSEvent as the engine rebuilds it (ui::EventFromData), or nil for events with no CGEvent.
-func encoded(_ event: NSEvent) -> String? {
-  (event.cgEvent?.data as Data?)?.base64EncodedString()
-}
-
-/// A CALayerHost showing the engine's CAContext, or nil if this macOS no longer has the class.
-func makeLayerHost(context: UInt32) -> CALayer? {
-  guard let type = NSClassFromString("CALayerHost") as? CALayer.Type else { return nil }
-  let host = type.init()
-  host.anchorPoint = .zero
-  host.setValue(NSNumber(value: context), forKey: "contextId")
-  host.autoresizingMask = [.layerMaxXMargin, .layerMaxYMargin]
-  return host
-}
-
-/// One tab. The same layer setup as Chromium's own view for a page (DisplayCALayerTree): a
-/// layer-hosting view, a flipped layer the size of the view, the CALayerHost at its origin.
-final class TabView: NSView, NSTextInputClient {
-  private let engine: Engine
-  private let flippedLayer = CALayer()
-  private var host: CALayer?
-
-  // What the text input system did with the key being handled (sent along with it).
-  private var handlingKey = false
-  private var insertedText = ""
-  private var commands: [String] = []
-  private var marked = ""
-  private var markedSelection = NSRange(location: 0, length: 0)
-  private var unmarked = false
-
-  init(engine: Engine) {
-    self.engine = engine
-    super.init(frame: .zero)
-    let root = CALayer()
-    root.backgroundColor = NSColor.white.cgColor
-    layer = root
-    wantsLayer = true
-    flippedLayer.isGeometryFlipped = true
-    flippedLayer.anchorPoint = .zero
-    root.addSublayer(flippedLayer)
-    addTrackingArea(NSTrackingArea(
-      rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
-      owner: self))
-  }
-  required init?(coder: NSCoder) { fatalError() }
-
-  func show(context: UInt32) {
-    guard let new = makeLayerHost(context: context) else {
-      print("FAIL: no CALayerHost class on this macOS")
-      return
-    }
-    CATransaction.begin()
-    CATransaction.setDisableActions(true)
-    flippedLayer.addSublayer(new)
-    host?.removeFromSuperlayer()
-    host = new
-    CATransaction.commit()
-  }
-
-  override func setFrameSize(_ newSize: NSSize) {
-    super.setFrameSize(newSize)
-    CATransaction.begin()
-    CATransaction.setDisableActions(true)
-    flippedLayer.frame = bounds
-    CATransaction.commit()
-    engine.send(["op": "resize", "width": Int(newSize.width), "height": Int(newSize.height)])
-  }
-
-  // Focus.
-  override var acceptsFirstResponder: Bool { true }
-  override func becomeFirstResponder() -> Bool {
-    engine.send(["op": "focus", "on": true])
-    return true
-  }
-  override func resignFirstResponder() -> Bool {
-    engine.send(["op": "focus", "on": false])
-    return true
-  }
-
-  // Mouse. Points go in the page's coordinates: from the top left.
-  // shortcut: the right button is not sent. The engine would open its own context menu, in a
-  // process with no window to anchor it; the menu has to come here as data first.
-  func mouse(_ event: NSEvent, op: String = "mouse", at: NSPoint? = nil) {
-    guard let data = encoded(event) else { return }
-    let point = at ?? convert(event.locationInWindow, from: nil)
-    engine.send(["op": op, "data": data, "x": point.x, "y": bounds.height - point.y])
-  }
-  override func mouseDown(with event: NSEvent) {
-    window?.makeFirstResponder(self)
-    mouse(event)
-  }
-  override func mouseUp(with event: NSEvent) { mouse(event) }
-  override func mouseDragged(with event: NSEvent) { mouse(event) }
-  override func mouseMoved(with event: NSEvent) { mouse(event) }
-  override func mouseExited(with event: NSEvent) { engine.send(["op": "mouse.leave"]) }
-  override func scrollWheel(with event: NSEvent) { mouse(event, op: "wheel") }
-
-  // Keyboard. The text input system runs here (dead keys, input methods, key bindings); the
-  // engine gets the key plus what came out of it, as its own view would have collected.
-  override func keyDown(with event: NSEvent) {
-    guard let data = encoded(event) else { return }
-    let hadMarked = !marked.isEmpty
-    insertedText = ""
-    commands = []
-    unmarked = false
-    handlingKey = true
-    interpretKeyEvents([event])
-    handlingKey = false
-    engine.send([
-      "op": "key", "data": data, "text": insertedText, "commands": commands, "marked": marked,
-      "sel_start": markedSelection.location, "sel_end": NSMaxRange(markedSelection),
-      "had_marked": hadMarked, "unmarked": unmarked,
-    ])
-  }
-  override func keyUp(with event: NSEvent) {
-    if let data = encoded(event) { engine.send(["op": "key", "data": data]) }
-  }
-  override func flagsChanged(with event: NSEvent) {
-    if let data = encoded(event) { engine.send(["op": "key", "data": data]) }
-  }
-  override func doCommand(by selector: Selector) {
-    if handlingKey { commands.append(NSStringFromSelector(selector)) }
-  }
-
-  // NSTextInputClient.
-  // shortcut: text that arrives outside a key press (the emoji picker, dictation) is dropped, and
-  // the input method's window appears under the view instead of at the caret; both need the
-  // engine to report the selection and its rectangle.
-  func insertText(_ string: Any, replacementRange: NSRange) {
-    if handlingKey { insertedText += (string as? NSAttributedString)?.string ?? (string as? String ?? "") }
-    marked = ""
-  }
-  func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
-    marked = (string as? NSAttributedString)?.string ?? (string as? String ?? "")
-    markedSelection = selectedRange.location == NSNotFound ? NSRange(location: 0, length: 0) : selectedRange
-  }
-  func unmarkText() {
-    marked = ""
-    unmarked = true
-  }
-  func hasMarkedText() -> Bool { !marked.isEmpty }
-  func markedRange() -> NSRange {
-    marked.isEmpty ? NSRange(location: NSNotFound, length: 0) : NSRange(location: 0, length: marked.utf16.count)
-  }
-  func selectedRange() -> NSRange { NSRange(location: NSNotFound, length: 0) }
-  func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?) -> NSAttributedString? { nil }
-  func validAttributesForMarkedText() -> [NSAttributedString.Key] { [] }
-  func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
-    window?.convertToScreen(convert(NSRect(x: 0, y: 0, width: bounds.width, height: 0), to: nil)) ?? .zero
-  }
-  func characterIndex(for point: NSPoint) -> Int { NSNotFound }
-
-  // The Edit menu.
-  @objc func cut(_ sender: Any?) { engine.send(["op": "edit", "command": "cut"]) }
-  @objc func copy(_ sender: Any?) { engine.send(["op": "edit", "command": "copy"]) }
-  @objc func paste(_ sender: Any?) { engine.send(["op": "edit", "command": "paste"]) }
-  @objc func undo(_ sender: Any?) { engine.send(["op": "edit", "command": "undo"]) }
-  @objc func redo(_ sender: Any?) { engine.send(["op": "edit", "command": "redo"]) }
-  override func selectAll(_ sender: Any?) { engine.send(["op": "edit", "command": "selectAll"]) }
-}
-
 /// The window: this app's own address bar and tab row over the engine's page.
-final class Controller: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
-  private let engine: Engine
-  private let window = NSWindow(
+@MainActor final class Controller: NSObject, NSApplicationDelegate {
+  let engine: BrowserEngine
+  let window = NSWindow(
     contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
     styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
   private let address = NSTextField()
-  private let tabs = NSSegmentedControl()
-  let page: TabView
+  private let tabRow = NSSegmentedControl()
+  /// This app's tabs, in its own order; only the selected one is in the window.
+  private(set) var pages: [BrowserTabView] = []
+  private(set) var selected = 0
+  private(set) var ato = "Default"
   let autotest: (url: String, folder: String)?
-  // What the engine said last (the autotest reads these).
-  var layers: [(context: UInt32, width: Int, height: Int)] = []
-  var tabList: [[String: Any]] = []
+  // What the engine said (the autotest reads these).
+  var layers: [(tab: String, context: Int, width: Int, height: Int)] = []
 
-  init(engine: Engine, autotest: (url: String, folder: String)? = nil) {
+  init(engine: BrowserEngine, autotest: (url: String, folder: String)? = nil) {
     self.engine = engine
     self.autotest = autotest
-    page = TabView(engine: engine)
   }
+
+  var page: BrowserTabView? { pages.indices.contains(selected) ? pages[selected] : nil }
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     let content = window.contentView!
     let size = content.bounds.size
-    func button(_ title: String, _ op: String, x: CGFloat) {
-      let button = NSButton(title: title, target: self, action: #selector(send(_:)))
-      button.identifier = NSUserInterfaceItemIdentifier(op)
+    func button(_ title: String, _ action: Selector, x: CGFloat) {
+      let button = NSButton(title: title, target: self, action: action)
       button.frame = NSRect(x: x, y: size.height - 30, width: 30, height: 24)
       button.autoresizingMask = [.minYMargin]
       content.addSubview(button)
     }
-    button("‹", "back", x: 8)
-    button("›", "forward", x: 40)
-    button("↻", "reload", x: 72)
-    button("+", "tab.new", x: size.width - 38)
+    button("‹", #selector(back), x: 8)
+    button("›", #selector(forward), x: 40)
+    button("↻", #selector(reload), x: 72)
+    button("+", #selector(newTab), x: size.width - 38)
     content.subviews.last!.autoresizingMask = [.minYMargin, .minXMargin]
     address.frame = NSRect(x: 108, y: size.height - 29, width: size.width - 154, height: 22)
     address.autoresizingMask = [.minYMargin, .width]
@@ -272,83 +57,155 @@ final class Controller: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     address.target = self
     address.action = #selector(navigate)
     content.addSubview(address)
-    tabs.frame = NSRect(x: 8, y: size.height - 60, width: size.width - 16, height: 24)
-    tabs.autoresizingMask = [.minYMargin, .width]
-    tabs.target = self
-    tabs.action = #selector(activate)
-    content.addSubview(tabs)
-    page.frame = NSRect(x: 0, y: 0, width: size.width, height: size.height - 66)
-    page.autoresizingMask = [.width, .height]
-    content.addSubview(page)
+    tabRow.frame = NSRect(x: 8, y: size.height - 60, width: size.width - 16, height: 24)
+    tabRow.autoresizingMask = [.minYMargin, .width]
+    tabRow.target = self
+    tabRow.action = #selector(activate)
+    content.addSubview(tabRow)
 
-    engine.onEvent = { [weak self] in self?.handle($0) }
-    engine.onClosed = {
-      print("engine closed the socket")
-      NSApp.terminate(nil)
+    engine.onStateChange = { [weak self] state in self?.stateChanged(state) }
+    engine.onEvent = { [weak self] name, message in self?.handle(name, message) }
+    engine.onApproval = { request in
+      let alert = NSAlert()
+      alert.messageText = request.title
+      alert.informativeText = request.detail
+      alert.addButton(withTitle: "Permitir")
+      alert.addButton(withTitle: "Não permitir")
+      if request.offerAlways { alert.addButton(withTitle: "Permitir sempre") }
+      switch alert.runModal() {
+      case .alertFirstButtonReturn: return .allow
+      case .alertThirdButtonReturn: return .always
+      default: return .deny
+      }
     }
-    engine.send(["op": "attach", "width": Int(page.bounds.width), "height": Int(page.bounds.height)])
 
     window.title = "Exemplo do embed"
     window.center()
-    window.makeFirstResponder(page)
     if autotest != nil {
       // Behind everything and never active: the person at this Mac keeps typing where they were.
       window.orderBack(nil)
-      Task { @MainActor in await runAutotest() }
     } else {
       window.makeKeyAndOrderFront(nil)
       NSApp.activate(ignoringOtherApps: true)
     }
+    Task { await startEngine() }
   }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+  func applicationWillTerminate(_ notification: Notification) { engine.stop() }
 
-  private func handle(_ event: [String: Any]) {
-    switch event["event"] as? String {
-    case "layer":
-      // The line to look for on the first run: the engine is drawing the tab for us.
-      print("layer context=\(event["context"] ?? "?") \(event["width"] ?? "?")x\(event["height"] ?? "?") scale=\(event["scale"] ?? "?")")
-      if let context = (event["context"] as? NSNumber)?.uint32Value {
-        page.show(context: context)
-        layers.append((context, event["width"] as? Int ?? 0, event["height"] as? Int ?? 0))
+  private func startEngine() async {
+    await engine.start()
+    guard case .ready = engine.state, let connection = engine.connection else { return }
+    do {
+      ato = try await connection.atos().first?.id ?? ato
+      let tab = try await connection.openTab(ato: ato)
+      try await engine.tabs.load(ato: ato)
+      add(tab)
+    } catch {
+      print("could not open a tab: \(error)")
+    }
+    if autotest != nil { await runAutotest() }
+  }
+
+  private func stateChanged(_ state: BrowserEngine.State) {
+    print("state \(state)")
+    switch state {
+    case .starting: window.title = "Abrindo o navegador…"
+    case .ready(_, let browser): window.title = "Exemplo do embed · \(browser)"
+    case .versionTooOld: window.title = "Atualize o navegador"
+    case .failed(let reason): window.title = "O navegador não abriu: \(reason)"
+    case .stopped: break
+    case .exited:
+      // The old tab ids are gone with the engine: drop the views and start over.
+      pages.forEach { $0.removeFromSuperview() }
+      pages = []
+      refresh()
+      window.title = "Reabrindo o navegador…"
+      if autotest != nil {
+        print("FAIL the engine went away")
+        NSApp.terminate(nil)
+      } else {
+        Task { await startEngine() }
       }
-    case "tabs":
-      let list = event["tabs"] as? [[String: Any]] ?? []
-      tabList = list
-      print("tabs \(list.map { ($0["active"] as? Bool == true ? "*" : "") + ($0["title"] as? String ?? "") })")
-      tabs.segmentCount = list.count
-      for (index, tab) in list.enumerated() {
-        tabs.setLabel(String((tab["title"] as? String ?? "").prefix(24)), forSegment: index)
-        if tab["active"] as? Bool == true {
-          tabs.selectedSegment = index
-          if address.currentEditor() == nil { address.stringValue = tab["url"] as? String ?? "" }
-        }
-      }
-    default:
-      print("event \(event)")
     }
   }
 
-  @objc private func send(_ sender: NSButton) {
-    engine.send(["op": sender.identifier!.rawValue])
+  private func handle(_ name: String, _ message: [String: JSON]) {
+    switch name {
+    case "view.layer":
+      // The line to look for on the first run: the engine is drawing the tab for us.
+      print("layer tab=\(message["tab"]?.string ?? "?") context=\(message["context"]?.int ?? 0) \(message["width"]?.int ?? 0)x\(message["height"]?.int ?? 0) scale=\(message["scale"]?.double ?? 0)")
+      layers.append((message["tab"]?.string ?? "", message["context"]?.int ?? 0, message["width"]?.int ?? 0, message["height"]?.int ?? 0))
+    case "view.tab", "view.closed":
+      if name == "view.closed", let index = pages.firstIndex(where: { $0.tab == message["tab"]?.string }) {
+        pages[index].removeFromSuperview()
+        pages.remove(at: index)
+        select(min(selected, pages.count - 1))
+      }
+      refresh()
+    default:
+      print("event \(name) \(message)")
+    }
   }
+
+  func add(_ tab: String) {
+    pages.append(BrowserTabView(engine: engine, tab: tab))
+    select(pages.count - 1)
+  }
+
+  func select(_ index: Int) {
+    page?.removeFromSuperview()
+    selected = index
+    if let page {
+      let content = window.contentView!.bounds
+      page.frame = NSRect(x: 0, y: 0, width: content.width, height: content.height - 66)
+      page.autoresizingMask = [.width, .height]
+      window.contentView!.addSubview(page)
+      window.makeFirstResponder(page)
+    }
+    refresh()
+  }
+
+  private func refresh() {
+    tabRow.segmentCount = pages.count
+    for (index, page) in pages.enumerated() {
+      tabRow.setLabel(String((engine.tabs[page.tab]?.title ?? "").prefix(24)), forSegment: index)
+    }
+    if pages.indices.contains(selected) { tabRow.selectedSegment = selected }
+    if let page, address.currentEditor() == nil { address.stringValue = engine.tabs[page.tab]?.url ?? "" }
+  }
+
+  private func run(_ op: @escaping (BrowserConnection, String) async throws -> Void) {
+    guard let connection = engine.connection, let tab = page?.tab else { return }
+    Task {
+      do { try await op(connection, tab) } catch { print("error \(error)") }
+    }
+  }
+
+  @objc private func back() { run { try await $0.back($1) } }
+  @objc private func forward() { run { try await $0.forward($1) } }
+  @objc private func reload() { run { try await $0.reload($1) } }
   @objc private func navigate() {
-    engine.send(["op": "navigate", "text": address.stringValue])
-    window.makeFirstResponder(page)
+    let text = address.stringValue
+    run { try await $0.navigate($1, to: text) }
+    if let page { window.makeFirstResponder(page) }
   }
-  @objc private func activate() {
-    engine.send(["op": "tab.activate", "index": tabs.selectedSegment])
-    window.makeFirstResponder(page)
+  @objc func newTab() {
+    guard let connection = engine.connection else { return }
+    Task {
+      do { add(try await connection.openTab(ato: ato)) } catch { print("error \(error)") }
+    }
   }
+  @objc private func activate() { select(tabRow.selectedSegment) }
 }
 
 // MARK: - Autotest
 
-@MainActor extension Controller {
+extension Controller {
   /// What teste.html reports in its title: {"c":clicks,"h":hovered,"y":scrollY,"v":input,"k":key,"w":width}.
   private var state: [String: Any] {
-    guard let title = tabList.first(where: { $0["active"] as? Bool == true })?["title"] as? String,
-      title.hasPrefix("T "),
+    guard let tab = page?.tab, let title = engine.tabs[tab]?.title, title.hasPrefix("T "),
       let object = try? JSONSerialization.jsonObject(with: Data(title.dropFirst(2).utf8)) as? [String: Any]
     else { return [:] }
     return object
@@ -380,15 +237,25 @@ final class Controller: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
 
   /// `at` is in the page's coordinates (from the top left), as in teste.html's CSS.
   private func mouseEvent(_ type: NSEvent.EventType, at: NSPoint, clicks: Int = 1) -> NSEvent {
-    let inWindow = page.convert(NSPoint(x: at.x, y: page.bounds.height - at.y), to: nil)
+    let inWindow = page!.convert(NSPoint(x: at.x, y: page!.bounds.height - at.y), to: nil)
     return NSEvent.mouseEvent(
       with: type, location: inWindow, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
       windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: clicks, pressure: 1)!
   }
   private func click(_ at: NSPoint) {
-    page.mouseMoved(with: mouseEvent(.mouseMoved, at: at, clicks: 0))
-    page.mouseDown(with: mouseEvent(.leftMouseDown, at: at))
-    page.mouseUp(with: mouseEvent(.leftMouseUp, at: at))
+    page!.mouseMoved(with: mouseEvent(.mouseMoved, at: at, clicks: 0))
+    page!.mouseDown(with: mouseEvent(.leftMouseDown, at: at))
+    page!.mouseUp(with: mouseEvent(.leftMouseUp, at: at))
+  }
+  /// The wheel goes as the message the view sends: a synthetic scroll event carries the real
+  /// pointer's position, not a point in this view.
+  private func wheel(_ delta: Int32, at: NSPoint) {
+    guard let scroll = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: delta, wheel2: 0, wheel3: 0),
+      let data = scroll.data as Data?
+    else { return }
+    engine.connection?.post(op: "view.wheel", params: [
+      "tab": .string(page!.tab), "data": .string(data.base64EncodedString()), "x": .number(at.x), "y": .number(at.y),
+    ])
   }
   private func keyEvent(_ type: NSEvent.EventType, _ characters: String, _ code: UInt16, _ flags: NSEvent.ModifierFlags = []) -> NSEvent {
     NSEvent.keyEvent(
@@ -398,19 +265,25 @@ final class Controller: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
   }
   /// Through the view's real handlers, so the text input system here takes part.
   private func press(_ characters: String, _ code: UInt16, _ flags: NSEvent.ModifierFlags = []) async {
-    page.keyDown(with: keyEvent(.keyDown, characters, code, flags))
-    page.keyUp(with: keyEvent(.keyUp, characters, code, flags))
+    page!.keyDown(with: keyEvent(.keyDown, characters, code, flags))
+    page!.keyUp(with: keyEvent(.keyUp, characters, code, flags))
     try? await Task.sleep(nanoseconds: 80_000_000)
   }
   private func value() -> String { state["v"] as? String ?? "" }
+  private func encoded(_ event: NSEvent) -> String? { (event.cgEvent?.data as Data?)?.base64EncodedString() }
 
   func runAutotest() async {
+    guard let first = page, let connection = engine.connection else {
+      check("1 layer", false, "no tab (state \(engine.state))")
+      NSApp.terminate(nil)
+      return
+    }
     let url = autotest!.url
     // 1. The engine draws the tab for us.
-    check("1 layer", await until(10) { !self.layers.isEmpty }, "\(layers.last.map { "\($0)" } ?? "none")")
+    check("1 layer", await until(10) { self.layers.contains { $0.tab == first.tab } }, "\(layers.last.map { "\($0)" } ?? "none")")
 
     // 5a. Navigate by address.
-    engine.send(["op": "navigate", "text": url])
+    try? await connection.navigate(first.tab, to: url)
     check("5a navigate", await until(10) { !self.state.isEmpty }, "\(state)")
     // 2. Does it show here? Only the picture answers.
     await capture("1-pagina")
@@ -418,26 +291,18 @@ final class Controller: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     // 3. Click, hover, wheel.
     click(NSPoint(x: 80, y: 40))
     check("3a click", await until { self.state["c"] as? Int == 1 }, "c=\(state["c"] ?? "?")")
-    page.mouseMoved(with: mouseEvent(.mouseMoved, at: NSPoint(x: 260, y: 40), clicks: 0))
+    first.mouseMoved(with: mouseEvent(.mouseMoved, at: NSPoint(x: 260, y: 40), clicks: 0))
     check("3b hover", await until { self.state["h"] as? Int == 1 }, "h=\(state["h"] ?? "?")")
     await capture("2-hover")
     check("3b hover stays", state["o"] == nil, "mouseout=\(state["o"] ?? 0)")
-    if let scroll = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: -120, wheel2: 0, wheel3: 0),
-      let event = NSEvent(cgEvent: scroll)
-    {
-      page.mouse(event, op: "wheel", at: NSPoint(x: 400, y: 300))
-    }
+    wheel(-120, at: NSPoint(x: 400, y: 300))
     check("3c wheel", await until { (self.state["y"] as? Int ?? 0) > 0 }, "y=\(state["y"] ?? "?")")
-    if let scroll = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: 2000, wheel2: 0, wheel3: 0),
-      let event = NSEvent(cgEvent: scroll)
-    {
-      page.mouse(event, op: "wheel", at: NSPoint(x: 400, y: 300))
-    }
+    wheel(2000, at: NSPoint(x: 400, y: 300))
     _ = await until { self.state["y"] as? Int == 0 }
 
     // 4. Typing: click the field, then keys through the view's keyDown.
     window.makeFirstResponder(nil)
-    window.makeFirstResponder(page)
+    window.makeFirstResponder(first)
     click(NSPoint(x: 100, y: 115))
     await press("a", 0)
     await press("b", 11)
@@ -449,12 +314,18 @@ final class Controller: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     await press("\u{7F}", 51)  // delete (Backspace)
     check("4c backspace", await until { self.value() == "abc" }, "v=\(value())")
     // A dead key and its letter, as the text input system reports them (´ then a = á). Sent as
-    // the messages TabView would send: a synthetic NSEvent cannot make the system compose.
+    // the messages BrowserTabView would send: a synthetic NSEvent cannot make the system compose.
     if let dead = encoded(keyEvent(.keyDown, "", 39)), let letter = encoded(keyEvent(.keyDown, "a", 0)) {
-      engine.send(["op": "key", "data": dead, "text": "", "commands": [String](), "marked": "´", "sel_start": 1, "sel_end": 1, "had_marked": false, "unmarked": false])
+      connection.post(op: "view.key", params: [
+        "tab": .string(first.tab), "data": .string(dead), "text": "", "commands": [], "marked": "´", "sel_start": 1,
+        "sel_end": 1, "had_marked": false, "unmarked": false,
+      ])
       _ = await until(1) { self.value() == "ab´c" }
       let during = value()
-      engine.send(["op": "key", "data": letter, "text": "á", "commands": [String](), "marked": "", "sel_start": 0, "sel_end": 0, "had_marked": true, "unmarked": false])
+      connection.post(op: "view.key", params: [
+        "tab": .string(first.tab), "data": .string(letter), "text": "á", "commands": [], "marked": "", "sel_start": 0,
+        "sel_end": 0, "had_marked": true, "unmarked": false,
+      ])
       check("4d accent", await until { self.value() == "abác" }, "composing=\(during) v=\(value())")
     }
     await press("\r", 36)
@@ -468,17 +339,19 @@ final class Controller: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     await capture("4-menor")
 
     // 5b. A second tab, then back to the first.
-    engine.send(["op": "tab.new"])
-    check("5b new tab", await until { self.tabList.count == 2 && self.tabList[1]["active"] as? Bool == true }, "tabs=\(tabList.count)")
-    engine.send(["op": "navigate", "text": url + "?segunda"])
-    _ = await until(10) { !self.state.isEmpty }
-    click(NSPoint(x: 80, y: 40))
-    click(NSPoint(x: 80, y: 40))
-    check("5c second tab takes input", await until { self.state["c"] as? Int == 2 }, "c=\(state["c"] ?? "?")")
-    await capture("5-segunda-aba")
+    newTab()
+    check("5b new tab", await until { self.pages.count == 2 && self.selected == 1 && self.engine.tabs.tabs(in: self.ato).count == 2 }, "tabs=\(engine.tabs.tabs(in: ato).count)")
+    if let second = pages.last, pages.count == 2 {
+      try? await connection.navigate(second.tab, to: url + "?segunda")
+      _ = await until(10) { !self.state.isEmpty }
+      click(NSPoint(x: 80, y: 40))
+      click(NSPoint(x: 80, y: 40))
+      check("5c second tab takes input", await until { self.state["c"] as? Int == 2 }, "c=\(state["c"] ?? "?")")
+      await capture("5-segunda-aba")
+    }
     let contexts = Set(layers.map { $0.context }).count
-    engine.send(["op": "tab.activate", "index": 0])
-    check("5d switch back", await until { self.tabList.first?["active"] as? Bool == true && self.value() == "abác" }, "v=\(value()) contexts seen=\(contexts)")
+    select(0)
+    check("5d switch back", await until { self.selected == 0 && self.value() == "abác" }, "v=\(value()) contexts seen=\(contexts)")
     await capture("6-primeira-aba")
 
     // For the memory numbers: autoteste.sh measures while this line is the last one printed.
@@ -490,13 +363,13 @@ final class Controller: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
 }
 
 /// Key equivalents (⌘C, ⌘V, ⌘Q…) only exist through a menu.
-func makeMenu() -> NSMenu {
+@MainActor func makeMenu() -> NSMenu {
   let main = NSMenu()
   let app = NSMenu()
   app.addItem(withTitle: "Encerrar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
   let edit = NSMenu(title: "Editar")
-  edit.addItem(withTitle: "Desfazer", action: #selector(TabView.undo(_:)), keyEquivalent: "z")
-  edit.addItem(withTitle: "Refazer", action: #selector(TabView.redo(_:)), keyEquivalent: "Z")
+  edit.addItem(withTitle: "Desfazer", action: #selector(BrowserTabView.undo(_:)), keyEquivalent: "z")
+  edit.addItem(withTitle: "Refazer", action: #selector(BrowserTabView.redo(_:)), keyEquivalent: "Z")
   edit.addItem(withTitle: "Recortar", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
   edit.addItem(withTitle: "Copiar", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
   edit.addItem(withTitle: "Colar", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
@@ -509,39 +382,53 @@ func makeMenu() -> NSMenu {
   return main
 }
 
-func selftest() {
+@MainActor func selftest() {
   // The private class this whole path stands on, and the property the context id goes in.
-  guard let host = makeLayerHost(context: 42) else { fatalError("no CALayerHost class") }
+  guard let type = NSClassFromString("CALayerHost") as? CALayer.Type else { fatalError("no CALayerHost class") }
+  let host = type.init()
+  host.setValue(NSNumber(value: 42), forKey: "contextId")
   precondition((host.value(forKey: "contextId") as? NSNumber)?.uint32Value == 42, "contextId does not hold")
   // An NSEvent survives the trip as CGEvent data.
   let key = NSEvent.keyEvent(
     with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil,
     characters: "a", charactersIgnoringModifiers: "a", isARepeat: false, keyCode: 0)!
-  guard let data = encoded(key), let bytes = Data(base64Encoded: data), let cg = CGEvent(withDataAllocator: nil, data: bytes as CFData),
+  guard let data = key.cgEvent?.data as Data?, let cg = CGEvent(withDataAllocator: nil, data: data as CFData),
     let back = NSEvent(cgEvent: cg)
   else { fatalError("NSEvent does not round-trip as CGEvent data") }
   precondition(back.type == .keyDown && back.keyCode == 0, "the key event came back different")
-  // One message is one line, whatever is in it.
-  let line = Engine.line(["op": "navigate", "text": "a\nb"])
-  precondition(line.last == 0x0A && line.dropLast().firstIndex(of: 0x0A) == nil, "a message must be one line")
+  // The kit refuses a socket path the system cannot take, before starting anything.
+  do {
+    try BrowserConnection.checkSocketPath("/" + String(repeating: "a", count: 104))
+    fatalError("a 105-byte socket path was accepted")
+  } catch {
+    precondition(error.code == BrowserError.socketPathTooLong)
+  }
   print("ok")
 }
 
 let arguments = CommandLine.arguments
 if arguments.count == 2, arguments[1] == "--selftest" {
   selftest()
-} else if arguments.count == 2 || (arguments.count == 5 && arguments[1] == "--autotest"),
-  let engine = Engine(path: arguments[arguments.count == 2 ? 1 : 2])
-{
+} else if arguments.count == 2 || arguments.count == 3 || (arguments.count >= 6 && arguments[1] == "--autotest") {
   setvbuf(stdout, nil, _IOLBF, 0)  // lines reach a log file as they happen
+  let auto = arguments[1] == "--autotest"
+  let executable = URL(fileURLWithPath: arguments[auto ? 2 : 1])
+  let data = arguments.count >= 3
+    ? URL(fileURLWithPath: arguments[auto ? 3 : 2])
+    : FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("BrowserKitExemplo")
+  // Unsigned during development: the engine has to be told to accept it.
+  let engine = BrowserEngine(
+    executable: executable, dataDirectory: data,
+    arguments: auto ? Array(arguments.dropFirst(6)) : ["--agens-accept-unsigned", "--use-mock-keychain", "--no-first-run"])
   let app = NSApplication.shared
-  let controller = Controller(engine: engine, autotest: arguments.count == 5 ? (arguments[3], arguments[4]) : nil)
+  let controller = Controller(engine: engine, autotest: auto ? (arguments[4], arguments[5]) : nil)
   app.delegate = controller
   // The autotest never becomes the active app (no Dock icon either).
-  app.setActivationPolicy(controller.autotest == nil ? .regular : .accessory)
+  app.setActivationPolicy(auto ? .accessory : .regular)
   app.mainMenu = makeMenu()
   app.run()
 } else {
-  FileHandle.standardError.write(Data("usage: exemplo <socket> | --autotest <socket> <page url> <folder> | --selftest (is the engine running with --agens-embed-socket?)\n".utf8))
+  FileHandle.standardError.write(Data(
+    "usage: exemplo <engine executable> [data folder] | --autotest <engine executable> <data folder> <page url> <out folder> [engine args...] | --selftest\n".utf8))
   exit(1)
 }
