@@ -1,9 +1,9 @@
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
 new file mode 100644
-index 0000000000..cf14158a03
+index 0000000000..3f067b4cc9
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embed.h
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,151 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The boundary between the engine and any interface (the browser's own chrome today, the Agens
 +// app later). Plain C on purpose: no Chromium or C++ types cross it, Swift imports it as is, and
@@ -116,6 +116,27 @@ index 0000000000..cf14158a03
 +void agens_window_download_open(AgensWindow* window, int index);       // the file
 +void agens_window_download_show(AgensWindow* window, int index);       // in the Finder
 +void agens_window_download_cancel(AgensWindow* window, int index);
++
++// --- Settings (the browser's own; not part of what the Agens app embeds).
++
++// Light, dark or follow the system, for the window and for pages (prefers-color-scheme).
++typedef enum { kAgensModeSystem, kAgensModeLight, kAgensModeDark } AgensColorMode;
++void agens_window_set_color_mode(AgensWindow* window, AgensColorMode mode);
++AgensColorMode agens_window_color_mode(AgensWindow* window);
++
++typedef struct {
++  const char* name;
++  const char* keyword;  // identifies the engine
++  int is_default;
++} AgensSearchEngine;
++typedef void (*AgensSearchEnginesFn)(void* context, const AgensSearchEngine* engines, int count);
++// Calls `fn` once, now, with the built-in engines (and the current default).
++void agens_window_search_engines(AgensWindow* window, AgensSearchEnginesFn fn, void* context);
++void agens_window_set_search_engine(AgensWindow* window, const char* keyword);
++
++void agens_window_rename_ato(AgensWindow* window, int index, const char* name);
++// Opens a page (e.g. one of Chromium's settings pages) in a new tab of this window.
++void agens_window_open_url(AgensWindow* window, const char* url);
 +
 +// Implemented by the interface. The chrome is a platform view (NSView* on macOS) the size of the
 +// window, returned retained; it must let clicks through where the page sits. The engine puts the
@@ -548,10 +569,10 @@ index 0000000000..3a513e84ee
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
 new file mode 100644
-index 0000000000..041b4e541e
+index 0000000000..87d73812a4
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.cc
-@@ -0,0 +1,174 @@
+@@ -0,0 +1,229 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The embed API (agens_embed.h) on top of AgensWindow. Same code on every platform.
 +
@@ -559,6 +580,9 @@ index 0000000000..041b4e541e
 +
 +#include "chrome/browser/agens/embed/agens_window.h"
 +#include "build/build_config.h"
++#include "chrome/browser/themes/theme_service.h"
++#include "chrome/browser/themes/theme_service_factory.h"
++#include "ui/base/window_open_disposition.h"
 +#include "ui/views/view.h"
 +
 +#include "base/containers/flat_set.h"
@@ -618,6 +642,58 @@ index 0000000000..041b4e541e
 +}
 +void agens_window_download_cancel(AgensWindow* w, int index) {
 +  if (download::DownloadItem* item = w->DownloadAt(index)) item->Cancel(/*user_cancel=*/true);
++}
++void agens_window_set_color_mode(AgensWindow* w, AgensColorMode mode) {
++  const auto scheme = mode == kAgensModeLight  ? ThemeService::BrowserColorScheme::kLight
++                      : mode == kAgensModeDark ? ThemeService::BrowserColorScheme::kDark
++                                               : ThemeService::BrowserColorScheme::kSystem;
++  // One choice for the whole browser: every loaded ato follows it.
++  for (Profile* profile : g_browser_process->profile_manager()->GetLoadedProfiles()) {
++    if (ThemeService* theme = ThemeServiceFactory::GetForProfile(profile)) theme->SetBrowserColorScheme(scheme);
++  }
++}
++AgensColorMode agens_window_color_mode(AgensWindow* w) {
++  ThemeService* theme = ThemeServiceFactory::GetForProfile(w->browser->GetProfile());
++  switch (theme ? theme->GetBrowserColorScheme() : ThemeService::BrowserColorScheme::kSystem) {
++    case ThemeService::BrowserColorScheme::kLight: return kAgensModeLight;
++    case ThemeService::BrowserColorScheme::kDark: return kAgensModeDark;
++    default: return kAgensModeSystem;
++  }
++}
++void agens_window_search_engines(AgensWindow* w, AgensSearchEnginesFn fn, void* context) {
++  TemplateURLService* service = TemplateURLServiceFactory::GetForProfile(w->browser->GetProfile());
++  std::vector<std::string> names, keywords;
++  std::vector<TemplateURL*> shown;
++  const TemplateURL* current = service ? service->GetDefaultSearchProvider() : nullptr;
++  if (service && service->loaded()) {
++    for (TemplateURL* t : service->GetTemplateURLs()) {
++      if (t->prepopulate_id() > 0 || t == current) shown.push_back(t);  // not the ones sites add
++    }
++  }
++  for (TemplateURL* t : shown) {
++    names.push_back(base::UTF16ToUTF8(t->short_name()));
++    keywords.push_back(base::UTF16ToUTF8(t->keyword()));
++  }
++  std::vector<AgensSearchEngine> out;
++  for (size_t i = 0; i < shown.size(); ++i) {
++    out.push_back({names[i].c_str(), keywords[i].c_str(), shown[i] == current});
++  }
++  fn(context, out.data(), static_cast<int>(out.size()));
++}
++void agens_window_set_search_engine(AgensWindow* w, const char* keyword) {
++  TemplateURLService* service = TemplateURLServiceFactory::GetForProfile(w->browser->GetProfile());
++  if (!service || !service->loaded() || !keyword) return;
++  if (TemplateURL* t = service->GetTemplateURLForKeyword(base::UTF8ToUTF16(keyword))) {
++    service->SetUserSelectedDefaultSearchProvider(t);
++  }
++}
++void agens_window_rename_ato(AgensWindow* w, int index, const char* name) {
++  std::vector<ProfileAttributesEntry*> atos = w->Atos();
++  if (index < 0 || static_cast<size_t>(index) >= atos.size() || !name || !name[0]) return;
++  atos[index]->SetLocalProfileName(base::UTF8ToUTF16(name), /*is_default_name=*/false);
++}
++void agens_window_open_url(AgensWindow* w, const char* url) {
++  if (url) w->browser->OpenGURL(GURL(url), WindowOpenDisposition::NEW_FOREGROUND_TAB);
 +}
 +void agens_window_suggest(AgensWindow* w, const char* text) {
 +  w->Suggest(text ? text : "");
@@ -932,10 +1008,10 @@ index 0000000000..64f981ee02
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..cd4611a3c7
+index 0000000000..e97b272f3b
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,1574 @@
+@@ -0,0 +1,1909 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -965,20 +1041,33 @@ index 0000000000..cd4611a3c7
 +  return [[appearance bestMatchFromAppearancesWithNames:@[ NSAppearanceNameAqua, NSAppearanceNameDarkAqua ]]
 +      isEqualToString:NSAppearanceNameDarkAqua];
 +}
++// Themes (prototype data-theme): 0 Grafite, 1 Brasa (warm, dark only). Vidro comes later.
++static NSString* const kThemeKey = @"AgensTheme";
++static int g_theme = -1;
++static int Theme() {
++  if (g_theme < 0) g_theme = (int)[NSUserDefaults.standardUserDefaults integerForKey:kThemeKey];
++  return g_theme;
++}
 +struct Token {
-+  unsigned dark, light;
-+  NSColor* color() const {
-+    unsigned d = dark, l = light;
-+    return [NSColor colorWithName:nil
-+                  dynamicProvider:^NSColor*(NSAppearance* a) { return Hex(IsDark(a) ? d : l); }];
++  unsigned dark, light, brasa;
++  unsigned pick(NSAppearance* a) const {
++    if (!IsDark(a)) return light;
++    return Theme() == 1 ? brasa : dark;
 +  }
-+  unsigned rgb(NSView* v) const { return IsDark(v.effectiveAppearance) ? dark : light; }
++  NSColor* color() const {
++    Token t = *this;
++    return [NSColor colorWithName:nil dynamicProvider:^NSColor*(NSAppearance* a) { return Hex(t.pick(a)); }];
++  }
++  unsigned rgb(NSView* v) const { return pick(v.effectiveAppearance); }
 +};
-+static const Token kBg{0x0B0B0D, 0xFAFAFB}, kSideBg{0x111114, 0xF1F1F4}, kRaise{0x16161A, 0xFFFFFF},
-+    kSunk{0x0F0F12, 0xE9E9ED}, kLine{0x24242A, 0xE0E0E5}, kLineStrong{0x3A3A42, 0xCFCFD6},
-+    kInk{0xF2F2F4, 0x16161A}, kMute{0x9A9AA4, 0x5C5C66}, kDim{0x8A8A94, 0x71717B},
-+    kHover{0x18181C, 0xE8E8EC}, kFloat{0x1A1A1F, 0xFFFFFF}, kRaise2{0x26262D, 0xE2E2E7},
-+    kLight3{0xFFC98A, 0xE8893A};
++static const Token kBg{0x0B0B0D, 0xFAFAFB, 0x110D0A}, kSideBg{0x111114, 0xF1F1F4, 0x16110D},
++    kRaise{0x16161A, 0xFFFFFF, 0x1E1712}, kSunk{0x0F0F12, 0xE9E9ED, 0x130E0B},
++    kLine{0x24242A, 0xE0E0E5, 0x2C221B}, kLineStrong{0x3A3A42, 0xCFCFD6, 0x47372A},
++    kInk{0xF2F2F4, 0x16161A, 0xF8F0E7}, kMute{0x9A9AA4, 0x5C5C66, 0xB6A899},
++    kDim{0x8A8A94, 0x71717B, 0xA09182}, kHover{0x18181C, 0xE8E8EC, 0x211913},
++    kFloat{0x1A1A1F, 0xFFFFFF, 0x241B15}, kRaise2{0x26262D, 0xE2E2E7, 0x2A2018},
++    kLight3{0xFFC98A, 0xE8893A, 0xFFC98A};
++static NSString* const kThemeChanged = @"AgensThemeChanged";
 +
 +// Layers take a CGColor, which doesn't follow the appearance by itself.
 +static CGColorRef CG(const Token& t, NSView* v) {
@@ -1012,6 +1101,17 @@ index 0000000000..cd4611a3c7
 +static NSString* const kIconStar = @"<path d='M10 3.6l1.9 4 4.3.5-3.2 2.9.9 4.3L10 13.1l-3.9 2.2.9-4.3-3.2-2.9 4.3-.5z'/>";
 +static NSString* const kIconClock = @"<circle cx='10' cy='10' r='6.5'/><path d='M10 6.5V10l2.5 1.5'/>";
 +static NSString* const kIconDown = @"<path d='M10 4v8.5M6.5 9l3.5 3.5L13.5 9M4.5 15.5h11'/>";
++static NSString* const kIconAparencia = @"<circle cx='10' cy='10' r='6.5'/><path d='M10 3.5a6.5 6.5 0 0 0 0 13z' fill='#000'/>";
++static NSString* const kIconSearch = @"<path d='M13.5 8.8A4.8 4.8 0 1 1 3.9 8.8A4.8 4.8 0 1 1 13.5 8.8Z M12.3 12.3L16.3 16.3'/>";
++static NSString* const kIconAtos = @"<rect x='3' y='4' width='6' height='6' rx='2'/><rect x='11' y='4' width='6' height='6' rx='2'/><rect x='3' y='12' width='6' height='4.5' rx='2'/><rect x='11' y='12' width='6' height='4.5' rx='2'/>";
++static NSString* const kIconLock = @"<rect x='4.5' y='9' width='11' height='8' rx='2.5'/><path d='M7 9V6.5a3 3 0 0 1 6 0V9'/>";
++static NSString* const kIconBlocker = @"<path d='M10 3l6 2.5v4.2c0 3.4-2.5 5.9-6 7.3-3.5-1.4-6-3.9-6-7.3V5.5z'/><path d='M7.5 7.8l5 5'/>";
++static NSString* const kIconPermissions = @"<path d='M10 3l6 2.5v4.2c0 3.4-2.5 5.9-6 7.3-3.5-1.4-6-3.9-6-7.3V5.5z'/><path d='M7.6 10.2l1.7 1.7 3.2-3.4'/>";
++static NSString* const kIconPasswords = @"<rect x='3' y='6.5' width='14' height='7' rx='2.5'/><path d='M6.5 10h.01M9 10h.01M11.5 10h.01M14 10h.01'/>";
++static NSString* const kIconLanguages = @"<circle cx='10' cy='10' r='6.5'/><path d='M3.5 10h13M10 3.5c2 2 2.8 4.2 2.8 6.5s-.8 4.5-2.8 6.5c-2-2-2.8-4.2-2.8-6.5s.8-4.5 2.8-6.5z'/>";
++static NSString* const kIconAccessibility = @"<circle cx='10' cy='10' r='6.5'/><path d='M10 6.8h.01M7.2 8.6h5.6M10 8.6v2.4l-1.8 3M10 11l1.8 3'/>";
++static NSString* const kIconExtensions = @"<rect x='3.5' y='3.5' width='13' height='13' rx='3.5'/><path d='M10 7v6M7 10h6'/>";
++static NSString* const kIconAbout = @"<circle cx='10' cy='10' r='6.5'/><path d='M10 9v4.5M10 6.5h.01'/>";
 +static NSString* const kIconSettings =
 +    @"<circle cx='10' cy='10' r='2.6'/><path d='M10 3v2M10 15v2M3 10h2M15 10h2M5 5l1.4 1.4M13.6 13.6L15 "
 +    @"15M5 15l1.4-1.4M13.6 6.4L15 5'/>";
@@ -1550,7 +1650,7 @@ index 0000000000..cd4611a3c7
 +  CGFloat w = NSWidth(self.bounds);
 +  _icon.frame = NSMakeRect(10, 8, 17, 17);
 +  _key.frame = NSMakeRect(w - 10 - 60, 9, 60, 16);
-+  _title.frame = NSMakeRect(37, 8, w - 37 - 70, 18);
++  _title.frame = NSMakeRect(37, 8, w - 37 - (_key.stringValue.length ? 70 : 10), 18);
 +}
 +- (void)refresh {
 +  self.layer.backgroundColor = self.hovered ? CG(kRaise, self) : NSColor.clearColor.CGColor;
@@ -1663,9 +1763,296 @@ index 0000000000..cd4611a3c7
 +@end
 +
 +// ---------------------------------------------------------------------------------------------
++// Configurações (prototype .settings): a window with the section list on the left (252 pt, 36 pt
++// rows, Agens icons) and the section on the right. v1 has Aparência, Busca and Atos of our own;
++// the other sections open Chromium's page for now.
++
++// What the settings window needs from a browser window's chrome.
++@protocol AgensSettingsHost <NSObject>
++- (BOOL)collapsed;
++- (void)toggleSidebar;
++- (NSArray<NSString*>*)atoNamesForSettings;
++@end
++
++@interface AgensSettings : NSWindowController <NSWindowDelegate, NSTextFieldDelegate>
+++ (void)showFor:(AgensWindow*)window collapsed:(BOOL)collapsed chrome:(id<AgensSettingsHost>)chrome;
+++ (void)forget:(AgensWindow*)window;
++@end
++
++@interface AgensFlippedView : NSView
++@end
++@implementation AgensFlippedView
++- (BOOL)isFlipped {
++  return YES;
++}
++@end
++
++static AgensSettings* g_settings;
++
++@implementation AgensSettings {
++  AgensWindow* _browser;  // the window that opened it; cleared when it closes (detach)
++  __weak id<AgensSettingsHost> _chrome;
++  AgensFlippedView* _nav;
++  AgensFlippedView* _pane;
++  NSMutableArray<AgensMenuRow*>* _navRows;
++  NSString* _section;
++  std::vector<std::string> _engineKeywords;
++  NSPopUpButton* _engines;
++}
++
++struct Section {
++  NSString* key;
++  NSString* title;
++  NSString* icon;
++  const char* chromium;  // nullptr: ours
++};
++static const Section kSections[] = {
++    {@"aparencia", @"Aparência", kIconAparencia, nullptr},
++    {@"busca", @"Busca", kIconSearch, nullptr},
++    {@"atos", @"Atos", kIconAtos, nullptr},
++    {@"privacidade", @"Privacidade e segurança", kIconLock, "chrome://settings/privacy"},
++    {@"permissoes", @"Permissões dos sites", kIconPermissions, "chrome://settings/content"},
++    {@"senhas", @"Senhas e preenchimento", kIconPasswords, "chrome://password-manager/passwords"},
++    {@"downloads", @"Downloads", kIconDown, "chrome://settings/downloads"},
++    {@"idiomas", @"Idiomas", kIconLanguages, "chrome://settings/languages"},
++    {@"acessibilidade", @"Acessibilidade e página", kIconAccessibility, "chrome://settings/accessibility"},
++    {@"extensoes", @"Extensões", kIconExtensions, "chrome://extensions"},
++    {@"sistema", @"Sistema", kIconSettings, "chrome://settings/system"},
++    {@"sobre", @"Sobre", kIconAbout, "chrome://settings/help"},
++};
++
+++ (void)showFor:(AgensWindow*)window collapsed:(BOOL)collapsed chrome:(id<AgensSettingsHost>)chrome {
++  if (!g_settings) g_settings = [[AgensSettings alloc] init];
++  g_settings->_browser = window;
++  g_settings->_chrome = chrome;
++  [g_settings showSection:g_settings->_section ?: @"aparencia"];
++  [g_settings showWindow:nil];
++  [g_settings.window makeKeyAndOrderFront:nil];
++}
+++ (void)forget:(AgensWindow*)window {
++  if (g_settings && g_settings->_browser == window) {
++    g_settings->_browser = nullptr;
++    [g_settings close];
++  }
++}
++
++- (instancetype)init {
++  NSWindow* w = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 860, 600)
++                                            styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
++                                                      NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable |
++                                                      NSWindowStyleMaskFullSizeContentView
++                                              backing:NSBackingStoreBuffered
++                                                defer:YES];
++  w.titlebarAppearsTransparent = YES;
++  w.titleVisibility = NSWindowTitleHidden;
++  w.title = @"Configurações";
++  w.minSize = NSMakeSize(720, 480);
++  w.releasedWhenClosed = NO;
++  [w center];
++  if ((self = [super initWithWindow:w])) {
++    w.delegate = self;
++    _navRows = [NSMutableArray array];
++    AgensFlippedView* root = [[AgensFlippedView alloc] init];
++    root.wantsLayer = YES;
++    w.contentView = root;
++    _nav = [[AgensFlippedView alloc] init];
++    _pane = [[AgensFlippedView alloc] init];
++    [root addSubview:_nav];
++    [root addSubview:_pane];
++    NSTextField* title = Label(20, NSFontWeightSemibold, kInk);
++    title.stringValue = @"Configurações";
++    title.frame = NSMakeRect(18, 44, 220, 26);
++    [_nav addSubview:title];
++    CGFloat y = 84;
++    __weak AgensSettings* weak = self;
++    for (const Section& sec : kSections) {
++      AgensMenuRow* row = [[AgensMenuRow alloc] initWithIcon:sec.icon title:sec.title key:@""];
++      row.frame = NSMakeRect(10, y, 232, 36);
++      NSString* key = sec.key;
++      row.onPress = ^{ [weak showSection:key]; };
++      row.identifier = key;
++      [_nav addSubview:row];
++      [_navRows addObject:row];
++      y += 36;
++    }
++    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(themeChanged:) name:kThemeChanged object:nil];
++    [self layout];
++  }
++  return self;
++}
++- (void)themeChanged:(NSNotification*)note {
++  [self paint];
++  [self showSection:_section];
++}
++- (void)paint {
++  NSView* root = self.window.contentView;
++  root.layer.backgroundColor = CG(kBg, root);
++  _nav.wantsLayer = YES;
++  _nav.layer.backgroundColor = CG(kSideBg, _nav);
++  for (AgensMenuRow* row in _navRows) row.selected = [row.identifier isEqualToString:_section];
++}
++- (void)windowDidResize:(NSNotification*)note {
++  [self layout];
++}
++- (void)layout {
++  NSRect b = self.window.contentView.bounds;
++  _nav.frame = NSMakeRect(0, 0, 252, NSHeight(b));
++  _pane.frame = NSMakeRect(252, 0, NSWidth(b) - 252, NSHeight(b));
++}
++
++// --- Building blocks of a section (prototype .group / .opt)
++- (CGFloat)heading:(NSString*)text y:(CGFloat)y {
++  NSTextField* h = Label(17, NSFontWeightSemibold, kInk);
++  h.stringValue = text;
++  h.frame = NSMakeRect(32, y, NSWidth(_pane.bounds) - 64, 24);
++  [_pane addSubview:h];
++  return y + 40;
++}
++- (CGFloat)option:(NSString*)label detail:(NSString*)detail control:(NSView*)control y:(CGFloat)y {
++  CGFloat w = NSWidth(_pane.bounds) - 64;
++  NSView* group = [[NSView alloc] initWithFrame:NSMakeRect(32, y, w, 56)];
++  group.wantsLayer = YES;
++  group.layer.cornerRadius = 10;
++  group.layer.borderWidth = 1;
++  group.layer.borderColor = CG(kLine, _pane);
++  group.layer.backgroundColor = CG(kRaise, _pane);
++  NSTextField* l = Label(13, NSFontWeightRegular, kInk);
++  l.stringValue = label;
++  l.frame = NSMakeRect(16, detail ? 30 : 19, w * 0.5, 18);
++  [group addSubview:l];
++  if (detail) {
++    NSTextField* d = Label(11.5, NSFontWeightRegular, kDim);
++    d.stringValue = detail;
++    d.frame = NSMakeRect(16, 12, w * 0.55, 15);
++    [group addSubview:d];
++  }
++  NSSize cs = control.fittingSize;
++  control.frame = NSMakeRect(w - 16 - cs.width, (56 - cs.height) / 2, cs.width, cs.height);
++  [group addSubview:control];
++  [_pane addSubview:group];
++  return y + 64;
++}
++- (NSSegmentedControl*)segments:(NSArray<NSString*>*)labels selected:(NSInteger)i action:(SEL)action {
++  NSSegmentedControl* seg = [NSSegmentedControl segmentedControlWithLabels:labels
++                                                              trackingMode:NSSegmentSwitchTrackingSelectOne
++                                                                    target:self
++                                                                    action:action];
++  seg.selectedSegment = i;
++  return seg;
++}
++
++- (void)showSection:(NSString*)key {
++  _section = key;
++  for (NSView* v in [_pane.subviews copy]) [v removeFromSuperview];
++  [self paint];
++  const Section* sec = &kSections[0];
++  for (const Section& s : kSections) {
++    if ([s.key isEqualToString:key]) sec = &s;
++  }
++  self.window.title = sec->title;
++  CGFloat y = [self heading:sec->title y:44];
++  if (sec->chromium) {
++    NSTextField* note = Label(13, NSFontWeightRegular, kMute);
++    note.stringValue = @"Esta seção ainda abre a página do Chromium, numa aba nova.";
++    note.frame = NSMakeRect(32, y, NSWidth(_pane.bounds) - 64, 18);
++    [_pane addSubview:note];
++    NSButton* open = [NSButton buttonWithTitle:@"Abrir" target:self action:@selector(openChromium:)];
++    open.identifier = @(sec->chromium);
++    open.frame = NSMakeRect(32, y + 30, 90, 28);
++    [_pane addSubview:open];
++    return;
++  }
++  if ([key isEqualToString:@"aparencia"]) {
++    const BOOL brasa = Theme() == 1;
++    y = [self option:@"Tema" detail:@"Vidro vem depois."
++             control:[self segments:@[ @"Grafite", @"Brasa" ] selected:Theme() action:@selector(setTheme:)]
++                   y:y];
++    NSSegmentedControl* mode = [self segments:@[ @"Sistema", @"Claro", @"Escuro" ]
++                                     selected:_browser ? agens_window_color_mode(_browser) : 0
++                                       action:@selector(setMode:)];
++    mode.enabled = !brasa;
++    y = [self option:@"Modo" detail:brasa ? @"A Brasa é sempre escura." : nil control:mode y:y];
++    [self option:@"Lateral" detail:@"⌘S alterna."
++         control:[self segments:@[ @"Aberta", @"Recolhida" ] selected:[_chrome collapsed] ? 1 : 0 action:@selector(setSide:)]
++               y:y];
++  } else if ([key isEqualToString:@"busca"]) {
++    _engines = [[NSPopUpButton alloc] init];
++    _engines.target = self;
++    _engines.action = @selector(setEngine:);
++    _engineKeywords.clear();
++    if (_browser) agens_window_search_engines(_browser, &EnginesListed, (__bridge void*)self);
++    y = [self option:@"Buscador padrão" detail:@"Texto que não é endereço vai para ele." control:_engines y:y];
++    NSTextField* off = Label(12, NSFontWeightRegular, kDim);
++    off.stringValue = @"Sugestões vindas do buscador ficam desligadas: o endereço só sugere o que está no seu Mac.";
++    off.frame = NSMakeRect(32, y + 4, NSWidth(_pane.bounds) - 64, 16);
++    [_pane addSubview:off];
++  } else if ([key isEqualToString:@"atos"]) {
++    [self fillAtos:y];
++  }
++}
++static void EnginesListed(void* context, const AgensSearchEngine* engines, int count) {
++  AgensSettings* s = (__bridge AgensSettings*)context;
++  for (int i = 0; i < count; ++i) {
++    [s->_engines addItemWithTitle:@(engines[i].name)];
++    s->_engineKeywords.push_back(engines[i].keyword);
++    if (engines[i].is_default) [s->_engines selectItemAtIndex:i];
++  }
++}
++- (void)fillAtos:(CGFloat)y {
++  // The atos list comes from the chrome (it already observes them); rename in place.
++  NSArray<NSString*>* names = [_chrome atoNamesForSettings];
++  for (NSUInteger i = 0; i < names.count; ++i) {
++    NSTextField* field = [NSTextField textFieldWithString:names[i]];
++    field.tag = i;
++    field.delegate = self;
++    field.target = self;
++    field.action = @selector(renameAto:);
++    field.frame = NSMakeRect(0, 0, 220, 24);
++    y = [self option:[NSString stringWithFormat:@"Ato %lu", (unsigned long)i + 1] detail:nil control:field y:y];
++  }
++  NSButton* add = [NSButton buttonWithTitle:@"Novo ato" target:self action:@selector(newAto:)];
++  add.frame = NSMakeRect(32, y + 4, 110, 28);
++  [_pane addSubview:add];
++  NSTextField* note = Label(12, NSFontWeightRegular, kDim);
++  note.stringValue = @"Cada ato tem abas, logins e cookies próprios. Compartilhar cookies entre atos: desligado.";
++  note.frame = NSMakeRect(32, y + 44, NSWidth(_pane.bounds) - 64, 16);
++  [_pane addSubview:note];
++}
++
++// --- Actions
++- (void)setTheme:(NSSegmentedControl*)seg {
++  g_theme = (int)seg.selectedSegment;
++  [NSUserDefaults.standardUserDefaults setInteger:g_theme forKey:kThemeKey];
++  if (g_theme == 1 && _browser) agens_window_set_color_mode(_browser, kAgensModeDark);  // Brasa is dark only
++  [NSNotificationCenter.defaultCenter postNotificationName:kThemeChanged object:nil];
++}
++- (void)setMode:(NSSegmentedControl*)seg {
++  if (_browser) agens_window_set_color_mode(_browser, (AgensColorMode)seg.selectedSegment);
++}
++- (void)setSide:(NSSegmentedControl*)seg {
++  if ((seg.selectedSegment == 1) != [_chrome collapsed]) [_chrome toggleSidebar];
++}
++- (void)setEngine:(NSPopUpButton*)popup {
++  NSInteger i = popup.indexOfSelectedItem;
++  if (_browser && i >= 0 && (size_t)i < _engineKeywords.size()) {
++    agens_window_set_search_engine(_browser, _engineKeywords[i].c_str());
++  }
++}
++- (void)renameAto:(NSTextField*)field {
++  if (_browser && field.stringValue.length) agens_window_rename_ato(_browser, (int)field.tag, field.stringValue.UTF8String);
++}
++- (void)newAto:(id)sender {
++  if (_browser) agens_window_new_ato(_browser);
++}
++- (void)openChromium:(NSButton*)button {
++  if (_browser) agens_window_open_url(_browser, button.identifier.UTF8String);
++}
++@end
++
++// ---------------------------------------------------------------------------------------------
 +// The chrome.
 +
-+@interface AgensChrome : AgensDragView <NSTextFieldDelegate>
++@interface AgensChrome : AgensDragView <NSTextFieldDelegate, AgensSettingsHost>
 +- (instancetype)initWithWindow:(AgensWindow*)window;
 +- (void)detach;
 +- (void)focusAddress;
@@ -1882,6 +2269,10 @@ index 0000000000..cd4611a3c7
 +    agens_window_set_atos_observer(_window, AtosChanged, (__bridge void*)self);
 +    agens_window_set_status_observer(_window, StatusChanged, (__bridge void*)self);
 +    agens_window_set_downloads_observer(_window, DownloadsChanged, (__bridge void*)self);
++    [NSNotificationCenter.defaultCenter addObserver:self
++                                           selector:@selector(themeChanged:)
++                                               name:kThemeChanged
++                                             object:nil];
 +    agens_window_set_suggestions_observer(_window, SuggestionsChanged, (__bridge void*)self);
 +  }
 +  return self;
@@ -1902,6 +2293,18 @@ index 0000000000..cd4611a3c7
 +  [super viewDidChangeEffectiveAppearance];
 +  [self refreshTheme];
 +  if (_window) agens_window_relayout(_window);  // the engine repaints the window and page card
++}
++// A theme switch (Grafite/Brasa) changes colors without changing the appearance: repaint all.
++static void RefreshTree(NSView* v) {
++  if ([v respondsToSelector:@selector(refresh)]) [(id)v refresh];
++  if ([v respondsToSelector:@selector(refreshTheme)]) [(id)v refreshTheme];
++  v.needsDisplay = YES;
++  for (NSView* sub in v.subviews) RefreshTree(sub);
++}
++- (void)themeChanged:(NSNotification*)note {
++  RefreshTree(self);
++  [self relayout];
++  if (_window) agens_window_relayout(_window);
 +}
 +- (void)colorsWindow:(unsigned*)window page:(unsigned*)page line:(unsigned*)line {
 +  *window = kSideBg.rgb(self);
@@ -2393,10 +2796,16 @@ index 0000000000..cd4611a3c7
 +  if (_window) agens_window_open_page(_window, kAgensHistory);
 +}
 +- (void)menuSettings:(id)sender {
-+  if (_window) agens_window_open_page(_window, kAgensSettings);
++  if (_window) [AgensSettings showFor:_window collapsed:_collapsed chrome:self];
 +}
 +// Open/close the column with the prototype's motion (width, .32s, ease-out); instant with
 +// "Reduzir movimento". Each frame lays out the chrome and asks the engine to move the page.
++- (BOOL)collapsed {
++  return _collapsed;
++}
++- (NSArray<NSString*>*)atoNamesForSettings {
++  return [_atoNames copy];
++}
 +- (void)toggleSidebar {
 +  _collapsed = !_collapsed;
 +  [NSUserDefaults.standardUserDefaults setBool:_collapsed forKey:kCollapsedKey];
@@ -2465,6 +2874,8 @@ index 0000000000..cd4611a3c7
 +  [self closeSuggestions];
 +}
 +- (void)detach {
++  [AgensSettings forget:_window];
++  [NSNotificationCenter.defaultCenter removeObserver:self];
 +  [_sideTimer invalidate];
 +  [self closeMenu];
 +  if (_keyMonitor) [NSEvent removeMonitor:_keyMonitor];
