@@ -93,7 +93,7 @@ def build_request(a):
         if s == "list":
             return {"op": "atos.list"}
         if s == "create":
-            return {"op": "atos.create", "name": a.name, "color": a.cor, "tag": a.tag}
+            return {"op": "atos.create", "name": a.name, **{k: v for k, v in (("color", a.cor), ("tag", a.tag)) if v is not None}}
         if s == "rename":
             return {"op": "atos.rename", "ato": a.id, "name": a.name}
         if s == "color":
@@ -184,7 +184,7 @@ def main(argv=None):
     node(sp, "hello", help="protocol and browser version")
     atos = node(sp, "atos", help="list and manage atos").add_subparsers(dest="sub", required=True)
     node(atos, "list")
-    node(atos, "create", ("name", {}), ("--cor", dict(required=True)), ("--tag", dict(required=True)))
+    node(atos, "create", ("name", {}), ("--cor", {}), ("--tag", {}))
     node(atos, "rename", ("id", {}), ("name", {}))
     node(atos, "color", ("id", {}), ("color", {}))
     node(atos, "open", ("id", {}), ("url", dict(nargs="?")))
