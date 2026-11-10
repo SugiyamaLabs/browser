@@ -1,9 +1,9 @@
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
 new file mode 100644
-index 0000000000..fd23d9cae5
+index 0000000000..b2719f8b46
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embed.h
-@@ -0,0 +1,177 @@
+@@ -0,0 +1,230 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The boundary between the engine and any interface (the browser's own chrome today, the Agens
 +// app later). Plain C on purpose: no Chromium or C++ types cross it, Swift imports it as is, and
@@ -160,6 +160,59 @@ index 0000000000..fd23d9cae5
 +AgensPermission agens_permission_get(AgensWindow* window, const char* kind);
 +void agens_permission_set(AgensWindow* window, const char* kind, AgensPermission value);
 +
++// The managers in Configurações. All act on this window's ato. `done` runs once, later, on the UI
++// thread.
++typedef void (*AgensDoneFn)(void* context);
++
++// Apagar dados de navegação. `what` is a mask; `period` 0 last hour, 1 day, 2 week, 3 four weeks,
++// 4 all time.
++enum {
++  kAgensClearHistory = 1 << 0,
++  kAgensClearCookies = 1 << 1,  // cookies and site data (signs out of sites)
++  kAgensClearCache = 1 << 2,
++  kAgensClearDownloads = 1 << 3,  // the list, not the files
++  kAgensClearForms = 1 << 4,
++};
++void agens_clear_data(AgensWindow* window, int what, int period, AgensDoneFn done, void* context);
++
++// Restaurar: search engine (back to ours), home and startup pages, site permissions, languages and
++// new tab shortcuts. Logins, cookies, passwords, bookmarks, history and extensions stay.
++void agens_reset_settings(AgensWindow* window, AgensDoneFn done, void* context);
++
++// Exceções por site: what the person set for one site, for the kinds of agens_permission_get.
++typedef struct {
++  const char* site;  // the pattern, e.g. "https://meet.google.com:443" or "[*.]example.com"
++  const char* kind;
++  AgensPermission value;
++} AgensSiteException;
++typedef void (*AgensSiteExceptionsFn)(void* context, const AgensSiteException* exceptions, int count);
++void agens_site_exceptions(AgensWindow* window, AgensSiteExceptionsFn fn, void* context);  // calls now
++void agens_site_exception_set(AgensWindow* window, const char* site, const char* kind, AgensPermission value);
++void agens_site_exception_remove(AgensWindow* window, const char* site, const char* kind);
++
++// Extensões instaladas neste ato (not the built-in ones).
++typedef struct {
++  const char* id;
++  const char* name;
++  const char* version;
++  int enabled;
++} AgensExtension;
++typedef void (*AgensExtensionsFn)(void* context, const AgensExtension* extensions, int count);
++void agens_extensions(AgensWindow* window, AgensExtensionsFn fn, void* context);  // calls now
++void agens_extension_set_enabled(AgensWindow* window, const char* id, int enabled);
++void agens_extension_remove(AgensWindow* window, const char* id);
++
++// Senhas salvas. The list carries no passwords; agens_password_get copies one (the UI asks for
++// Touch ID first). Indexes refer to the last list delivered.
++typedef struct {
++  const char* site;
++  const char* username;
++} AgensLogin;
++typedef void (*AgensLoginsFn)(void* context, const AgensLogin* logins, int count);
++void agens_passwords(AgensWindow* window, AgensLoginsFn fn, void* context);  // calls later
++int agens_password_get(AgensWindow* window, int index, char* out, int size);
++void agens_password_remove(AgensWindow* window, int index);
++
 +// Asks the system to make this browser the default for links (macOS shows its own prompt).
 +void agens_window_set_default_browser(AgensWindow* window);
 +
@@ -183,10 +236,10 @@ index 0000000000..fd23d9cae5
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EMBED_H_
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
 new file mode 100644
-index 0000000000..246a46b29d
+index 0000000000..cdcefd2ace
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_window.h
-@@ -0,0 +1,408 @@
+@@ -0,0 +1,410 @@
 +// Copyright 2026 SugiyamaLabs.
 +// One browser window as the embed API sees it (agens_embed.h): tabs, suggestions, atos, search
 +// default, bookmarks. Platform-neutral; each platform's shell (native_shell_mac.mm, later
@@ -302,16 +355,18 @@ index 0000000000..246a46b29d
 +
 +  // Each ato starts searching with DuckDuckGo. Only while nobody has picked a default yet: once
 +  // set (by this or by the person in Configurações), the choice is theirs and stays.
-+  void PreferDuckDuckGo() {
++  // `force` (Restaurar) sets it even when a default was already chosen.
++  void PreferDuckDuckGo(bool force = false) {
 +    Profile* profile = browser->GetProfile()->GetOriginalProfile();
-+    if (profile->GetPrefs()->HasPrefPath(DefaultSearchManager::kDefaultSearchProviderDataPrefName)) {
++    if (!force &&
++        profile->GetPrefs()->HasPrefPath(DefaultSearchManager::kDefaultSearchProviderDataPrefName)) {
 +      return;
 +    }
 +    TemplateURLService* service = TemplateURLServiceFactory::GetForProfile(profile);
 +    if (!service) return;
 +    if (!service->loaded()) {
 +      search_loaded_ = service->RegisterOnLoadedCallback(
-+          base::BindOnce(&AgensWindow::PreferDuckDuckGo, weak.GetWeakPtr()));
++          base::BindOnce(&AgensWindow::PreferDuckDuckGo, weak.GetWeakPtr(), force));
 +      service->Load();
 +      return;
 +    }
@@ -597,10 +652,10 @@ index 0000000000..246a46b29d
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
 new file mode 100644
-index 0000000000..f4db9ab0c9
+index 0000000000..8e5aea74fc
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.cc
-@@ -0,0 +1,321 @@
+@@ -0,0 +1,545 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The embed API (agens_embed.h) on top of AgensWindow. Same code on every platform.
 +
@@ -612,6 +667,23 @@ index 0000000000..f4db9ab0c9
 +#include "chrome/browser/shell_integration.h"
 +#include "components/content_settings/core/browser/host_content_settings_map.h"
 +#include "components/prefs/pref_service.h"
++#include "base/memory/scoped_refptr.h"
++#include "base/supports_user_data.h"
++#include "chrome/browser/browsing_data/chrome_browsing_data_remover_constants.h"
++#include "chrome/browser/password_manager/factories/profile_password_store_factory.h"
++#include "chrome/browser/profile_resetter/brandcoded_default_settings.h"
++#include "chrome/browser/profile_resetter/profile_resetter.h"
++#include "components/browsing_data/core/browsing_data_utils.h"
++#include "components/keyed_service/core/service_access_type.h"
++#include "components/password_manager/core/browser/password_store/password_store_consumer.h"
++#include "components/password_manager/core/browser/password_store/password_store_interface.h"
++#include "components/password_manager/core/browser/password_store/stored_credential.h"
++#include "content/public/browser/browsing_data_remover.h"
++#include "extensions/browser/extension_registrar.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/browser/ui_util.h"
++#include "extensions/browser/uninstall_reason.h"
++#include "extensions/common/extension.h"
 +#include "chrome/browser/themes/theme_service.h"
 +#include "chrome/browser/themes/theme_service_factory.h"
 +#include "ui/base/window_open_disposition.h"
@@ -784,24 +856,231 @@ index 0000000000..f4db9ab0c9
 +  }
 +  return std::nullopt;
 +}
-+AgensPermission agens_permission_get(AgensWindow* w, const char* kind) {
-+  std::optional<ContentSettingsType> type = KindOf(kind);
-+  if (!type) return kAgensAsk;
-+  switch (HostContentSettingsMapFactory::GetForProfile(w->browser->GetProfile())->GetDefaultContentSetting(*type)) {
++static AgensPermission ToAgens(ContentSetting setting) {
++  switch (setting) {
 +    case CONTENT_SETTING_ALLOW: return kAgensAllow;
 +    case CONTENT_SETTING_BLOCK: return kAgensBlock;
 +    case CONTENT_SETTING_SESSION_ONLY: return kAgensSessionOnly;
 +    default: return kAgensAsk;
 +  }
 +}
++static ContentSetting FromAgens(AgensPermission value) {
++  return value == kAgensAllow         ? CONTENT_SETTING_ALLOW
++         : value == kAgensBlock       ? CONTENT_SETTING_BLOCK
++         : value == kAgensSessionOnly ? CONTENT_SETTING_SESSION_ONLY
++                                      : CONTENT_SETTING_ASK;
++}
++
++AgensPermission agens_permission_get(AgensWindow* w, const char* kind) {
++  std::optional<ContentSettingsType> type = KindOf(kind);
++  if (!type) return kAgensAsk;
++  return ToAgens(HostContentSettingsMapFactory::GetForProfile(w->browser->GetProfile())->GetDefaultContentSetting(*type));
++}
 +void agens_permission_set(AgensWindow* w, const char* kind, AgensPermission value) {
 +  std::optional<ContentSettingsType> type = KindOf(kind);
 +  if (!type) return;
-+  const ContentSetting setting = value == kAgensAllow         ? CONTENT_SETTING_ALLOW
-+                                 : value == kAgensBlock       ? CONTENT_SETTING_BLOCK
-+                                 : value == kAgensSessionOnly ? CONTENT_SETTING_SESSION_ONLY
-+                                                              : CONTENT_SETTING_ASK;
-+  HostContentSettingsMapFactory::GetForProfile(w->browser->GetProfile())->SetDefaultContentSetting(*type, setting);
++  HostContentSettingsMapFactory::GetForProfile(w->browser->GetProfile())->SetDefaultContentSetting(*type, FromAgens(value));
++}
++
++void agens_site_exceptions(AgensWindow* w, AgensSiteExceptionsFn fn, void* context) {
++  static const char* const kNames[] = {"camera", "microphone", "location", "notifications", "popups",
++                                       "sound", "clipboard", "downloads", "javascript", "cookies"};
++  HostContentSettingsMap* map = HostContentSettingsMapFactory::GetForProfile(w->browser->GetProfile());
++  std::vector<std::string> sites;
++  std::vector<AgensSiteException> out;
++  std::vector<std::pair<std::string, const char*>> found;
++  std::vector<AgensPermission> values;
++  for (const char* name : kNames) {
++    for (const ContentSettingPatternSource& rule : map->GetSettingsForOneType(*KindOf(name))) {
++      // Only what the person set (not policy, extensions or the defaults), for one site.
++      if (rule.source != content_settings::mojom::ProviderType::kPrefProvider ||
++          rule.primary_pattern == ContentSettingsPattern::Wildcard() ||
++          rule.secondary_pattern != ContentSettingsPattern::Wildcard()) {
++        continue;
++      }
++      found.emplace_back(rule.primary_pattern.ToString(), name);
++      values.push_back(ToAgens(rule.GetContentSetting()));
++    }
++  }
++  for (size_t i = 0; i < found.size(); ++i) out.push_back({found[i].first.c_str(), found[i].second, values[i]});
++  fn(context, out.data(), static_cast<int>(out.size()));
++}
++void agens_site_exception_set(AgensWindow* w, const char* site, const char* kind, AgensPermission value) {
++  std::optional<ContentSettingsType> type = KindOf(kind);
++  ContentSettingsPattern pattern = ContentSettingsPattern::FromString(site ? site : "");
++  if (!type || !pattern.IsValid() || pattern == ContentSettingsPattern::Wildcard()) return;
++  HostContentSettingsMapFactory::GetForProfile(w->browser->GetProfile())
++      ->SetContentSettingCustomScope(pattern, ContentSettingsPattern::Wildcard(), *type, FromAgens(value));
++}
++void agens_site_exception_remove(AgensWindow* w, const char* site, const char* kind) {
++  std::optional<ContentSettingsType> type = KindOf(kind);
++  ContentSettingsPattern pattern = ContentSettingsPattern::FromString(site ? site : "");
++  if (!type || !pattern.IsValid() || pattern == ContentSettingsPattern::Wildcard()) return;
++  HostContentSettingsMapFactory::GetForProfile(w->browser->GetProfile())
++      ->SetContentSettingCustomScope(pattern, ContentSettingsPattern::Wildcard(), *type, CONTENT_SETTING_DEFAULT);
++}
++
++namespace {
++// Deletes itself when the remover is done.
++class ClearDone : public content::BrowsingDataRemover::Observer {
++ public:
++  ClearDone(content::BrowsingDataRemover* remover, AgensDoneFn done, void* context)
++      : remover_(remover), done_(done), context_(context) {
++    remover_->AddObserver(this);
++  }
++  void OnBrowsingDataRemoverDone(uint64_t) override {
++    remover_->RemoveObserver(this);
++    if (done_) done_(context_);
++    delete this;
++  }
++
++ private:
++  raw_ptr<content::BrowsingDataRemover> remover_;
++  AgensDoneFn done_;
++  raw_ptr<void> context_;
++};
++}  // namespace
++
++void agens_clear_data(AgensWindow* w, int what, int period, AgensDoneFn done, void* context) {
++  uint64_t mask = 0;
++  if (what & kAgensClearHistory) mask |= chrome_browsing_data_remover::DATA_TYPE_HISTORY;
++  if (what & kAgensClearCookies) mask |= chrome_browsing_data_remover::DATA_TYPE_SITE_DATA;
++  if (what & kAgensClearCache) mask |= content::BrowsingDataRemover::DATA_TYPE_CACHE;
++  if (what & kAgensClearDownloads) mask |= content::BrowsingDataRemover::DATA_TYPE_DOWNLOADS;
++  if (what & kAgensClearForms) mask |= chrome_browsing_data_remover::DATA_TYPE_FORM_DATA;
++  const auto time = static_cast<browsing_data::TimePeriod>(std::clamp(period, 0, 4));
++  content::BrowsingDataRemover* remover = w->browser->GetProfile()->GetBrowsingDataRemover();
++  remover->RemoveAndReply(browsing_data::CalculateBeginDeleteTime(time),
++                          browsing_data::CalculateEndDeleteTime(time), mask,
++                          content::BrowsingDataRemover::ORIGIN_TYPE_UNPROTECTED_WEB,
++                          new ClearDone(remover, done, context));
++}
++
++void agens_reset_settings(AgensWindow* w, AgensDoneFn done, void* context) {
++  auto* resetter = new ProfileResetter(w->browser->GetProfile());
++  base::WeakPtr<AgensWindow> window = w->weak.GetWeakPtr();
++  resetter->ResetSettings(
++      ProfileResetter::DEFAULT_SEARCH_ENGINE | ProfileResetter::HOMEPAGE |
++          ProfileResetter::CONTENT_SETTINGS | ProfileResetter::STARTUP_PAGES |
++          ProfileResetter::SHORTCUTS | ProfileResetter::NTP_CUSTOMIZATIONS |
++          ProfileResetter::LANGUAGES,
++      std::make_unique<BrandcodedDefaultSettings>(),
++      base::BindOnce(
++          [](ProfileResetter* resetter, base::WeakPtr<AgensWindow> window, AgensDoneFn done,
++             void* context) {
++            if (window) window->PreferDuckDuckGo(/*force=*/true);  // our default search, as on a new ato
++            base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE, resetter);
++            if (done) done(context);
++          },
++          resetter, window, done, context));
++}
++
++void agens_extensions(AgensWindow* w, AgensExtensionsFn fn, void* context) {
++  content::BrowserContext* profile = w->browser->GetProfile();
++  extensions::ExtensionRegistry* registry = extensions::ExtensionRegistry::Get(profile);
++  std::vector<scoped_refptr<const extensions::Extension>> shown;
++  for (const auto& e : registry->GenerateInstalledExtensionsSet()) {
++    if (extensions::ui_util::ShouldDisplayInExtensionSettings(*e)) shown.push_back(e);
++  }
++  std::vector<AgensExtension> out;
++  for (const auto& e : shown) {
++    out.push_back({e->id().c_str(), e->name().c_str(), e->VersionString().c_str(),
++                   registry->enabled_extensions().Contains(e->id())});
++  }
++  fn(context, out.data(), static_cast<int>(out.size()));
++}
++void agens_extension_set_enabled(AgensWindow* w, const char* id, int enabled) {
++  auto* registrar = extensions::ExtensionRegistrar::Get(w->browser->GetProfile());
++  if (!id) return;
++  if (enabled) {
++    registrar->EnableExtension(id);
++  } else {
++    registrar->DisableExtension(id, {extensions::disable_reason::DISABLE_USER_ACTION});
++  }
++}
++void agens_extension_remove(AgensWindow* w, const char* id) {
++  if (!id || !extensions::ExtensionRegistry::Get(w->browser->GetProfile())->GetInstalledExtension(id)) return;
++  std::u16string error;
++  extensions::ExtensionRegistrar::Get(w->browser->GetProfile())
++      ->UninstallExtension(id, extensions::UNINSTALL_REASON_USER_INITIATED, &error);
++}
++
++namespace {
++// The last list of saved logins of a profile, kept so the UI can address them by index.
++class SavedLogins : public base::SupportsUserData::Data,
++                    public password_manager::PasswordStoreConsumer {
++ public:
++  static SavedLogins* For(Profile* profile) {
++    static const char kKey[] = "AgensSavedLogins";
++    auto* data = static_cast<SavedLogins*>(profile->GetUserData(kKey));
++    if (!data) {
++      auto owned = std::make_unique<SavedLogins>();
++      data = owned.get();
++      profile->SetUserData(kKey, std::move(owned));
++    }
++    data->store = ProfilePasswordStoreFactory::GetForProfile(profile, ServiceAccessType::EXPLICIT_ACCESS);
++    return data;
++  }
++  void Fetch(AgensLoginsFn fn, void* context) {
++    fn_ = fn;
++    context_ = context;
++    if (!store) {
++      Deliver();
++      return;
++    }
++    store->GetAutofillableLogins(weak_.GetWeakPtr());
++  }
++  void OnGetPasswordStoreResultsOrErrorFrom(
++      password_manager::PasswordStoreInterface*,
++      base::expected<std::vector<password_manager::StoredCredential>,
++                     password_manager::PasswordStoreBackendError> results) override {
++    logins = results.has_value() ? std::move(results.value())
++                                 : std::vector<password_manager::StoredCredential>();
++    std::sort(logins.begin(), logins.end(), [](const auto& a, const auto& b) {
++      return std::tie(a.signon_realm, a.username_value) < std::tie(b.signon_realm, b.username_value);
++    });
++    Deliver();
++  }
++  void Deliver() {
++    if (!fn_) return;
++    std::vector<std::string> sites, users;
++    for (const auto& l : logins) {
++      sites.push_back(l.url.is_valid() ? std::string(l.url.host()) : l.signon_realm);
++      users.push_back(base::UTF16ToUTF8(l.username_value));
++    }
++    std::vector<AgensLogin> out;
++    for (size_t i = 0; i < logins.size(); ++i) out.push_back({sites[i].c_str(), users[i].c_str()});
++    AgensLoginsFn fn = std::exchange(fn_, nullptr);
++    fn(context_, out.data(), static_cast<int>(out.size()));
++  }
++
++  scoped_refptr<password_manager::PasswordStoreInterface> store;
++  std::vector<password_manager::StoredCredential> logins;
++
++ private:
++  AgensLoginsFn fn_ = nullptr;
++  raw_ptr<void> context_ = nullptr;
++  base::WeakPtrFactory<SavedLogins> weak_{this};
++};
++}  // namespace
++
++void agens_passwords(AgensWindow* w, AgensLoginsFn fn, void* context) {
++  SavedLogins::For(w->browser->GetProfile())->Fetch(fn, context);
++}
++int agens_password_get(AgensWindow* w, int index, char* out, int size) {
++  SavedLogins* saved = SavedLogins::For(w->browser->GetProfile());
++  if (index < 0 || index >= static_cast<int>(saved->logins.size()) || size <= 0) return 0;
++  const std::string password = base::UTF16ToUTF8(saved->logins[index].password_value.value());
++  const size_t n = std::min(password.size(), static_cast<size_t>(size - 1));
++  std::copy_n(password.data(), n, out);
++  out[n] = 0;
++  return 1;
++}
++void agens_password_remove(AgensWindow* w, int index) {
++  SavedLogins* saved = SavedLogins::For(w->browser->GetProfile());
++  if (!saved->store || index < 0 || index >= static_cast<int>(saved->logins.size())) return;
++  saved->store->RemoveLogin(FROM_HERE, saved->logins[index]);
++  saved->logins.erase(saved->logins.begin() + index);
 +}
 +
 +void agens_window_set_default_browser(AgensWindow*) {
@@ -1130,10 +1409,10 @@ index 0000000000..fb231e798b
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..f85f888dd4
+index 0000000000..b2a87bd370
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,2719 @@
+@@ -0,0 +1,3204 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -1141,6 +1420,7 @@ index 0000000000..f85f888dd4
 +// the system. Only AppKit and agens_embed.h here, so it can move to the Swift app unchanged.
 +
 +#import <AppKit/AppKit.h>
++#import <LocalAuthentication/LocalAuthentication.h>
 +#import <QuartzCore/QuartzCore.h>
 +#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 +
@@ -2006,6 +2286,23 @@ index 0000000000..f85f888dd4
 +  NSString* _section;
 +  std::vector<std::string> _engineKeywords;
 +  NSPopUpButton* _engines;
++  NSString* _navKey;  // the section lit in the list (a sub-page lights its parent)
++  // Apagar dados
++  int _clearWhat, _clearPeriod;
++  NSString* _clearStatus;
++  NSString* _resetStatus;
++  // Exceções por site and extensions, as last listed (rows address them by tag)
++  std::vector<std::pair<std::string, std::string>> _exceptions;  // site, kind
++  std::vector<std::string> _extensionIds, _extensionNames;
++  // Senhas salvas
++  std::vector<std::pair<std::string, std::string>> _logins;  // site, username
++  BOOL _loginsFresh;
++  int _revealed;  // the login whose password shows, or -1
++  std::string _revealedPassword;
++  NSDate* _unlockedUntil;
++  NSSearchField* _loginSearch;
++  CGFloat _loginsY;
++  NSString* _passwordStatus;
 +}
 +
 +struct Section {
@@ -2031,6 +2328,22 @@ index 0000000000..f85f888dd4
 +    {@"sistema", @"Sistema", kIconSettings},
 +    {@"sobre", @"Sobre", kIconAbout},
 +};
++
++// Pages one level down, opened from a row of their section ("‹" goes back).
++struct SubPage {
++  NSString* key;
++  NSString* title;
++  NSString* parent;
++};
++static const SubPage kSubPages[] = {
++    {@"apagar", @"Apagar dados de navegação", @"privacidade"},
++    {@"excecoes", @"Exceções por site", @"permissoes"},
++    {@"senhas-salvas", @"Senhas salvas", @"senhas"},
++    {@"restaurar", @"Restaurar as configurações originais", @"sistema"},
++};
++static void ClearFinished(void* context);
++static void ResetFinished(void* context);
++static void LoginsListed(void* context, const AgensLogin* logins, int count);
 +
 ++ (void)showFor:(AgensWindow*)window collapsed:(BOOL)collapsed chrome:(id<AgensSettingsHost>)chrome {
 +  if (!g_settings) g_settings = [[AgensSettings alloc] init];
@@ -2063,6 +2376,8 @@ index 0000000000..f85f888dd4
 +  if ((self = [super initWithWindow:w])) {
 +    w.delegate = self;
 +    _navRows = [NSMutableArray array];
++    _clearWhat = kAgensClearHistory | kAgensClearCookies | kAgensClearCache;
++    _revealed = -1;
 +    AgensFlippedView* root = [[AgensFlippedView alloc] init];
 +    root.wantsLayer = YES;
 +    w.contentView = root;
@@ -2109,7 +2424,7 @@ index 0000000000..f85f888dd4
 +  root.layer.backgroundColor = CG(kBg, root);
 +  _nav.wantsLayer = YES;
 +  _nav.layer.backgroundColor = CG(kSideBg, _nav);
-+  for (AgensMenuRow* row in _navRows) row.selected = [row.identifier isEqualToString:_section];
++  for (AgensMenuRow* row in _navRows) row.selected = [row.identifier isEqualToString:_navKey ?: _section];
 +}
 +- (void)windowDidResize:(NSNotification*)note {
 +  [self layout];
@@ -2166,6 +2481,7 @@ index 0000000000..f85f888dd4
 +    d.frame = NSMakeRect(16, 12, textW, 15);
 +    [group addSubview:d];
 +  }
++  if (!control.accessibilityLabel.length) control.accessibilityLabel = label;  // VoiceOver reads the row's name
 +  control.frame = NSMakeRect(w - 16 - cs.width, (56 - cs.height) / 2, cs.width, cs.height);
 +  [group addSubview:control];
 +  [_pane addSubview:group];
@@ -2181,15 +2497,48 @@ index 0000000000..f85f888dd4
 +}
 +
 +- (void)showSection:(NSString*)key {
++  if (![key isEqualToString:_section]) {  // leaving a page forgets what it showed
++    _loginsFresh = NO;
++    _revealed = -1;
++    _revealedPassword.clear();
++    _clearStatus = _resetStatus = _passwordStatus = nil;
++  }
 +  _section = key;
 +  for (NSView* v in [_pane.subviews copy]) [v removeFromSuperview];
-+  [self paint];
 +  const Section* sec = &kSections[0];
 +  for (const Section& s : kSections) {
 +    if ([s.key isEqualToString:key]) sec = &s;
 +  }
-+  self.window.title = sec->title;
-+  CGFloat y = [self heading:sec->title y:46];
++  const SubPage* sub = nullptr;
++  for (const SubPage& p : kSubPages) {
++    if ([p.key isEqualToString:key]) sub = &p;
++  }
++  _navKey = sub ? sub->parent : key;
++  [self paint];
++  NSString* title = sub ? sub->title : sec->title;
++  self.window.title = title;
++  if (sub) {
++    NSString* parentTitle = @"";
++    for (const Section& s : kSections) {
++      if ([s.key isEqualToString:sub->parent]) parentTitle = s.title;
++    }
++    NSButton* back = [NSButton buttonWithTitle:[@"‹ " stringByAppendingString:parentTitle] target:self action:@selector(openSub:)];
++    back.bordered = NO;
++    back.identifier = sub->parent;
++    back.contentTintColor = kMute.color();
++    back.font = [NSFont systemFontOfSize:12];
++    [back sizeToFit];
++    back.frame = NSMakeRect(28, 22, NSWidth(back.frame) + 8, 18);
++    [_pane addSubview:back];
++  }
++  CGFloat y = [self heading:title y:46];
++  if (sub) {
++    y = [self subPage:key y:y];
++    NSRect f = _pane.frame;
++    f.size.height = MAX(y + 40, NSHeight(_paneScroll.frame));
++    _pane.frame = f;
++    return;
++  }
 +  NSString* product = @"AgensBrowser";
 +  if ([key isEqualToString:@"inicio"]) {
 +    int restore = 5;
@@ -2224,7 +2573,7 @@ index 0000000000..f85f888dd4
 +    y = [self option:@"Pedir aos sites para não rastrear" detail:@"Global Privacy Control e Do Not Track." control:[self dntSwitch] y:y];
 +    y = [self option:@"Não revelar o IP local em chamadas de vídeo" detail:@"WebRTC só pela rota padrão." control:[self webrtcSwitch] y:y];
 +    y = [self option:@"Ao fechar, apagar os cookies" detail:@"Tira você dos logins a cada vez que fechar." control:[self cookiesOnCloseSwitch] y:y];
-+    y = [self option:@"Apagar dados de navegação" detail:@"Histórico, cookies e cache." control:[self linkButton:@"Apagar…" url:@"chrome://settings/clearBrowserData"] y:y];
++    y = [self option:@"Apagar dados de navegação" detail:@"Histórico, cookies e cache." control:[self subButton:@"Apagar…" key:@"apagar"] y:y];
 +    y = [self info:@"Impressão digital, rastreadores nos links, DNS seguro" detail:nil note:@"Ainda não existem" y:y];
 +  } else if ([key isEqualToString:@"bloqueador"]) {
 +    y = [self info:@"Bloquear anúncios e rastreadores" detail:@"Em todos os atos e na janela anônima." note:@"Ligado" y:y];
@@ -2240,11 +2589,11 @@ index 0000000000..f85f888dd4
 +        {"downloads", @"Downloads automáticos", YES}, {"javascript", @"JavaScript", NO},
 +    };
 +    for (const P& p : perms) y = [self option:p.label detail:nil control:[self permissionPopup:p.kind ask:p.ask] y:y];
-+    y = [self option:@"Exceções por site" detail:nil control:[self linkButton:@"Ver…" url:@"chrome://settings/content/all"] y:y];
++    y = [self option:@"Exceções por site" detail:nil control:[self subButton:@"Ver…" key:@"excecoes"] y:y];
 +  } else if ([key isEqualToString:@"senhas"]) {
 +    y = [self option:@"Oferecer para salvar senhas" detail:@"Por ato." control:[self prefSwitch:"credentials_enable_service"] y:y];
 +    y = [self option:@"Entrar sozinho" detail:@"Usa a senha salva sem perguntar quando há só uma." control:[self prefSwitch:"credentials_enable_autosignin"] y:y];
-+    y = [self option:@"Senhas salvas" detail:nil control:[self linkButton:@"Abrir…" url:@"chrome://password-manager/passwords"] y:y];
++    y = [self option:@"Senhas salvas" detail:nil control:[self subButton:@"Abrir…" key:@"senhas-salvas"] y:y];
 +    y = [self option:@"Endereços" detail:nil control:[self prefSwitch:"autofill.profile_enabled"] y:y];
 +    y = [self option:@"Cartões" detail:@"O código de segurança nunca é salvo." control:[self prefSwitch:"autofill.credit_card_enabled"] y:y];
 +  } else if ([key isEqualToString:@"downloads"]) {
@@ -2271,13 +2620,13 @@ index 0000000000..f85f888dd4
 +    y = [self option:@"Tab percorre links e botões" detail:@"Além dos campos." control:[self prefSwitch:"webkit.webprefs.tabs_to_links"] y:y];
 +    y = [self info:@"Reduzir movimento e transparência" detail:@"Segue os ajustes do macOS." note:@"Automático" y:y];
 +  } else if ([key isEqualToString:@"extensoes"]) {
-+    y = [self option:@"Extensões instaladas" detail:@"Por ato." control:[self linkButton:@"Gerenciar…" url:@"chrome://extensions"] y:y];
++    y = [self fillExtensions:y];
 +    y = [self info:@"Instalar da Chrome Web Store" detail:@"O ungoogled bloqueia por padrão." note:@"Ainda não" y:y];
 +  } else if ([key isEqualToString:@"sistema"]) {
 +    y = [self option:@"Aceleração por hardware" detail:@"Vale ao reabrir." control:[self prefSwitch:"hardware_acceleration_mode.enabled"] y:y];
 +    NSButton* proxy = [NSButton buttonWithTitle:@"Abrir…" target:self action:@selector(openProxy:)];
 +    y = [self option:@"Configurações de proxy" detail:@"Usa as do macOS." control:proxy y:y];
-+    y = [self option:@"Restaurar as configurações originais" detail:nil control:[self linkButton:@"Restaurar…" url:@"chrome://settings/reset"] y:y];
++    y = [self option:@"Restaurar as configurações originais" detail:nil control:[self subButton:@"Restaurar…" key:@"restaurar"] y:y];
 +  } else if ([key isEqualToString:@"sobre"]) {
 +    NSString* version = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"";
 +    y = [self info:product detail:[NSString stringWithFormat:@"Versão %@ · SugiyamaLabs", version] note:@"" y:y];
@@ -2583,7 +2932,422 @@ index 0000000000..f85f888dd4
 +- (void)openChromium:(NSButton*)button {
 +  if (_browser) agens_window_open_url(_browser, button.identifier.UTF8String);
 +}
++
++// --- Sub-pages and the managers.
++- (NSButton*)subButton:(NSString*)title key:(NSString*)key {
++  NSButton* b = [NSButton buttonWithTitle:title target:self action:@selector(openSub:)];
++  b.identifier = key;
++  return b;
++}
++- (void)openSub:(NSButton*)button {
++  [self showSection:button.identifier];
++  [_paneScroll.documentView scrollPoint:NSZeroPoint];
++}
++// Several small buttons side by side, as one control of a row.
++- (NSView*)buttons:(NSArray<NSButton*>*)buttons {
++  NSView* box = [[NSView alloc] init];
++  CGFloat x = 0, h = 0;
++  for (NSButton* b in buttons) {
++    b.controlSize = NSControlSizeSmall;
++    b.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
++    [b sizeToFit];
++    b.frame = NSMakeRect(x, 0, NSWidth(b.frame), NSHeight(b.frame));
++    x += NSWidth(b.frame) + 6;
++    h = MAX(h, NSHeight(b.frame));
++    [box addSubview:b];
++  }
++  box.frame = NSMakeRect(0, 0, MAX(0, x - 6), h);
++  return box;
++}
++- (NSButton*)small:(NSString*)title action:(SEL)action tag:(NSInteger)tag {
++  NSButton* b = [NSButton buttonWithTitle:title target:self action:action];
++  b.tag = tag;
++  return b;
++}
++- (CGFloat)subPage:(NSString*)key y:(CGFloat)y {
++  if ([key isEqualToString:@"apagar"]) return [self clearPage:y];
++  if ([key isEqualToString:@"restaurar"]) return [self resetPage:y];
++  if ([key isEqualToString:@"excecoes"]) return [self exceptionsPage:y];
++  if ([key isEqualToString:@"senhas-salvas"]) return [self passwordsPage:y];
++  return y;
++}
++
++// Apagar dados de navegação: period, what, and the button.
++- (CGFloat)clearPage:(CGFloat)y {
++  NSPopUpButton* period = [[NSPopUpButton alloc] init];
++  NSArray<NSString*>* periods = @[ @"Última hora", @"Últimas 24 horas", @"Últimos 7 dias", @"Últimas 4 semanas", @"Todo o período" ];
++  for (NSUInteger i = 0; i < periods.count; ++i) {
++    [period addItemWithTitle:periods[i]];
++    period.lastItem.tag = i;
++  }
++  [period selectItemWithTag:_clearPeriod];
++  period.target = self;
++  period.action = @selector(setClearPeriod:);
++  y = [self option:@"Período" detail:@"Só deste ato." control:period y:y];
++  struct Kind {
++    int bit;
++    NSString* label;
++    NSString* detail;
++  } kinds[] = {
++      {kAgensClearHistory, @"Histórico", @"As páginas visitadas."},
++      {kAgensClearCookies, @"Cookies e dados de sites", @"Sai da maioria dos sites."},
++      {kAgensClearCache, @"Imagens e arquivos em cache", @"As páginas carregam de novo, um pouco mais devagar."},
++      {kAgensClearDownloads, @"Lista de downloads", @"Os arquivos continuam no disco."},
++      {kAgensClearForms, @"Dados de formulários", @"O que o preenchimento automático guardou."},
++  };
++  for (const Kind& k : kinds) {
++    NSSwitch* sw = [[NSSwitch alloc] init];
++    sw.state = (_clearWhat & k.bit) ? NSControlStateValueOn : NSControlStateValueOff;
++    sw.tag = k.bit;
++    sw.target = self;
++    sw.action = @selector(setClearKind:);
++    y = [self option:k.label detail:k.detail control:sw y:y];
++  }
++  NSButton* go = [NSButton buttonWithTitle:@"Apagar dados" target:self action:@selector(clearData:)];
++  go.hasDestructiveAction = YES;
++  go.enabled = _clearWhat != 0 && ![_clearStatus isEqualToString:@"Apagando…"];
++  return [self option:@"Apagar o que está marcado" detail:_clearStatus control:go y:y];
++}
++- (void)setClearPeriod:(NSPopUpButton*)popup {
++  _clearPeriod = (int)popup.selectedItem.tag;
++}
++- (void)setClearKind:(NSSwitch*)sw {
++  _clearWhat = sw.state == NSControlStateValueOn ? (_clearWhat | (int)sw.tag) : (_clearWhat & ~(int)sw.tag);
++  [self showSection:@"apagar"];
++}
++- (void)clearData:(id)sender {
++  if (!_browser || !_clearWhat) return;
++  _clearStatus = @"Apagando…";
++  [self showSection:@"apagar"];
++  agens_clear_data(_browser, _clearWhat, _clearPeriod, ClearFinished, (__bridge void*)self);
++}
++- (void)clearFinished {
++  NSDateFormatter* f = [[NSDateFormatter alloc] init];
++  f.dateFormat = @"HH:mm";
++  _clearStatus = [NSString stringWithFormat:@"Apagado às %@.", [f stringFromDate:NSDate.date]];
++  if ([_section isEqualToString:@"apagar"]) [self showSection:@"apagar"];
++}
++
++// Restaurar: what goes back to our defaults, what stays, and a confirmation.
++- (CGFloat)resetPage:(CGFloat)y {
++  y = [self info:@"Volta ao padrão" detail:@"Buscador (DuckDuckGo), páginas de início, permissões dos sites, idiomas e o visual." note:@"" y:y];
++  y = [self info:@"Fica como está" detail:@"Logins e cookies, senhas, favoritos, histórico, extensões e os atos." note:@"" y:y];
++  NSButton* go = [NSButton buttonWithTitle:@"Restaurar…" target:self action:@selector(confirmReset:)];
++  go.hasDestructiveAction = YES;
++  return [self option:@"Restaurar neste ato" detail:_resetStatus control:go y:y];
++}
++- (void)confirmReset:(id)sender {
++  NSAlert* alert = [[NSAlert alloc] init];
++  alert.messageText = @"Restaurar as configurações originais?";
++  alert.informativeText = @"O buscador, as páginas de início, as permissões dos sites, os idiomas e o visual voltam ao padrão do AgensBrowser. Logins, senhas, favoritos e histórico ficam.";
++  [alert addButtonWithTitle:@"Restaurar"].hasDestructiveAction = YES;
++  [alert addButtonWithTitle:@"Cancelar"];
++  __weak AgensSettings* weak = self;
++  [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
++    if (r == NSAlertFirstButtonReturn) [weak reset];
++  }];
++}
++- (void)reset {
++  if (!_browser) return;
++  _resetStatus = @"Restaurando…";
++  [self showSection:@"restaurar"];
++  agens_reset_settings(_browser, ResetFinished, (__bridge void*)self);
++  agens_window_set_color_mode(_browser, kAgensModeSystem);
++  NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
++  for (NSString* k in @[ kThemeKey, kTintKey, kOpacityKey, kBlurKey, kImageKey, kTabsOnTopKey ]) [d removeObjectForKey:k];
++  g_theme = -1;
++  [self themeDidChange];
++}
++- (void)resetFinished {
++  _resetStatus = @"Restaurado.";
++  if ([_section isEqualToString:@"restaurar"]) [self showSection:@"restaurar"];
++}
++
++// Exceções por site: one row per site and kind, with the value and "Tirar".
++static NSString* KindName(const std::string& kind) {
++  static const std::pair<const char*, NSString*> kNames[] = {
++      {"camera", @"Câmera"}, {"microphone", @"Microfone"}, {"location", @"Localização"},
++      {"notifications", @"Notificações"}, {"popups", @"Pop-ups e redirecionamentos"}, {"sound", @"Som"},
++      {"clipboard", @"Área de transferência"}, {"downloads", @"Downloads automáticos"},
++      {"javascript", @"JavaScript"}, {"cookies", @"Cookies"},
++  };
++  for (const auto& [k, name] : kNames) {
++    if (kind == k) return name;
++  }
++  return @(kind.c_str());
++}
++// "https://meet.google.com:443" → "meet.google.com"; "[*.]example.com" → "*.example.com".
++static NSString* SiteName(const std::string& pattern) {
++  NSString* s = @(pattern.c_str());
++  for (NSString* prefix in @[ @"https://", @"http://" ]) {
++    if ([s hasPrefix:prefix]) s = [s substringFromIndex:prefix.length];
++  }
++  if ([s hasSuffix:@":443"]) s = [s substringToIndex:s.length - 4];
++  return [s stringByReplacingOccurrencesOfString:@"[*.]" withString:@"*."];
++}
++static void ExceptionsListed(void* context, const AgensSiteException* list, int count) {
++  auto* out = static_cast<std::vector<std::tuple<std::string, std::string, AgensPermission>>*>(context);
++  for (int i = 0; i < count; ++i) out->emplace_back(list[i].site, list[i].kind, list[i].value);
++}
++- (CGFloat)exceptionsPage:(CGFloat)y {
++  std::vector<std::tuple<std::string, std::string, AgensPermission>> list;
++  if (_browser) agens_site_exceptions(_browser, ExceptionsListed, &list);
++  std::sort(list.begin(), list.end());
++  _exceptions.clear();
++  if (list.empty()) {
++    return [self info:@"Nenhuma exceção neste ato" detail:@"Quando você permite ou bloqueia algo para um site, aparece aqui." note:@"" y:y];
++  }
++  for (const auto& [site, kind, value] : list) {
++    const NSInteger tag = _exceptions.size();
++    _exceptions.emplace_back(site, kind);
++    NSPopUpButton* popup = [[NSPopUpButton alloc] init];
++    popup.controlSize = NSControlSizeSmall;
++    popup.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
++    const BOOL ask = kind == "camera" || kind == "microphone" || kind == "location" ||
++                     kind == "notifications" || kind == "clipboard" || kind == "downloads";
++    if (ask) {
++      [popup addItemWithTitle:@"Perguntar"];
++      popup.lastItem.tag = kAgensAsk;
++    }
++    [popup addItemWithTitle:@"Permitir"];
++    popup.lastItem.tag = kAgensAllow;
++    [popup addItemWithTitle:@"Bloquear"];
++    popup.lastItem.tag = kAgensBlock;
++    if (kind == "cookies") {
++      [popup addItemWithTitle:@"Só nesta sessão"];
++      popup.lastItem.tag = kAgensSessionOnly;
++    }
++    [popup selectItemWithTag:value];
++    popup.identifier = [NSString stringWithFormat:@"%ld", (long)tag];
++    popup.target = self;
++    popup.action = @selector(setException:);
++    [popup sizeToFit];
++    NSView* box = [self buttons:@[ [self small:@"Tirar" action:@selector(removeException:) tag:tag] ]];
++    NSView* both = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, NSWidth(popup.frame) + 8 + NSWidth(box.frame), MAX(NSHeight(popup.frame), NSHeight(box.frame)))];
++    popup.frame = NSMakeRect(0, (NSHeight(both.frame) - NSHeight(popup.frame)) / 2, NSWidth(popup.frame), NSHeight(popup.frame));
++    box.frame = NSMakeRect(NSMaxX(popup.frame) + 8, (NSHeight(both.frame) - NSHeight(box.frame)) / 2, NSWidth(box.frame), NSHeight(box.frame));
++    [both addSubview:popup];
++    [both addSubview:box];
++    y = [self option:SiteName(site) detail:KindName(kind) control:both y:y];
++  }
++  return y;
++}
++- (void)setException:(NSPopUpButton*)popup {
++  const size_t i = popup.identifier.integerValue;
++  if (!_browser || i >= _exceptions.size()) return;
++  agens_site_exception_set(_browser, _exceptions[i].first.c_str(), _exceptions[i].second.c_str(),
++                           (AgensPermission)popup.selectedItem.tag);
++}
++- (void)removeException:(NSButton*)button {
++  const size_t i = button.tag;
++  if (!_browser || i >= _exceptions.size()) return;
++  agens_site_exception_remove(_browser, _exceptions[i].first.c_str(), _exceptions[i].second.c_str());
++  [self showSection:@"excecoes"];
++}
++
++// Extensões: the ato's extensions, each with on/off and "Remover".
++static void ExtensionsListed(void* context, const AgensExtension* list, int count) {
++  auto* out = static_cast<std::vector<std::tuple<std::string, std::string, std::string, int>>*>(context);
++  for (int i = 0; i < count; ++i) out->emplace_back(list[i].id, list[i].name, list[i].version, list[i].enabled);
++}
++- (CGFloat)fillExtensions:(CGFloat)y {
++  std::vector<std::tuple<std::string, std::string, std::string, int>> list;
++  if (_browser) agens_extensions(_browser, ExtensionsListed, &list);
++  _extensionIds.clear();
++  _extensionNames.clear();
++  if (list.empty()) {
++    return [self info:@"Nenhuma extensão neste ato" detail:@"Cada ato tem as suas." note:@"" y:y];
++  }
++  for (const auto& [id, name, version, enabled] : list) {
++    const NSInteger tag = _extensionIds.size();
++    _extensionIds.push_back(id);
++    _extensionNames.push_back(name);
++    NSSwitch* sw = [[NSSwitch alloc] init];
++    sw.controlSize = NSControlSizeSmall;
++    sw.state = enabled ? NSControlStateValueOn : NSControlStateValueOff;
++    sw.tag = tag;
++    sw.target = self;
++    sw.action = @selector(toggleExtension:);
++    sw.accessibilityLabel = [@"Ligar " stringByAppendingString:@(name.c_str())];
++    [sw sizeToFit];
++    NSView* box = [self buttons:@[ [self small:@"Remover…" action:@selector(confirmRemoveExtension:) tag:tag] ]];
++    NSView* both = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, NSWidth(box.frame) + 10 + NSWidth(sw.frame), MAX(NSHeight(sw.frame), NSHeight(box.frame)))];
++    box.frame = NSMakeRect(0, (NSHeight(both.frame) - NSHeight(box.frame)) / 2, NSWidth(box.frame), NSHeight(box.frame));
++    sw.frame = NSMakeRect(NSMaxX(box.frame) + 10, (NSHeight(both.frame) - NSHeight(sw.frame)) / 2, NSWidth(sw.frame), NSHeight(sw.frame));
++    [both addSubview:box];
++    [both addSubview:sw];
++    y = [self option:@(name.c_str()) detail:[@"Versão " stringByAppendingString:@(version.c_str())] control:both y:y];
++  }
++  return y;
++}
++- (void)toggleExtension:(NSSwitch*)sw {
++  const size_t i = sw.tag;
++  if (_browser && i < _extensionIds.size()) {
++    agens_extension_set_enabled(_browser, _extensionIds[i].c_str(), sw.state == NSControlStateValueOn);
++  }
++}
++- (void)confirmRemoveExtension:(NSButton*)button {
++  const size_t i = button.tag;
++  if (i >= _extensionIds.size()) return;
++  NSAlert* alert = [[NSAlert alloc] init];
++  alert.messageText = [NSString stringWithFormat:@"Remover %@?", @(_extensionNames[i].c_str())];
++  alert.informativeText = @"Sai deste ato junto com os dados dela.";
++  [alert addButtonWithTitle:@"Remover"].hasDestructiveAction = YES;
++  [alert addButtonWithTitle:@"Cancelar"];
++  const std::string id = _extensionIds[i];
++  __weak AgensSettings* weak = self;
++  [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
++    AgensSettings* strong = weak;
++    if (r != NSAlertFirstButtonReturn || !strong || !strong->_browser) return;
++    agens_extension_remove(strong->_browser, id.c_str());
++    [strong showSection:@"extensoes"];
++  }];
++}
++
++// Senhas salvas: search, then one row per login. Seeing or copying a password asks for Touch ID
++// (or the Mac's password), good for a minute.
++- (CGFloat)passwordsPage:(CGFloat)y {
++  if (!_loginsFresh && _browser) {
++    _loginsFresh = YES;
++    agens_passwords(_browser, LoginsListed, (__bridge void*)self);
++    return [self info:@"Carregando…" detail:nil note:@"" y:y];
++  }
++  if (!_loginSearch) {
++    _loginSearch = [[NSSearchField alloc] init];
++    _loginSearch.placeholderString = @"Buscar site ou usuário";
++    _loginSearch.target = self;
++    _loginSearch.action = @selector(searchLogins:);
++    _loginSearch.sendsSearchStringImmediately = YES;
++  }
++  _loginSearch.frame = NSMakeRect(32, y, NSWidth(_pane.bounds) - 64, 28);
++  [_pane addSubview:_loginSearch];
++  _loginsY = y + 40;
++  return [self fillLogins];
++}
++- (CGFloat)fillLogins {
++  for (NSView* v in [_pane.subviews copy]) {
++    if ([v.identifier isEqualToString:@"login"]) [v removeFromSuperview];
++  }
++  NSString* q = _loginSearch.stringValue.lowercaseString;
++  CGFloat y = _loginsY;
++  NSUInteger before = _pane.subviews.count;
++  if (_passwordStatus) y = [self info:_passwordStatus detail:nil note:@"" y:y];
++  if (_logins.empty()) {
++    y = [self info:@"Nenhuma senha salva neste ato" detail:@"Quando você salvar uma ao entrar num site, aparece aqui." note:@"" y:y];
++  }
++  for (size_t i = 0; i < _logins.size(); ++i) {
++    NSString* site = @(_logins[i].first.c_str());
++    NSString* user = _logins[i].second.empty() ? @"(sem usuário)" : @(_logins[i].second.c_str());
++    if (q.length && ![site.lowercaseString containsString:q] && ![user.lowercaseString containsString:q]) continue;
++    const BOOL shown = (int)i == _revealed;
++    NSView* box = [self buttons:@[
++      [self small:shown ? @"Esconder" : @"Ver" action:@selector(revealPassword:) tag:i],
++      [self small:@"Copiar" action:@selector(copyPassword:) tag:i],
++      [self small:@"Apagar…" action:@selector(confirmRemovePassword:) tag:i],
++    ]];
++    NSString* detail = shown ? [NSString stringWithFormat:@"%@ · %@", user, @(_revealedPassword.c_str())] : user;
++    y = [self option:site detail:detail control:box y:y];
++  }
++  for (NSUInteger k = before; k < _pane.subviews.count; ++k) _pane.subviews[k].identifier = @"login";
++  NSRect f = _pane.frame;
++  f.size.height = MAX(y + 40, NSHeight(_paneScroll.frame));
++  _pane.frame = f;
++  return y;
++}
++- (void)setLogins:(const AgensLogin*)logins count:(int)count {
++  _logins.clear();
++  for (int i = 0; i < count; ++i) _logins.emplace_back(logins[i].site, logins[i].username);
++  if ([_section isEqualToString:@"senhas-salvas"]) [self showSection:@"senhas-salvas"];
++}
++- (void)searchLogins:(NSSearchField*)field {
++  [self fillLogins];
++}
++- (void)unlockThen:(void (^)(void))then {
++  if (_unlockedUntil && _unlockedUntil.timeIntervalSinceNow > 0) {
++    then();
++    return;
++  }
++  LAContext* context = [[LAContext alloc] init];
++  __weak AgensSettings* weak = self;
++  [context evaluatePolicy:LAPolicyDeviceOwnerAuthentication
++          localizedReason:@"mostrar a senha salva"
++                    reply:^(BOOL ok, NSError* error) {
++                      dispatch_async(dispatch_get_main_queue(), ^{
++                        AgensSettings* strong = weak;
++                        if (!ok || !strong) return;
++                        strong->_unlockedUntil = [NSDate dateWithTimeIntervalSinceNow:60];
++                        then();
++                      });
++                    }];
++}
++- (std::string)passwordAt:(int)i {
++  char buf[1024] = "";
++  if (_browser) agens_password_get(_browser, i, buf, sizeof buf);
++  std::string out = buf;
++  std::fill(std::begin(buf), std::end(buf), 0);
++  return out;
++}
++- (void)revealPassword:(NSButton*)button {
++  const int i = (int)button.tag;
++  if (_revealed == i) {
++    _revealed = -1;
++    _revealedPassword.clear();
++    [self fillLogins];
++    return;
++  }
++  __weak AgensSettings* weak = self;
++  [self unlockThen:^{
++    AgensSettings* strong = weak;
++    if (!strong) return;
++    strong->_revealed = i;
++    strong->_revealedPassword = [strong passwordAt:i];
++    [strong fillLogins];
++  }];
++}
++- (void)copyPassword:(NSButton*)button {
++  const int i = (int)button.tag;
++  __weak AgensSettings* weak = self;
++  [self unlockThen:^{
++    AgensSettings* strong = weak;
++    if (!strong) return;
++    const std::string password = [strong passwordAt:i];
++    [NSPasteboard.generalPasteboard clearContents];
++    [NSPasteboard.generalPasteboard setString:@(password.c_str()) forType:NSPasteboardTypeString];
++    strong->_passwordStatus = [NSString stringWithFormat:@"Senha de %@ copiada.", @(strong->_logins[i].first.c_str())];
++    [strong fillLogins];
++  }];
++}
++- (void)confirmRemovePassword:(NSButton*)button {
++  const int i = (int)button.tag;
++  if (i < 0 || i >= (int)_logins.size()) return;
++  NSAlert* alert = [[NSAlert alloc] init];
++  alert.messageText = [NSString stringWithFormat:@"Apagar a senha de %@?", @(_logins[i].first.c_str())];
++  alert.informativeText = _logins[i].second.empty() ? @"Não dá para desfazer." : [NSString stringWithFormat:@"Usuário %@. Não dá para desfazer.", @(_logins[i].second.c_str())];
++  [alert addButtonWithTitle:@"Apagar"].hasDestructiveAction = YES;
++  [alert addButtonWithTitle:@"Cancelar"];
++  __weak AgensSettings* weak = self;
++  [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
++    AgensSettings* strong = weak;
++    if (r != NSAlertFirstButtonReturn || !strong || !strong->_browser || i >= (int)strong->_logins.size()) return;
++    agens_password_remove(strong->_browser, i);
++    strong->_logins.erase(strong->_logins.begin() + i);
++    strong->_revealed = -1;
++    strong->_revealedPassword.clear();
++    strong->_passwordStatus = nil;
++    [strong fillLogins];
++  }];
++}
 +@end
++
++static void ClearFinished(void* context) {
++  [(__bridge AgensSettings*)context clearFinished];
++}
++static void ResetFinished(void* context) {
++  [(__bridge AgensSettings*)context resetFinished];
++}
++static void LoginsListed(void* context, const AgensLogin* logins, int count) {
++  [(__bridge AgensSettings*)context setLogins:logins count:count];
++}
 +
 +// ---------------------------------------------------------------------------------------------
 +// Primeira instalação (prototipos/primeiro-uso.html): one window, once. v1 steps: boas-vindas,
@@ -3933,10 +4697,10 @@ index 886649ae98..3adfa8a130 100644
    }
  
 diff --git a/chrome/browser/ui/webui_browser/BUILD.gn b/chrome/browser/ui/webui_browser/BUILD.gn
-index db2aba2a32..fcb8dea37a 100644
+index db2aba2a32..09328bfc13 100644
 --- a/chrome/browser/ui/webui_browser/BUILD.gn
 +++ b/chrome/browser/ui/webui_browser/BUILD.gn
-@@ -77,10 +77,21 @@ source_set("impl") {
+@@ -77,10 +77,22 @@ source_set("impl") {
      "webui_browser_window.cc",
      "webui_stub_location_bar.cc",
      "zoom_bubble_manager_webui_browser.cc",
@@ -3956,6 +4720,7 @@ index db2aba2a32..fcb8dea37a 100644
 +      "//chrome/browser/agens/ui/logo_svg.h",
 +      "webui_browser_window_mac.mm",
 +    ]
++    frameworks = [ "LocalAuthentication.framework" ]  # agens: Touch ID before showing a password
    }
  
    deps = [
