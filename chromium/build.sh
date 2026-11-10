@@ -26,4 +26,4 @@ cd "$SRC_DIR"
 ./out/gn gen "$out" --fail-on-unused-args
 ninja -C "$out" chrome
 ccache --show-stats | grep -iE "hits|misses" || true
-echo "ok: $OUT_DIR/Chromium.app"
+echo "ok: $OUT_DIR/AgensBrowser.app"

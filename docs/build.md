@@ -28,7 +28,7 @@ Máquina: MacBook Pro M5 Pro (18 núcleos, 64 GB), macOS 27.0.1, Xcode 27.2, red
 | `build.sh` sem mudança | 25 s | — |
 | **Total em `~/browser-work`** | | **46 GB** |
 
-O `Chromium.app` final tem 370 MB.
+O `Chromium.app` final tem 370 MB. Desde a #40 o app sai como `out/<dir>/AgensBrowser.app` (binário `Contents/MacOS/AgensBrowser`, bundle id `com.sugiyamalabs.agensbrowser`, perfil em `~/Library/Application Support/AgensBrowser`; o nome não é só "Agens" porque esse é o do app Agens, instalado junto).
 
 O build do zero usou 133.308 s de CPU em 52.797 s de relógio, só ~2,5 núcleos em média. Quem segura é o link com ThinLTO e PGO, que é quase todo serial. O ccache teve 0% de acerto no build do zero, como esperado. O ganho dele num segundo `fetch.sh` + `build.sh` **ainda não foi medido**.
 
