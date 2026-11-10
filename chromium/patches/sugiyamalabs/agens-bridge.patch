@@ -798,10 +798,10 @@ index 0000000000..ac8013e4eb
 +}  // namespace agens::bridge
 diff --git a/chrome/browser/agens/bridge/control_keys.cc b/chrome/browser/agens/bridge/control_keys.cc
 new file mode 100644
-index 0000000000..f7bd696093
+index 0000000000..33cf2160f4
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_keys.cc
-@@ -0,0 +1,164 @@
+@@ -0,0 +1,186 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/control_keys.h"
@@ -959,6 +959,28 @@ index 0000000000..f7bd696093
 +  return op.starts_with("tab.") || op.starts_with("page.");
 +}
 +
++bool DialogBlocks(std::string_view op) {
++  return op.starts_with("page.") && op != "page.dialog";
++}
++
++bool IsLocalURL(const GURL& url) {
++  if (!url.is_valid() || !url.SchemeIsHTTPOrHTTPS() || url.has_username() || url.has_password()) return false;
++  const std::string_view host = url.host();  // canonical: lowercase, IPv4 in dotted form, IPv6 in brackets
++  return host == "localhost" || (host.size() > 10 && host.ends_with(".localhost")) || host == "127.0.0.1" ||
++         host == "[::1]";
++}
++
++std::string ClipChars(std::string text, size_t max) {
++  size_t count = 0;
++  for (size_t i = 0; i < text.size(); ++i) {
++    if ((static_cast<unsigned char>(text[i]) & 0xC0) != 0x80 && ++count > max) {
++      text.resize(i);
++      break;
++    }
++  }
++  return text;
++}
++
 +bool TouchesClipboard(const Key& key) {
 +  if (key.key == "Delete" && key.shift) return true;  // cut, on Windows and Linux
 +  if (!key.meta && !key.ctrl) return false;
@@ -968,10 +990,10 @@ index 0000000000..f7bd696093
 +}  // namespace agens::bridge
 diff --git a/chrome/browser/agens/bridge/control_keys.h b/chrome/browser/agens/bridge/control_keys.h
 new file mode 100644
-index 0000000000..a9bb81876d
+index 0000000000..07bb21ee18
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_keys.h
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,79 @@
 +// Copyright 2026 SugiyamaLabs.
 +// page.key's key names and the password rules that depend on them (docs/protocolo.md, "control,
 +// tab, page"). Pure logic, checked by protocol_selfcheck.cc with only //base.
@@ -984,6 +1006,7 @@ index 0000000000..a9bb81876d
 +#include <vector>
 +
 +#include "base/values.h"
++#include "url/gurl.h"
 +
 +namespace agens::bridge {
 +
@@ -1034,6 +1057,16 @@ index 0000000000..a9bb81876d
 +// While the person is in control (control.paused), these ops answer kPaused.
 +bool PauseBlocks(std::string_view op);
 +
++// While a JavaScript dialog of the tab is open, these ops on it answer kDialogOpen.
++bool DialogBlocks(std::string_view op);
++
++// page.eval runs only on a local page: http or https on localhost, *.localhost, 127.0.0.1 or
++// [::1]. `url` is the committed origin's URL.
++bool IsLocalURL(const GURL& url);
++
++// `text` cut to at most `max` characters (code points), never inside one.
++std::string ClipChars(std::string text, size_t max);
++
 +// "A", "A e B", "A, B e C".
 +std::string JoinNames(const std::vector<std::string>& names);
 +
@@ -1042,10 +1075,10 @@ index 0000000000..a9bb81876d
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_CONTROL_KEYS_H_
 diff --git a/chrome/browser/agens/bridge/control_ops.cc b/chrome/browser/agens/bridge/control_ops.cc
 new file mode 100644
-index 0000000000..3f8e6d1dc5
+index 0000000000..6e9c9fdba4
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_ops.cc
-@@ -0,0 +1,607 @@
+@@ -0,0 +1,853 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The control session (docs/protocolo.md, "control, tab, page"): an app, after the person's OK,
 +// drives tabs of one ato. It belongs to the connection and ends on control.stop, when the
@@ -1059,7 +1092,9 @@ index 0000000000..3f8e6d1dc5
 +#include "chrome/browser/agens/bridge/control_ops.h"
 +
 +#include <algorithm>
++#include <cmath>
 +#include <map>
++#include <optional>
 +#include <memory>
 +#include <set>
 +#include <utility>
@@ -1080,8 +1115,14 @@ index 0000000000..3f8e6d1dc5
 +#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
 +#include "chrome/browser/ui/navigator/browser_navigator.h"
 +#include "chrome/browser/ui/navigator/browser_navigator_params.h"
++#include "components/javascript_dialogs/tab_modal_dialog_manager.h"
 +#include "components/prefs/pref_change_registrar.h"
++#include "content/public/browser/global_routing_id.h"
 +#include "content/public/browser/invalidate_type.h"
++#include "content/public/browser/javascript_dialog_manager.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/reload_type.h"
++#include "content/public/browser/render_frame_host.h"
 +#include "content/public/browser/navigation_handle.h"
 +#include "content/public/browser/web_contents_observer.h"
 +
@@ -1097,9 +1138,22 @@ index 0000000000..3f8e6d1dc5
 +constexpr size_t kMaxAgentChars = 40;
 +constexpr size_t kMaxStatusChars = 120;
 +
++constexpr size_t kMaxEvalChars = 100000;
++constexpr size_t kMaxDialogChars = 2000;
++
 +void StopByUser(uint64_t connection);
 +void Pause(uint64_t connection);
 +void Resume(uint64_t connection);
++content::JavaScriptDialogManager* Dialogs();
++
++// A JavaScript dialog a controlled tab opened, held for page.dialog.
++struct HeldDialog {
++  std::string type;  // "alert", "confirm", "prompt", "beforeunload"
++  std::u16string message, default_prompt;
++  content::GlobalRenderFrameHostId frame;
++  bool is_reload = false;  // beforeunload's
++  content::JavaScriptDialogManager::DialogClosedCallback done;
++};
 +
 +// A tab the session opened. Marks it while it lives, and unmarks it when the session lets go.
 +class Tab : public content::WebContentsObserver {
@@ -1112,6 +1166,7 @@ index 0000000000..3f8e6d1dc5
 +    mark->stop = base::BindRepeating(&StopByUser, connection);
 +    mark->take_over = base::BindRepeating(&Pause, connection);
 +    mark->hand_back = base::BindRepeating(&Resume, connection);
++    mark->dialogs = Dialogs();
 +    // The agent's cursor on the pill's page: where it last clicked or hovered.
 +    page.on_pointer = base::BindRepeating(
 +        [](content::WebContents* contents, gfx::PointF point) {
@@ -1130,6 +1185,7 @@ index 0000000000..3f8e6d1dc5
 +  }
 +  ~Tab() override {
 +    Answer(ErrorReply(&waiting_id_, kFailed, "the tab is no longer controlled"));
++    ReleaseDialog();  // the tab stays open: its dialog goes to the person
 +    if (content::WebContents* contents = web_contents()) {
 +      contents->RemoveUserData(AgensControlled::UserDataKey());
 +      contents->NotifyNavigationStateChanged(content::INVALIDATE_TYPE_TAB);
@@ -1139,7 +1195,9 @@ index 0000000000..3f8e6d1dc5
 +  const std::string id;  // "t1", "t2"… for this session
 +  Page page;
 +
-+  // Answers `request_id` with {tab} once `navigation_id` finishes (or kNavigationWait passes).
++  // Answers `request_id` with {tab} once `navigation_id` finishes (or kNavigationWait passes);
++  // kNextNavigation: the next one of the main frame to finish (history and reload give no handle).
++  static constexpr int64_t kNextNavigation = -1;
 +  void WaitFor(int64_t navigation_id, base::Value request_id, ReplyCallback reply) {
 +    AnswerOk();  // an earlier wait: its navigation was replaced by this one
 +    waiting_navigation_ = navigation_id;
@@ -1155,9 +1213,55 @@ index 0000000000..3f8e6d1dc5
 +
 +  // content::WebContentsObserver:
 +  void DidFinishNavigation(content::NavigationHandle* handle) override {
-+    if (waiting_reply_ && handle->GetNavigationId() == waiting_navigation_) AnswerOk();  // a failed load is ok too
++    if (waiting_reply_ && (handle->GetNavigationId() == waiting_navigation_ ||
++                           (waiting_navigation_ == kNextNavigation && handle->IsInPrimaryMainFrame()))) {
++      AnswerOk();  // a failed load is ok too
++    }
 +  }
 +  void WebContentsDestroyed() override;
++
++  bool HasDialog() const { return dialog_.has_value(); }
++  // Holds `dialog` and tells the client; the ops waiting on this tab can't run while it's open.
++  void Hold(HeldDialog dialog) {
++    ReleaseDialog();  // content shows one at a time; an older one would be stale
++    base::DictValue fields;
++    fields.Set("tab", id);
++    fields.Set("type", dialog.type);
++    fields.Set("message", ClipChars(base::UTF16ToUTF8(dialog.message), kMaxDialogChars));
++    dialog_ = std::move(dialog);
++    page.FailWaiting(kDialogOpen, "a dialog is open: answer it with page.dialog");
++    SendEventTo(connection_, "page.dialog", std::move(fields));
++  }
++  // The agent's answer (page.dialog), or content closing it (accept false). False when none.
++  bool AnswerDialog(bool accept, const std::u16string* text) {
++    if (!dialog_) return false;
++    HeldDialog dialog = std::move(*dialog_);
++    dialog_.reset();
++    std::move(dialog.done).Run(accept, accept ? (text ? *text : dialog.default_prompt) : std::u16string());
++    return true;
++  }
++  // To the person, as the browser shows any dialog ("Assumir", or the session let go).
++  void ReleaseDialog() {
++    if (!dialog_) return;
++    HeldDialog dialog = std::move(*dialog_);
++    dialog_.reset();
++    content::RenderFrameHost* frame = content::RenderFrameHost::FromID(dialog.frame);
++    auto* normal = web_contents() ? javascript_dialogs::TabModalDialogManager::FromWebContents(web_contents()) : nullptr;
++    if (!frame || !normal) return std::move(dialog.done).Run(false, std::u16string());
++    if (dialog.type == "beforeunload") {
++      return normal->RunBeforeUnloadDialog(web_contents(), frame, dialog.is_reload, std::move(dialog.done));
++    }
++    // It may suppress the dialog (a background tab) without answering: then it's a "Cancel".
++    auto [shown, suppressed] = base::SplitOnceCallback(std::move(dialog.done));
++    bool did_suppress = false;
++    const content::JavaScriptDialogType type = dialog.type == "alert"     ? content::JAVASCRIPT_DIALOG_TYPE_ALERT
++                                               : dialog.type == "confirm" ? content::JAVASCRIPT_DIALOG_TYPE_CONFIRM
++                                                                          : content::JAVASCRIPT_DIALOG_TYPE_PROMPT;
++    normal->RunJavaScriptDialog(web_contents(), frame, type, dialog.message, dialog.default_prompt, std::move(shown),
++                                &did_suppress);
++    if (did_suppress) std::move(suppressed).Run(false, std::u16string());
++  }
++  base::WeakPtr<Tab> GetWeakPtr() { return weak_.GetWeakPtr(); }
 +
 + private:
 +  void Answer(std::string line) {
@@ -1171,6 +1275,8 @@ index 0000000000..3f8e6d1dc5
 +  base::Value waiting_id_;
 +  ReplyCallback waiting_reply_;
 +  base::OneShotTimer waiting_timer_;
++  std::optional<HeldDialog> dialog_;
++  base::WeakPtrFactory<Tab> weak_{this};
 +};
 +
 +// One app's control of one ato.
@@ -1213,12 +1319,88 @@ index 0000000000..3f8e6d1dc5
 +  }
 +}
 +
++// The dialog manager of controlled tabs (AgensControlled::dialogs, asked by the browser for each
++// dialog): holds a dialog for the agent while its session runs, else hands it to the browser's
++// own. Never destroyed: content may keep the pointer past the tab's control.
++class HeldDialogs : public content::JavaScriptDialogManager {
++ public:
++  void RunJavaScriptDialog(content::WebContents* contents,
++                           content::RenderFrameHost* frame,
++                           content::JavaScriptDialogType type,
++                           const std::u16string& message,
++                           const std::u16string& default_prompt,
++                           DialogClosedCallback done,
++                           bool* did_suppress_message) override {
++    if (Tab* tab = Holding(contents)) {
++      *did_suppress_message = false;
++      tab->Hold({type == content::JAVASCRIPT_DIALOG_TYPE_ALERT     ? "alert"
++                 : type == content::JAVASCRIPT_DIALOG_TYPE_CONFIRM ? "confirm"
++                                                                   : "prompt",
++                 message, default_prompt, frame->GetGlobalId(), false, std::move(done)});
++      return;
++    }
++    if (auto* normal = Normal(contents)) {
++      return normal->RunJavaScriptDialog(contents, frame, type, message, default_prompt, std::move(done),
++                                         did_suppress_message);
++    }
++    *did_suppress_message = true;
++  }
++  void RunBeforeUnloadDialog(content::WebContents* contents,
++                             content::RenderFrameHost* frame,
++                             bool is_reload,
++                             DialogClosedCallback done) override {
++    if (Tab* tab = Holding(contents)) {
++      return tab->Hold({"beforeunload", {}, {}, frame->GetGlobalId(), is_reload, std::move(done)});
++    }
++    if (auto* normal = Normal(contents)) return normal->RunBeforeUnloadDialog(contents, frame, is_reload, std::move(done));
++    std::move(done).Run(true, std::u16string());
++  }
++  bool HandleJavaScriptDialog(content::WebContents* contents, bool accept, const std::u16string* prompt) override {
++    if (Tab* tab = Find(contents); tab && tab->AnswerDialog(accept, prompt)) return true;
++    auto* normal = Normal(contents);
++    return normal && normal->HandleJavaScriptDialog(contents, accept, prompt);
++  }
++  void CancelDialogs(content::WebContents* contents, bool reset_state) override {
++    if (Tab* tab = Find(contents)) tab->AnswerDialog(false, nullptr);
++    if (auto* normal = Normal(contents)) normal->CancelDialogs(contents, reset_state);
++  }
++
++ private:
++  static Tab* Find(content::WebContents* contents) {
++    for (auto& [connection, session] : Sessions()) {
++      for (auto& tab : session.tabs) {
++        if (tab->web_contents() == contents) return tab.get();
++      }
++    }
++    return nullptr;
++  }
++  // The session's tab while it isn't paused: then the person gets the dialog.
++  static Tab* Holding(content::WebContents* contents) {
++    for (auto& [connection, session] : Sessions()) {
++      for (auto& tab : session.tabs) {
++        if (tab->web_contents() == contents) return session.paused ? nullptr : tab.get();
++      }
++    }
++    return nullptr;
++  }
++  static content::JavaScriptDialogManager* Normal(content::WebContents* contents) {
++    return javascript_dialogs::TabModalDialogManager::FromWebContents(contents);
++  }
++};
++content::JavaScriptDialogManager* Dialogs() {
++  static base::NoDestructor<HeldDialogs> dialogs;
++  return dialogs.get();
++}
++
 +// "Assumir": ops still in flight finish; queued and new ones answer `paused`.
 +void Pause(uint64_t connection) {
 +  auto it = Sessions().find(connection);
 +  if (it == Sessions().end() || it->second.paused) return;
 +  it->second.paused = true;
-+  for (auto& tab : it->second.tabs) tab->page.FailWaiting(kPaused, "the person took over the tab");
++  for (auto& tab : it->second.tabs) {
++    tab->page.FailWaiting(kPaused, "the person took over the tab");
++    tab->ReleaseDialog();
++  }
 +  Sync(it->second);
 +  base::DictValue fields;
 +  fields.Set("by", "user");
@@ -1504,6 +1686,33 @@ index 0000000000..3f8e6d1dc5
 +  tab->WaitFor(handle->GetNavigationId(), std::move(request.id), std::move(reply));
 +}
 +
++// tab.back, tab.forward and tab.reload: answer like tab.navigate.
++void TabHistory(Session& session, Request request, ReplyCallback reply) {
++  std::optional<std::string> id = StringParam(request.body, "tab");
++  if (!id) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs tab"));
++    return;
++  }
++  Tab* tab = session.Find(*id);
++  if (!tab) {
++    std::move(reply).Run(ErrorReply(&request.id, kNotFound, *id));
++    return;
++  }
++  content::NavigationController& controller = tab->web_contents()->GetController();
++  if (request.op == "tab.back" ? !controller.CanGoBack() : request.op == "tab.forward" && !controller.CanGoForward()) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "nothing to go to in that direction"));
++    return;
++  }
++  tab->WaitFor(Tab::kNextNavigation, std::move(request.id), std::move(reply));
++  if (request.op == "tab.back") {
++    controller.GoBack();
++  } else if (request.op == "tab.forward") {
++    controller.GoForward();
++  } else {
++    controller.Reload(content::ReloadType::NORMAL, /*check_for_repost=*/false);
++  }
++}
++
 +void TabClose(Session& session, const Request& request, ReplyCallback reply) {
 +  std::optional<std::string> id = StringParam(request.body, "tab");
 +  if (!id) {
@@ -1533,8 +1742,76 @@ index 0000000000..3f8e6d1dc5
 +    std::move(reply).Run(ErrorReply(&request.id, kNotFound, *id));
 +    return;
 +  }
++  if (tab->HasDialog() && DialogBlocks(op)) {
++    std::move(reply).Run(ErrorReply(&request.id, kDialogOpen, "a dialog is open: answer it with page.dialog"));
++    return;
++  }
 +  std::optional<std::string> ref = StringParam(request.body, "ref");
-+  if (op == "page.snapshot") {
++  // Runs `method` (a Page op without other arguments) in the tab's queue.
++  auto run = [&](void (Page::*method)(base::Value, ReplyCallback)) {
++    tab->page.Run(request.id.Clone(), base::BindOnce(method, base::Unretained(&tab->page), request.id.Clone()),
++                  std::move(reply));
++  };
++  if (op == "page.console") {
++    run(&Page::Console);
++  } else if (op == "page.network") {
++    run(&Page::Network);
++  } else if (op == "page.hover") {
++    if (!ref) {
++      std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs tab and ref"));
++      return;
++    }
++    tab->page.Run(request.id.Clone(),
++                  base::BindOnce(&Page::Hover, base::Unretained(&tab->page), request.id.Clone(), *ref), std::move(reply));
++  } else if (op == "page.scroll") {
++    std::optional<double> dy = request.body.FindDouble("dy");
++    const base::Value* ref_value = request.body.Find("ref");
++    if (!dy || !std::isfinite(*dy) || std::abs(*dy) > 1e6 || (ref_value && !ref)) {
++      std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs tab and dy (CSS pixels); ref is optional"));
++      return;
++    }
++    tab->page.Run(request.id.Clone(),
++                  base::BindOnce(&Page::Scroll, base::Unretained(&tab->page), request.id.Clone(), ref.value_or(""), *dy),
++                  std::move(reply));
++  } else if (op == "page.eval") {
++    std::optional<std::string> js = StringParam(request.body, "js");
++    if (!js || !AtMostChars(*js, kMaxEvalChars)) {
++      std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs tab and js (up to 100000 characters)"));
++      return;
++    }
++    tab->page.Run(request.id.Clone(),
++                  base::BindOnce(&Page::Eval, base::Unretained(&tab->page), request.id.Clone(), std::move(*js)),
++                  std::move(reply));
++  } else if (op == "page.dialog") {
++    std::optional<std::string> action = StringParam(request.body, "action");
++    const base::Value* text_value = request.body.Find("text");
++    std::u16string text;
++    if (!action || (*action != "accept" && *action != "dismiss") ||
++        (text_value && (!text_value->is_string() || !AtMostChars(text_value->GetString(), kMaxTypeChars) ||
++                        !base::UTF8ToUTF16(text_value->GetString().data(), text_value->GetString().size(), &text)))) {
++      std::move(reply).Run(ErrorReply(&request.id, kBadRequest,
++                                      "needs tab and action (accept or dismiss); text is optional"));
++      return;
++    }
++    if (!tab->HasDialog()) {
++      std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "no dialog is open on that tab"));
++      return;
++    }
++    // In the queue too: an op already running (the click that opened it) answers first.
++    tab->page.Run(request.id.Clone(),
++                  base::BindOnce(
++                      [](base::WeakPtr<Tab> tab, base::Value id, bool accept, std::optional<std::u16string> text,
++                         ReplyCallback reply) {
++                        if (!tab) return std::move(reply).Run(ErrorReply(&id, kFailed, "the tab is no longer controlled"));
++                        if (!tab->AnswerDialog(accept, text ? &*text : nullptr)) {
++                          return std::move(reply).Run(ErrorReply(&id, kBadRequest, "no dialog is open on that tab"));
++                        }
++                        std::move(reply).Run(OkReply(id));
++                      },
++                      tab->GetWeakPtr(), request.id.Clone(), *action == "accept",
++                      text_value ? std::optional<std::u16string>(std::move(text)) : std::nullopt),
++                  std::move(reply));
++  } else if (op == "page.snapshot") {
 +    tab->page.Run(request.id.Clone(), base::BindOnce(&Page::Snapshot, base::Unretained(&tab->page), request.id.Clone()),
 +                  std::move(reply));
 +  } else if (op == "page.screenshot") {
@@ -1638,6 +1915,8 @@ index 0000000000..3f8e6d1dc5
 +    TabOpen(client, std::move(request), std::move(reply));
 +  } else if (op == "tab.navigate") {
 +    TabNavigate(session, std::move(request), std::move(reply));
++  } else if (op == "tab.back" || op == "tab.forward" || op == "tab.reload") {
++    TabHistory(session, std::move(request), std::move(reply));
 +  } else if (op == "tab.close") {
 +    TabClose(session, request, std::move(reply));
 +  } else if (op.starts_with("page.")) {
@@ -1682,10 +1961,10 @@ index 0000000000..eda9e71d52
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_CONTROL_OPS_H_
 diff --git a/chrome/browser/agens/bridge/control_page.cc b/chrome/browser/agens/bridge/control_page.cc
 new file mode 100644
-index 0000000000..2801066935
+index 0000000000..f74630a413
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_page.cc
-@@ -0,0 +1,492 @@
+@@ -0,0 +1,686 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/control_page.h"
@@ -1694,6 +1973,9 @@ index 0000000000..2801066935
 +#include <vector>
 +
 +#include "base/base64.h"
++#include "base/json/json_reader.h"
++#include "base/json/json_writer.h"
++#include "base/memory/ref_counted.h"
 +#include "base/memory/raw_ptr.h"
 +#include "base/strings/string_number_conversions.h"
 +#include "base/strings/string_util.h"
@@ -1710,6 +1992,14 @@ index 0000000000..2801066935
 +#include "content/public/browser/render_widget_host_view.h"
 +#include "content/public/browser/scoped_accessibility_mode.h"
 +#include "content/public/browser/web_contents.h"
++#include "content/public/browser/weak_document_ptr.h"
++#include "content/public/common/isolated_world_ids.h"
++#include "net/base/net_errors.h"
++#include "net/http/http_response_headers.h"
++#include "services/network/public/cpp/request_destination.h"
++#include "third_party/blink/public/common/input/web_mouse_wheel_event.h"
++#include "third_party/blink/public/mojom/devtools/console_message.mojom.h"
++#include "third_party/blink/public/mojom/loader/resource_load_info.mojom.h"
 +#include "third_party/blink/public/common/input/web_input_event.h"
 +#include "third_party/blink/public/common/input/web_mouse_event.h"
 +#include "ui/accessibility/ax_enum_util.h"
@@ -1736,6 +2026,10 @@ index 0000000000..2801066935
 +constexpr base::TimeDelta kAckWait = base::Seconds(2);
 +constexpr base::TimeDelta kRendererWait = base::Seconds(3);
 +constexpr size_t kMaxWaitingOps = 64;
++constexpr size_t kMaxLogEntries = 200;   // page.console and page.network, per tab
++constexpr size_t kMaxLogChars = 2000;    // a message or URL in them
++constexpr size_t kMaxEvalResultBytes = 1 << 20;
++constexpr base::TimeDelta kEvalWait = base::Seconds(10);
 +// A snapshot reply stays far under the socket's output cap (bridge_mac.mm), escaping included.
 +constexpr size_t kMaxSnapshotBytes = 4 << 20;
 +// Basic plus extended properties: checked states and other attributes Blink only sends with them.
@@ -1868,6 +2162,27 @@ index 0000000000..2801066935
 +  widget->ForwardMouseEvent(event);
 +}
 +
++// A wheel scroll at `point`: began with the delta, then ended, as a trackpad sends it.
++void SendWheel(content::RenderWidgetHost* widget, gfx::PointF point, double dy) {
++  for (auto phase : {blink::WebMouseWheelEvent::kPhaseBegan, blink::WebMouseWheelEvent::kPhaseEnded}) {
++    blink::WebMouseWheelEvent event(blink::WebInputEvent::Type::kMouseWheel, blink::WebInputEvent::kNoModifiers,
++                                    base::TimeTicks::Now());
++    event.SetPositionInWidget(point);
++    event.delta_units = ui::ScrollGranularity::kScrollByPrecisePixel;
++    event.delta_y = phase == blink::WebMouseWheelEvent::kPhaseBegan ? -dy : 0;  // positive delta scrolls up
++    event.phase = phase;
++    widget->ForwardWheelEvent(event);
++  }
++}
++
++// A URL as page.console and page.network show it: no user or password, clipped.
++std::string ShownURL(const GURL& url) {
++  GURL::Replacements no_credentials;
++  no_credentials.ClearUsername();
++  no_credentials.ClearPassword();
++  return ClipChars(url.is_valid() ? url.ReplaceComponents(no_credentials).spec() : std::string(), kMaxLogChars);
++}
++
 +}  // namespace
 +
 +Page::Page(content::WebContents* contents) : content::WebContentsObserver(contents) {
@@ -1911,9 +2226,136 @@ index 0000000000..2801066935
 +}
 +
 +void Page::DidFinishNavigation(content::NavigationHandle* handle) {
++  // A document that failed (network error or HTTP status >= 400), for page.network.
++  const int status = handle->GetResponseHeaders() ? handle->GetResponseHeaders()->response_code() : 0;
++  const net::Error error = handle->GetNetErrorCode();
++  if (!handle->IsSameDocument() && (status >= 400 || (error != net::OK && error != net::ERR_ABORTED))) {
++    base::DictValue entry;
++    entry.Set("url", ShownURL(handle->GetURL()));
++    entry.Set("method", handle->IsPost() ? "POST" : "GET");
++    if (status >= 400) {
++      entry.Set("status", status);
++    } else {
++      entry.Set("error", net::ErrorToShortString(error));
++    }
++    entry.Set("type", handle->IsInMainFrame() ? "document" : "iframe");
++    Keep(network_, std::move(entry));
++  }
 +  if (!handle->IsInPrimaryMainFrame() || !handle->HasCommitted() || handle->IsSameDocument()) return;
 +  nodes_.clear();  // refs end with their document
 +  refs_.clear();
++}
++
++void Page::Keep(std::deque<base::DictValue>& ring, base::DictValue entry) {
++  if (ring.size() >= kMaxLogEntries) ring.pop_front();
++  ring.push_back(std::move(entry));
++}
++
++void Page::OnDidAddMessageToConsole(content::RenderFrameHost* frame,
++                                    blink::mojom::ConsoleMessageLevel level,
++                                    const std::u16string& message,
++                                    int32_t line,
++                                    const std::u16string& source,
++                                    const std::optional<std::u16string>& stack) {
++  // console.log and console.info both come as kInfo; console.debug as kVerbose. Uncaught
++  // exceptions come here too, as errors ("Uncaught …").
++  const char* name = level == blink::mojom::ConsoleMessageLevel::kVerbose   ? "log"
++                     : level == blink::mojom::ConsoleMessageLevel::kInfo    ? "info"
++                     : level == blink::mojom::ConsoleMessageLevel::kWarning ? "warn"
++                                                                            : "error";
++  base::DictValue entry;
++  entry.Set("level", name);
++  entry.Set("text", ClipChars(base::UTF16ToUTF8(message), kMaxLogChars));
++  entry.Set("url", ShownURL(GURL(source)));
++  entry.Set("line", line);
++  Keep(console_, std::move(entry));
++}
++
++void Page::ResourceLoadComplete(content::RenderFrameHost* frame,
++                                const content::GlobalRequestID& request_id,
++                                const GURL& original_url,
++                                const blink::mojom::ResourceLoadInfo& info) {
++  // Documents come from DidFinishNavigation.
++  if (network::IsRequestDestinationEmbeddedFrame(info.request_destination) ||
++      info.request_destination == network::mojom::RequestDestination::kDocument) {
++    return;
++  }
++  if (info.http_status_code < 400 && info.net_error == net::OK) return;
++  base::DictValue entry;
++  entry.Set("url", ShownURL(info.final_url));
++  entry.Set("method", ClipChars(info.method, 20));
++  if (info.http_status_code >= 400) {
++    entry.Set("status", info.http_status_code);
++  } else {
++    entry.Set("error", net::ErrorToShortString(info.net_error));
++  }
++  const std::string type = network::RequestDestinationToString(info.request_destination);
++  entry.Set("type", type.empty() ? "fetch" : type);  // fetch() and XMLHttpRequest have no destination
++  Keep(network_, std::move(entry));
++}
++
++void Page::Console(base::Value id, ReplyCallback reply) {
++  base::ListValue messages;
++  for (const base::DictValue& entry : console_) messages.Append(entry.Clone());
++  base::DictValue result;
++  result.Set("messages", std::move(messages));
++  std::move(reply).Run(OkReply(id, std::move(result)));
++}
++
++void Page::Network(base::Value id, ReplyCallback reply) {
++  base::ListValue requests;
++  for (const base::DictValue& entry : network_) requests.Append(entry.Clone());
++  base::DictValue result;
++  result.Set("requests", std::move(requests));
++  std::move(reply).Run(OkReply(id, std::move(result)));
++}
++
++void Page::Eval(base::Value id, std::string js, ReplyCallback reply) {
++  // Checked now, when it runs: the page may have moved since the request came.
++  content::RenderFrameHost* frame = web_contents()->GetPrimaryMainFrame();
++  if (!IsLocalURL(frame->GetLastCommittedOrigin().GetURL())) {
++    return Fail(id, reply, kDenied, "page.eval runs only on a local page (localhost, 127.0.0.1, [::1])");
++  }
++  // The page turns the value into JSON itself, so a value JSON can't carry is an error, not a guess.
++  const std::string wrapper =
++      "(() => { try { const v = (0, eval)(" + base::WriteJson(base::Value(std::move(js))).value_or("''") +
++      "); if (v === undefined) return ['ok', 'null']; const s = JSON.stringify(v); return s === undefined ? "
++      "['error', 'the result is not JSON'] : ['ok', s]; } catch (e) { return ['error', String(e)]; } })()";
++  // Whichever comes first, the result or kEvalWait, answers.
++  auto pending = base::MakeRefCounted<base::RefCountedData<ReplyCallback>>(std::move(reply));
++  base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
++      FROM_HERE,
++      base::BindOnce(
++          [](base::Value id, scoped_refptr<base::RefCountedData<ReplyCallback>> pending) {
++            if (pending->data) Fail(id, pending->data, kFailed, "the script ran past 10 s");
++          },
++          id.Clone(), pending),
++      kEvalWait);
++  frame->ExecuteJavaScriptForTests(
++      base::UTF8ToUTF16(wrapper),
++      base::BindOnce(
++          [](base::WeakPtr<Page> self, content::WeakDocumentPtr document, base::Value id,
++             scoped_refptr<base::RefCountedData<ReplyCallback>> pending, base::Value result) {
++            if (!pending->data) return;
++            ReplyCallback reply = std::move(pending->data);
++            if (!self || document.AsRenderFrameHostIfValid() != self->web_contents()->GetPrimaryMainFrame()) {
++              return Fail(id, reply, kFailed, "the page navigated while the script ran");
++            }
++            const base::ListValue* pair = result.GetIfList();
++            if (!pair || pair->size() != 2 || !(*pair)[0].is_string() || !(*pair)[1].is_string()) {
++              return Fail(id, reply, kFailed, "the script gave no result");
++            }
++            const std::string& text = (*pair)[1].GetString();
++            if ((*pair)[0].GetString() != "ok") return Fail(id, reply, kFailed, ClipChars(text, 500));
++            if (text.size() > kMaxEvalResultBytes) return Fail(id, reply, kFailed, "the result is over 1 MB");
++            std::optional<base::Value> value = base::JSONReader::Read(text, base::JSON_PARSE_RFC);
++            if (!value) return Fail(id, reply, kFailed, "the result is not JSON");
++            base::DictValue out;
++            out.Set("result", std::move(*value));
++            std::move(reply).Run(OkReply(id, std::move(out)));
++          },
++          weak_.GetWeakPtr(), frame->GetWeakDocumentPtr(), std::move(id), pending),
++      content::ISOLATED_WORLD_ID_GLOBAL);
 +}
 +
 +ui::BrowserAccessibilityManager* Page::RootManager() {
@@ -2013,19 +2455,41 @@ index 0000000000..2801066935
 +}
 +
 +void Page::Click(base::Value id, std::string ref, ReplyCallback reply) {
-+  ClickAttempt(weak_.GetWeakPtr(), std::move(id), std::move(ref), base::TimeTicks::Now() + kScrollWait, false,
-+               std::move(reply));
++  PointerAttempt(weak_.GetWeakPtr(), std::move(id), std::move(ref), Pointer::kClick, 0,
++                 base::TimeTicks::Now() + kScrollWait, false, std::move(reply));
 +}
 +
-+// A real click at the node's center, scrolled into view first. The accessibility default action
-+// where a click can't land: an option of a closed <select>, a node in another process's frame, or
-+// one that stays out of view.
-+void Page::ClickAttempt(base::WeakPtr<Page> self,
-+                        base::Value id,
-+                        std::string ref,
-+                        base::TimeTicks deadline,
-+                        bool scrolled,
-+                        ReplyCallback reply) {
++void Page::Hover(base::Value id, std::string ref, ReplyCallback reply) {
++  PointerAttempt(weak_.GetWeakPtr(), std::move(id), std::move(ref), Pointer::kHover, 0,
++                 base::TimeTicks::Now() + kScrollWait, false, std::move(reply));
++}
++
++void Page::Scroll(base::Value id, std::string ref, double dy, ReplyCallback reply) {
++  if (!ref.empty()) {
++    return PointerAttempt(weak_.GetWeakPtr(), std::move(id), std::move(ref), Pointer::kScroll, dy,
++                          base::TimeTicks::Now() + kScrollWait, false, std::move(reply));
++  }
++  content::RenderWidgetHost* widget = web_contents()->GetPrimaryMainFrame()->GetRenderWidgetHost();
++  content::RenderWidgetHostView* view = widget->GetView();
++  if (!view) return Fail(id, reply, kFailed, "the tab shows nothing");
++  const gfx::Size size = view->GetViewBounds().size();
++  AckWaiter::Start(widget, blink::WebInputEvent::Type::kMouseWheel,
++                   base::BindOnce([](base::Value id, ReplyCallback reply) { std::move(reply).Run(OkReply(id)); },
++                                  std::move(id), std::move(reply)));
++  SendWheel(widget, gfx::PointF(size.width() / 2.0f, size.height() / 2.0f), dy);
++}
++
++// A real click, hover or wheel scroll at the node's center, scrolled into view first. Where the
++// mouse can't land (an option of a closed <select>, a node in another process's frame, or one
++// that stays out of view), a click is the accessibility default action; hover and scroll fail.
++void Page::PointerAttempt(base::WeakPtr<Page> self,
++                          base::Value id,
++                          std::string ref,
++                          Pointer pointer,
++                          double dy,
++                          base::TimeTicks deadline,
++                          bool scrolled,
++                          ReplyCallback reply) {
 +  if (!self) return Fail(id, reply, kFailed, "the tab is no longer controlled");
 +  ui::BrowserAccessibility* node = self->Resolve(ref);
 +  if (!node) return Fail(id, reply, kNotFound, ref);
@@ -2044,9 +2508,13 @@ index 0000000000..2801066935
 +    if (!scrolled) node->manager()->ScrollToMakeVisible(*node, gfx::Rect());
 +    base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
 +        FROM_HERE,
-+        base::BindOnce(&Page::ClickAttempt, self, std::move(id), std::move(ref), deadline, true, std::move(reply)),
++        base::BindOnce(&Page::PointerAttempt, self, std::move(id), std::move(ref), pointer, dy, deadline, true,
++                       std::move(reply)),
 +        base::Milliseconds(50));
 +    return;
++  }
++  if ((!clickable || !visible) && pointer != Pointer::kClick) {
++    return Fail(id, reply, kFailed, "the mouse can't reach that element");
 +  }
 +  if (!clickable || !visible) {
 +    node->manager()->DoDefaultAction(*node);
@@ -2056,11 +2524,16 @@ index 0000000000..2801066935
 +  // Tree bounds are in physical pixels; input takes DIPs.
 +  const float scale = self->RootManager() ? self->RootManager()->device_scale_factor() : 1;
 +  const gfx::PointF point(bounds.CenterPoint().x() / scale, bounds.CenterPoint().y() / scale);
-+  if (self->on_pointer) self->on_pointer.Run(point);
-+  AckWaiter::Start(widget, blink::WebInputEvent::Type::kMouseUp,
++  if (pointer != Pointer::kScroll && self->on_pointer) self->on_pointer.Run(point);
++  const blink::WebInputEvent::Type last = pointer == Pointer::kClick   ? blink::WebInputEvent::Type::kMouseUp
++                                          : pointer == Pointer::kHover ? blink::WebInputEvent::Type::kMouseMove
++                                                                       : blink::WebInputEvent::Type::kMouseWheel;
++  AckWaiter::Start(widget, last,
 +                   base::BindOnce([](base::Value id, ReplyCallback reply) { std::move(reply).Run(OkReply(id)); },
 +                                  std::move(id), std::move(reply)));
++  if (pointer == Pointer::kScroll) return SendWheel(widget, point, dy);
 +  SendMouse(widget, blink::WebInputEvent::Type::kMouseMove, point);
++  if (pointer == Pointer::kHover) return;
 +  SendMouse(widget, blink::WebInputEvent::Type::kMouseDown, point);
 +  SendMouse(widget, blink::WebInputEvent::Type::kMouseUp, point);
 +}
@@ -2180,10 +2653,10 @@ index 0000000000..2801066935
 +}  // namespace agens::bridge::control
 diff --git a/chrome/browser/agens/bridge/control_page.h b/chrome/browser/agens/bridge/control_page.h
 new file mode 100644
-index 0000000000..3fb3858da9
+index 0000000000..350f85420e
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_page.h
-@@ -0,0 +1,105 @@
+@@ -0,0 +1,133 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The page side of a controlled tab (page.* in docs/protocolo.md): its accessibility tree with
 +// refs, real input on its widget, and screenshots. UI thread. Password rules, checked against the
@@ -2192,6 +2665,8 @@ index 0000000000..3fb3858da9
 +//   value and takes no typing; while one has the focus, only keys that move go through;
 +// - no screenshot while such a field shows its text;
 +// - the clipboard is never touched, unless the session was allowed "clipboard".
++// page.console and page.network never carry headers, cookies or bodies; URLs lose any user and
++// password in them.
 +#ifndef CHROME_BROWSER_AGENS_BRIDGE_CONTROL_PAGE_H_
 +#define CHROME_BROWSER_AGENS_BRIDGE_CONTROL_PAGE_H_
 +
@@ -2203,6 +2678,8 @@ index 0000000000..3fb3858da9
 +#include <utility>
 +
 +#include "base/memory/weak_ptr.h"
++#include "third_party/blink/public/mojom/devtools/console_message.mojom-forward.h"
++#include "third_party/blink/public/mojom/loader/resource_load_info.mojom-forward.h"
 +#include "chrome/browser/agens/bridge/control_keys.h"
 +#include "chrome/browser/agens/bridge/ops.h"
 +#include "content/public/browser/web_contents_observer.h"
@@ -2245,12 +2722,31 @@ index 0000000000..3fb3858da9
 +  void Type(base::Value id, std::string ref, std::u16string text, ReplyCallback reply);
 +  void PressKey(base::Value id, Key key, ReplyCallback reply);
 +  void Screenshot(base::Value id, ReplyCallback reply);
++  void Hover(base::Value id, std::string ref, ReplyCallback reply);
++  // A wheel scroll by `dy` CSS pixels at `ref`'s center, or the viewport's when it is empty.
++  void Scroll(base::Value id, std::string ref, double dy, ReplyCallback reply);
++  // What the tab's documents logged, and the requests that failed, since the session took it.
++  void Console(base::Value id, ReplyCallback reply);
++  void Network(base::Value id, ReplyCallback reply);
++  // `js` in the main frame's main world, only on a local page (IsLocalURL); the result as JSON.
++  void Eval(base::Value id, std::string js, ReplyCallback reply);
 +
 +  // content::WebContentsObserver:
 +  void DidFinishNavigation(content::NavigationHandle* handle) override;
++  void OnDidAddMessageToConsole(content::RenderFrameHost* frame,
++                                blink::mojom::ConsoleMessageLevel level,
++                                const std::u16string& message,
++                                int32_t line,
++                                const std::u16string& source,
++                                const std::optional<std::u16string>& stack) override;
++  void ResourceLoadComplete(content::RenderFrameHost* frame,
++                            const content::GlobalRequestID& request_id,
++                            const GURL& original_url,
++                            const blink::mojom::ResourceLoadInfo& info) override;
 +
 + private:
 +  using Node = std::pair<ui::AXTreeID, int32_t>;
++  enum class Pointer { kClick, kHover, kScroll };
 +  struct Waiting {
 +    base::Value id;
 +    Op op;
@@ -2266,12 +2762,16 @@ index 0000000000..3fb3858da9
 +  // Static with a weak `self`, so a reply waiting in a posted task still runs if the tab goes.
 +  static void WaitForTree(base::WeakPtr<Page> self, base::TimeTicks deadline, base::OnceClosure then);
 +  static void SnapshotNow(base::WeakPtr<Page> self, base::Value id, ReplyCallback reply);
-+  static void ClickAttempt(base::WeakPtr<Page> self,
-+                           base::Value id,
-+                           std::string ref,
-+                           base::TimeTicks deadline,
-+                           bool scrolled,
-+                           ReplyCallback reply);
++  static void PointerAttempt(base::WeakPtr<Page> self,
++                             base::Value id,
++                             std::string ref,
++                             Pointer pointer,
++                             double dy,
++                             base::TimeTicks deadline,
++                             bool scrolled,
++                             ReplyCallback reply);
++  // Into a ring of kMaxLogEntries, oldest out first.
++  static void Keep(std::deque<base::DictValue>& ring, base::DictValue entry);
 +  // Asks the renderer for the page as it is now (after the input already sent) whether the
 +  // focused element is or was a password field; nullopt when it can't tell.
 +  void FocusIsPassword(base::OnceCallback<void(std::optional<bool>)> done);
@@ -2283,6 +2783,7 @@ index 0000000000..3fb3858da9
 +  std::map<std::string, Node> nodes_;
 +  std::map<Node, std::string> refs_;
 +  int next_ref_ = 1;
++  std::deque<base::DictValue> console_, network_;
 +  base::WeakPtrFactory<Page> weak_{this};
 +};
 +
@@ -2659,10 +3160,10 @@ index 0000000000..e9608caa6e
 +}  // namespace agens::bridge
 diff --git a/chrome/browser/agens/bridge/protocol.h b/chrome/browser/agens/bridge/protocol.h
 new file mode 100644
-index 0000000000..82537f5b69
+index 0000000000..a3127abf5e
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/protocol.h
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,65 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The socket's wire format (docs/agens.md, "O socket"): one JSON object per line. Pure logic, no
 +// sockets or threads, so protocol_selfcheck.cc can exercise it with only //base.
@@ -2690,6 +3191,8 @@ index 0000000000..82537f5b69
 +inline constexpr char kDenied[] = "denied";
 +// The person took over the controlled tabs (control.paused): tab.* and page.* wait for "Devolver".
 +inline constexpr char kPaused[] = "paused";
++// A JavaScript dialog of that tab waits for page.dialog.
++inline constexpr char kDialogOpen[] = "dialog_open";
 +
 +// Splits a byte stream into lines (without the "\n"). Empty lines are skipped.
 +class LineFramer {
@@ -2728,10 +3231,10 @@ index 0000000000..82537f5b69
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_PROTOCOL_H_
 diff --git a/chrome/browser/agens/bridge/protocol_selfcheck.cc b/chrome/browser/agens/bridge/protocol_selfcheck.cc
 new file mode 100644
-index 0000000000..dafd0e7415
+index 0000000000..47feb9b11a
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/protocol_selfcheck.cc
-@@ -0,0 +1,198 @@
+@@ -0,0 +1,218 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Assert-based check of the wire format (protocol.h). Build and run:
 +//   ninja -C out/Dev agens_bridge_selfcheck && out/Dev/agens_bridge_selfcheck
@@ -2913,6 +3416,26 @@ index 0000000000..dafd0e7415
 +    const Key paste = *ParseKey("v", &meta_list), a = *ParseKey("a", nullptr), tab = *ParseKey("Tab", nullptr);
 +    CHECK_TRUE(!KeyAllowed(paste, false, false) && KeyAllowed(paste, false, true) && KeyAllowed(paste, true, true));
 +    CHECK_TRUE(KeyAllowed(a, false, false) && !KeyAllowed(a, true, true) && KeyAllowed(tab, true, false));
++  }
++  // page.eval's origin check, look-alikes included; clipping; what an open dialog blocks.
++  {
++    for (const char* url : {"http://localhost/", "https://localhost:3000/a?b", "http://app.localhost:8080/",
++                            "http://127.0.0.1:8765/form", "http://[::1]:5173/", "HTTP://LOCALHOST/",
++                            "http://127.1/", "http://0x7f000001/"}) {
++      CHECK_TRUE(IsLocalURL(GURL(url)));
++    }
++    for (const char* url : {"http://localhost.evil.com/", "http://127.0.0.1.evil.com/", "http://evil.com/?localhost",
++                            "http://localhost@evil.com/", "http://evil.com@localhost/", "http://user:pw@127.0.0.1/",
++                            "http://0.0.0.0/", "http://127.0.0.2/", "http://[::2]/", "http://.localhost/",
++                            "http://localhost./", "http://evillocalhost/", "file:///etc/passwd",
++                            "ws://localhost/", "chrome://settings", "data:text/html,hi", "http://example.invalid/",
++                            "about:blank", ""}) {
++      CHECK_TRUE(!IsLocalURL(GURL(url)));
++    }
++    CHECK_TRUE(ClipChars("abc", 2) == "ab" && ClipChars("abc", 3) == "abc" && ClipChars("", 0).empty());
++    CHECK_TRUE(ClipChars("\xC3\xA7\xC3\xA7", 1) == "\xC3\xA7" && ClipChars("a\xF0\x9F\x98\x80" "b", 2) == "a\xF0\x9F\x98\x80");
++    CHECK_TRUE(DialogBlocks("page.snapshot") && DialogBlocks("page.eval") && !DialogBlocks("page.dialog"));
++    CHECK_TRUE(!DialogBlocks("tab.close") && !DialogBlocks("control.stop"));
 +  }
 +  // control.start's agent and control.status lines; what a pause blocks.
 +  {
@@ -4515,10 +5038,10 @@ index 0000000000..7d791e90d7
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_VIEW_OPS_H_
 diff --git a/chrome/browser/agens/embed/agens_controlled.h b/chrome/browser/agens/embed/agens_controlled.h
 new file mode 100644
-index 0000000000..d476a0e4a4
+index 0000000000..79041779be
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_controlled.h
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,45 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Marks a tab an app drives over the socket (bridge/control_ops.cc, docs/agens.md "Controle").
 +// The shell shows it (AgensTab.controller: the pill with Assumir / Devolver); downloads stay out
@@ -4530,6 +5053,10 @@ index 0000000000..d476a0e4a4
 +
 +#include "base/functional/callback.h"
 +#include "content/public/browser/web_contents_user_data.h"
++
++namespace content {
++class JavaScriptDialogManager;
++}
 +
 +class AgensControlled : public content::WebContentsUserData<AgensControlled> {
 + public:
@@ -4549,6 +5076,8 @@ index 0000000000..d476a0e4a4
 +  base::RepeatingClosure stop;       // "Encerrar": ends the whole control session
 +  base::RepeatingClosure take_over;  // "Assumir": pauses the session
 +  base::RepeatingClosure hand_back;  // "Devolver ao …": resumes it
++  // Its JavaScript dialogs go here (held for the agent); never destroyed, so content may keep it.
++  content::JavaScriptDialogManager* dialogs = nullptr;
 +
 + private:
 +  explicit AgensControlled(content::WebContents* contents)
@@ -6366,6 +6895,29 @@ index 242bac51ca..9b04fdb59f 100644
    if (expected_field_id &&
        (!delegate || delegate->GetQueriedFieldId() != expected_field_id) &&
        base::FeatureList::IsEnabled(
+diff --git a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc b/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
+index 9e4154d594..ae63a83685 100644
+--- a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
++++ b/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.h"
+ 
++#include "chrome/browser/agens/embed/agens_controlled.h"  // agens
+ #include "chrome/browser/agens/embed/native_shell.h"
+ 
+ #include "base/check_deref.h"
+@@ -1129,6 +1130,10 @@ void BrowserWebContentsDelegate::RendererResponsive(
+ content::JavaScriptDialogManager*
+ BrowserWebContentsDelegate::GetJavaScriptDialogManager(
+     content::WebContents* source) {
++  // agens: a tab an app drives over the socket holds its dialogs for the app (bridge/control_ops.cc).
++  if (AgensControlled* controlled = AgensControlled::FromWebContents(source); controlled && controlled->dialogs) {
++    return controlled->dialogs;
++  }
+   return javascript_dialogs::TabModalDialogManager::FromWebContents(source);
+ }
+ 
 diff --git a/chrome/browser/ui/webui_browser/BUILD.gn b/chrome/browser/ui/webui_browser/BUILD.gn
 index 98ada3ff32..8002af248b 100644
 --- a/chrome/browser/ui/webui_browser/BUILD.gn
