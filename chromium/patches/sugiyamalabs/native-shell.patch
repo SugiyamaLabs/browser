@@ -2640,10 +2640,10 @@ index 0000000000..8d10fddb69
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..940adc84c4
+index 0000000000..34cab5a42a
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,4836 @@
+@@ -0,0 +1,4891 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -2766,6 +2766,47 @@ index 0000000000..940adc84c4
 +static CGFloat OmniH() { return Dense() ? 30 : 34; }   // the address well
 +// Roundness follows the theme (prototype --round, --pill): Grafite and Seu 1×, Vidro 1.3× and
 +// Brasa 1.45× with pill-shaped tabs on top.
++// Vidro on macOS 26+: the system's Liquid Glass (NSGlassEffectView); older systems keep the blur.
++static BOOL LiquidGlass() {
++  if (@available(macOS 26.0, *)) return Theme() == 2;
++  return NO;
++}
++// A glass layer behind a floating panel's content (menus, suggestions, find): fills it, rounded.
++// Glass behind, then a veil of the panel's own color so our text keeps its contrast over any page.
++static void AddGlass(NSView* panel, CGFloat radius) {
++  if (@available(macOS 26.0, *)) {
++    NSGlassEffectView* glass = [[NSGlassEffectView alloc] initWithFrame:panel.bounds];
++    glass.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
++    glass.cornerRadius = radius;
++    glass.style = NSGlassEffectViewStyleRegular;
++    NSView* veil = [[NSView alloc] initWithFrame:panel.bounds];
++    veil.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
++    veil.wantsLayer = YES;
++    veil.identifier = @"glass-veil";
++    veil.layer.cornerRadius = radius;
++    __block CGColorRef color;
++    [panel.effectiveAppearance performAsCurrentDrawingAppearance:^{
++      color = [kFloat.color() colorWithAlphaComponent:0.8].CGColor;
++    }];
++    veil.layer.backgroundColor = color;
++    [panel addSubview:veil positioned:NSWindowBelow relativeTo:nil];
++    [panel addSubview:glass positioned:NSWindowBelow relativeTo:nil];
++    panel.layer.backgroundColor = NSColor.clearColor.CGColor;
++    panel.layer.borderWidth = 0;
++  }
++}
++// Panels that live on (suggestions, find): glass on in Vidro, off otherwise. Call after setting
++// their normal background and border.
++static void SyncGlass(NSView* panel, CGFloat radius) {
++  if (@available(macOS 26.0, *)) {
++    for (NSView* v in [panel.subviews copy]) {
++      if ([v isKindOfClass:NSGlassEffectView.class] || [v.identifier isEqualToString:@"glass-veil"]) {
++        [v removeFromSuperview];
++      }
++    }
++    if (LiquidGlass()) AddGlass(panel, radius);  // rebuilt: the veil takes the current light/dark color
++  }
++}
 +static CGFloat Round() { return Theme() == 1 ? 1.45 : Theme() == 2 ? 1.3 : 1; }
 +static BOOL Pill() { return Theme() == 1 || Theme() == 2; }
 +
@@ -5622,6 +5663,8 @@ index 0000000000..940adc84c4
 +  self.layer.cornerRadius = 10 * Round();
 +  self.layer.backgroundColor = CG(kFloat, self);
 +  self.layer.borderColor = CG(kLineStrong, self);
++  self.layer.borderWidth = 1;
++  SyncGlass(self, 10 * Round());
 +}
 +- (void)viewDidChangeEffectiveAppearance {
 +  [super viewDidChangeEffectiveAppearance];
@@ -6092,12 +6135,14 @@ index 0000000000..940adc84c4
 +  _omni.layer.backgroundColor = CG(kSunk, self);
 +  _omni.layer.borderColor = CG(_address.currentEditor ? kLineStrong : kLine, self);
 +  _suggest.layer.backgroundColor = CG(kFloat, self);
++  _suggest.layer.borderWidth = 1;
 +  _suggest.layer.borderColor = CG(kLineStrong, self);
 +  _separator.layer.backgroundColor = CG(kLine, self);
 +  _atosLine.layer.backgroundColor = CG(kLine, self);
 +  _atoDot.layer.backgroundColor = CG(kLight3, self);
 +  _statusPill.layer.backgroundColor = CG(kFloat, self);
 +  _statusPill.layer.borderColor = CG(kLine, self);
++  SyncGlass(_suggest, 12 * Round());
 +  [self runLoadbar];  // the glow's color
 +}
 +- (void)viewDidChangeEffectiveAppearance {
@@ -6137,6 +6182,15 @@ index 0000000000..940adc84c4
 +    [_backdrop addSubview:picture];
 +  }
 +  // Vidro always blurs; Seu blurs if asked (without blur and without image, the desktop shows).
++  if (LiquidGlass()) {
++    if (@available(macOS 26.0, *)) {
++      NSGlassEffectView* glass = [[NSGlassEffectView alloc] initWithFrame:_backdrop.bounds];
++      glass.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
++      glass.style = NSGlassEffectViewStyleRegular;
++      [_backdrop addSubview:glass];
++      return;
++    }
++  }
 +  if (Theme() == 2 || [d boolForKey:kBlurKey]) {
 +    NSVisualEffectView* glass = [[NSVisualEffectView alloc] initWithFrame:_backdrop.bounds];
 +    glass.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
@@ -6737,7 +6791,7 @@ index 0000000000..940adc84c4
 +      {kIconStar, _barShown ? @"Ocultar barra de favoritos" : @"Mostrar barra de favoritos", @"⌘⇧B", ^{ [weak toggleBookmarkBar]; }},
 +      {kIconSettings, @"Configurações", @"⌘,", ^{ [weak menuSettings:nil]; }},
 +  };
-+  const CGFloat w = 260, rowH = 33;
++  const CGFloat w = 280, rowH = 33;
 +  NSView* panel = [self popoverWidth:w height:std::size(items) * rowH + 10 under:_menu];
 +  panel.accessibilityRole = NSAccessibilityMenuRole;
 +  panel.accessibilityLabel = @"Menu";
@@ -6764,6 +6818,7 @@ index 0000000000..940adc84c4
 +  panel.layer.borderWidth = 1;
 +  panel.layer.backgroundColor = CG(kFloat, self);
 +  panel.layer.borderColor = CG(kLineStrong, self);
++  if (LiquidGlass()) AddGlass(panel, 12 * Round());
 +  return panel;
 +}
 +- (void)presentPopover:(NSView*)panel anchor:(NSView*)anchor {
