@@ -1,0 +1,17 @@
+diff --git a/components/url_formatter/url_fixer.cc b/components/url_formatter/url_fixer.cc
+index 0c26175fe2..d24a7e224f 100644
+--- a/components/url_formatter/url_fixer.cc
++++ b/components/url_formatter/url_fixer.cc
+@@ -459,6 +459,12 @@ std::string SegmentURLInternal(std::string* text, url::Parsed* parts) {
+     }
+   }
+ 
++  // agens:// is the user-facing alias of chrome:// (typed input only; the real
++  // scheme is unchanged, so web content cannot navigate to it).
++  if (scheme == "agens") {
++    scheme = kChromeUIScheme;
++  }
++
+   // Proceed with about, chrome, and devtools schemes,
+   // but not file or nonstandard schemes.
+   if ((scheme != url::kAboutScheme) && (scheme != kChromeUIScheme) &&

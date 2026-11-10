@@ -4,3 +4,5 @@
 out/
 *.dmg
 .DS_Store
+__pycache__/
+.claude/
