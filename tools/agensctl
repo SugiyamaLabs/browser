@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""Command-line client for the AgensBrowser local socket protocol (docs/protocolo.md).
+
+Examples:
+  agensctl hello
+  agensctl atos create "Cliente A" --cor azul --tag time-123
+  agensctl session --ato ID --need cookie:https://app.slack.com:d --reason "Slack bridge"
+  echo '{"op":"control.start","ato":"ID","reason":"test"}' | agensctl raw
+
+Exit code: 0 reply ok, 1 reply with ok=false, 2 connection or usage error.
+Socket: --socket PATH, else env AGENS_SOCK, else ~/Library/Application Support/AgensBrowser/agens.sock.
+"""
+import argparse, base64, json, os, socket, sys
+from pathlib import Path
+
+DEFAULT_SOCK = Path.home() / "Library/Application Support/AgensBrowser/agens.sock"
+
+
+def die(msg):
+    print(f"agensctl: {msg}", file=sys.stderr)
+    sys.exit(2)
+
+
+def parse_need(s):
+    # The origin has colons (https://host:port), so: type = before first colon, name = after last.
+    typ, sep, rest = s.partition(":")
+    origin, sep2, name = rest.rpartition(":")
+    if typ not in ("cookie", "localStorage", "header") or not sep or not sep2 or not origin or not name:
+        die(f"bad --need {s!r}: expected TYPE:ORIGIN:NAME with TYPE cookie, localStorage or header")
+    return {"type": typ, "from": origin, "name": name}
+
+
+def parse_done(s):
+    kind, _, rest = s.partition(":")
+    if kind == "url_prefix" and rest:
+        return {"url_prefix": rest}
+    if kind == "cookie":
+        origin, sep, name = rest.rpartition(":")
+        if sep and origin and name:
+            return {"cookie": name, "from": origin}
+    die(f"bad --done {s!r}: expected cookie:ORIGIN:NAME or url_prefix:URL")
+
+
+class Conn:
+    def __init__(self, path, timeout):
+        self.path = path
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(timeout)  # approval sheets wait for a person, so the default is long
+        try:
+            self.sock.connect(path)
+        except FileNotFoundError:
+            die(f"socket not found at {path}. The browser is probably not running.")
+        except ConnectionRefusedError:
+            die(f"connection refused at {path}. The browser is probably not running (stale socket file).")
+        except OSError as e:
+            die(f"cannot connect to {path}: {e}")
+        self.f = self.sock.makefile("rb")
+
+    def send(self, obj):
+        self.sock.sendall(json.dumps(obj, separators=(",", ":")).encode() + b"\n")
+
+    def recv(self):
+        """Next message, or None when the server closed the connection."""
+        try:
+            line = self.f.readline()
+        except socket.timeout:
+            die("timed out waiting for the browser")
+        if not line:
+            return None
+        try:
+            return json.loads(line)
+        except ValueError:
+            die(f"invalid JSON from the browser: {line[:80]!r}")
+
+    def call(self, req):
+        req = {"id": 1, **req}
+        self.send(req)
+        while True:
+            m = self.recv()
+            if m is None:
+                die("connection closed before a reply")
+            if m.get("id") == req["id"]:
+                return m
+            print(json.dumps(m), file=sys.stderr)  # an event that arrived in between
+
+
+def build_request(a):
+    c = a.cmd
+    if c == "hello":
+        return {"op": "hello", "client": "agensctl"}
+    if c == "atos":
+        s = a.sub
+        if s == "list":
+            return {"op": "atos.list"}
+        if s == "create":
+            return {"op": "atos.create", "name": a.name, "color": a.cor, "tag": a.tag}
+        if s == "rename":
+            return {"op": "atos.rename", "ato": a.id, "name": a.name}
+        if s == "color":
+            return {"op": "atos.color", "ato": a.id, "color": a.color}
+        r = {"op": "atos.open", "ato": a.id}
+        if a.url:
+            r["url"] = a.url
+        return r
+    if c == "login":
+        return {"op": "login", "ato": a.ato, "url": a.url, "done": parse_done(a.done)}
+    if c == "session":
+        return {"op": "session", "ato": a.ato, "need": [parse_need(n) for n in a.need], "reason": a.reason}
+    if c == "renew":
+        return {"op": "renew", "ato": a.ato, "need": [parse_need(n) for n in a.need]}
+    if c == "control":
+        r = {"op": "control." + a.sub}
+        if a.sub == "start":
+            r.update(ato=a.ato, reason=a.reason)
+        return r
+    if c == "tab":
+        r = {"op": "tab." + a.sub}
+        if a.sub == "open":
+            r.update(ato=a.ato, url=a.url)
+        else:
+            r["tab"] = a.tab
+            if a.sub == "navigate":
+                r["url"] = a.url
+        return r
+    r = {"op": "page." + a.sub, "tab": a.tab}
+    if a.sub in ("click", "type"):
+        r["ref"] = a.ref
+    if a.sub == "type":
+        r["text"] = a.text
+    if a.sub == "key":
+        r["key"] = a.key
+    return r
+
+
+def run_raw(conn, a):
+    """One request at a time on the same connection, so a person can type the next line after seeing a reply."""
+    lines = [a.json] if a.json else sys.stdin
+    bad = False
+    for l in lines:
+        if not l.strip():
+            continue
+        try:
+            req = json.loads(l)
+        except ValueError:
+            die(f"invalid JSON line: {l[:80]!r}")
+        conn.send(req)
+        while "id" in req:
+            m = conn.recv()
+            if m is None:
+                die("connection closed before a reply")
+            print(json.dumps(m), flush=True)
+            if m.get("id") == req["id"]:
+                bad |= m.get("ok") is not True
+                break
+    return 1 if bad else 0
+
+
+def run_listen(conn):
+    try:
+        while (m := conn.recv()) is not None:
+            print(json.dumps(m), flush=True)
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="agensctl", description="Client for the AgensBrowser local socket.")
+    p.add_argument("--socket", help="socket path (default: $AGENS_SOCK or the AgensBrowser data folder)")
+    p.add_argument("--timeout", type=float, default=600, help="seconds to wait for a reply (default 600)")
+    sp = p.add_subparsers(dest="cmd", required=True)
+
+    def node(parent, name, *args, **kw):
+        n = parent.add_parser(name, **kw)
+        for a in args:
+            n.add_argument(a[0], **a[1])
+        return n
+
+    def need_args():
+        return [("--ato", dict(required=True)),
+                ("--need", dict(action="append", required=True, help="TYPE:ORIGIN:NAME, repeatable")),
+                ]
+
+    node(sp, "hello", help="protocol and browser version")
+    atos = node(sp, "atos", help="list and manage atos").add_subparsers(dest="sub", required=True)
+    node(atos, "list")
+    node(atos, "create", ("name", {}), ("--cor", dict(required=True)), ("--tag", dict(required=True)))
+    node(atos, "rename", ("id", {}), ("name", {}))
+    node(atos, "color", ("id", {}), ("color", {}))
+    node(atos, "open", ("id", {}), ("url", dict(nargs="?")))
+    node(sp, "login", ("--ato", dict(required=True)), ("--url", dict(required=True)),
+         ("--done", dict(required=True, help="cookie:ORIGIN:NAME or url_prefix:URL")))
+    node(sp, "session", *need_args(), ("--reason", dict(required=True)))
+    node(sp, "renew", *need_args())
+    ctl = node(sp, "control", help="start or stop agent control").add_subparsers(dest="sub", required=True)
+    node(ctl, "start", ("--ato", dict(required=True)), ("--reason", dict(required=True)))
+    node(ctl, "stop")
+    tab = node(sp, "tab", help="tabs opened by control").add_subparsers(dest="sub", required=True)
+    node(tab, "open", ("--ato", dict(required=True)), ("url", {}))
+    node(tab, "navigate", ("tab", {}), ("url", {}))
+    node(tab, "close", ("tab", {}))
+    page = node(sp, "page", help="act on a tab").add_subparsers(dest="sub", required=True)
+    node(page, "snapshot", ("tab", {}))
+    node(page, "click", ("tab", {}), ("ref", {}))
+    node(page, "type", ("tab", {}), ("ref", {}), ("text", {}))
+    node(page, "key", ("tab", {}), ("key", {}))
+    node(page, "screenshot", ("tab", {}), ("--out", dict(help="write the PNG to this file")))
+    node(sp, "raw", ("json", dict(nargs="?", help="one JSON request; default: JSON lines from stdin")),
+         help="send JSON lines on one connection, print every reply and event")
+    node(sp, "listen", help="stay connected and print events")
+
+    a = p.parse_args(argv)
+    path = a.socket or os.environ.get("AGENS_SOCK") or str(DEFAULT_SOCK)
+    req = build_request(a) if a.cmd not in ("raw", "listen") else None
+    conn = Conn(path, None if a.cmd == "listen" else a.timeout)
+    if a.cmd == "raw":
+        return run_raw(conn, a)
+    if a.cmd == "listen":
+        return run_listen(conn)
+    reply = conn.call(req)
+    if a.cmd == "page" and a.sub == "screenshot" and a.out and reply.get("ok"):
+        Path(a.out).write_bytes(base64.b64decode(reply.pop("png")))
+        reply["file"] = a.out
+    print(json.dumps(reply, indent=2, ensure_ascii=False))
+    return 0 if reply.get("ok") is True else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
