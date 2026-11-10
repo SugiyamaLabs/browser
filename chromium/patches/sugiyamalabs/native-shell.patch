@@ -1,9 +1,9 @@
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
 new file mode 100644
-index 0000000000..858411a1b7
+index 0000000000..d69d159bce
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embed.h
-@@ -0,0 +1,317 @@
+@@ -0,0 +1,346 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The boundary between the engine and any interface (the browser's own chrome today, the Agens
 +// app later). Plain C on purpose: no Chromium or C++ types cross it, Swift imports it as is, and
@@ -34,6 +34,12 @@ index 0000000000..858411a1b7
 +  int muted;       // sound turned off by the person
 +  int error;               // the page failed to load: Chromium's net error (e.g. -106), else 0
 +  const char* error_name;  // e.g. "ERR_INTERNET_DISCONNECTED", "" when none
++  int interstitial;  // a security stop page (bad certificate…): see agens_window_interstitial
++  int split;          // shown with another tab: 0 no, 1 side by side, 2 one above the other
++  int split_first;    // this tab is the left (or top) one
++  double split_ratio; // the first one's share of the page area
++  int camera;      // the page is using the camera now
++  int microphone;  // the page is using the microphone now
 +} AgensTab;
 +
 +// Things the window's menu opens (Chromium's own pages for now).
@@ -56,6 +62,9 @@ index 0000000000..858411a1b7
 +void agens_window_activate_tab(AgensWindow* window, int index);
 +void agens_window_close_tab(AgensWindow* window, int index);
 +void agens_window_move_tab(AgensWindow* window, int from, int to);
++// Shows the active tab together with the tab at `index`: `layout` 1 side by side, 2 stacked.
++void agens_window_split(AgensWindow* window, int index, int layout);
++void agens_window_unsplit(AgensWindow* window, int index);
 +void agens_window_set_pinned(AgensWindow* window, int index, int pinned);
 +void agens_window_toggle_mute(AgensWindow* window, int index);
 +// Address or search text, as typed; the engine decides which it is.
@@ -270,6 +279,24 @@ index 0000000000..858411a1b7
 +// Cookies and storage of the active page's site only.
 +void agens_site_clear_data(AgensWindow* window, AgensDoneFn done, void* context);
 +
++// The extensions button (toolbar): this ato's enabled extensions, with their icons. Called now
++// and on every change; `installed` is the id of one that was just installed, else "".
++typedef struct {
++  const char* id;
++  const char* name;
++  const unsigned char* icon_png;  // 32x32, null until loaded
++  int icon_png_size;
++} AgensExtensionButton;
++typedef void (*AgensExtensionButtonsChanged)(void* context, const AgensExtensionButton* list, int count,
++                                             const char* installed);
++void agens_window_set_extension_buttons_observer(AgensWindow* window, AgensExtensionButtonsChanged observer,
++                                                 void* context);
++// Runs the extension's action on the active page; its popup opens under agens_ui_extensions_anchor.
++void agens_extension_click(AgensWindow* window, const char* id);
++
++// Answers the security stop page of the active tab: 1 goes on to the site anyway, 0 goes back.
++void agens_window_interstitial(AgensWindow* window, int proceed);
++
 +// Histórico of this window's ato, newest first, one entry per page per day, at most 300.
 +// `text` filters by title and address ("" for all). Calls `fn` later, once.
 +typedef struct {
@@ -310,6 +337,8 @@ index 0000000000..858411a1b7
 +void agens_ui_colors(void* chrome, unsigned* window, unsigned* page, unsigned* line);
 +// The page card's corner radius (the theme's roundness) and the titlebar height (the traffic
 +// lights center on it; it follows the density).
++// Where the extensions button is (extension popups hang from it).
++AgensRect agens_ui_extensions_anchor(void* chrome);
 +float agens_ui_card_radius(void* chrome);
 +float agens_ui_titlebar_height(void* chrome);
 +void agens_ui_permission_prompt(void* chrome, const char* site, const char* const* asks, int count);
@@ -323,10 +352,10 @@ index 0000000000..858411a1b7
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EMBED_H_
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
 new file mode 100644
-index 0000000000..f7a51ac64b
+index 0000000000..91603c7c4d
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_window.h
-@@ -0,0 +1,560 @@
+@@ -0,0 +1,660 @@
 +// Copyright 2026 SugiyamaLabs.
 +// One browser window as the embed API sees it (agens_embed.h): tabs, suggestions, atos, search
 +// default, bookmarks. Platform-neutral; each platform's shell (native_shell_mac.mm, later
@@ -334,6 +363,8 @@ index 0000000000..f7a51ac64b
 +#ifndef CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
 +#define CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
 +
++#include <map>
++#include <set>
 +#include <string>
 +#include <vector>
 +#include "base/memory/raw_ptr.h"
@@ -359,6 +390,13 @@ index 0000000000..f7a51ac64b
 +#include "base/scoped_observation.h"
 +#include "components/find_in_page/find_result_observer.h"
 +#include "components/permissions/permission_prompt.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/browser/extension_registry_observer.h"
++#include "extensions/browser/image_loader.h"
++#include "extensions/common/extension.h"
++#include "extensions/common/manifest_handlers/icons_handler.h"
++#include "ui/gfx/image/image.h"
++#include "ui/views/view.h"
 +#include "components/find_in_page/find_tab_helper.h"
 +#include "components/find_in_page/find_types.h"
 +#include "components/bookmarks/browser/bookmark_utils.h"
@@ -392,7 +430,13 @@ index 0000000000..f7a51ac64b
 +#include "content/public/browser/web_contents_observer.h"
 +#include "content/public/browser/web_contents_user_data.h"
 +#include "net/base/net_errors.h"
++#include "components/tabs/public/split_tab_data.h"
++#include "components/split_tabs/split_tab_visual_data.h"
++#include "components/security_interstitials/content/security_interstitial_page.h"
++#include "components/security_interstitials/content/security_interstitial_tab_helper.h"
 +#include "chrome/common/chrome_isolated_world_ids.h"
++#include "chrome/browser/media/webrtc/media_capture_devices_dispatcher.h"
++#include "chrome/browser/media/webrtc/media_stream_capture_indicator.h"
 +#include "content/public/browser/render_frame_host.h"
 +#include "extensions/common/extension_urls.h"
 +#include "chrome/browser/ui/status_bubble.h"
@@ -497,7 +541,8 @@ index 0000000000..f7a51ac64b
 +                     public content::DownloadManager::Observer,
 +                     public download::DownloadItem::Observer,
 +                     public bookmarks::BaseBookmarkModelObserver,
-+                     public find_in_page::FindResultObserver {
++                     public find_in_page::FindResultObserver,
++                     public extensions::ExtensionRegistryObserver {
 +  explicit AgensWindow(BrowserWindowInterface* browser) : browser(browser) {
 +    browser->GetTabStripModel()->AddObserver(this);
 +    Storage().AddObserver(this);
@@ -684,6 +729,10 @@ index 0000000000..f7a51ac64b
 +        FROM_HERE, base::BindOnce(&AgensWindow::NotifyNow, weak.GetWeakPtr()));
 +  }
 +
++  static int Interstitial(content::WebContents* contents) {
++    auto* helper = security_interstitials::SecurityInterstitialTabHelper::FromWebContents(contents);
++    return helper && helper->IsDisplayingInterstitial();
++  }
 +  void NotifyNow() {
 +    notify_pending = false;
 +    if (!observer) return;
@@ -693,6 +742,20 @@ index 0000000000..f7a51ac64b
 +    std::vector<std::string> titles(count), urls(count), errors(count);
 +    std::vector<std::vector<uint8_t>> icons(count);
 +    std::vector<AgensTab> tabs(count);
++    struct Split { int layout = 0, first = 0; double ratio = 0.5; };
++    std::vector<Split> splits(count);
++    for (int i = 0; i < count; ++i) {
++      std::optional<split_tabs::SplitTabId> id = model()->GetSplitForTab(i);
++      split_tabs::SplitTabData* data = id ? model()->GetSplitData(*id) : nullptr;
++      if (!data) continue;
++      const auto* visual = data->visual_data();
++      splits[i].layout = visual->split_layout() == split_tabs::SplitTabLayout::kStacked ? 2 : 1;
++      splits[i].ratio = visual->split_ratio();
++      const auto list = data->ListTabs();
++      splits[i].first = !list.empty() && list[0]->GetContents() == model()->GetWebContentsAt(i);
++    }
++    scoped_refptr<MediaStreamCaptureIndicator> capture =
++        MediaCaptureDevicesDispatcher::GetInstance()->GetMediaStreamCaptureIndicator();
 +    for (int i = 0; i < count; ++i) {
 +      content::WebContents* contents = model()->GetWebContentsAt(i);
 +      AgensPageError::CreateForWebContents(contents);  // starts watching; the page in it now loaded fine
@@ -714,7 +777,9 @@ index 0000000000..f7a51ac64b
 +                 contents->GetController().CanGoBack(), contents->GetController().CanGoForward(),
 +                 bookmarks && bookmarks->IsBookmarked(contents->GetVisibleURL()),
 +                 model()->IsTabPinned(i), contents->IsCurrentlyAudible(),
-+                 contents->IsAudioMuted(), error, errors[i].c_str()};
++                 contents->IsAudioMuted(), error, errors[i].c_str(),
++                 Interstitial(contents), splits[i].layout, splits[i].first, splits[i].ratio,
++                 capture && capture->IsCapturingVideo(contents), capture && capture->IsCapturingAudio(contents)};
 +    }
 +    observer(context, tabs.data(), static_cast<int>(tabs.size()));
 +  }
@@ -726,6 +791,7 @@ index 0000000000..f7a51ac64b
 +    NotifyAtos();  // cheap; keeps "asleep" fresh as atos load and unload
 +  }
 +  void OnTabChangedAt(tabs::TabInterface*, TabChangeType) override { Notify(); }
++  void OnSplitTabChanged(const SplitTabChange&) override { Notify(); }
 +
 +  void Suggest(const std::string& text) {
 +    if (!autocomplete) {
@@ -807,6 +873,69 @@ index 0000000000..f7a51ac64b
 +  base::CallbackListSubscription search_loaded_;
 +  base::CancelableTaskTracker history_tracker;
 +  raw_ptr<void> ui = nullptr;  // the chrome (agens_ui_*), set by the platform shell
++  raw_ptr<views::View> extensions_anchor = nullptr;  // under the UI's extensions button
++  AgensExtensionButtonsChanged extension_buttons_observer = nullptr;
++  raw_ptr<void> extension_buttons_context = nullptr;
++  std::map<std::string, std::vector<uint8_t>> extension_icons;
++  std::set<std::string> extension_icons_loading;
++  base::ScopedObservation<extensions::ExtensionRegistry, extensions::ExtensionRegistryObserver>
++      extensions_observation{this};
++
++  void WatchExtensions() {
++    if (!extensions_observation.IsObserving()) {
++      extensions_observation.Observe(extensions::ExtensionRegistry::Get(browser->GetProfile()));
++    }
++  }
++  void NotifyExtensionButtons(const std::string& installed = std::string()) {
++    if (!extension_buttons_observer) return;
++    std::vector<scoped_refptr<const extensions::Extension>> shown;
++    for (const auto& e : extensions::ExtensionRegistry::Get(browser->GetProfile())->enabled_extensions()) {
++      if (e->is_extension() && !extensions::Manifest::IsComponentLocation(e->location())) shown.push_back(e);
++    }
++    std::vector<AgensExtensionButton> out;
++    for (const auto& e : shown) {
++      auto icon = extension_icons.find(e->id());
++      if (icon == extension_icons.end()) LoadExtensionIcon(e.get());
++      const bool has = icon != extension_icons.end() && !icon->second.empty();
++      out.push_back({e->id().c_str(), e->name().c_str(), has ? icon->second.data() : nullptr,
++                     has ? static_cast<int>(icon->second.size()) : 0});
++    }
++    extension_buttons_observer(extension_buttons_context, out.data(), static_cast<int>(out.size()),
++                               installed.c_str());
++  }
++  void LoadExtensionIcon(const extensions::Extension* e) {
++    if (!extension_icons_loading.insert(e->id()).second) return;
++    extensions::ImageLoader::Get(browser->GetProfile())
++        ->LoadImageAsync(e, extensions::IconsInfo::GetIconResource(e, 32, ExtensionIconSet::Match::kBigger),
++                         gfx::Size(32, 32),
++                         base::BindOnce(
++                             [](base::WeakPtr<AgensWindow> self, std::string id, const gfx::Image& image) {
++                               if (!self) return;
++                               std::vector<uint8_t> png;
++                               if (!image.IsEmpty()) {
++                                 png = gfx::PNGCodec::EncodeBGRASkBitmap(*image.ToSkBitmap(), false)
++                                           .value_or(std::vector<uint8_t>());
++                               }
++                               self->extension_icons[id] = std::move(png);
++                               self->NotifyExtensionButtons();
++                             },
++                             weak.GetWeakPtr(), e->id()));
++  }
++  // extensions::ExtensionRegistryObserver:
++  void OnExtensionLoaded(content::BrowserContext*, const extensions::Extension*) override {
++    NotifyExtensionButtons();
++  }
++  void OnExtensionUnloaded(content::BrowserContext*, const extensions::Extension*,
++                           extensions::UnloadedExtensionReason) override {
++    NotifyExtensionButtons();
++  }
++  void OnExtensionInstalled(content::BrowserContext*, const extensions::Extension* e, bool is_update) override {
++    if (!is_update && e->is_extension()) {
++      // Loaded right after this; tell the UI once it's in the list.
++      base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++          FROM_HERE, base::BindOnce(&AgensWindow::NotifyExtensionButtons, weak.GetWeakPtr(), e->id()));
++    }
++  }
 +  base::WeakPtr<permissions::PermissionPrompt::Delegate> permission_delegate;
 +  AgensFindChanged find_observer = nullptr;
 +  raw_ptr<void> find_context = nullptr;
@@ -889,10 +1018,10 @@ index 0000000000..f7a51ac64b
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
 new file mode 100644
-index 0000000000..c470c966d4
+index 0000000000..58380fd42f
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.cc
-@@ -0,0 +1,726 @@
+@@ -0,0 +1,795 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The embed API (agens_embed.h) on top of AgensWindow. Same code on every platform.
 +
@@ -907,6 +1036,15 @@ index 0000000000..c470c966d4
 +#include "base/memory/scoped_refptr.h"
 +#include "base/supports_user_data.h"
 +#include "chrome/browser/history/history_service_factory.h"
++#include "chrome/browser/ui/tabs/split_tab_metrics.h"
++#include "chrome/browser/extensions/extension_action_runner.h"
++#include "chrome/browser/extensions/extension_tab_util.h"
++#include "chrome/browser/extensions/extension_view_host.h"
++#include "chrome/browser/extensions/extension_view_host_factory.h"
++#include "chrome/browser/ui/extensions/extension_popup_types.h"
++#include "chrome/browser/ui/views/extensions/extension_popup.h"
++#include "extensions/browser/extension_action.h"
++#include "extensions/browser/extension_action_manager.h"
 +#include "content/public/browser/navigation_entry.h"
 +#include "content/public/browser/ssl_status.h"
 +#include "net/base/registry_controlled_domains/registry_controlled_domain.h"
@@ -1383,6 +1521,38 @@ index 0000000000..c470c966d4
 +                                    content::BrowsingDataRemover::ORIGIN_TYPE_UNPROTECTED_WEB,
 +                                    std::move(filter), new ClearDone(remover, done, context));
 +}
++void agens_window_set_extension_buttons_observer(AgensWindow* w, AgensExtensionButtonsChanged observer,
++                                                 void* context) {
++  w->extension_buttons_observer = observer;
++  w->extension_buttons_context = context;
++  w->WatchExtensions();
++  w->NotifyExtensionButtons();
++}
++void agens_extension_click(AgensWindow* w, const char* id) {
++  Profile* profile = w->browser->GetProfile();
++  const extensions::Extension* extension =
++      extensions::ExtensionRegistry::Get(profile)->enabled_extensions().GetByID(id ? id : "");
++  content::WebContents* active = w->model()->GetActiveWebContents();
++  auto* runner = active ? extensions::ExtensionActionRunner::GetForWebContents(active) : nullptr;
++  if (!extension || !runner) return;
++  if (runner->RunAction(extension, /*grant_tab_permissions=*/true) != extensions::ExtensionAction::ShowAction::kShowPopup) {
++    return;  // the extension handled the click itself (or has no action)
++  }
++  extensions::ExtensionAction* action = extensions::ExtensionActionManager::Get(profile)->GetExtensionAction(*extension);
++  if (!action || !w->extensions_anchor) return;
++  const GURL popup = action->GetPopupUrl(extensions::ExtensionTabUtil::GetTabId(active));
++  ExtensionPopup::ShowPopup(w->browser.get(),
++                            extensions::ExtensionViewHostFactory::CreatePopupHost(*extension, popup, w->browser.get()),
++                            views::BubbleAnchor(w->extensions_anchor.get()), views::BubbleBorder::TOP_RIGHT, PopupShowAction::kShow,
++                            base::DoNothing());
++}
++void agens_window_interstitial(AgensWindow* w, int proceed) {
++  content::WebContents* active = w->model()->GetActiveWebContents();
++  auto* helper = active ? security_interstitials::SecurityInterstitialTabHelper::FromWebContents(active) : nullptr;
++  // The page Chromium shows; its own buttons send these same commands (CMD_PROCEED / CMD_DONT_PROCEED).
++  auto* page = helper ? helper->GetBlockingPageForCurrentlyCommittedNavigationForTesting() : nullptr;
++  if (page) page->CommandReceived(proceed ? "1" : "0");
++}
 +void agens_window_set_find_observer(AgensWindow* w, AgensFindChanged observer, void* context) {
 +  w->find_observer = observer;
 +  w->find_context = context;
@@ -1516,6 +1686,22 @@ index 0000000000..c470c966d4
 +    w->model()->MoveWebContentsAt(from, to, /*select_after_move=*/false);
 +  }
 +}
++void agens_window_split(AgensWindow* w, int index, int layout) {
++  TabStripModel* m = w->model();
++  const int active = m->active_index();
++  if (!m->ContainsIndex(index) || index == active || m->GetSplitForTab(active) || m->GetSplitForTab(index)) {
++    return;
++  }
++  m->AddToNewSplit({active, index},
++                   split_tabs::SplitTabVisualData(layout == 2 ? split_tabs::SplitTabLayout::kStacked
++                                                              : split_tabs::SplitTabLayout::kSideBySide,
++                                                  0.5),
++                   split_tabs::SplitTabCreatedSource::kTabContextMenu);
++}
++void agens_window_unsplit(AgensWindow* w, int index) {
++  if (!w->model()->ContainsIndex(index)) return;
++  if (std::optional<split_tabs::SplitTabId> id = w->model()->GetSplitForTab(index)) w->model()->RemoveSplit(*id);
++}
 +void agens_window_set_pinned(AgensWindow* w, int index, int pinned) {
 +  if (w->model()->ContainsIndex(index)) w->model()->SetTabPinned(index, pinned);
 +}
@@ -1593,6 +1779,18 @@ index 0000000000..c470c966d4
 +  NOTREACHED();
 +}
 +void FocusNativeLocationBar(views::Widget*) {}
++ExtensionInstallPrompt::ShowDialogCallback NativeInstallDialogCallback() {
++  return ExtensionInstallPrompt::ShowDialogCallback();
++}
++std::unique_ptr<LoginHandler> CreateNativeLoginHandler(const net::AuthChallengeInfo&, content::WebContents*,
++                                                       content::LoginDelegate::LoginAuthRequiredCallback) {
++  NOTREACHED();
++}
++base::WeakPtr<javascript_dialogs::TabModalDialogView> CreateNativeJsDialog(
++    content::WebContents*, const std::u16string&, content::JavaScriptDialogType, const std::u16string&,
++    const std::u16string&, content::JavaScriptDialogManager::DialogClosedCallback, base::OnceClosure) {
++  NOTREACHED();
++}
 +std::unique_ptr<permissions::PermissionPrompt> CreateNativePermissionPrompt(
 +    content::WebContents*,
 +    permissions::PermissionPrompt::Delegate*) {
@@ -1621,10 +1819,10 @@ index 0000000000..c470c966d4
 +}  // namespace agens
 diff --git a/chrome/browser/agens/embed/native_shell.h b/chrome/browser/agens/embed/native_shell.h
 new file mode 100644
-index 0000000000..9b81aa73ae
+index 0000000000..ebd1215130
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.h
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,66 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Glue between Chromium's Webium window (WebUIBrowserWindow, without its HTML page) and the
 +// agens_embed.h interface.
@@ -1635,7 +1833,11 @@ index 0000000000..9b81aa73ae
 +
 +#include "base/feature_list.h"
 +#include "base/functional/callback_forward.h"
++#include "chrome/browser/extensions/extension_install_prompt.h"
++#include "chrome/browser/ui/login/login_handler.h"
++#include "components/javascript_dialogs/tab_modal_dialog_view.h"
 +#include "components/permissions/permission_prompt.h"
++#include "content/public/browser/javascript_dialog_manager.h"
 +
 +class BrowserWindowInterface;
 +class StatusBubble;
@@ -1658,6 +1860,22 @@ index 0000000000..9b81aa73ae
 +    permissions::PermissionPrompt::Delegate* delegate);
 +// Where the window's traffic lights center (the shell's toolbar or tab strip height).
 +float NativeTitlebarHeight(views::Widget* widget);
++// A site's HTTP login (user and password) as a native sheet on its window.
++std::unique_ptr<LoginHandler> CreateNativeLoginHandler(
++    const net::AuthChallengeInfo& auth_info,
++    content::WebContents* contents,
++    content::LoginDelegate::LoginAuthRequiredCallback callback);
++// A page's alert/confirm/prompt as a native sheet on its window.
++base::WeakPtr<javascript_dialogs::TabModalDialogView> CreateNativeJsDialog(
++    content::WebContents* contents,
++    const std::u16string& title,
++    content::JavaScriptDialogType type,
++    const std::u16string& message,
++    const std::u16string& default_prompt,
++    content::JavaScriptDialogManager::DialogClosedCallback callback,
++    base::OnceClosure force_closed);
++// "Adicionar extensão?" as a native sheet on the browser window.
++ExtensionInstallPrompt::ShowDialogCallback NativeInstallDialogCallback();
 +// Lets the native shell take a browser command (IDC_*) before Chromium runs it. True if it did.
 +bool HandleNativeCommand(BrowserWindowInterface* browser, int command_id);
 +// The window's status bubble (link URL), or null when the native shell isn't in this widget.
@@ -1673,10 +1891,10 @@ index 0000000000..9b81aa73ae
 +#endif  // CHROME_BROWSER_AGENS_EMBED_NATIVE_SHELL_H_
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
 new file mode 100644
-index 0000000000..af382d65b2
+index 0000000000..59b5e3fbbd
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
-@@ -0,0 +1,266 @@
+@@ -0,0 +1,534 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The macOS host: the views::View that fills the Webium window, puts the UI's chrome (an NSView)
 +// over it and the active tab in the page card. Everything else is shared (agens_window.h,
@@ -1687,6 +1905,11 @@ index 0000000000..af382d65b2
 +#import <AppKit/AppKit.h>
 +
 +#include "chrome/browser/agens/embed/agens_window.h"
++#include "components/split_tabs/split_tab_visual_data.h"
++#include "components/tabs/public/split_tab_data.h"
++#include "base/strings/sys_string_conversions.h"
++#include "chrome/browser/extensions/extension_install_prompt_show_params.h"
++#include "extensions/browser/install_prompt_data.h"
 +#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
 +#include "components/permissions/permission_request.h"
 +#include "ui/base/metadata/metadata_header_macros.h"
@@ -1706,6 +1929,20 @@ index 0000000000..af382d65b2
 +
 +namespace {
 +
++// Watches one pane's page: a click (focus) in the other pane of a split makes its tab active.
++class PaneWatcher : public content::WebContentsObserver {
++ public:
++  explicit PaneWatcher(base::RepeatingCallback<void(content::WebContents*)> on_focus)
++      : on_focus_(std::move(on_focus)) {}
++  void Watch(content::WebContents* contents) {
++    if (web_contents() != contents) Observe(contents);
++  }
++  void OnWebContentsFocused(content::RenderWidgetHost*) override { on_focus_.Run(web_contents()); }
++
++ private:
++  base::RepeatingCallback<void(content::WebContents*)> on_focus_;
++};
++
 +class NativeShellView : public views::View,
 +                        public TabStripModelObserver,
 +                        public content::WebContentsObserver {
@@ -1724,7 +1961,19 @@ index 0000000000..af382d65b2
 +    // Views toolbar).
 +    site_icon_ = AddChildView(std::make_unique<views::View>());
 +    site_icon_->SetProperty(views::kElementIdentifierKey, kLocationIconElementId);
++    extensions_anchor_ = AddChildView(std::make_unique<views::View>());  // where extension popups hang
++    card2_ = AddChildView(std::make_unique<views::View>());
 +    contents_ = AddChildView(std::make_unique<views::WebView>(browser->GetProfile()));
++    contents2_ = AddChildView(std::make_unique<views::WebView>(browser->GetProfile()));  // a split's second tab
++    auto activate = base::BindRepeating(
++        [](BrowserWindowInterface* browser, content::WebContents* contents) {
++          TabStripModel* model = browser->GetTabStripModel();
++          const int index = contents ? model->GetIndexOfWebContents(contents) : TabStripModel::kNoTab;
++          if (index != TabStripModel::kNoTab && index != model->active_index()) model->ActivateTabAt(index);
++        },
++        base::Unretained(browser));
++    pane1_ = std::make_unique<PaneWatcher>(activate);
++    pane2_ = std::make_unique<PaneWatcher>(activate);
 +    // Webium sizes new tabs from this element (GetContentsBoundsInScreen).
 +    contents_->SetProperty(views::kElementIdentifierKey, kContentsContainerViewElementId);
 +    browser->GetTabStripModel()->AddObserver(this);
@@ -1736,11 +1985,13 @@ index 0000000000..af382d65b2
 +        base::Unretained(this));
 +    chrome_ = (__bridge_transfer NSView*)agens_ui_create_chrome(window_.get());
 +    window_->ui = (__bridge void*)chrome_;
++    window_->extensions_anchor = extensions_anchor_;
 +  }
 +  ~NativeShellView() override {
 +    agens_ui_destroy_chrome((__bridge void*)chrome_);
 +    [chrome_ removeFromSuperview];
 +    contents_->SetWebContents(nullptr);
++    contents2_->SetWebContents(nullptr);
 +  }
 +
 +  void FocusAddress() { agens_ui_focus_address((__bridge void*)chrome_); }
@@ -1761,10 +2012,44 @@ index 0000000000..af382d65b2
 +  void Layout(PassKey) override {
 +    // A page in full screen (a video, a game) gets the whole window, like Chrome: no chrome, no
 +    // card, no corners. The window's own full screen (green button) keeps the chrome.
-+    content::WebContents* active = contents_->GetWebContents();
++    TabStripModel* model = window_->model();
++    content::WebContents* active = model->GetActiveWebContents();
 +    const bool page_fullscreen = active && active->IsFullscreen();
 +    chrome_.hidden = page_fullscreen;
 +    card_->SetVisible(!page_fullscreen);
++    // A split shows its two tabs; anything else shows the active one alone.
++    content::WebContents* first = active;
++    content::WebContents* second = nullptr;
++    const split_tabs::SplitTabData* split = nullptr;
++    const int active_index = model->active_index();  // kNoTab while the window is being set up
++    if (std::optional<split_tabs::SplitTabId> id =
++            model->ContainsIndex(active_index) ? model->GetSplitForTab(active_index) : std::nullopt;
++        id && !page_fullscreen) {
++      split = model->GetSplitData(*id);
++      const auto tabs = split ? split->ListTabs() : std::vector<tabs::TabInterface*>();
++      if (tabs.size() == 2) {
++        first = tabs[0]->GetContents();
++        second = tabs[1]->GetContents();
++      } else {
++        split = nullptr;
++      }
++    }
++    // Chromium keeps every tab but the active one hidden (no painting); a split shows two.
++    for (views::WebView* pane : {contents_.get(), contents2_.get()}) {
++      content::WebContents* was = pane->GetWebContents();
++      if (was && was != active && was != first && was != second) {
++        was->UpdateWebContentsVisibility(content::Visibility::HIDDEN);
++      }
++    }
++    if (contents_->GetWebContents() != first) contents_->SetWebContents(first);
++    if (contents2_->GetWebContents() != second) contents2_->SetWebContents(second);
++    for (content::WebContents* shown : {first, second}) {
++      if (shown && shown != active) shown->UpdateWebContentsVisibility(content::Visibility::VISIBLE);
++    }
++    contents2_->SetVisible(second);
++    card2_->SetVisible(second);
++    pane1_->Watch(first);
++    pane2_->Watch(second);
 +    if (page_fullscreen) {
 +      SetBackground(views::CreateSolidBackground(SK_ColorBLACK));
 +      contents_->SetBoundsRect(GetLocalBounds());
@@ -1783,16 +2068,45 @@ index 0000000000..af382d65b2
 +    SetBackground(views::CreateSolidBackground(SkColorSetARGB(window_color >> 24, (window_color >> 16) & 255,
 +                                                              (window_color >> 8) & 255, window_color & 255)));
 +    radius_ = agens_ui_card_radius((__bridge void*)chrome_);
-+    card_->SetBackground(views::CreateRoundedRectBackground(sk(page_color), radius_, 1));
-+    card_->SetBorder(views::CreateRoundedRectBorder(1, radius_, sk(line_color)));
++    for (views::View* card : {card_.get(), card2_.get()}) {
++      card->SetBackground(views::CreateRoundedRectBackground(sk(page_color), radius_, 1));
++      card->SetBorder(views::CreateRoundedRectBorder(1, radius_, sk(line_color)));
++    }
 +    AgensRect page = agens_ui_layout((__bridge void*)chrome_, width(), height());
 +    AgensRect icon = agens_ui_site_icon_rect((__bridge void*)chrome_);
 +    site_icon_->SetBounds(icon.x, icon.y, icon.width, icon.height);
++    AgensRect ext = agens_ui_extensions_anchor((__bridge void*)chrome_);
++    extensions_anchor_->SetBounds(ext.x, ext.y, ext.width, ext.height);
 +    gfx::Rect card(page.x, page.y, page.width, page.height);
++    gfx::Rect card2;
++    if (split) {  // two cards with the window's gap between them, split by the ratio
++      constexpr int kGap = 8;
++      const double ratio = split->visual_data()->split_ratio();
++      if (split->visual_data()->split_layout() == split_tabs::SplitTabLayout::kStacked) {
++        const int h1 = static_cast<int>((page.height - kGap) * ratio);
++        card2 = gfx::Rect(page.x, page.y + h1 + kGap, page.width, page.height - h1 - kGap);
++        card.set_height(h1);
++      } else {
++        const int w1 = static_cast<int>((page.width - kGap) * ratio);
++        card2 = gfx::Rect(page.x + w1 + kGap, page.y, page.width - w1 - kGap, page.height);
++        card.set_width(w1);
++      }
++    }
 +    card_->SetBoundsRect(card);
 +    card.Inset(1);
 +    contents_->SetBoundsRect(card);
 +    contents_->holder()->SetNativeViewCornerRadii(gfx::RoundedCornersF(radius_ - 1));
++    if (split) {
++      card2_->SetBoundsRect(card2);
++      card2.Inset(1);
++      contents2_->SetBoundsRect(card2);
++      contents2_->holder()->SetNativeViewCornerRadii(gfx::RoundedCornersF(radius_ - 1));
++    }
++  }
++
++  void OnSplitTabChanged(const SplitTabChange&) override {
++    InvalidateLayout();
++    SchedulePaint();
 +  }
 +
 +  // content::WebContentsObserver (the active tab):
@@ -1804,10 +2118,9 @@ index 0000000000..af382d65b2
 +  // TabStripModelObserver: the page area follows the active tab.
 +  void OnTabStripModelChanged(TabStripModel*, const TabStripModelChange&,
 +                              const TabStripSelectionChange& selection) override {
++    InvalidateLayout();  // which tabs show (one, or a split's two) is decided in Layout
 +    if (selection.active_tab_changed()) {
-+      contents_->SetWebContents(selection.new_contents);
 +      Observe(selection.new_contents);  // its full screen changes the layout
-+      contents_->holder()->SetNativeViewCornerRadii(gfx::RoundedCornersF(radius_ - 1));
 +      // New tabs open ready to type, as in BrowserView::RestoreFocus. Posted so it lands after
 +      // the window gives the new contents focus.
 +      if (selection.new_contents && selection.new_contents->FocusLocationBarByDefault()) {
@@ -1822,7 +2135,11 @@ index 0000000000..af382d65b2
 +  base::WeakPtrFactory<NativeShellView> weak_{this};
 +  raw_ptr<views::View> card_;
 +  raw_ptr<views::View> site_icon_;
++  raw_ptr<views::View> extensions_anchor_;
 +  raw_ptr<views::WebView> contents_;
++  raw_ptr<views::View> card2_;
++  raw_ptr<views::WebView> contents2_;
++  std::unique_ptr<PaneWatcher> pane1_, pane2_;
 +  NSView* __strong chrome_;
 +};
 +
@@ -1927,6 +2244,175 @@ index 0000000000..af382d65b2
 +  return std::make_unique<NativePermissionPrompt>(shell->window(), delegate);
 +}
 +
++namespace {
++void ShowNativeInstallDialog(std::unique_ptr<ExtensionInstallPromptShowParams> params,
++                             ExtensionInstallPrompt::DoneCallback done,
++                             std::unique_ptr<extensions::InstallPromptData> prompt) {
++  NSAlert* alert = [[NSAlert alloc] init];
++  alert.messageText = base::SysUTF16ToNSString(prompt->GetDialogTitle());
++  NSMutableArray<NSString*>* asks = [NSMutableArray array];
++  for (size_t i = 0; i < prompt->GetPermissionCount(); ++i) {
++    [asks addObject:[@"·  " stringByAppendingString:base::SysUTF16ToNSString(prompt->GetPermission(i))]];
++  }
++  alert.informativeText = asks.count ? [@"Ela pode:\n" stringByAppendingString:[asks componentsJoinedByString:@"\n"]]
++                                     : @"Ela não pede acesso especial.";
++  NSString* accept = base::SysUTF16ToNSString(prompt->GetAcceptButtonLabel());
++  [alert addButtonWithTitle:accept.length ? accept : @"Adicionar extensão"];
++  [alert addButtonWithTitle:@"Cancelar"];
++  __block ExtensionInstallPrompt::DoneCallback answer = std::move(done);
++  void (^finish)(NSModalResponse) = ^(NSModalResponse response) {
++    std::move(answer).Run(ExtensionInstallPrompt::DoneCallbackPayload(
++        response == NSAlertFirstButtonReturn ? ExtensionInstallPrompt::Result::ACCEPTED
++                                             : ExtensionInstallPrompt::Result::USER_CANCELED));
++  };
++  NSWindow* parent = params->GetParentWindow().GetNativeNSWindow();
++  if (parent) {
++    [alert beginSheetModalForWindow:parent completionHandler:finish];
++  } else {
++    finish([alert runModal]);
++  }
++}
++}  // namespace
++
++class NativeLoginHandler : public LoginHandler {
++ public:
++  NativeLoginHandler(const net::AuthChallengeInfo& auth_info,
++                     content::WebContents* contents,
++                     content::LoginDelegate::LoginAuthRequiredCallback callback)
++      : LoginHandler(auth_info, contents, std::move(callback)) {}
++  ~NativeLoginHandler() override { CloseDialog(); }
++
++ protected:
++  bool BuildViewImpl(const std::u16string& authority,
++                     const std::u16string& explanation,
++                     LoginModelData*) override {
++    NSWindow* window = web_contents() ? web_contents()->GetTopLevelNativeWindow().GetNativeNSWindow() : nil;
++    if (!window) return false;
++    alert_ = [[NSAlert alloc] init];
++    alert_.messageText = @"Entrar no site";
++    alert_.informativeText = base::SysUTF16ToNSString(explanation.empty() ? authority : explanation);
++    NSView* fields = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 260, 56)];
++    user_ = [NSTextField textFieldWithString:@""];
++    user_.placeholderString = @"Usuário";
++    user_.frame = NSMakeRect(0, 30, 260, 24);
++    password_ = [[NSSecureTextField alloc] initWithFrame:NSMakeRect(0, 0, 260, 24)];
++    password_.placeholderString = @"Senha";
++    [fields addSubview:user_];
++    [fields addSubview:password_];
++    alert_.accessoryView = fields;
++    alert_.window.initialFirstResponder = user_;
++    [alert_ addButtonWithTitle:@"Entrar"];
++    [alert_ addButtonWithTitle:@"Cancelar"];
++    window_ = window;
++    base::WeakPtr<LoginHandler> weak = GetWeakPtr();
++    NSTextField* user = user_;
++    NSSecureTextField* password = password_;
++    [alert_ beginSheetModalForWindow:window completionHandler:^(NSModalResponse response) {
++      if (!weak) return;
++      if (response == NSAlertFirstButtonReturn) {
++        weak->SetAuth(base::SysNSStringToUTF16(user.stringValue), base::SysNSStringToUTF16(password.stringValue));
++      } else if (response != NSModalResponseAbort) {
++        weak->CancelAuth(/*notify_others=*/true);
++      }
++    }];
++    return true;
++  }
++  void CloseDialog() override {
++    if (window_ && alert_.window.sheetParent) [window_ endSheet:alert_.window returnCode:NSModalResponseAbort];
++    alert_ = nil;
++  }
++
++ private:
++  NSAlert* __strong alert_ = nil;
++  NSTextField* __strong user_ = nil;
++  NSSecureTextField* __strong password_ = nil;
++  NSWindow* __strong window_ = nil;
++};
++
++// Owns itself: deleted when its sheet ends.
++class NativeJsDialog : public javascript_dialogs::TabModalDialogView {
++ public:
++  NativeJsDialog(content::WebContents* contents,
++                 const std::u16string& title,
++                 content::JavaScriptDialogType type,
++                 const std::u16string& message,
++                 const std::u16string& default_prompt,
++                 content::JavaScriptDialogManager::DialogClosedCallback callback,
++                 base::OnceClosure force_closed)
++      : callback_(std::move(callback)), force_closed_(std::move(force_closed)) {
++    alert_ = [[NSAlert alloc] init];
++    alert_.messageText = base::SysUTF16ToNSString(title);
++    alert_.informativeText = base::SysUTF16ToNSString(message);
++    [alert_ addButtonWithTitle:@"OK"];
++    if (type != content::JAVASCRIPT_DIALOG_TYPE_ALERT) [alert_ addButtonWithTitle:@"Cancelar"];
++    if (type == content::JAVASCRIPT_DIALOG_TYPE_PROMPT) {
++      field_ = [NSTextField textFieldWithString:base::SysUTF16ToNSString(default_prompt)];
++      field_.frame = NSMakeRect(0, 0, 260, 24);
++      alert_.accessoryView = field_;
++      alert_.window.initialFirstResponder = field_;
++    }
++    window_ = contents->GetTopLevelNativeWindow().GetNativeNSWindow();
++    base::WeakPtr<NativeJsDialog> weak = weak_.GetWeakPtr();
++    void (^done)(NSModalResponse) = ^(NSModalResponse response) {
++      if (weak) weak->Finish(response == NSAlertFirstButtonReturn);
++    };
++    if (window_) {
++      [alert_ beginSheetModalForWindow:window_ completionHandler:done];
++    } else {
++      done([alert_ runModal]);
++    }
++  }
++  void CloseDialogWithoutCallback() override {
++    callback_.Reset();
++    force_closed_.Reset();
++    if (window_ && alert_.window.sheetParent) {
++      [window_ endSheet:alert_.window];  // Finish() runs from the completion handler
++    } else {
++      Finish(false);
++    }
++  }
++  std::u16string GetUserInput() override {
++    return field_ ? base::SysNSStringToUTF16(field_.stringValue) : std::u16string();
++  }
++  base::WeakPtr<NativeJsDialog> GetWeakPtr() { return weak_.GetWeakPtr(); }
++
++ private:
++  void Finish(bool ok) {
++    force_closed_.Reset();
++    if (callback_) std::move(callback_).Run(ok, ok ? GetUserInput() : std::u16string());
++    base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE, this);
++  }
++  content::JavaScriptDialogManager::DialogClosedCallback callback_;
++  base::OnceClosure force_closed_;
++  NSAlert* __strong alert_;
++  NSTextField* __strong field_ = nil;
++  NSWindow* __strong window_ = nil;
++  base::WeakPtrFactory<NativeJsDialog> weak_{this};
++};
++
++std::unique_ptr<LoginHandler> CreateNativeLoginHandler(const net::AuthChallengeInfo& auth_info,
++                                                       content::WebContents* contents,
++                                                       content::LoginDelegate::LoginAuthRequiredCallback callback) {
++  return std::make_unique<NativeLoginHandler>(auth_info, contents, std::move(callback));
++}
++
++base::WeakPtr<javascript_dialogs::TabModalDialogView> CreateNativeJsDialog(
++    content::WebContents* contents,
++    const std::u16string& title,
++    content::JavaScriptDialogType type,
++    const std::u16string& message,
++    const std::u16string& default_prompt,
++    content::JavaScriptDialogManager::DialogClosedCallback callback,
++    base::OnceClosure force_closed) {
++  return (new NativeJsDialog(contents, title, type, message, default_prompt, std::move(callback),
++                             std::move(force_closed)))
++      ->GetWeakPtr();
++}
++
++ExtensionInstallPrompt::ShowDialogCallback NativeInstallDialogCallback() {
++  return base::BindRepeating(&ShowNativeInstallDialog);
++}
++
 +float NativeTitlebarHeight(views::Widget* widget) {
 +  auto* shell = widget && widget->GetRootView()
 +                    ? views::AsViewClass<NativeShellView>(
@@ -1945,10 +2431,10 @@ index 0000000000..af382d65b2
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..757dbff48c
+index 0000000000..5c17b7fe93
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,4422 @@
+@@ -0,0 +1,4710 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -2244,6 +2730,18 @@ index 0000000000..757dbff48c
 +}
 +@end
 +
++// The top tab strip: clips the tabs and scrolls sideways (wheel or trackpad) when they don't fit.
++@interface AgensStripView : AgensDragView
++@property(nonatomic, copy) void (^onScroll)(CGFloat delta);
++@end
++@implementation AgensStripView
++@synthesize onScroll = _onScroll;
++- (void)scrollWheel:(NSEvent*)event {
++  const CGFloat d = fabs(event.scrollingDeltaX) > fabs(event.scrollingDeltaY) ? event.scrollingDeltaX : event.scrollingDeltaY;
++  if (_onScroll) _onScroll(-d * (event.hasPreciseScrollingDeltas ? 1 : 10));
++}
++@end
++
 +// Rounded hover/selected background, as the prototype's .tbtn / .stab.
 +@interface AgensHoverView : AgensDragView
 +@property(nonatomic) BOOL selected;
@@ -2338,6 +2836,7 @@ index 0000000000..757dbff48c
 +- (instancetype)initWithSymbol:(NSString*)symbol label:(NSString*)label size:(CGFloat)size;
 +- (void)setSymbol:(NSString*)symbol;
 +- (void)setTint:(const Token&)token;
++- (void)setColor:(NSColor*)color;
 +- (void)setImage:(NSImage*)image;
 +@end
 +@implementation AgensToolButton {
@@ -2377,6 +2876,9 @@ index 0000000000..757dbff48c
 +- (void)setTint:(const Token&)token {
 +  _icon.contentTintColor = token.color();
 +}
++- (void)setColor:(NSColor*)color {
++  _icon.contentTintColor = color;
++}
 +- (void)mouseDown:(NSEvent*)event {
 +  if (_enabled) [super mouseDown:event];
 +}
@@ -2395,6 +2897,9 @@ index 0000000000..757dbff48c
 +@property(nonatomic, copy) void (^onClose)(void);
 +@property(nonatomic, copy) void (^onPin)(void);
 +@property(nonatomic, copy) void (^onMute)(void);
++@property(nonatomic, copy) void (^onSplit)(int layout);  // with the active tab: 1 side by side, 2 stacked
++@property(nonatomic, copy) void (^onUnsplit)(void);
++@property(nonatomic, readonly) BOOL inSplit;
 +@property(nonatomic, copy) void (^onDrag)(NSPoint delta);  // pointer moved this much since mouse down
 +@property(nonatomic, copy) void (^onDrop)(void);
 +- (void)updateWith:(const AgensTab&)tab;
@@ -2404,6 +2909,7 @@ index 0000000000..757dbff48c
 +  BOOL _dragging;
 +  BOOL _muted;
 +  BOOL _audible;
++  BOOL _capturing;
 +  NSImageView* _favicon;
 +  NSProgressIndicator* _spinner;
 +  NSTextField* _title;
@@ -2416,6 +2922,9 @@ index 0000000000..757dbff48c
 +@synthesize onClose = _onClose;
 +@synthesize onPin = _onPin;
 +@synthesize onMute = _onMute;
++@synthesize onSplit = _onSplit;
++@synthesize onUnsplit = _onUnsplit;
++@synthesize inSplit = _inSplit;
 +@synthesize onDrag = _onDrag;
 +@synthesize onDrop = _onDrop;
 +// Click activates on release; a drag of more than 4 pt reorders instead.
@@ -2508,12 +3017,21 @@ index 0000000000..757dbff48c
 +  }
 +  _favicon.hidden = tab.loading;
 +  _pinned = tab.pinned;
++  _inSplit = tab.split != 0;
 +  _muted = tab.muted;
 +  _audible = tab.audible;
-+  _sound.image = Symbol(_muted ? @"speaker.slash.fill" : @"speaker.wave.2.fill", 10);
-+  _sound.toolTip = _muted ? @"Ativar o som da aba" : @"Silenciar a aba";
++  _capturing = tab.camera || tab.microphone;
++  if (_capturing) {  // camera or microphone in use outranks sound: it's what you'd want to know
++    _sound.image = Symbol(tab.camera ? @"video.fill" : @"mic.fill", 10);
++    _sound.toolTip = tab.camera && tab.microphone ? @"Usando a câmera e o microfone"
++                     : tab.camera                 ? @"Usando a câmera"
++                                                  : @"Usando o microfone";
++  } else {
++    _sound.image = Symbol(_muted ? @"speaker.slash.fill" : @"speaker.wave.2.fill", 10);
++    _sound.toolTip = _muted ? @"Ativar o som da aba" : @"Silenciar a aba";
++  }
 +  _sound.accessibilityLabel = _sound.toolTip;
-+  _sound.hidden = !(_audible || _muted);
++  _sound.hidden = !(_audible || _muted || _capturing);
 +  self.selected = tab.active;
 +  self.needsLayout = YES;
 +}
@@ -2521,7 +3039,7 @@ index 0000000000..757dbff48c
 +  [super refresh];
 +  _title.textColor = (self.selected || self.hovered) ? kInk.color() : kMute.color();
 +  _close.hidden = self.compact || !(self.selected || self.hovered);
-+  _sound.contentTintColor = _muted ? kLight3.color() : kDim.color();
++  _sound.contentTintColor = _capturing ? NSColor.systemRedColor : _muted ? kLight3.color() : kDim.color();
 +  // Pinned tiles always have the line; top pills only when selected.
 +  const BOOL border = _look == kLookPin || (_look == kLookTop && self.selected);
 +  self.layer.borderWidth = border ? 1 : 0;
@@ -2531,6 +3049,19 @@ index 0000000000..757dbff48c
 +  NSMenu* menu = [[NSMenu alloc] initWithTitle:@"Aba"];
 +  [menu addItemWithTitle:_pinned ? @"Desafixar aba" : @"Fixar aba" action:@selector(pin:) keyEquivalent:@""].target = self;
 +  [menu addItemWithTitle:_muted ? @"Ativar o som da aba" : @"Silenciar a aba" action:@selector(mute:) keyEquivalent:@""].target = self;
++  if (_inSplit) {
++    [menu addItemWithTitle:@"Separar a visualização dividida" action:@selector(unsplit:) keyEquivalent:@""].target = self;
++  } else if (!self.selected) {
++    NSMenuItem* split = [menu addItemWithTitle:@"Dividir com a aba atual" action:nil keyEquivalent:@""];
++    NSMenu* how = [[NSMenu alloc] initWithTitle:@""];
++    NSMenuItem* side = [how addItemWithTitle:@"Lado a lado" action:@selector(split:) keyEquivalent:@""];
++    side.target = self;
++    side.tag = 1;
++    NSMenuItem* stacked = [how addItemWithTitle:@"Em cima e embaixo" action:@selector(split:) keyEquivalent:@""];
++    stacked.target = self;
++    stacked.tag = 2;
++    split.submenu = how;
++  }
 +  [menu addItem:NSMenuItem.separatorItem];
 +  [menu addItemWithTitle:@"Fechar aba" action:@selector(closeTab:) keyEquivalent:@""].target = self;
 +  return menu;
@@ -2544,7 +3075,14 @@ index 0000000000..757dbff48c
 +- (void)pin:(id)sender {
 +  if (_onPin) _onPin();
 +}
++- (void)split:(NSMenuItem*)item {
++  if (_onSplit) _onSplit((int)item.tag);
++}
++- (void)unsplit:(id)sender {
++  if (_onUnsplit) _onUnsplit();
++}
 +- (void)mute:(id)sender {
++  if (_capturing) return;  // the badge only tells; the site panel changes permissions
 +  if (_onMute) _onMute();
 +}
 +@end
@@ -2702,6 +3240,7 @@ index 0000000000..757dbff48c
 +// One item of our menus (prototype .menu .mi): icon, label, shortcut on the right in mono.
 +@interface AgensMenuRow : AgensHoverView
 +- (instancetype)initWithIcon:(NSString*)icon title:(NSString*)title key:(NSString*)key;
++- (void)setIconImage:(NSImage*)image;
 +@end
 +@implementation AgensMenuRow {
 +  NSImageView* _icon;
@@ -2736,7 +3275,12 @@ index 0000000000..757dbff48c
 +}
 +- (void)refresh {
 +  self.layer.backgroundColor = self.hovered ? CG(kRaise, self) : NSColor.clearColor.CGColor;
++  self.layer.cornerRadius = self.radius * Round();
 +  _title.textColor = self.hovered ? kInk.color() : kMute.color();
++}
++- (void)setIconImage:(NSImage*)image {  // a picture of its own (an extension's icon), not tinted
++  _icon.image = image;
++  _icon.contentTintColor = nil;
 +}
 +@end
 +
@@ -2856,6 +3400,7 @@ index 0000000000..757dbff48c
 +- (BOOL)tabsOnTop;
 +- (void)toggleTabsPosition;
 +- (NSArray<NSString*>*)atoNamesForSettings;
++- (NSImage*)extensionIcon:(NSString*)extensionId;
 +@end
 +
 +@interface AgensSettings : NSWindowController <NSWindowDelegate, NSTextFieldDelegate>
@@ -3062,6 +3607,10 @@ index 0000000000..757dbff48c
 +  return [self option:label detail:detail control:n y:y];
 +}
 +- (CGFloat)option:(NSString*)label detail:(NSString*)detail control:(NSView*)control y:(CGFloat)y {
++  return [self option:label detail:detail control:control icon:nil y:y];
++}
++// The same row with an icon before the text (extensions).
++- (CGFloat)option:(NSString*)label detail:(NSString*)detail control:(NSView*)control icon:(NSImage*)icon y:(CGFloat)y {
 +  CGFloat w = NSWidth(_pane.bounds) - 64;
 +  NSView* group = [[NSView alloc] initWithFrame:NSMakeRect(32, y, w, 56)];
 +  group.wantsLayer = YES;
@@ -3076,13 +3625,20 @@ index 0000000000..757dbff48c
 +  const CGFloat textW = w - 16 - cs.width - 24;
 +  NSTextField* l = Label(13, NSFontWeightRegular, kInk);
 +  l.stringValue = label;
-+  l.frame = NSMakeRect(16, detail ? 30 : 19, textW, 18);
++  const CGFloat textX = icon ? 16 + 24 + 12 : 16;
++  if (icon) {
++    NSImageView* iv = [NSImageView imageViewWithImage:icon];
++    iv.imageScaling = NSImageScaleProportionallyUpOrDown;
++    iv.frame = NSMakeRect(16, (56 - 24) / 2, 24, 24);
++    [group addSubview:iv];
++  }
++  l.frame = NSMakeRect(textX, detail ? 30 : 19, textW - (textX - 16), 18);
 +  [group addSubview:l];
 +  if (detail) {
 +    NSTextField* d = Label(11.5, NSFontWeightRegular, kDim);
 +    d.stringValue = detail;
 +    d.toolTip = detail;
-+    d.frame = NSMakeRect(16, 12, textW, 15);
++    d.frame = NSMakeRect(textX, 12, textW - (textX - 16), 15);
 +    [group addSubview:d];
 +  }
 +  if (!control.accessibilityLabel.length) control.accessibilityLabel = label;  // VoiceOver reads the row's name
@@ -3805,7 +4361,8 @@ index 0000000000..757dbff48c
 +    sw.frame = NSMakeRect(NSMaxX(box.frame) + 10, (NSHeight(both.frame) - NSHeight(sw.frame)) / 2, NSWidth(sw.frame), NSHeight(sw.frame));
 +    [both addSubview:box];
 +    [both addSubview:sw];
-+    y = [self option:@(name.c_str()) detail:[@"Versão " stringByAppendingString:@(version.c_str())] control:both y:y];
++    y = [self option:@(name.c_str()) detail:[@"Versão " stringByAppendingString:@(version.c_str())] control:both
++                icon:[_chrome extensionIcon:@(id.c_str())] y:y];
 +  }
 +  return y;
 +}
@@ -4596,7 +5153,8 @@ index 0000000000..757dbff48c
 +// code in mono, and "Tentar de novo". Certificate warnings stay Chromium's (they are interstitials).
 +@interface AgensErrorView : NSView
 +@property(nonatomic, copy) void (^onRetry)(void);
-+- (void)showError:(int)error name:(NSString*)name;
++@property(nonatomic, copy) void (^onProceed)(void);  // security stops: go on anyway
++- (void)showError:(int)error name:(NSString*)name stop:(BOOL)stop;
 +- (void)refreshTheme;
 +@end
 +@implementation AgensErrorView {
@@ -4605,8 +5163,11 @@ index 0000000000..757dbff48c
 +  NSTextField* _detail;
 +  NSTextField* _code;
 +  NSButton* _retry;
++  NSButton* _proceed;
++  BOOL _stop;
 +}
 +@synthesize onRetry = _onRetry;
++@synthesize onProceed = _onProceed;
 +- (instancetype)initWithFrame:(NSRect)frame {
 +  if ((self = [super initWithFrame:frame])) {
 +    self.wantsLayer = YES;
@@ -4620,7 +5181,11 @@ index 0000000000..757dbff48c
 +    for (NSTextField* t in @[ _title, _detail, _code ]) t.alignment = NSTextAlignmentCenter;
 +    _retry = [NSButton buttonWithTitle:@"Tentar de novo" target:self action:@selector(retry:)];
 +    _retry.keyEquivalent = @"\r";  // the prototype's primary button
-+    for (NSView* v in @[ _icon, _title, _detail, _code, _retry ]) [self addSubview:v];
++    _proceed = [NSButton buttonWithTitle:@"Continuar mesmo assim (não seguro)" target:self action:@selector(proceed:)];
++    _proceed.bordered = NO;
++    _proceed.font = [NSFont systemFontOfSize:12];
++    _proceed.contentTintColor = kDim.color();
++    for (NSView* v in @[ _icon, _title, _detail, _code, _retry, _proceed ]) [self addSubview:v];
 +    [self refreshTheme];
 +  }
 +  return self;
@@ -4636,7 +5201,8 @@ index 0000000000..757dbff48c
 +  [super viewDidChangeEffectiveAppearance];
 +  [self refreshTheme];
 +}
-+- (void)showError:(int)error name:(NSString*)name {
++- (void)showError:(int)error name:(NSString*)name stop:(BOOL)stop {
++  _stop = stop;
 +  NSString* title = @"Não deu para abrir a página";
 +  NSString* detail = @"Tente de novo daqui a pouco.";
 +  BOOL offline = NO;
@@ -4670,7 +5236,16 @@ index 0000000000..757dbff48c
 +      offline = YES;
 +      break;
 +  }
-+  _icon.image = AgensIcon(offline ? kIconWifiOff : kIconAbout, 40);
++  // Certificate errors (-200…-299) and other security stops: back is the safe answer.
++  const BOOL certificate = error <= -200 && error > -300;
++  if (stop || certificate) {
++    title = certificate ? @"Esta conexão não é privada" : @"O navegador parou antes de abrir o site";
++    detail = certificate ? @"O certificado do site não confere. Alguém pode estar tentando ler o que você envia."
++                         : @"Este endereço pode não ser seguro.";
++  }
++  _retry.title = stop ? @"Voltar" : @"Tentar de novo";
++  _proceed.hidden = !stop;
++  _icon.image = AgensIcon(stop || certificate ? kIconLock : offline ? kIconWifiOff : kIconAbout, 40);
 +  _title.stringValue = title;
 +  _detail.stringValue = detail;
 +  _code.stringValue = name;
@@ -4692,6 +5267,11 @@ index 0000000000..757dbff48c
 +  _code.frame = NSMakeRect(24, y, w - 48, 16);
 +  y += 16 + 18;
 +  _retry.frame = NSMakeRect((w - NSWidth(_retry.frame)) / 2, y, NSWidth(_retry.frame), NSHeight(_retry.frame));
++  [_proceed sizeToFit];
++  _proceed.frame = NSMakeRect((w - NSWidth(_proceed.frame)) / 2, NSMaxY(_retry.frame) + 14, NSWidth(_proceed.frame), 18);
++}
++- (void)proceed:(id)sender {
++  if (_onProceed) _onProceed();
 +}
 +- (void)retry:(id)sender {
 +  if (_onRetry) _onRetry();
@@ -4842,6 +5422,12 @@ index 0000000000..757dbff48c
 +static void DownloadsChanged(void* context, const AgensDownload* downloads, int count, int started) {
 +  [(__bridge AgensChrome*)context setDownloads:downloads count:count started:started];
 +}
++@interface AgensChrome (Extensions)
++- (void)setExtensions:(const AgensExtensionButton*)list count:(int)count installed:(const char*)installed;
++@end
++static void ExtensionButtonsChanged(void* context, const AgensExtensionButton* list, int count, const char* installed) {
++  [(__bridge AgensChrome*)context setExtensions:list count:count installed:installed];
++}
 +@interface AgensChrome (Bookmarks)
 +- (void)setBookmarks:(const AgensBookmark*)bookmarks count:(int)count bar:(long long)bar;
 +@end
@@ -4883,7 +5469,11 @@ index 0000000000..757dbff48c
 +  AgensToolButton* _toggle;
 +  AgensToolButton* _star;  // in the address, right side (prototype .star)
 +  AgensToolButton* _sound;  // in the address, left of the star, while the page plays or is muted
++  AgensToolButton* _capture;  // in the address: camera/microphone in use (opens the site panel)
 +  AgensToolButton* _newTabTop;  // "+" at the end of the top strip
++  AgensStripView* _strip;       // holds the tabs on top; scrolls when they don't fit
++  CGFloat _stripOffset;
++  BOOL _stripFollowActive;      // bring the active tab into view on the next layout
 +  BOOL _top;                    // tabs on top instead of the column
 +  int _pinnedCount;             // Chromium keeps pinned tabs first: rows [0, _pinnedCount)
 +  int _activeIndex;
@@ -4916,7 +5506,13 @@ index 0000000000..757dbff48c
 +  std::vector<BookmarkItem> _bookmarks;
 +  long long _barId;
 +  AgensFindBar* _find;
++  AgensToolButton* _extButton;  // extensions, before downloads and the menu
++  NSMutableArray<NSDictionary*>* _extensions;  // id, name, icon (NSImage, optional)
 +  AgensErrorView* _error;
++  BOOL _stopPage;  // the active tab shows a security stop page
++  int _split;            // the active tab's split (0 none, 1 side by side, 2 stacked)
++  BOOL _splitFirst;
++  double _splitRatio;
 +  BOOL _passwordAsked;  // our "save password?" panel is open and not answered yet
 +  BOOL _permissionAsked;  // a site's permission request is open and not answered yet
 +  NSView* _bar;  // the bookmarks bar
@@ -4971,6 +5567,12 @@ index 0000000000..757dbff48c
 +    [_omni addSubview:_omniIcon];
 +    [_omni addSubview:_address];
 +    [_omni addSubview:_sound];
++    _capture = [[AgensToolButton alloc] initWithSymbol:@"video.fill" label:@"Usando a câmera" size:12];
++    _capture.radius = 7;
++    _capture.hidden = YES;
++    [_capture setTint:kDim];
++    _capture.onPress = ^{ [weak showSiteInfo]; };
++    [_omni addSubview:_capture];
 +    [_omni addSubview:_star];
 +    _siteButton = [[AgensHoverView alloc] init];
 +    _siteButton.radius = 7;
@@ -4978,6 +5580,11 @@ index 0000000000..757dbff48c
 +    _siteButton.accessibilityLabel = @"Informações do site";
 +    _siteButton.onPress = ^{ [weak showSiteInfo]; };
 +    [_omni addSubview:_siteButton positioned:NSWindowBelow relativeTo:_omniIcon];
++    _extensions = [NSMutableArray array];
++    _extButton = [[AgensToolButton alloc] initWithSymbol:@"puzzlepiece" label:@"Extensões"];
++    [_extButton setImage:AgensIcon(kIconExtensions)];
++    _extButton.hidden = YES;
++    _extButton.onPress = ^{ [weak toggleExtensions:nil]; };
 +    _downloadsButton = [[AgensToolButton alloc] initWithSymbol:@"arrow.down" label:@"Downloads"];
 +    [_downloadsButton setImage:AgensIcon(kIconDown)];
 +    _downloadsButton.hidden = YES;
@@ -5025,6 +5632,15 @@ index 0000000000..757dbff48c
 +    _newTab.onPress = ^{ [weak run:agens_window_new_tab]; };
 +    _newTabTop = [[AgensToolButton alloc] initWithSymbol:@"plus" label:@"Nova aba (⌘T)"];
 +    _newTabTop.onPress = ^{ [weak run:agens_window_new_tab]; };
++    _strip = [[AgensStripView alloc] init];
++    _strip.wantsLayer = YES;
++    _strip.layer.masksToBounds = YES;
++    _strip.onScroll = ^(CGFloat delta) {
++      AgensChrome* strong = weak;
++      if (!strong) return;
++      strong->_stripOffset += delta;
++      [strong relayout];
++    };
 +    _top = [NSUserDefaults.standardUserDefaults boolForKey:kTabsOnTopKey];
 +
 +    _tabsScroll = [[NSScrollView alloc] init];
@@ -5106,7 +5722,19 @@ index 0000000000..757dbff48c
 +    };
 +    _error = [[AgensErrorView alloc] initWithFrame:NSZeroRect];
 +    _error.hidden = YES;
-+    _error.onRetry = ^{ [weak run:agens_window_reload]; };
++    _error.onRetry = ^{
++      AgensChrome* strong = weak;
++      if (!strong || !strong->_window) return;
++      if (strong->_stopPage) {
++        agens_window_interstitial(strong->_window, 0);  // back to safety
++      } else {
++        agens_window_reload(strong->_window);
++      }
++    };
++    _error.onProceed = ^{
++      AgensChrome* strong = weak;
++      if (strong && strong->_window) agens_window_interstitial(strong->_window, 1);
++    };
 +    _find = [[AgensFindBar alloc] initWithFrame:NSZeroRect];
 +    _find.engine = window;
 +    agens_window_set_find_observer(window, FindChanged, (__bridge void*)_find);
@@ -5125,8 +5753,8 @@ index 0000000000..757dbff48c
 +    _ntp.field.action = @selector(go:);
 +    _ntp.field.delegate = self;
 +
-+    for (NSView* v in @[ _toggle, _back, _forward, _reload, _omni, _downloadsButton, _menu, _tabsScroll, _moreAtos, _atoTile, _atoName, _separator, _newTab, _newTabTop,
-+                         _atosLine, _addAto, _atoDot, _bar, _history, _bookmarksPage, _ntp, _error, _find, _loadbar, _statusPill, _suggest ]) {
++    for (NSView* v in @[ _toggle, _back, _forward, _reload, _omni, _extButton, _downloadsButton, _menu, _tabsScroll, _moreAtos, _atoTile, _atoName, _separator, _newTab, _newTabTop,
++                         _atosLine, _addAto, _atoDot, _strip, _bar, _history, _bookmarksPage, _ntp, _error, _find, _loadbar, _statusPill, _suggest ]) {
 +      [self addSubview:v];
 +    }
 +    [self refreshTheme];
@@ -5138,6 +5766,7 @@ index 0000000000..757dbff48c
 +    agens_window_set_status_observer(_window, StatusChanged, (__bridge void*)self);
 +    agens_window_set_downloads_observer(_window, DownloadsChanged, (__bridge void*)self);
 +    agens_window_set_bookmarks_observer(_window, BookmarksChanged, (__bridge void*)self);
++    agens_window_set_extension_buttons_observer(_window, ExtensionButtonsChanged, (__bridge void*)self);
 +    [NSNotificationCenter.defaultCenter addObserver:self
 +                                           selector:@selector(themeChanged:)
 +                                               name:kThemeChanged
@@ -5280,8 +5909,9 @@ index 0000000000..757dbff48c
 +  const BOOL narrow = side < (kRail + kSide) / 2;
 +  for (NSView* v in @[ _toggle, _atoTile, _atoName, _separator, _newTab, _tabsScroll, _atosLine ]) v.hidden = top;
 +  _newTabTop.hidden = !top;
++  _strip.hidden = !top;
 +  for (AgensTabRow* row in _rows) {
-+    NSView* parent = top || row.pinned ? self : _tabsDoc;
++    NSView* parent = top ? _strip : row.pinned ? self : _tabsDoc;
 +    if (row.superview != parent) {
 +      if (parent == self) {
 +        [self addSubview:row positioned:NSWindowBelow relativeTo:_ntp];
@@ -5307,6 +5937,10 @@ index 0000000000..757dbff48c
 +  if (!_downloadsButton.hidden) {
 +    _downloadsButton.frame = NSMakeRect(NSMinX(_menu.frame) - 30, btnY, 28, 28);
 +    omniEnd = NSMinX(_downloadsButton.frame) - 4;
++  }
++  if (!_extButton.hidden) {
++    _extButton.frame = NSMakeRect(omniEnd + 4 - 30, btnY, 28, 28);
++    omniEnd = NSMinX(_extButton.frame) - 4;
 +  }
 +
 +  // Atos: only what fits (6 in the open column, 5 collapsed, 4 on the bar); past that the last
@@ -5339,7 +5973,9 @@ index 0000000000..757dbff48c
 +  _siteButton.frame = NSInsetRect(_omniIcon.frame, -6, -6);
 +  _star.frame = NSMakeRect(NSWidth(_omni.frame) - 4 - 26, (omniH - 26) / 2, 26, 26);
 +  _sound.frame = NSMakeRect(NSMinX(_star.frame) - 26, (omniH - 26) / 2, 26, 26);
-+  const CGFloat addressEnd = _sound.hidden ? NSMinX(_star.frame) : NSMinX(_sound.frame);
++  const CGFloat afterSound = _sound.hidden ? NSMinX(_star.frame) : NSMinX(_sound.frame);
++  _capture.frame = NSMakeRect(afterSound - 26, (omniH - 26) / 2, 26, 26);
++  const CGFloat addressEnd = _capture.hidden ? afterSound : NSMinX(_capture.frame);
 +  _address.frame = NSMakeRect(33, (omniH - 18) / 2, addressEnd - 6 - 33, 18);
 +
 +  NSMutableArray<AgensTabRow*>* pins = [NSMutableArray array];
@@ -5350,15 +5986,33 @@ index 0000000000..757dbff48c
 +    // The strip: pinned tabs as 44 pt icons, the rest share what's left (prototype .ttab: up to
 +    // 220 pt, at least 44). The "+" stays at the right end.
 +    _newTabTop.frame = NSMakeRect(width - kPad - 28, (strip - 28) / 2, 28, 28);
-+    const CGFloat x0 = kLightsEnd, end = NSMinX(_newTabTop.frame) - 6;
++    const CGFloat x0 = kLightsEnd, end = NSMinX(_newTabTop.frame) - 6, stripW = MAX(0, end - x0);
++    _strip.frame = NSMakeRect(x0, 0, stripW, strip);  // tabs are laid out inside it
 +    const CGFloat pinsW = pins.count * 48;
-+    const CGFloat w = list.count ? MAX(44, MIN(220, (end - x0 - pinsW + 4) / list.count - 4)) : 0;
++    const CGFloat w = list.count ? MAX(44, MIN(220, (stripW - pinsW + 4) / list.count - 4)) : 0;
++    // Too many to fit at 44 pt: the strip scrolls; the active tab is brought into view.
++    const CGFloat total = pinsW + list.count * (w + 4) - 4;
++    if (_stripFollowActive) {
++      _stripFollowActive = NO;
++      CGFloat ax = 0, aw = 0, cx = 0;
++      for (AgensTabRow* row in pins) {
++        if (row.selected) ax = cx, aw = 44;
++        cx += 48;
++      }
++      for (AgensTabRow* row in list) {
++        if (row.selected) ax = cx, aw = w;
++        cx += w + 4;
++      }
++      if (ax < _stripOffset) _stripOffset = ax;
++      if (ax + aw > _stripOffset + stripW) _stripOffset = ax + aw - stripW;
++    }
++    _stripOffset = MAX(0, MIN(_stripOffset, MAX(0, total - stripW)));
 +    _tabStep = w + 4;
-+    _listX = x0 + pinsW;
-+    CGFloat x = x0;
++    _listX = pinsW - _stripOffset;
++    CGFloat x = -_stripOffset;
 +    for (AgensTabRow* row in pins) {
 +      row.frame = NSMakeRect(x, (strip - rowH) / 2, 44, rowH);
-+      row.hidden = x + 44 > end;
++      row.hidden = NO;
 +      x += 48;
 +    }
 +    int slot = 0;
@@ -5366,8 +6020,7 @@ index 0000000000..757dbff48c
 +      if (row == _dragged) continue;  // it follows the pointer (dragRow:by:)
 +      if (_dragged && slot == _dropIndex - _pinnedCount) x += w + 4;  // where it will land
 +      row.frame = NSMakeRect(x, (strip - rowH) / 2, w, rowH);
-+      // shortcut: tabs past the end are hidden, not scrolled; add strip scrolling if people keep 30+ tabs on top.
-+      row.hidden = x + w > end;
++      row.hidden = NO;
 +      x += w + 4;
 +      ++slot;
 +    }
@@ -5450,11 +6103,26 @@ index 0000000000..757dbff48c
 +  }
 +
 +  _page = page;
-+  _ntp.frame = NSInsetRect(_page, 1, 1);
++  // Our pages over the card (new tab, errors…) cover the active tab's pane only; the engine splits
++  // the card the same way (8 pt gap, the split's ratio).
++  NSRect pane = _page;
++  if (_split) {
++    const CGFloat gap = 8;
++    if (_split == 2) {
++      const CGFloat h1 = floor((NSHeight(page) - gap) * _splitRatio);
++      pane = _splitFirst ? NSMakeRect(NSMinX(page), NSMinY(page), NSWidth(page), h1)
++                         : NSMakeRect(NSMinX(page), NSMinY(page) + h1 + gap, NSWidth(page), NSHeight(page) - h1 - gap);
++    } else {
++      const CGFloat w1 = floor((NSWidth(page) - gap) * _splitRatio);
++      pane = _splitFirst ? NSMakeRect(NSMinX(page), NSMinY(page), w1, NSHeight(page))
++                         : NSMakeRect(NSMinX(page) + w1 + gap, NSMinY(page), NSWidth(page) - w1 - gap, NSHeight(page));
++    }
++  }
++  _ntp.frame = NSInsetRect(pane, 1, 1);
 +  _history.frame = _ntp.frame;
 +  _bookmarksPage.frame = _ntp.frame;
 +  _error.frame = _ntp.frame;
-+  _find.frame = NSMakeRect(NSMaxX(_page) - 10 - 340, NSMinY(_page) + 10, 340, 38);
++  _find.frame = NSMakeRect(NSMaxX(pane) - 10 - 340, NSMinY(pane) + 10, 340, 38);
 +  _loadbar.frame = NSMakeRect(NSMinX(_page), NSMinY(_page) - 5, NSWidth(_page), 2);
 +  if (NSWidth(_page) != _loadW) [self runLoadbar];  // the sweep is sized to the line
 +  CGFloat statusW = MIN(ceil(_statusText.fittingSize.width) + 24, NSWidth(_page) / 2);
@@ -5469,6 +6137,10 @@ index 0000000000..757dbff48c
 +    _suggestionRows[i].frame = NSMakeRect(5, 5 + i * 34, NSWidth(anchor) - 10, 34);
 +  }
 +  return {(int)NSMinX(_page), (int)NSMinY(_page), (int)NSWidth(_page), (int)NSHeight(_page)};
++}
++- (AgensRect)extensionsAnchor {
++  NSRect r = _extButton.hidden ? _menu.frame : _extButton.frame;
++  return {(int)NSMinX(r), (int)NSMinY(r), (int)NSWidth(r), (int)NSHeight(r)};
 +}
 +- (AgensRect)siteIconRect {
 +  NSRect r = [_omni convertRect:_omniIcon.frame toView:self];
@@ -5495,6 +6167,14 @@ index 0000000000..757dbff48c
 +      AgensChrome* strong = weak;
 +      if (strong && strong->_window) agens_window_toggle_mute(strong->_window, weakRow.index);
 +    };
++    row.onSplit = ^(int layout) {
++      AgensChrome* strong = weak;
++      if (strong && strong->_window) agens_window_split(strong->_window, weakRow.index, layout);
++    };
++    row.onUnsplit = ^{
++      AgensChrome* strong = weak;
++      if (strong && strong->_window) agens_window_unsplit(strong->_window, weakRow.index);
++    };
 +    [_tabsDoc addSubview:row];
 +    [_rows addObject:row];
 +  }
@@ -5510,16 +6190,30 @@ index 0000000000..757dbff48c
 +    if (tabs[i].pinned) ++_pinnedCount;
 +    if (tabs[i].active) activeTab = i;
 +    if (!tabs[i].active) continue;
-+    if (_activeIndex != i) [_find close];  // a find belongs to the page it ran on
++    if (_activeIndex != i) {
++      [_find close];  // a find belongs to the page it ran on
++      _stripFollowActive = YES;
++    }
 +    _activeIndex = i;
 +    _sound.hidden = !(tabs[i].audible || tabs[i].muted);
 +    [_sound setSymbol:tabs[i].muted ? @"speaker.slash.fill" : @"speaker.wave.2.fill"];
 +    [_sound setTint:tabs[i].muted ? kLight3 : kDim];
 +    _sound.accessibilityLabel = tabs[i].muted ? @"Ativar o som da aba" : @"Silenciar a aba";
 +    _sound.toolTip = _sound.accessibilityLabel;
++    _capture.hidden = !(tabs[i].camera || tabs[i].microphone);
++    [_capture setSymbol:tabs[i].camera ? @"video.fill" : @"mic.fill"];
++    [_capture setColor:NSColor.systemRedColor];  // like the system's own camera/mic dot
++    _capture.accessibilityLabel = tabs[i].camera && tabs[i].microphone ? @"Usando a câmera e o microfone"
++                                  : tabs[i].camera                     ? @"Usando a câmera"
++                                                                       : @"Usando o microfone";
++    _capture.toolTip = _capture.accessibilityLabel;
 +    // Our error page over Chromium's, while the tab shows one (not while it retries).
-+    _error.hidden = !tabs[i].error || tabs[i].loading || !tabs[i].url[0];
-+    if (!_error.hidden) [_error showError:tabs[i].error name:@(tabs[i].error_name)];
++    _stopPage = tabs[i].interstitial;
++    _split = tabs[i].split;
++    _splitFirst = tabs[i].split_first;
++    _splitRatio = tabs[i].split_ratio;
++    _error.hidden = !(tabs[i].error || _stopPage) || tabs[i].loading || !tabs[i].url[0];
++    if (!_error.hidden) [_error showError:tabs[i].error name:@(tabs[i].error_name) stop:_stopPage];
 +    _url = @(tabs[i].url);
 +    _loading = tabs[i].loading;
 +    _bookmarked = tabs[i].bookmarked;
@@ -5986,9 +6680,86 @@ index 0000000000..757dbff48c
 +    agens_window_set_downloads_observer(_window, nullptr, nullptr);
 +    agens_window_set_bookmarks_observer(_window, nullptr, nullptr);
 +    agens_window_set_find_observer(_window, nullptr, nullptr);
++    agens_window_set_extension_buttons_observer(_window, nullptr, nullptr);
 +  }
 +  _window = nullptr;
 +}
++// --- Extensions: the button, its panel (one row per extension; a click runs its action, whose
++// popup hangs from the button), and the "installed" notice.
++- (void)setExtensions:(const AgensExtensionButton*)list count:(int)count installed:(const char*)installed {
++  [_extensions removeAllObjects];
++  NSString* installedName = nil;
++  for (int i = 0; i < count; ++i) {
++    NSMutableDictionary* e = [@{@"id" : @(list[i].id), @"name" : @(list[i].name)} mutableCopy];
++    if (list[i].icon_png) {
++      NSImage* icon = [[NSImage alloc] initWithData:[NSData dataWithBytes:list[i].icon_png length:list[i].icon_png_size]];
++      icon.size = NSMakeSize(16, 16);
++      if (icon) e[@"icon"] = icon;
++    }
++    if (installed && !strcmp(installed, list[i].id)) installedName = e[@"name"];
++    [_extensions addObject:e];
++  }
++  _extButton.hidden = count == 0;
++  [self relayout];
++  if (_window) agens_window_relayout(_window);  // the popup anchor moves with the button
++  if (installedName) {
++    [self showExtensions:[installedName stringByAppendingString:@" foi instalada"]];
++  }
++}
++- (NSImage*)extensionIcon:(NSString*)extensionId {
++  for (NSDictionary* e in _extensions) {
++    if ([e[@"id"] isEqualToString:extensionId]) return e[@"icon"];
++  }
++  return nil;
++}
++- (void)toggleExtensions:(id)sender {
++  if (_menuView && _popoverAnchor == _extButton) {
++    [self closeMenu];
++  } else {
++    [self showExtensions:nil];
++  }
++}
++- (void)showExtensions:(NSString*)notice {
++  const CGFloat w = 280, rowH = 32, noticeH = notice ? 30 : 0;
++  const CGFloat h = 5 + noticeH + (_extensions.count + 1) * rowH + 5;
++  NSView* panel = [self popoverWidth:w height:h under:_extButton];
++  panel.accessibilityRole = NSAccessibilityMenuRole;
++  panel.accessibilityLabel = @"Extensões";
++  CGFloat y = h - 5;
++  if (notice) {
++    NSTextField* note = Label(12.5, NSFontWeightSemibold, kInk);
++    note.stringValue = notice;
++    note.frame = NSMakeRect(14, y - 24, w - 28, 18);
++    [panel addSubview:note];
++    y -= noticeH;
++  }
++  __weak AgensChrome* weak = self;
++  for (NSDictionary* e in _extensions) {
++    y -= rowH;
++    AgensMenuRow* row = [[AgensMenuRow alloc] initWithIcon:kIconExtensions title:e[@"name"] key:@""];
++    if (e[@"icon"]) [row setIconImage:e[@"icon"]];
++    row.frame = NSMakeRect(5, y, w - 10, rowH);
++    NSString* extensionId = e[@"id"];
++    row.onPress = ^{
++      AgensChrome* strong = weak;
++      [strong closeMenu];
++      if (strong && strong->_window) agens_extension_click(strong->_window, extensionId.UTF8String);
++    };
++    [panel addSubview:row];
++  }
++  y -= rowH;
++  AgensMenuRow* manage = [[AgensMenuRow alloc] initWithIcon:kIconSettings title:@"Gerenciar extensões" key:@""];
++  manage.frame = NSMakeRect(5, y, w - 10, rowH);
++  manage.onPress = ^{
++    AgensChrome* strong = weak;
++    [strong closeMenu];
++    [strong menuSettings:nil];
++    [g_settings showSection:@"extensoes"];
++  };
++  [panel addSubview:manage];
++  [self presentPopover:panel anchor:_extButton];
++}
++
 +// --- Favoritos: the page, the bar and its menus.
 +- (void)setBookmarks:(const AgensBookmark*)bookmarks count:(int)count bar:(long long)bar {
 +  _bookmarks.clear();
@@ -6357,6 +7128,9 @@ index 0000000000..757dbff48c
 +void agens_ui_permission_prompt_close(void* chrome) {
 +  [(__bridge AgensChrome*)chrome permissionGone];
 +}
++AgensRect agens_ui_extensions_anchor(void* chrome) {
++  return [(__bridge AgensChrome*)chrome extensionsAnchor];
++}
 +float agens_ui_card_radius(void*) {
 +  return 12 * Round();
 +}
@@ -6406,6 +7180,20 @@ index 8277fe0aba..e496cb7ab4 100644
      chrome::ShowSettings(browser);
    } else {
      chrome::OpenOptionsWindow(profile);
+diff --git a/chrome/browser/profiles/profile_impl.cc b/chrome/browser/profiles/profile_impl.cc
+index 6f5c220aae..5f70397a82 100644
+--- a/chrome/browser/profiles/profile_impl.cc
++++ b/chrome/browser/profiles/profile_impl.cc
+@@ -432,7 +432,8 @@ void ProfileImpl::RegisterProfilePrefs(
+ #if BUILDFLAG(ENABLE_OOP_PRINTING)
+   registry->RegisterBooleanPref(prefs::kOopPrintDriversAllowedByPolicy, true);
+ #endif
+-  registry->RegisterBooleanPref(prefs::kPrintPreviewDisabled, false);
++  // agens: print with the macOS dialog (Chromium's basic printing), not the print preview page.
++  registry->RegisterBooleanPref(prefs::kPrintPreviewDisabled, true);
+   registry->RegisterStringPref(
+       prefs::kPrintPreviewDefaultDestinationSelectionRules, std::string());
+ #if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
 diff --git a/chrome/browser/ui/browser_command_controller.cc b/chrome/browser/ui/browser_command_controller.cc
 index d2224772cc..cd3d1c68d9 100644
 --- a/chrome/browser/ui/browser_command_controller.cc
@@ -6468,6 +7256,30 @@ index 3bc40bcc91..9e4154d594 100644
      StatusBubbleViews* status_bubble_views =
          static_cast<StatusBubbleViews*>(status_bubble);
      ContentsWebView* anchor =
+diff --git a/chrome/browser/ui/extensions/extension_install_ui_desktop.cc b/chrome/browser/ui/extensions/extension_install_ui_desktop.cc
+index c9e2a59c3e..59a138dd94 100644
+--- a/chrome/browser/ui/extensions/extension_install_ui_desktop.cc
++++ b/chrome/browser/ui/extensions/extension_install_ui_desktop.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "chrome/browser/ui/extensions/extension_install_ui_desktop.h"
+ 
++#include "chrome/browser/agens/embed/native_shell.h"
++
+ #include <string>
+ #include <utility>
+ 
+@@ -122,6 +124,10 @@ void ExtensionInstallUIDesktop::OnInstallSuccess(
+   if (IsUiDisabled() || skip_post_install_ui() || extension->is_theme()) {
+     return;
+   }
++  // agens: our extensions button says it was installed; no extra window or Views bubble.
++  if (agens::IsNativeShellEnabled()) {
++    return;
++  }
+ 
+   if (!profile()) {
+     // TODO(zelidrag): Figure out what exact conditions cause crash
 diff --git a/chrome/browser/ui/passwords/manage_passwords_ui_controller.cc b/chrome/browser/ui/passwords/manage_passwords_ui_controller.cc
 index 0d2c0bbb5b..a28a885d1a 100644
 --- a/chrome/browser/ui/passwords/manage_passwords_ui_controller.cc
@@ -6518,6 +7330,76 @@ index 886649ae98..3adfa8a130 100644
      return StartupProfileMode::kBrowserWindow;
    }
  
+diff --git a/chrome/browser/ui/views/extensions/extension_install_dialog_view.cc b/chrome/browser/ui/views/extensions/extension_install_dialog_view.cc
+index 83ce5b59c1..71aaf5ca2e 100644
+--- a/chrome/browser/ui/views/extensions/extension_install_dialog_view.cc
++++ b/chrome/browser/ui/views/extensions/extension_install_dialog_view.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "chrome/browser/ui/views/extensions/extension_install_dialog_view.h"
+ 
++#include "chrome/browser/agens/embed/native_shell.h"
++
+ #include <memory>
+ #include <string>
+ #include <utility>
+@@ -732,5 +734,8 @@ END_METADATA
+ // static
+ ExtensionInstallPrompt::ShowDialogCallback
+ ExtensionInstallPrompt::GetDefaultShowDialogCallback() {
++  if (agens::IsNativeShellEnabled()) {
++    return agens::NativeInstallDialogCallback();  // agens: a native sheet
++  }
+   return base::BindRepeating(&ShowExtensionInstallDialogImpl);
+ }
+diff --git a/chrome/browser/ui/views/javascript_tab_modal_dialog_view_views.cc b/chrome/browser/ui/views/javascript_tab_modal_dialog_view_views.cc
+index 7c39cff1a2..12aaf6ef38 100644
+--- a/chrome/browser/ui/views/javascript_tab_modal_dialog_view_views.cc
++++ b/chrome/browser/ui/views/javascript_tab_modal_dialog_view_views.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "chrome/browser/ui/views/javascript_tab_modal_dialog_view_views.h"
+ 
++#include "chrome/browser/agens/embed/native_shell.h"
++
+ #include "base/functional/callback.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ #include "chrome/browser/ui/javascript_dialogs/javascript_tab_modal_dialog_manager_delegate_desktop.h"
+@@ -175,6 +177,11 @@ JavaScriptTabModalDialogManagerDelegateDesktop::CreateNewDialog(
+     const std::u16string& default_prompt_text,
+     content::JavaScriptDialogManager::DialogClosedCallback dialog_callback,
+     base::OnceClosure dialog_force_closed_callback) {
++  if (agens::IsNativeShellEnabled()) {  // agens: a native sheet
++    return agens::CreateNativeJsDialog(alerting_web_contents, title, dialog_type, message_text,
++                                       default_prompt_text, std::move(dialog_callback),
++                                       std::move(dialog_force_closed_callback));
++  }
+   return (new JavaScriptTabModalDialogViewViews(
+               web_contents_, alerting_web_contents, title, dialog_type,
+               message_text, default_prompt_text, std::move(dialog_callback),
+diff --git a/chrome/browser/ui/views/login_handler_views.cc b/chrome/browser/ui/views/login_handler_views.cc
+index 14a99f40f3..aba1304f22 100644
+--- a/chrome/browser/ui/views/login_handler_views.cc
++++ b/chrome/browser/ui/views/login_handler_views.cc
+@@ -4,6 +4,8 @@
+ 
+ #include <string>
+ 
++#include "chrome/browser/agens/embed/native_shell.h"
++
+ #include "base/memory/raw_ptr.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "chrome/browser/ui/blocked_content/popunder_preventer.h"
+@@ -231,6 +233,9 @@ std::unique_ptr<LoginHandler> LoginHandler::Create(
+     const net::AuthChallengeInfo& auth_info,
+     content::WebContents* web_contents,
+     content::LoginDelegate::LoginAuthRequiredCallback auth_required_callback) {
++  if (agens::IsNativeShellEnabled()) {  // agens: a native sheet
++    return agens::CreateNativeLoginHandler(auth_info, web_contents, std::move(auth_required_callback));
++  }
+   return std::make_unique<LoginHandlerViews>(auth_info, web_contents,
+                                              std::move(auth_required_callback));
+ }
 diff --git a/chrome/browser/ui/views/permissions/permission_prompt_factory.cc b/chrome/browser/ui/views/permissions/permission_prompt_factory.cc
 index 12bb0ac5fb..52735f7a84 100644
 --- a/chrome/browser/ui/views/permissions/permission_prompt_factory.cc
@@ -6569,8 +7451,38 @@ index db2aba2a32..09328bfc13 100644
    }
  
    deps = [
+diff --git a/chrome/browser/ui/webui_browser/webui_browser_exclusive_access_context.cc b/chrome/browser/ui/webui_browser/webui_browser_exclusive_access_context.cc
+index 1dc8329849..103a27ea84 100644
+--- a/chrome/browser/ui/webui_browser/webui_browser_exclusive_access_context.cc
++++ b/chrome/browser/ui/webui_browser/webui_browser_exclusive_access_context.cc
+@@ -140,6 +140,12 @@ void WebUIBrowserExclusiveAccessContext::UpdateExclusiveAccessBubble(
+       this, params, std::move(first_hide_callback));
+ }
+ 
++void WebUIBrowserExclusiveAccessContext::RepositionBubble() {
++  if (exclusive_access_bubble_) {
++    exclusive_access_bubble_->RepositionIfVisible();
++  }
++}
++
+ bool WebUIBrowserExclusiveAccessContext::IsExclusiveAccessBubbleDisplayed()
+     const {
+   return exclusive_access_bubble_ && (exclusive_access_bubble_->IsShowing() ||
+diff --git a/chrome/browser/ui/webui_browser/webui_browser_exclusive_access_context.h b/chrome/browser/ui/webui_browser/webui_browser_exclusive_access_context.h
+index 2018474821..e0e0a8581e 100644
+--- a/chrome/browser/ui/webui_browser/webui_browser_exclusive_access_context.h
++++ b/chrome/browser/ui/webui_browser/webui_browser_exclusive_access_context.h
+@@ -52,6 +52,8 @@ class WebUIBrowserExclusiveAccessContext
+   // Called when the widget's show state changes (e.g., entering/exiting
+   // fullscreen).
+   void OnWidgetShowStateChanged();
++  // agens: keeps the "press Esc" bubble centered while the window grows into full screen.
++  void RepositionBubble();
+ 
+   // ExclusiveAccessContext:
+   Profile* GetProfile() override;
 diff --git a/chrome/browser/ui/webui_browser/webui_browser_window.cc b/chrome/browser/ui/webui_browser/webui_browser_window.cc
-index f83d197409..5199edb952 100644
+index f83d197409..7d927f2cd4 100644
 --- a/chrome/browser/ui/webui_browser/webui_browser_window.cc
 +++ b/chrome/browser/ui/webui_browser/webui_browser_window.cc
 @@ -40,6 +40,7 @@
@@ -6657,7 +7569,17 @@ index f83d197409..5199edb952 100644
    return web_contents_delegate_->web_contents()
        ->GetWebUI()
        ->GetDeviceScaleFactor();
-@@ -655,7 +675,7 @@ void WebUIBrowserWindow::ProcessFullscreen(bool fullscreen) {
+@@ -625,6 +645,9 @@ void WebUIBrowserWindow::OnWidgetBoundsChanged(views::Widget* widget,
+   if (modal_dialog_host_) {
+     modal_dialog_host_->NotifyPositionRequiresUpdate();
+   }
++  if (auto* context = WebUIBrowserExclusiveAccessContext::From(browser_)) {
++    context->RepositionBubble();  // agens
++  }
+ }
+ 
+ gfx::Rect WebUIBrowserWindow::GetContentsBoundsInScreen() const {
+@@ -655,7 +678,7 @@ void WebUIBrowserWindow::ProcessFullscreen(bool fullscreen) {
    }
  
    // Notify the WebUI about the fullscreen mode.
@@ -6666,7 +7588,7 @@ index f83d197409..5199edb952 100644
      page->OnFullscreenModeChanged(fullscreen, context);
    }
  
-@@ -754,6 +774,9 @@ void WebUIBrowserWindow::SetTopControlsGestureScrollInProgress(
+@@ -754,6 +777,9 @@ void WebUIBrowserWindow::SetTopControlsGestureScrollInProgress(
  }
  
  std::vector<StatusBubble*> WebUIBrowserWindow::GetStatusBubbles() {
@@ -6676,7 +7598,7 @@ index f83d197409..5199edb952 100644
    NOTIMPLEMENTED_LOG_ONCE();
    return {};
  }
-@@ -765,7 +788,9 @@ void WebUIBrowserWindow::UpdateTitleBar() {
+@@ -765,7 +791,9 @@ void WebUIBrowserWindow::UpdateTitleBar() {
  
  void WebUIBrowserWindow::OnBookmarkBarStateChanged(
      BookmarkBar::AnimateChangeType change_type) {
@@ -6687,7 +7609,7 @@ index f83d197409..5199edb952 100644
  }
  
  void WebUIBrowserWindow::UpdateLoadingAnimations(bool is_visible) {
-@@ -868,13 +893,17 @@ PinnedToolbarActions* WebUIBrowserWindow::GetPinnedToolbarActions() {
+@@ -868,13 +896,17 @@ PinnedToolbarActions* WebUIBrowserWindow::GetPinnedToolbarActions() {
  }
  
  void WebUIBrowserWindow::SetFocusToLocationBar(bool is_user_initiated) {
@@ -6707,7 +7629,7 @@ index f83d197409..5199edb952 100644
      page->SetReloadStopState(is_loading);
    }
  }
-@@ -990,6 +1019,10 @@ void WebUIBrowserWindow::ConfirmBrowserCloseWithPendingDownloads(
+@@ -990,6 +1022,10 @@ void WebUIBrowserWindow::ConfirmBrowserCloseWithPendingDownloads(
      int download_count,
      UnloadController::DownloadCloseType dialog_type,
      base::OnceCallback<void(bool)> callback) {
@@ -6718,7 +7640,7 @@ index f83d197409..5199edb952 100644
    NOTIMPLEMENTED_LOG_ONCE();
  }
  
-@@ -1347,6 +1380,9 @@ bool WebUIBrowserWindow::WidgetDelegate::ShouldDescendIntoChildForEventHandling(
+@@ -1347,6 +1383,9 @@ bool WebUIBrowserWindow::WidgetDelegate::ShouldDescendIntoChildForEventHandling(
  }
  
  WebUIBrowserUI* WebUIBrowserWindow::GetWebUIBrowserUI() const {
@@ -6728,7 +7650,7 @@ index f83d197409..5199edb952 100644
    return web_contents_delegate_->web_contents()
        ->GetWebUI()
        ->GetController()
-@@ -1354,11 +1390,15 @@ WebUIBrowserUI* WebUIBrowserWindow::GetWebUIBrowserUI() const {
+@@ -1354,11 +1393,15 @@ WebUIBrowserUI* WebUIBrowserWindow::GetWebUIBrowserUI() const {
  }
  
  void WebUIBrowserWindow::ShowSidePanel(SidePanelEntryKey side_panel_entry_key) {
