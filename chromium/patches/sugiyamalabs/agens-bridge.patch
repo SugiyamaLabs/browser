@@ -1,9 +1,9 @@
 diff --git a/chrome/browser/agens/bridge/BUILD.gn b/chrome/browser/agens/bridge/BUILD.gn
 new file mode 100644
-index 0000000000..815f7eea06
+index 0000000000..324965ccc3
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/BUILD.gn
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,30 @@
 +# Copyright 2026 SugiyamaLabs.
 +# The local control socket (docs/agens.md). The server and its ops build inside
 +# //chrome/browser/ui/webui_browser:impl next to the embed glue they call; only the wire format
@@ -11,6 +11,8 @@ index 0000000000..815f7eea06
 +
 +source_set("protocol") {
 +  sources = [
++    "control_keys.cc",
++    "control_keys.h",
 +    "protocol.cc",
 +    "protocol.h",
 +    "session_need.cc",
@@ -232,7 +234,7 @@ index 0000000000..392ac29938
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_BRIDGE_H_
 diff --git a/chrome/browser/agens/bridge/bridge_mac.mm b/chrome/browser/agens/bridge/bridge_mac.mm
 new file mode 100644
-index 0000000000..4f5200a085
+index 0000000000..bf1ef3a6cc
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/bridge_mac.mm
 @@ -0,0 +1,534 @@
@@ -303,7 +305,7 @@ index 0000000000..4f5200a085
 +// Same-user DoS bounds: requests held while the approval is pending, replies the client hasn't
 +// read, and open connections.
 +constexpr size_t kMaxWaitingBytes = 64 * 1024;
-+constexpr size_t kMaxPendingOutput = 1 << 20;
++constexpr size_t kMaxPendingOutput = 16 << 20;  // a page.screenshot reply alone can pass 1 MB
 +constexpr size_t kMaxConnections = 16;
 +
 +// --- Who is on the other side (thread pool: the Security calls may block).
@@ -770,12 +772,153 @@ index 0000000000..4f5200a085
 +}
 +
 +}  // namespace agens::bridge
+diff --git a/chrome/browser/agens/bridge/control_keys.cc b/chrome/browser/agens/bridge/control_keys.cc
+new file mode 100644
+index 0000000000..2b88d3ff08
+--- /dev/null
++++ b/chrome/browser/agens/bridge/control_keys.cc
+@@ -0,0 +1,91 @@
++// Copyright 2026 SugiyamaLabs.
++
++#include "chrome/browser/agens/bridge/control_keys.h"
++
++#include "base/strings/utf_string_conversions.h"
++
++namespace agens::bridge {
++
++namespace {
++
++struct Named {
++  const char* name;
++  int windows_code;
++  bool edits;
++};
++// DOM key and code are the same string for all of these.
++constexpr Named kNamed[] = {
++    {"Enter", 0x0D, false},     {"Tab", 0x09, false},        {"Escape", 0x1B, false},
++    {"Backspace", 0x08, true},  {"Delete", 0x2E, true},      {"ArrowUp", 0x26, false},
++    {"ArrowDown", 0x28, false}, {"ArrowLeft", 0x25, false},  {"ArrowRight", 0x27, false},
++    {"PageUp", 0x21, false},    {"PageDown", 0x22, false},   {"Home", 0x24, false},
++    {"End", 0x23, false},
++};
++
++}  // namespace
++
++std::optional<Key> ParseKey(std::string_view name, const base::Value* modifiers) {
++  Key key;
++  if (modifiers) {
++    if (!modifiers->is_list()) return std::nullopt;
++    for (const base::Value& m : modifiers->GetList()) {
++      const std::string* s = m.GetIfString();
++      if (!s) return std::nullopt;
++      if (*s == "shift") {
++        key.shift = true;
++      } else if (*s == "meta") {
++        key.meta = true;
++      } else if (*s == "alt") {
++        key.alt = true;
++      } else if (*s == "ctrl") {
++        key.ctrl = true;
++      } else {
++        return std::nullopt;
++      }
++    }
++  }
++  for (const Named& n : kNamed) {
++    if (name == n.name) {
++      key.key = key.code = n.name;
++      key.windows_code = n.windows_code;
++      key.edits = n.edits;
++      if (key.key == "Enter") key.text = u"\r";
++      return key;
++    }
++  }
++  std::u16string text;
++  if (!base::UTF8ToUTF16(name.data(), name.size(), &text) || text.empty() || text.size() > 2) return std::nullopt;
++  if (text.size() == 2 && !(text[0] >= 0xD800 && text[0] < 0xDC00)) return std::nullopt;  // two characters
++  if (text[0] < 0x20 || text[0] == 0x7F) return std::nullopt;  // control characters: use the names
++  key.key = std::string(name);
++  key.text = text;
++  key.edits = true;
++  const char16_t c = text.size() == 1 ? text[0] : 0;
++  if (c >= 'a' && c <= 'z') {
++    key.windows_code = c - 'a' + 'A';
++  } else if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
++    key.windows_code = c;
++  } else if (c == ' ') {
++    key.windows_code = 0x20;
++    key.code = "Space";
++  }
++  if (key.windows_code >= 'A' && key.windows_code <= 'Z') {
++    key.code = std::string("Key") + static_cast<char>(key.windows_code);
++  } else if (key.windows_code >= '0' && key.windows_code <= '9') {
++    key.code = std::string("Digit") + static_cast<char>(key.windows_code);
++  }
++  if (key.meta || key.ctrl) key.text.clear();  // a shortcut, not typing
++  return key;
++}
++
++bool AllowedOnPassword(const Key& key) {
++  return !key.edits && !key.meta && !key.alt && !key.ctrl;
++}
++
++bool TouchesClipboard(const Key& key) {
++  if (key.key == "Delete" && key.shift) return true;  // cut, on Windows and Linux
++  if (!key.meta && !key.ctrl) return false;
++  return key.windows_code == 'C' || key.windows_code == 'X' || key.windows_code == 'V';
++}
++
++}  // namespace agens::bridge
+diff --git a/chrome/browser/agens/bridge/control_keys.h b/chrome/browser/agens/bridge/control_keys.h
+new file mode 100644
+index 0000000000..341970043c
+--- /dev/null
++++ b/chrome/browser/agens/bridge/control_keys.h
+@@ -0,0 +1,38 @@
++// Copyright 2026 SugiyamaLabs.
++// page.key's key names and the password rules that depend on them (docs/protocolo.md, "control,
++// tab, page"). Pure logic, checked by protocol_selfcheck.cc with only //base.
++#ifndef CHROME_BROWSER_AGENS_BRIDGE_CONTROL_KEYS_H_
++#define CHROME_BROWSER_AGENS_BRIDGE_CONTROL_KEYS_H_
++
++#include <optional>
++#include <string>
++#include <string_view>
++
++#include "base/values.h"
++
++namespace agens::bridge {
++
++struct Key {
++  std::string key;        // DOM key value: "Enter", "a"
++  std::string code;       // DOM code: "Enter", "KeyA"; empty when it has none we know
++  int windows_code = 0;   // Windows virtual key code (Chromium's ui::KeyboardCode); 0 when none
++  std::u16string text;    // what it types: the character, "\r" for Enter; empty for the others
++  bool shift = false, meta = false, alt = false, ctrl = false;
++  bool edits = false;     // inserts or deletes text
++};
++
++// A named key (Enter, Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right, PageUp/PageDown,
++// Home, End) or one character, with `modifiers` ("shift", "meta", "alt", "ctrl"; may be null).
++// nullopt for anything else.
++std::optional<Key> ParseKey(std::string_view name, const base::Value* modifiers);
++
++// Allowed while a password field has the focus: keys that move, never ones that type, delete or
++// carry a modifier other than Shift.
++bool AllowedOnPassword(const Key& key);
++
++// Copy, cut or paste: never, so the clipboard stays out of the controller's reach.
++bool TouchesClipboard(const Key& key);
++
++}  // namespace agens::bridge
++
++#endif  // CHROME_BROWSER_AGENS_BRIDGE_CONTROL_KEYS_H_
 diff --git a/chrome/browser/agens/bridge/control_ops.cc b/chrome/browser/agens/bridge/control_ops.cc
 new file mode 100644
-index 0000000000..dd57881b49
+index 0000000000..b0172270ee
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_ops.cc
-@@ -0,0 +1,362 @@
+@@ -0,0 +1,420 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The control session (docs/protocolo.md, "control, tab, page"): an app, after the person's OK,
 +// drives tabs of one ato. It belongs to the connection and ends on control.stop, when the
@@ -797,8 +940,11 @@ index 0000000000..dd57881b49
 +#include "base/no_destructor.h"
 +#include "base/strings/string_number_conversions.h"
 +#include "base/strings/string_util.h"
++#include "base/strings/utf_string_conversions.h"
 +#include "base/timer/timer.h"
 +#include "chrome/browser/agens/bridge/approval.h"
++#include "chrome/browser/agens/bridge/control_keys.h"
++#include "chrome/browser/agens/bridge/control_page.h"
 +#include "chrome/browser/agens/embed/agens_controlled.h"
 +#include "chrome/browser/agens/embed/agens_window.h"
 +#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
@@ -816,6 +962,7 @@ index 0000000000..dd57881b49
 +constexpr size_t kMaxReasonChars = 1024;
 +// tab.open and tab.navigate answer when the navigation commits or fails, or after this.
 +constexpr base::TimeDelta kNavigationWait = base::Seconds(30);
++constexpr size_t kMaxTypeChars = 10000;
 +
 +void StopByUser(uint64_t connection);
 +
@@ -823,7 +970,7 @@ index 0000000000..dd57881b49
 +class Tab : public content::WebContentsObserver {
 + public:
 +  Tab(uint64_t connection, std::string id, content::WebContents* contents, const std::string& client)
-+      : content::WebContentsObserver(contents), id(std::move(id)), connection_(connection) {
++      : content::WebContentsObserver(contents), id(std::move(id)), page(contents), connection_(connection) {
 +    AgensControlled::CreateForWebContents(contents);
 +    AgensControlled* mark = AgensControlled::FromWebContents(contents);
 +    mark->by = client;
@@ -843,6 +990,7 @@ index 0000000000..dd57881b49
 +  }
 +
 +  const std::string id;  // "t1", "t2"… for this session
++  Page page;
 +
 +  // Answers `request_id` with {tab} once `navigation_id` finishes (or kNavigationWait passes).
 +  void WaitFor(int64_t navigation_id, base::Value request_id, ReplyCallback reply) {
@@ -1094,6 +1242,57 @@ index 0000000000..dd57881b49
 +  std::move(reply).Run(OkReply(request.id));
 +}
 +
++void PageOp(Session& session, Request request, ReplyCallback reply) {
++  const std::string& op = request.op;
++  std::optional<std::string> id = StringParam(request.body, "tab");
++  if (!id) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs tab"));
++    return;
++  }
++  Tab* tab = session.Find(*id);
++  if (!tab) {
++    std::move(reply).Run(ErrorReply(&request.id, kNotFound, *id));
++    return;
++  }
++  std::optional<std::string> ref = StringParam(request.body, "ref");
++  if (op == "page.snapshot") {
++    tab->page.Snapshot(std::move(request.id), std::move(reply));
++  } else if (op == "page.screenshot") {
++    tab->page.Screenshot(std::move(request.id), std::move(reply));
++  } else if (op == "page.click") {
++    if (!ref) {
++      std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs tab and ref"));
++      return;
++    }
++    tab->page.Click(std::move(request.id), *ref, std::move(reply));
++  } else if (op == "page.type") {
++    std::optional<std::string> text = StringParam(request.body, "text");
++    std::u16string text16;
++    // No control characters: Enter or Tab inside the text could move the focus (to a password
++    // field, say) while typing. Those go one at a time through page.key, which checks again.
++    if (!ref || !text || !AtMostChars(*text, kMaxTypeChars) || !base::UTF8ToUTF16(text->data(), text->size(), &text16) ||
++        std::any_of(text16.begin(), text16.end(), [](char16_t c) { return c < 0x20 || c == 0x7F; })) {
++      std::move(reply).Run(ErrorReply(&request.id, kBadRequest,
++                                      "needs tab, ref and text (up to 10000 characters, no control characters)"));
++      return;
++    }
++    tab->page.Type(std::move(request.id), *ref, std::move(text16), std::move(reply));
++  } else if (op == "page.key") {
++    std::optional<std::string> name = StringParam(request.body, "key");
++    std::optional<Key> key = name ? ParseKey(*name, request.body.Find("modifiers")) : std::nullopt;
++    if (!key) {
++      std::move(reply).Run(ErrorReply(&request.id, kBadRequest,
++                                      "needs tab and key: a key name (Enter, Tab, Escape, Backspace, Delete, "
++                                      "ArrowUp…, PageUp, PageDown, Home, End) or one character; modifiers is a list "
++                                      "of shift, meta, alt, ctrl"));
++      return;
++    }
++    tab->page.PressKey(std::move(request.id), std::move(*key), std::move(reply));
++  } else {
++    std::move(reply).Run(ErrorReply(&request.id, kUnknownOp, op));
++  }
++}
++
 +}  // namespace
 +
 +bool Handles(std::string_view op) {
@@ -1127,8 +1326,10 @@ index 0000000000..dd57881b49
 +    TabNavigate(session, std::move(request), std::move(reply));
 +  } else if (op == "tab.close") {
 +    TabClose(session, request, std::move(reply));
++  } else if (op.starts_with("page.")) {
++    PageOp(session, std::move(request), std::move(reply));
 +  } else {
-+    std::move(reply).Run(ErrorReply(&request.id, kUnknownOp, op));  // page.* comes next
++    std::move(reply).Run(ErrorReply(&request.id, kUnknownOp, op));
 +  }
 +}
 +
@@ -1165,6 +1366,526 @@ index 0000000000..eda9e71d52
 +}  // namespace agens::bridge::control
 +
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_CONTROL_OPS_H_
+diff --git a/chrome/browser/agens/bridge/control_page.cc b/chrome/browser/agens/bridge/control_page.cc
+new file mode 100644
+index 0000000000..733eff21f4
+--- /dev/null
++++ b/chrome/browser/agens/bridge/control_page.cc
+@@ -0,0 +1,428 @@
++// Copyright 2026 SugiyamaLabs.
++
++#include "chrome/browser/agens/bridge/control_page.h"
++
++#include <algorithm>
++#include <vector>
++
++#include "base/base64.h"
++#include "base/memory/raw_ptr.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_util.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/task/sequenced_task_runner.h"
++#include "base/timer/timer.h"
++#include "components/input/native_web_keyboard_event.h"
++#include "components/viz/common/frame_sinks/copy_output_result.h"
++#include "content/public/browser/browser_accessibility_state.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/render_widget_host.h"
++#include "content/public/browser/render_widget_host_observer.h"
++#include "content/public/browser/render_widget_host_view.h"
++#include "content/public/browser/scoped_accessibility_mode.h"
++#include "content/public/browser/web_contents.h"
++#include "third_party/blink/public/common/input/web_input_event.h"
++#include "third_party/blink/public/common/input/web_mouse_event.h"
++#include "ui/accessibility/ax_enum_util.h"
++#include "ui/accessibility/ax_mode.h"
++#include "ui/accessibility/ax_node_data.h"
++#include "ui/accessibility/ax_role_properties.h"
++#include "ui/accessibility/ax_tree_manager.h"
++#include "ui/accessibility/ax_tree_update.h"
++#include "ui/accessibility/platform/browser_accessibility.h"
++#include "ui/accessibility/platform/browser_accessibility_manager.h"
++#include "ui/events/keycodes/dom/keycode_converter.h"
++#include "ui/gfx/codec/png_codec.h"
++
++namespace agens::bridge::control {
++
++namespace {
++
++constexpr char kFailed[] = "failed";
++constexpr size_t kMaxNodes = 2000;
++constexpr size_t kMaxTextBytes = 4000;  // per name or value
++constexpr base::TimeDelta kTreeWait = base::Seconds(5);  // for a page that just started loading
++constexpr base::TimeDelta kTreePoll = base::Milliseconds(100);
++constexpr base::TimeDelta kScrollWait = base::Seconds(1);
++constexpr base::TimeDelta kAckWait = base::Seconds(2);
++constexpr base::TimeDelta kRendererWait = base::Seconds(3);
++
++void Fail(base::Value& id, ReplyCallback& reply, std::string_view code, std::string_view message) {
++  std::move(reply).Run(ErrorReply(&id, code, message));
++}
++
++// Is or was a password field: Blink keeps saying "password" for a field whose type a "show
++// password" toggle changed (ax_object.cc, agens), and the current ones are also protected.
++bool IsPassword(const ui::AXNodeData& data) {
++  return data.HasState(ax::mojom::State::kProtected) ||
++         data.GetStringAttribute(ax::mojom::StringAttribute::kInputType) == "password";
++}
++// One that shows its text right now.
++bool IsRevealedPassword(const ui::AXNodeData& data) {
++  return !data.HasState(ax::mojom::State::kProtected) &&
++         data.GetStringAttribute(ax::mojom::StringAttribute::kInputType) == "password";
++}
++
++ui::BrowserAccessibilityManager* ManagerFor(const ui::AXTreeID& tree) {
++  // Every tree a web page's frame has is a BrowserAccessibilityManager.
++  return static_cast<ui::BrowserAccessibilityManager*>(ui::AXTreeManager::FromID(tree));
++}
++
++std::string Clip(std::string text) {
++  if (text.size() > kMaxTextBytes) base::TruncateUTF8ToByteSize(text, kMaxTextBytes, &text);
++  return text;
++}
++
++// Worth listing: what can be acted on or read. Text inside a link, button or heading is already
++// its name.
++bool Worth(const ui::BrowserAccessibility& node, bool in_named) {
++  const ax::mojom::Role role = node.GetRole();
++  const bool named = !base::TrimWhitespaceASCII(node.GetName(), base::TRIM_ALL).empty();
++  if (role == ax::mojom::Role::kStaticText) return named && !in_named;
++  if (role == ax::mojom::Role::kImage) return named;
++  return ui::IsControl(role) || ui::IsLink(role) || ui::IsHeading(role) ||
++         role == ax::mojom::Role::kListBoxOption ||
++         node.GetBoolAttribute(ax::mojom::BoolAttribute::kNonAtomicTextFieldRoot);  // contenteditable
++}
++
++// Waits for the renderer to acknowledge `count` input events of `type` (so what they did, focus
++// or a page's handler, has happened), or kAckWait. Owns itself.
++class AckWaiter : public content::RenderWidgetHost::InputEventObserver, public content::RenderWidgetHostObserver {
++ public:
++  static void Start(content::RenderWidgetHost* widget,
++                    blink::WebInputEvent::Type type,
++                    base::OnceClosure done,
++                    int count = 1) {
++    new AckWaiter(widget, type, count, std::move(done));
++  }
++
++  void OnInputEventAck(const content::RenderWidgetHost&,
++                       blink::mojom::InputEventResultSource,
++                       blink::mojom::InputEventResultState,
++                       const blink::WebInputEvent& event) override {
++    if (event.GetType() == type_ && --count_ == 0) Finish();
++  }
++  void RenderWidgetHostDestroyed(content::RenderWidgetHost*) override { Finish(); }
++
++ private:
++  AckWaiter(content::RenderWidgetHost* widget, blink::WebInputEvent::Type type, int count, base::OnceClosure done)
++      : widget_(widget), type_(type), count_(count), done_(std::move(done)) {
++    widget->AddInputEventObserver(this);
++    widget->AddObserver(this);
++    timer_.Start(FROM_HERE, kAckWait + base::Milliseconds(5) * count,
++                 base::BindOnce(&AckWaiter::Finish, base::Unretained(this)));
++  }
++  void Finish() {
++    widget_->RemoveInputEventObserver(this);
++    widget_->RemoveObserver(this);
++    std::move(done_).Run();
++    delete this;
++  }
++
++  raw_ptr<content::RenderWidgetHost> widget_;
++  const blink::WebInputEvent::Type type_;
++  int count_;
++  base::OnceClosure done_;
++  base::OneShotTimer timer_;
++};
++
++int Modifiers(const Key& key) {
++  return (key.shift ? blink::WebInputEvent::kShiftKey : 0) | (key.meta ? blink::WebInputEvent::kMetaKey : 0) |
++         (key.alt ? blink::WebInputEvent::kAltKey : 0) | (key.ctrl ? blink::WebInputEvent::kControlKey : 0);
++}
++
++// Key down, the character it types (if any), key up. Never handed to the browser's own shortcuts.
++void SendKey(content::RenderWidgetHost* widget, const Key& key) {
++  auto send = [&](blink::WebInputEvent::Type type) {
++    input::NativeWebKeyboardEvent event(type, Modifiers(key), base::TimeTicks::Now());
++    event.windows_key_code = key.windows_code;
++    event.dom_key = static_cast<int>(ui::KeycodeConverter::KeyStringToDomKey(key.key));
++    event.dom_code = static_cast<int>(ui::KeycodeConverter::CodeStringToDomCode(key.code));
++    if (type == blink::WebInputEvent::Type::kChar) {
++      for (size_t i = 0; i < key.text.size() && i < event.text.size(); ++i) {
++        event.text[i] = event.unmodified_text[i] = key.text[i];
++      }
++    }
++    event.skip_if_unhandled = true;
++    widget->ForwardKeyboardEvent(event);
++  };
++  send(blink::WebInputEvent::Type::kRawKeyDown);
++  if (!key.text.empty()) send(blink::WebInputEvent::Type::kChar);
++  send(blink::WebInputEvent::Type::kKeyUp);
++}
++
++void SendMouse(content::RenderWidgetHost* widget, blink::WebInputEvent::Type type, gfx::PointF point) {
++  const bool button = type != blink::WebInputEvent::Type::kMouseMove;
++  gfx::PointF screen = point;
++  if (content::RenderWidgetHostView* view = widget->GetView()) {
++    screen += view->GetViewBounds().OffsetFromOrigin();
++  }
++  blink::WebMouseEvent event(
++      type, point, screen,
++      button ? blink::WebPointerProperties::Button::kLeft : blink::WebPointerProperties::Button::kNoButton,
++      button ? 1 : 0,
++      type == blink::WebInputEvent::Type::kMouseDown ? blink::WebInputEvent::kLeftButtonDown
++                                                       : blink::WebInputEvent::kNoModifiers,
++      base::TimeTicks::Now());
++  widget->ForwardMouseEvent(event);
++}
++
++}  // namespace
++
++Page::Page(content::WebContents* contents) : content::WebContentsObserver(contents) {
++  accessibility_ = content::BrowserAccessibilityState::GetInstance()->CreateScopedModeForWebContents(
++      contents, ui::kAXModeBasic);
++}
++
++Page::~Page() = default;
++
++void Page::DidFinishNavigation(content::NavigationHandle* handle) {
++  if (!handle->IsInPrimaryMainFrame() || !handle->HasCommitted() || handle->IsSameDocument()) return;
++  nodes_.clear();  // refs end with their document
++  refs_.clear();
++}
++
++ui::BrowserAccessibilityManager* Page::RootManager() {
++  return ManagerFor(web_contents()->GetPrimaryMainFrame()->GetAXTreeID());
++}
++
++ui::BrowserAccessibility* Page::Resolve(const std::string& ref) {
++  auto it = nodes_.find(ref);
++  if (it == nodes_.end()) return nullptr;
++  ui::BrowserAccessibilityManager* manager = ManagerFor(it->second.first);
++  return manager ? manager->GetFromID(it->second.second) : nullptr;
++}
++
++content::RenderWidgetHost* Page::FocusedWidget() {
++  content::RenderFrameHost* frame = web_contents()->GetFocusedFrame();
++  return (frame ? frame : web_contents()->GetPrimaryMainFrame())->GetRenderWidgetHost();
++}
++
++void Page::WaitForTree(base::WeakPtr<Page> self, base::TimeTicks deadline, base::OnceClosure then) {
++  ui::BrowserAccessibilityManager* manager = self ? self->RootManager() : nullptr;
++  const bool ready = manager && manager->GetBrowserAccessibilityRoot() && manager->GetTreeData().loaded;
++  if (!self || ready || base::TimeTicks::Now() >= deadline) {
++    std::move(then).Run();
++    return;
++  }
++  base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
++      FROM_HERE, base::BindOnce(&Page::WaitForTree, self, deadline, std::move(then)), kTreePoll);
++}
++
++void Page::Snapshot(base::Value id, ReplyCallback reply) {
++  WaitForTree(weak_.GetWeakPtr(), base::TimeTicks::Now() + kTreeWait,
++              base::BindOnce(&Page::SnapshotNow, weak_.GetWeakPtr(), std::move(id), std::move(reply)));
++}
++
++void Page::SnapshotNow(base::WeakPtr<Page> self, base::Value id, ReplyCallback reply) {
++  if (!self) return Fail(id, reply, kFailed, "the tab is no longer controlled");
++  std::map<std::string, Node>& nodes = self->nodes_;
++  std::map<Node, std::string>& refs = self->refs_;
++  base::ListValue list;
++  bool truncated = false;
++  ui::BrowserAccessibilityManager* manager = self->RootManager();
++  ui::BrowserAccessibility* focus = manager ? manager->GetFocus() : nullptr;
++  // Document order; `depth` counts listed ancestors. PlatformGetChild walks into frames.
++  auto visit = [&](auto&& recurse, ui::BrowserAccessibility* node, int depth, bool in_named) -> void {
++    const bool listed = !node->IsInvisibleOrIgnored() && Worth(*node, in_named);
++    if (listed && list.size() >= kMaxNodes) {
++      truncated = true;
++      return;
++    }
++    if (listed) {
++      const Node key{node->manager()->GetTreeID(), node->GetId()};
++      std::string& ref = refs[key];
++      if (ref.empty()) {
++        ref = "e" + base::NumberToString(self->next_ref_++);
++        nodes[ref] = key;
++      }
++      const ui::AXNodeData& data = node->GetData();
++      base::DictValue item;
++      item.Set("ref", ref);
++      item.Set("role", ui::ToString(node->GetRole()));
++      item.Set("name", Clip(node->GetName()));
++      if (IsPassword(data)) {
++        item.Set("password", true);  // never its value
++      } else {
++        item.Set("value", Clip(base::UTF16ToUTF8(node->GetValueForControl())));
++      }
++      item.Set("depth", depth);
++      if (node == focus) item.Set("focused", true);
++      if (data.GetRestriction() == ax::mojom::Restriction::kDisabled) item.Set("disabled", true);
++      switch (data.GetCheckedState()) {
++        case ax::mojom::CheckedState::kTrue: item.Set("checked", true); break;
++        case ax::mojom::CheckedState::kFalse: item.Set("checked", false); break;
++        case ax::mojom::CheckedState::kMixed: item.Set("checked", "mixed"); break;
++        default: break;
++      }
++      list.Append(std::move(item));
++    }
++    const bool named = listed && node->GetRole() != ax::mojom::Role::kStaticText && !node->GetName().empty();
++    for (size_t i = 0; i < node->PlatformChildCount() && !truncated; ++i) {
++      if (ui::BrowserAccessibility* child = node->PlatformGetChild(i)) {
++        recurse(recurse, child, depth + (listed ? 1 : 0), in_named || named);
++      }
++    }
++  };
++  if (ui::BrowserAccessibility* root = manager ? manager->GetBrowserAccessibilityRoot() : nullptr) {
++    visit(visit, root, 0, false);
++  }
++  base::DictValue result;
++  result.Set("nodes", std::move(list));
++  if (truncated) result.Set("truncated", true);
++  std::move(reply).Run(OkReply(id, std::move(result)));
++}
++
++void Page::Click(base::Value id, std::string ref, ReplyCallback reply) {
++  ClickAttempt(weak_.GetWeakPtr(), std::move(id), std::move(ref), base::TimeTicks::Now() + kScrollWait, false,
++               std::move(reply));
++}
++
++// A real click at the node's center, scrolled into view first. The accessibility default action
++// where a click can't land: an option of a closed <select>, a node in another process's frame, or
++// one that stays out of view.
++void Page::ClickAttempt(base::WeakPtr<Page> self,
++                        base::Value id,
++                        std::string ref,
++                        base::TimeTicks deadline,
++                        bool scrolled,
++                        ReplyCallback reply) {
++  if (!self) return Fail(id, reply, kFailed, "the tab is no longer controlled");
++  ui::BrowserAccessibility* node = self->Resolve(ref);
++  if (!node) return Fail(id, reply, kNotFound, ref);
++  content::RenderWidgetHost* widget = self->web_contents()->GetPrimaryMainFrame()->GetRenderWidgetHost();
++  content::RenderFrameHost* frame = nullptr;
++  self->web_contents()->GetPrimaryMainFrame()->ForEachRenderFrameHost([&](content::RenderFrameHost* rfh) {
++    if (rfh->GetAXTreeID() == node->manager()->GetTreeID()) frame = rfh;
++  });
++  ui::AXOffscreenResult offscreen = ui::AXOffscreenResult::kOnscreen;
++  const gfx::Rect bounds =
++      node->GetBoundsRect(ui::AXCoordinateSystem::kRootFrame, ui::AXClippingBehavior::kClipped, &offscreen);
++  const bool visible = !bounds.IsEmpty() && offscreen == ui::AXOffscreenResult::kOnscreen;
++  const bool clickable = frame && frame->GetRenderWidgetHost() == widget &&
++                         node->GetRole() != ax::mojom::Role::kMenuListOption;
++  if (clickable && !visible && base::TimeTicks::Now() < deadline) {
++    if (!scrolled) node->manager()->ScrollToMakeVisible(*node, gfx::Rect());
++    base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
++        FROM_HERE,
++        base::BindOnce(&Page::ClickAttempt, self, std::move(id), std::move(ref), deadline, true, std::move(reply)),
++        base::Milliseconds(50));
++    return;
++  }
++  if (!clickable || !visible) {
++    node->manager()->DoDefaultAction(*node);
++    std::move(reply).Run(OkReply(id));
++    return;
++  }
++  // Tree bounds are in physical pixels; input takes DIPs.
++  const float scale = self->RootManager() ? self->RootManager()->device_scale_factor() : 1;
++  const gfx::PointF point(bounds.CenterPoint().x() / scale, bounds.CenterPoint().y() / scale);
++  AckWaiter::Start(widget, blink::WebInputEvent::Type::kMouseUp,
++                   base::BindOnce([](base::Value id, ReplyCallback reply) { std::move(reply).Run(OkReply(id)); },
++                                  std::move(id), std::move(reply)));
++  SendMouse(widget, blink::WebInputEvent::Type::kMouseMove, point);
++  SendMouse(widget, blink::WebInputEvent::Type::kMouseDown, point);
++  SendMouse(widget, blink::WebInputEvent::Type::kMouseUp, point);
++}
++
++void Page::FocusIsPassword(base::OnceCallback<void(std::optional<bool>)> done) {
++  web_contents()->RequestAXTreeSnapshot(
++      base::BindOnce(
++          [](base::OnceCallback<void(std::optional<bool>)> done, ui::AXTreeUpdate& update) {
++            if (update.nodes.empty()) return std::move(done).Run(std::nullopt);
++            const ui::AXNodeID focus = update.tree_data.focus_id;
++            if (focus == ui::kInvalidAXNodeID) return std::move(done).Run(false);  // keys reach no field
++            for (const ui::AXNodeData& node : update.nodes) {
++              if (node.id == focus) return std::move(done).Run(IsPassword(node));
++            }
++            std::move(done).Run(std::nullopt);  // a partial tree: can't tell
++          },
++          std::move(done)),
++      ui::kAXModeBasic, /*max_nodes=*/0, kRendererWait, content::WebContents::AXTreeSnapshotPolicy::kAll);
++}
++
++void Page::Type(base::Value id, std::string ref, std::u16string text, ReplyCallback reply) {
++  ui::BrowserAccessibility* node = Resolve(ref);
++  if (!node) return Fail(id, reply, kNotFound, ref);
++  if (IsPassword(node->GetData())) return Fail(id, reply, kDenied, "a password field");
++  node->manager()->SetFocus(*node);
++  // Then, with the focus where it really landed, refuse if that is a password field.
++  FocusIsPassword(base::BindOnce(
++      [](base::WeakPtr<Page> self, base::Value id, std::u16string text, ReplyCallback reply,
++         std::optional<bool> password) {
++        if (!self) return Fail(id, reply, kFailed, "the tab is no longer controlled");
++        if (!password) return Fail(id, reply, kFailed, "could not read the page");
++        if (*password) return Fail(id, reply, kDenied, "the focus is on a password field");
++        // One character at a time (a surrogate pair is one).
++        std::vector<Key> keys;
++        for (size_t i = 0; i < text.size();) {
++          const size_t n = (text[i] >= 0xD800 && text[i] < 0xDC00 && i + 1 < text.size()) ? 2 : 1;
++          if (std::optional<Key> key = ParseKey(base::UTF16ToUTF8(text.substr(i, n)), nullptr)) {
++            keys.push_back(std::move(*key));
++          }
++          i += n;
++        }
++        if (keys.empty()) return std::move(reply).Run(OkReply(id));
++        content::RenderWidgetHost* widget = self->FocusedWidget();
++        AckWaiter::Start(widget, blink::WebInputEvent::Type::kKeyUp,
++                         base::BindOnce([](base::Value id, ReplyCallback reply) { std::move(reply).Run(OkReply(id)); },
++                                        std::move(id), std::move(reply)),
++                         static_cast<int>(keys.size()));
++        for (const Key& key : keys) SendKey(widget, key);
++      },
++      weak_.GetWeakPtr(), std::move(id), std::move(text), std::move(reply)));
++}
++
++void Page::PressKey(base::Value id, Key key, ReplyCallback reply) {
++  if (TouchesClipboard(key)) return Fail(id, reply, kDenied, "copy, cut and paste are not available");
++  FocusIsPassword(base::BindOnce(
++      [](base::WeakPtr<Page> self, base::Value id, Key key, ReplyCallback reply, std::optional<bool> password) {
++        if (!self) return Fail(id, reply, kFailed, "the tab is no longer controlled");
++        if (!password) return Fail(id, reply, kFailed, "could not read the page");
++        if (*password && !AllowedOnPassword(key)) {
++          return Fail(id, reply, kDenied, "the focus is on a password field: only keys that move");
++        }
++        content::RenderWidgetHost* widget = self->FocusedWidget();
++        AckWaiter::Start(widget, blink::WebInputEvent::Type::kKeyUp,
++                         base::BindOnce([](base::Value id, ReplyCallback reply) { std::move(reply).Run(OkReply(id)); },
++                                        std::move(id), std::move(reply)));
++        SendKey(widget, key);
++      },
++      weak_.GetWeakPtr(), std::move(id), std::move(key), std::move(reply)));
++}
++
++void Page::Screenshot(base::Value id, ReplyCallback reply) {
++  // The page as it is now: a password field showing its text would show in the picture.
++  web_contents()->RequestAXTreeSnapshot(
++      base::BindOnce(
++          [](base::WeakPtr<Page> self, base::Value id, ReplyCallback reply, ui::AXTreeUpdate& update) {
++            if (!self) return Fail(id, reply, kFailed, "the tab is no longer controlled");
++            if (update.nodes.empty()) return Fail(id, reply, kFailed, "could not read the page");
++            for (const ui::AXNodeData& node : update.nodes) {
++              if (IsRevealedPassword(node)) return Fail(id, reply, kDenied, "a password field shows its text");
++            }
++            content::RenderWidgetHostView* view = self->web_contents()->GetRenderWidgetHostView();
++            if (!view) return Fail(id, reply, kFailed, "the tab shows nothing");
++            // The visible viewport at 1x (DIPs), which keeps the reply small.
++            view->CopyFromSurface(
++                gfx::Rect(), view->GetViewBounds().size(), kRendererWait,
++                base::BindOnce(
++                    [](base::Value id, ReplyCallback reply, const content::CopyFromSurfaceResult& result) {
++                      if (!result.has_value() || result->bitmap.drawsNothing()) {
++                        return Fail(id, reply, kFailed, "could not capture the tab");
++                      }
++                      std::optional<std::vector<uint8_t>> png =
++                          gfx::PNGCodec::EncodeBGRASkBitmap(result->bitmap, /*discard_transparency=*/true);
++                      if (!png) return Fail(id, reply, kFailed, "could not encode the picture");
++                      base::DictValue out;
++                      out.Set("png", base::Base64Encode(*png));
++                      std::move(reply).Run(OkReply(id, std::move(out)));
++                    },
++                    std::move(id), std::move(reply)));
++          },
++          weak_.GetWeakPtr(), std::move(id), std::move(reply)),
++      ui::kAXModeBasic, /*max_nodes=*/0, kRendererWait, content::WebContents::AXTreeSnapshotPolicy::kAll);
++}
++
++}  // namespace agens::bridge::control
+diff --git a/chrome/browser/agens/bridge/control_page.h b/chrome/browser/agens/bridge/control_page.h
+new file mode 100644
+index 0000000000..0a40815b31
+--- /dev/null
++++ b/chrome/browser/agens/bridge/control_page.h
+@@ -0,0 +1,80 @@
++// Copyright 2026 SugiyamaLabs.
++// The page side of a controlled tab (page.* in docs/protocolo.md): its accessibility tree with
++// refs, real input on its widget, and screenshots. UI thread. Password rules, checked against the
++// page as it is when the action runs:
++// - a field that is or was a password field (Blink keeps that for the element's life) shows no
++//   value and takes no typing; while one has the focus, only keys that move go through;
++// - no screenshot while such a field shows its text;
++// - the clipboard is never touched.
++#ifndef CHROME_BROWSER_AGENS_BRIDGE_CONTROL_PAGE_H_
++#define CHROME_BROWSER_AGENS_BRIDGE_CONTROL_PAGE_H_
++
++#include <map>
++#include <memory>
++#include <optional>
++#include <string>
++#include <utility>
++
++#include "base/memory/weak_ptr.h"
++#include "chrome/browser/agens/bridge/control_keys.h"
++#include "chrome/browser/agens/bridge/ops.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "ui/accessibility/ax_tree_id.h"
++
++namespace content {
++class RenderWidgetHost;
++class ScopedAccessibilityMode;
++}  // namespace content
++namespace ui {
++class BrowserAccessibility;
++class BrowserAccessibilityManager;
++}  // namespace ui
++
++namespace agens::bridge::control {
++
++class Page : public content::WebContentsObserver {
++ public:
++  // Turns accessibility on for this tab only, for as long as it lives.
++  explicit Page(content::WebContents* contents);
++  ~Page() override;
++
++  // Each answers `reply` once, for the request `id`.
++  void Snapshot(base::Value id, ReplyCallback reply);
++  void Click(base::Value id, std::string ref, ReplyCallback reply);
++  void Type(base::Value id, std::string ref, std::u16string text, ReplyCallback reply);
++  void PressKey(base::Value id, Key key, ReplyCallback reply);
++  void Screenshot(base::Value id, ReplyCallback reply);
++
++  // content::WebContentsObserver:
++  void DidFinishNavigation(content::NavigationHandle* handle) override;
++
++ private:
++  using Node = std::pair<ui::AXTreeID, int32_t>;
++
++  ui::BrowserAccessibilityManager* RootManager();
++  ui::BrowserAccessibility* Resolve(const std::string& ref);
++  content::RenderWidgetHost* FocusedWidget();
++  // Static with a weak `self`, so a reply waiting in a posted task still runs if the tab goes.
++  static void WaitForTree(base::WeakPtr<Page> self, base::TimeTicks deadline, base::OnceClosure then);
++  static void SnapshotNow(base::WeakPtr<Page> self, base::Value id, ReplyCallback reply);
++  static void ClickAttempt(base::WeakPtr<Page> self,
++                           base::Value id,
++                           std::string ref,
++                           base::TimeTicks deadline,
++                           bool scrolled,
++                           ReplyCallback reply);
++  // Asks the renderer for the page as it is now (after the input already sent) whether the
++  // focused element is or was a password field; nullopt when it can't tell.
++  void FocusIsPassword(base::OnceCallback<void(std::optional<bool>)> done);
++
++  std::unique_ptr<content::ScopedAccessibilityMode> accessibility_;
++  // Refs of the current document, both ways. Cleared when the tab goes to another page.
++  std::map<std::string, Node> nodes_;
++  std::map<Node, std::string> refs_;
++  int next_ref_ = 1;
++  base::WeakPtrFactory<Page> weak_{this};
++};
++
++}  // namespace agens::bridge::control
++
++#endif  // CHROME_BROWSER_AGENS_BRIDGE_CONTROL_PAGE_H_
 diff --git a/chrome/browser/agens/bridge/ops.cc b/chrome/browser/agens/bridge/ops.cc
 new file mode 100644
 index 0000000000..335cc66a55
@@ -1594,10 +2315,10 @@ index 0000000000..1647ec285f
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_PROTOCOL_H_
 diff --git a/chrome/browser/agens/bridge/protocol_selfcheck.cc b/chrome/browser/agens/bridge/protocol_selfcheck.cc
 new file mode 100644
-index 0000000000..578056d3b7
+index 0000000000..ac3c349f96
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/protocol_selfcheck.cc
-@@ -0,0 +1,109 @@
+@@ -0,0 +1,139 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Assert-based check of the wire format (protocol.h). Build and run:
 +//   ninja -C out/Dev agens_bridge_selfcheck && out/Dev/agens_bridge_selfcheck
@@ -1608,6 +2329,7 @@ index 0000000000..578056d3b7
 +#include <vector>
 +
 +#include "base/json/json_reader.h"
++#include "chrome/browser/agens/bridge/control_keys.h"
 +#include "chrome/browser/agens/bridge/protocol.h"
 +
 +using namespace agens::bridge;
@@ -1702,6 +2424,35 @@ index 0000000000..578056d3b7
 +    CHECK_TRUE(AtMostChars(accents, 256));
 +    CHECK_TRUE(!AtMostChars(accents + "a", 256));
 +    CHECK_TRUE(AtMostChars("\xF0\x9F\x98\x80", 1));  // one emoji, 4 bytes
++  }
++  // page.key: names, characters, modifiers, and what a password field allows.
++  {
++    base::Value none;
++    CHECK_TRUE(ParseKey("Enter", nullptr)->text == u"\r" && ParseKey("Enter", nullptr)->windows_code == 0x0D);
++    CHECK_TRUE(!ParseKey("Enter", nullptr)->edits && ParseKey("Backspace", nullptr)->edits);
++    CHECK_TRUE(ParseKey("a", nullptr)->code == "KeyA" && ParseKey("a", nullptr)->windows_code == 'A');
++    CHECK_TRUE(ParseKey("7", nullptr)->code == "Digit7" && ParseKey("\xC3\xA7", nullptr)->text == u"\u00e7");
++    CHECK_TRUE(ParseKey("\xF0\x9F\x98\x80", nullptr));  // one emoji: a surrogate pair
++    CHECK_TRUE(!ParseKey("", nullptr) && !ParseKey("ab", nullptr) && !ParseKey("enter", nullptr));
++    CHECK_TRUE(!ParseKey("\t", nullptr) && !ParseKey("F5", nullptr));
++    base::ListValue mods;
++    mods.Append("meta");
++    mods.Append("shift");
++    base::Value list(std::move(mods));
++    std::optional<Key> k = ParseKey("v", &list);
++    CHECK_TRUE(k && k->meta && k->shift && !k->ctrl && k->text.empty() && TouchesClipboard(*k));
++    base::ListValue bad;
++    bad.Append("hyper");
++    base::Value bad_list(std::move(bad));
++    CHECK_TRUE(!ParseKey("a", &bad_list) && !ParseKey("a", &none));
++    base::ListValue shift;
++    shift.Append("shift");
++    base::Value shift_list(std::move(shift));
++    CHECK_TRUE(AllowedOnPassword(*ParseKey("Tab", &shift_list)) && AllowedOnPassword(*ParseKey("ArrowLeft", nullptr)));
++    CHECK_TRUE(AllowedOnPassword(*ParseKey("Enter", nullptr)) && AllowedOnPassword(*ParseKey("Escape", nullptr)));
++    CHECK_TRUE(!AllowedOnPassword(*ParseKey("a", nullptr)) && !AllowedOnPassword(*ParseKey("Backspace", nullptr)));
++    CHECK_TRUE(!AllowedOnPassword(*ParseKey("Delete", nullptr)) && !AllowedOnPassword(*ParseKey("ArrowLeft", &list)));
++    CHECK_TRUE(TouchesClipboard(*ParseKey("Delete", &shift_list)) && !TouchesClipboard(*ParseKey("c", nullptr)));
 +  }
 +  std::printf("agens bridge protocol: ok\n");
 +  RunSessionNeedChecks();
@@ -3345,8 +4096,79 @@ index 433fa42fa4..65017e0702 100644
  
    InitializeNetworkTimeTracker();
  
+diff --git a/chrome/browser/download/chrome_download_manager_delegate.cc b/chrome/browser/download/chrome_download_manager_delegate.cc
+index 2c467f4524..2aee2739bd 100644
+--- a/chrome/browser/download/chrome_download_manager_delegate.cc
++++ b/chrome/browser/download/chrome_download_manager_delegate.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/download/chrome_download_manager_delegate.h"
++#include "chrome/browser/agens/embed/agens_controlled.h"  // agens
+ 
+ #include <algorithm>
+ #include <memory>
+@@ -2438,6 +2439,12 @@ void ChromeDownloadManagerDelegate::CheckDownloadAllowed(
+     return;
+   }
+ 
++  // agens: a tab an app drives over the socket never downloads.
++  if (AgensControlled::Is(web_contents)) {
++    OnCheckDownloadAllowedFailed(std::move(check_download_allowed_cb));
++    return;
++  }
++
+   // Check whether download is restricted for saved tab groups.
+   if (tab_groups::RestrictDownloadOnSyncedTabs() &&
+       TabGroupSyncTabState::FromWebContents(web_contents)) {
+diff --git a/chrome/browser/password_manager/chrome_password_manager_client.cc b/chrome/browser/password_manager/chrome_password_manager_client.cc
+index f7819e353a..50d2631dca 100644
+--- a/chrome/browser/password_manager/chrome_password_manager_client.cc
++++ b/chrome/browser/password_manager/chrome_password_manager_client.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/password_manager/chrome_password_manager_client.h"
++#include "chrome/browser/agens/embed/agens_controlled.h"  // agens
+ 
+ #include <memory>
+ #include <optional>
+@@ -2163,6 +2164,10 @@ void ChromePasswordManagerClient::HideFillingUI() {
+ 
+ bool ChromePasswordManagerClient::IsPasswordManagementEnabledForCurrentPage(
+     const GURL& url) const {
++  // agens: no saving or filling in a tab an app drives over the socket.
++  if (AgensControlled::Is(web_contents())) {
++    return false;
++  }
+ #if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX) || \
+     BUILDFLAG(IS_CHROMEOS)
+   if (IsPasswordManagerForUrlDisallowedByPolicy(url)) {
+diff --git a/chrome/browser/ui/autofill/chrome_autofill_client.cc b/chrome/browser/ui/autofill/chrome_autofill_client.cc
+index 242bac51ca..966a9f641e 100644
+--- a/chrome/browser/ui/autofill/chrome_autofill_client.cc
++++ b/chrome/browser/ui/autofill/chrome_autofill_client.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/ui/autofill/chrome_autofill_client.h"
++#include "chrome/browser/agens/embed/agens_controlled.h"  // agens
+ 
+ #include <utility>
+ 
+@@ -1418,6 +1419,10 @@ void ChromeAutofillClient::ShowAutofillSuggestionsImpl(
+     const PopupOpenArgs& open_args,
+     base::WeakPtr<AutofillSuggestionDelegate> delegate,
+     FieldGlobalId expected_field_id) {
++  // agens: no suggestions (addresses, cards, passwords) in a tab an app drives over the socket.
++  if (AgensControlled::Is(web_contents())) {
++    return;
++  }
+   if (expected_field_id &&
+       (!delegate || delegate->GetQueriedFieldId() != expected_field_id) &&
+       base::FeatureList::IsEnabled(
 diff --git a/chrome/browser/ui/webui_browser/BUILD.gn b/chrome/browser/ui/webui_browser/BUILD.gn
-index 98ada3ff32..6f8d5d7bcb 100644
+index 98ada3ff32..185c98a174 100644
 --- a/chrome/browser/ui/webui_browser/BUILD.gn
 +++ b/chrome/browser/ui/webui_browser/BUILD.gn
 @@ -81,8 +81,11 @@ source_set("impl") {
@@ -3361,7 +4183,7 @@ index 98ada3ff32..6f8d5d7bcb 100644
      "//chrome/browser/agens/embed/agens_embed.h",
      "//chrome/browser/agens/embed/agens_window.h",
      "//chrome/browser/agens/embed/native_shell.cc",
-@@ -97,6 +100,16 @@ source_set("impl") {
+@@ -97,6 +100,18 @@ source_set("impl") {
  
    if (is_mac) {
      sources += [
@@ -3371,6 +4193,8 @@ index 98ada3ff32..6f8d5d7bcb 100644
 +      "//chrome/browser/agens/bridge/bridge_mac.mm",
 +      "//chrome/browser/agens/bridge/control_ops.cc",
 +      "//chrome/browser/agens/bridge/control_ops.h",
++      "//chrome/browser/agens/bridge/control_page.cc",
++      "//chrome/browser/agens/bridge/control_page.h",
 +      "//chrome/browser/agens/bridge/ops.cc",
 +      "//chrome/browser/agens/bridge/ops.h",
 +      "//chrome/browser/agens/bridge/session_ops.cc",
@@ -3378,7 +4202,16 @@ index 98ada3ff32..6f8d5d7bcb 100644
        "//chrome/browser/agens/embed/native_shell_mac.mm",
        "//chrome/browser/agens/embed/import_chromium_keychain_mac.mm",
        "//chrome/browser/agens/ui/chrome_mac.mm",
-@@ -192,6 +205,7 @@ source_set("impl") {
+@@ -173,6 +188,8 @@ source_set("impl") {
+     "//components/browser_apis/ui_controllers/toolbar:mojom",
+     "//components/guest_contents/browser",
+     "//components/input",
++    "//components/viz/common",  # agens: socket control screenshots
++    "//ui/accessibility:ax_base",  # agens: socket control reads the page
+     "//components/omnibox/browser:vector_icons",
+     "//components/sharing_message",
+     "//components/surface_embed/browser",
+@@ -192,6 +209,7 @@ source_set("impl") {
  
    if (is_mac) {
      deps += [
@@ -3386,3 +4219,46 @@ index 98ada3ff32..6f8d5d7bcb 100644
        "//chrome/browser:global_keyboard_shortcuts_mac",
        "//chrome/browser/apps/app_shim",
        "//chrome/browser/ui/cocoa",
+diff --git a/third_party/blink/renderer/modules/accessibility/ax_object.cc b/third_party/blink/renderer/modules/accessibility/ax_object.cc
+index 73333059ef..a045430c36 100644
+--- a/third_party/blink/renderer/modules/accessibility/ax_object.cc
++++ b/third_party/blink/renderer/modules/accessibility/ax_object.cc
+@@ -2472,6 +2472,12 @@ void AXObject::SerializeUnignoredAttributes(ui::AXNodeData* node_data,
+       if (type.empty()) {
+         type = "text";
+       }
++      // agens: a field that was a password field (e.g. shown by a "show password" toggle) keeps
++      // saying so, as the context menu does for autofill. The browser's socket control relies on
++      // it to never read or type into one (chrome/browser/agens/bridge/control_ops.cc).
++      if (input->HasBeenPasswordField()) {
++        type = "password";
++      }
+       TruncateAndAddStringAttribute(
+           node_data, ax::mojom::blink::StringAttribute::kInputType, type);
+       // Serialize <input name> for use by password managers.
+diff --git a/ui/accessibility/ax_tree_combiner.cc b/ui/accessibility/ax_tree_combiner.cc
+index ba39675a7f..0651593a19 100644
+--- a/ui/accessibility/ax_tree_combiner.cc
++++ b/ui/accessibility/ax_tree_combiner.cc
+@@ -73,14 +73,17 @@ bool AXTreeCombiner::Combine() {
+   if (tree_id_map.find(focused_tree_id) != tree_id_map.end()) {
+     focused_tree = tree_id_map[focused_tree_id];
+   }
++  // agens: map through the tree actually used, which is the root when no frame has the focus
++  // (focused_tree_id unknown); mapping through the unknown id gave a focus_id no node has.
++  const AXTreeID mapped_tree_id = focused_tree->tree_data.tree_id;
+   combined_->tree_data.focus_id =
+-      MapId(focused_tree_id, focused_tree->tree_data.focus_id);
++      MapId(mapped_tree_id, focused_tree->tree_data.focus_id);
+   combined_->tree_data.sel_is_backward =
+-      MapId(focused_tree_id, focused_tree->tree_data.sel_is_backward);
++      MapId(mapped_tree_id, focused_tree->tree_data.sel_is_backward);
+   combined_->tree_data.sel_anchor_object_id =
+-      MapId(focused_tree_id, focused_tree->tree_data.sel_anchor_object_id);
++      MapId(mapped_tree_id, focused_tree->tree_data.sel_anchor_object_id);
+   combined_->tree_data.sel_focus_object_id =
+-      MapId(focused_tree_id, focused_tree->tree_data.sel_focus_object_id);
++      MapId(mapped_tree_id, focused_tree->tree_data.sel_focus_object_id);
+   combined_->tree_data.sel_anchor_offset =
+       focused_tree->tree_data.sel_anchor_offset;
+   combined_->tree_data.sel_focus_offset =
