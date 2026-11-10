@@ -7,8 +7,9 @@ Referência para quem escreve um cliente (o time do Agens, em Go). O plano e o p
 | Fase | Operações | Estado |
 |---|---|---|
 | 1 | `hello`, `atos.*` | implementado |
-| 2 | `login`, `session`, `renew`, evento `session.lost` | especificado, **não implementado** |
-| 3 | `control.*`, `tab.*`, `page.*` | especificado, **não implementado** |
+| 2 | `login` | implementado |
+| 2 | `session`, `renew`, evento `session.lost` | especificado, **não implementado** |
+| 3 | `control.*`, `tab.*`, `page.*` | implementado |
 
 Um navegador de fase 1 responde `unknown_op` às demais. Trate `unknown_op` como "este navegador ainda não faz isso".
 
@@ -84,6 +85,11 @@ Um pedido para um ato dormindo acorda o ato. `tag` é uma etiqueta opaca do clie
 
 Abre o site no ato; a pessoa entra como sempre. A aba fecha quando `done` acontece. `done` é a regra que a ponte conhece: o navegador não adivinha.
 
+- `url` só `http` ou `https`. Não há folha de aprovação: a pessoa vê a aba.
+- Regra de cookie: vale assim que o cookie existir para aquela origem, inclusive se a pessoa já estava logada.
+- Regra `url_prefix`: vale quando a aba carrega uma URL que começa com o prefixo.
+- Se o cliente desconectar antes, a aba fica aberta.
+
 ```
 → {"id": 7, "op": "login", "ato": "Profile 1", "url": "https://app.slack.com", "done": {"cookie": "d", "from": "https://app.slack.com"}}
 → {"id": 7, "op": "login", "ato": "Profile 1", "url": "https://outlook.office.com", "done": {"url_prefix": "https://outlook.office.com/mail/"}}
@@ -126,16 +132,27 @@ O controle vale **para a conexão**: quando o cliente desconecta, o controle aca
 → {"id": 2, "op": "tab.open", "ato": "Profile 1", "url": "https://example.com"}
 ← {"id": 2, "ok": true, "tab": "t1"}
 → {"id": 3, "op": "page.snapshot", "tab": "t1"}
-← {"id": 3, "ok": true, "nodes": [{"ref": "e1", "role": "textbox", "name": "Text", "value": ""}, ...]}
+← {"id": 3, "ok": true, "nodes": [{"ref": "e1", "role": "textField", "name": "Text", "value": "", "depth": 0}, ...]}
 → {"id": 4, "op": "page.type", "tab": "t1", "ref": "e1", "text": "olá"}
 → {"id": 5, "op": "page.click", "tab": "t1", "ref": "e4"}
-→ {"id": 6, "op": "page.key", "tab": "t1", "key": "Enter"}
+→ {"id": 6, "op": "page.key", "tab": "t1", "key": "Enter", "modifiers": ["shift"]}
 → {"id": 7, "op": "page.screenshot", "tab": "t1"}
 ← {"id": 7, "ok": true, "png": "<base64>"}
 → {"id": 8, "op": "tab.navigate", "tab": "t1", "url": "https://example.com/b"}
 → {"id": 9, "op": "tab.close", "tab": "t1"}
 → {"id": 10, "op": "control.stop"}
 ```
+
+- **`control.start {ato, reason}`**: a pessoa vê a folha "O <app> quer usar abas do ato <ato>" com o `reason` (até 1024 caracteres). Uma sessão por conexão, para um ato; um segundo `control.start` na mesma conexão dá `bad_request`.
+- **Fim do controle**: `control.stop` fecha as abas da sessão. Ao desconectar, as abas ficam abertas, sem controle. Se a pessoa tocar em "Parar", chega o evento `control.stopped` e `tab.*` e `page.*` passam a dar `unauthorized`.
+- **`tab.open` e `tab.navigate`**: só `http` e `https`, só no ato da sessão (outro ato dá `denied`). Respondem quando a navegação termina, com teto de 30 s; página que falhou ao carregar ainda é `ok`. O `tab` vale só nesta sessão: fora dela, ou depois de fechada, dá `not_found`.
+- **`page.snapshot`**: lista plana, na ordem do documento, de controles, links, títulos, imagens com nome e texto. Cada nó tem `ref`, `role`, `name`, `value` e `depth`, e, quando vale, `focused`, `disabled`, `checked` e `password`. Os papéis são os nomes do Chromium (`textField`, `button`, `link`, `checkBox`, `comboBoxSelect`, `staticText`, `heading`, `image`). Teto de 2000 nós (`truncated: true`). O `ref` vale até a próxima navegação da aba; depois dá `not_found`.
+- **`page.click`**: clique de mouse de verdade no centro do elemento, rolando até ele antes.
+- **`page.type`**: foca o elemento e digita tecla a tecla, até 10000 caracteres. Quebra de linha e tab dão `bad_request`: use `page.key`.
+- **`page.key`**: `Enter`, `Tab`, `Escape`, `Backspace`, `Delete`, `ArrowUp/Down/Left/Right`, `PageUp`, `PageDown`, `Home`, `End` ou um caractere, com `modifiers` opcionais (`shift`, `meta`, `alt`, `ctrl`). Copiar, recortar e colar pelo teclado dão `denied`.
+- **`page.screenshot`**: PNG da área visível da aba, a 1x. Funciona com a aba em segundo plano.
+- **Senha**: campo de senha vem com `password: true` e sem `value`, inclusive depois de "mostrar senha". `page.type` nele dá `denied`. Com o foco nele, `page.key` só aceita teclas que movem (Tab, Enter, Escape, setas). `page.screenshot` dá `denied` enquanto houver senha revelada na página.
+- Nas abas controladas não há senhas salvas, autofill nem downloads.
 
 ## Erros
 
@@ -156,8 +173,7 @@ O controle vale **para a conexão**: quando o cliente desconecta, o controle aca
 | Evento | Campos | Quando |
 |---|---|---|
 | `session.lost` | `ato`, `from`, `name` | Um item de sessão vigiado sumiu ou expirou no cookie store do ato. |
-
-Quando a pessoa toca em "Parar" na faixa, o controle acaba e o cliente é avisado. O nome do evento ainda não foi definido.
+| `control.stopped` | `reason` (`"user"`) | A pessoa tocou em "Parar" na faixa: o controle desta conexão acabou. |
 
 ## Regras de segurança que o cliente sente
 
@@ -202,6 +218,3 @@ Ao fechar o stdin (Ctrl-D) a conexão cai e o controle acaba. Pedido sem `id` n�
 
 Sites de teste locais (login com cookie httpOnly, Bearer, formulário): [tools/sites-teste](../tools/sites-teste/README.md).
 
-## Pontos em aberto
-
-- Nome do evento de "Parar" na faixa.
