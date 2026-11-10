@@ -1,9 +1,9 @@
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
 new file mode 100644
-index 0000000000..340745ffe1
+index 0000000000..ff8fbd4ff2
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embed.h
-@@ -0,0 +1,266 @@
+@@ -0,0 +1,270 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The boundary between the engine and any interface (the browser's own chrome today, the Agens
 +// app later). Plain C on purpose: no Chromium or C++ types cross it, Swift imports it as is, and
@@ -263,6 +263,10 @@ index 0000000000..340745ffe1
 +// Colors the engine paints behind the chrome: the window (0xAARRGGBB, so a theme can let the
 +// desktop or an image show through), the page card and its border (0xRRGGBB).
 +void agens_ui_colors(void* chrome, unsigned* window, unsigned* page, unsigned* line);
++// The page card's corner radius (the theme's roundness) and the titlebar height (the traffic
++// lights center on it; it follows the density).
++float agens_ui_card_radius(void* chrome);
++float agens_ui_titlebar_height(void* chrome);
 +void agens_ui_destroy_chrome(void* chrome);
 +
 +#ifdef __cplusplus
@@ -732,10 +736,10 @@ index 0000000000..8844352ffa
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
 new file mode 100644
-index 0000000000..7e68f39639
+index 0000000000..40ef8ec987
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.cc
-@@ -0,0 +1,609 @@
+@@ -0,0 +1,612 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The embed API (agens_embed.h) on top of AgensWindow. Same code on every platform.
 +
@@ -1327,6 +1331,9 @@ index 0000000000..7e68f39639
 +  NOTREACHED();
 +}
 +void FocusNativeLocationBar(views::Widget*) {}
++float NativeTitlebarHeight(views::Widget*) {
++  return 52;
++}
 +bool HandleNativeCommand(BrowserWindowInterface*, int) {
 +  return false;
 +}
@@ -1347,10 +1354,10 @@ index 0000000000..7e68f39639
 +}  // namespace agens
 diff --git a/chrome/browser/agens/embed/native_shell.h b/chrome/browser/agens/embed/native_shell.h
 new file mode 100644
-index 0000000000..4443fefcef
+index 0000000000..04fb6f0162
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.h
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,41 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Glue between Chromium's Webium window (WebUIBrowserWindow, without its HTML page) and the
 +// agens_embed.h interface.
@@ -1377,6 +1384,8 @@ index 0000000000..4443fefcef
 +
 +std::unique_ptr<views::View> CreateNativeShellView(BrowserWindowInterface* browser);
 +void FocusNativeLocationBar(views::Widget* widget);
++// Where the window's traffic lights center (the shell's toolbar or tab strip height).
++float NativeTitlebarHeight(views::Widget* widget);
 +// Lets the native shell take a browser command (IDC_*) before Chromium runs it. True if it did.
 +bool HandleNativeCommand(BrowserWindowInterface* browser, int command_id);
 +// The window's status bubble (link URL), or null when the native shell isn't in this widget.
@@ -1392,10 +1401,10 @@ index 0000000000..4443fefcef
 +#endif  // CHROME_BROWSER_AGENS_EMBED_NATIVE_SHELL_H_
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
 new file mode 100644
-index 0000000000..e5616339fd
+index 0000000000..093813f024
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,185 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The macOS host: the views::View that fills the Webium window, puts the UI's chrome (an NSView)
 +// over it and the active tab in the page card. Everything else is shared (agens_window.h,
@@ -1427,7 +1436,7 @@ index 0000000000..e5616339fd
 +  METADATA_HEADER(NativeShellView, views::View)
 +
 + public:
-+  static constexpr float kRadius = 12;  // the page card, as in the prototype
++  float radius_ = 12;  // the page card's corners; the theme decides (agens_ui_card_radius)
 +  static constexpr int kViewId = 0x4167;  // lookup from the window (Cmd+L)
 +
 +  explicit NativeShellView(BrowserWindowInterface* browser)
@@ -1458,6 +1467,7 @@ index 0000000000..e5616339fd
 +  }
 +
 +  void FocusAddress() { agens_ui_focus_address((__bridge void*)chrome_); }
++  float TitlebarHeight() { return agens_ui_titlebar_height((__bridge void*)chrome_); }
 +  bool Command(AgensCommand command) { return agens_ui_command((__bridge void*)chrome_, command); }
 +  StatusBubble* status_bubble() { return &window_->status_bubble; }
 +
@@ -1482,8 +1492,9 @@ index 0000000000..e5616339fd
 +    // The window color carries alpha (0xAARRGGBB): see-through themes let the backdrop show.
 +    SetBackground(views::CreateSolidBackground(SkColorSetARGB(window_color >> 24, (window_color >> 16) & 255,
 +                                                              (window_color >> 8) & 255, window_color & 255)));
-+    card_->SetBackground(views::CreateRoundedRectBackground(sk(page_color), kRadius, 1));
-+    card_->SetBorder(views::CreateRoundedRectBorder(1, kRadius, sk(line_color)));
++    radius_ = agens_ui_card_radius((__bridge void*)chrome_);
++    card_->SetBackground(views::CreateRoundedRectBackground(sk(page_color), radius_, 1));
++    card_->SetBorder(views::CreateRoundedRectBorder(1, radius_, sk(line_color)));
 +    AgensRect page = agens_ui_layout((__bridge void*)chrome_, width(), height());
 +    AgensRect icon = agens_ui_site_icon_rect((__bridge void*)chrome_);
 +    site_icon_->SetBounds(icon.x, icon.y, icon.width, icon.height);
@@ -1491,7 +1502,7 @@ index 0000000000..e5616339fd
 +    card_->SetBoundsRect(card);
 +    card.Inset(1);
 +    contents_->SetBoundsRect(card);
-+    contents_->holder()->SetNativeViewCornerRadii(gfx::RoundedCornersF(kRadius - 1));
++    contents_->holder()->SetNativeViewCornerRadii(gfx::RoundedCornersF(radius_ - 1));
 +  }
 +
 +  // TabStripModelObserver: the page area follows the active tab.
@@ -1499,7 +1510,7 @@ index 0000000000..e5616339fd
 +                              const TabStripSelectionChange& selection) override {
 +    if (selection.active_tab_changed()) {
 +      contents_->SetWebContents(selection.new_contents);
-+      contents_->holder()->SetNativeViewCornerRadii(gfx::RoundedCornersF(kRadius - 1));
++      contents_->holder()->SetNativeViewCornerRadii(gfx::RoundedCornersF(radius_ - 1));
 +      // New tabs open ready to type, as in BrowserView::RestoreFocus. Posted so it lands after
 +      // the window gives the new contents focus.
 +      if (selection.new_contents && selection.new_contents->FocusLocationBarByDefault()) {
@@ -1563,6 +1574,14 @@ index 0000000000..e5616339fd
 +  return shell && shell->Command(*command);
 +}
 +
++float NativeTitlebarHeight(views::Widget* widget) {
++  auto* shell = widget && widget->GetRootView()
++                    ? views::AsViewClass<NativeShellView>(
++                          widget->GetRootView()->GetViewByID(NativeShellView::kViewId))
++                    : nullptr;
++  return shell ? shell->TitlebarHeight() : 52;  // before the shell exists: the normal density
++}
++
 +void FocusNativeLocationBar(views::Widget* widget) {
 +  if (auto* shell = views::AsViewClass<NativeShellView>(
 +          widget->GetRootView()->GetViewByID(NativeShellView::kViewId))) {
@@ -1573,10 +1592,10 @@ index 0000000000..e5616339fd
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..49e5b776c5
+index 0000000000..c240f584a0
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,3904 @@
+@@ -0,0 +1,3952 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -1678,13 +1697,28 @@ index 0000000000..49e5b776c5
 +}
 +
 +// Layout (prototype: toolbar, then body with 14 pt padding, 236 pt sidebar, 10 pt gap).
-+static const CGFloat kToolbar = 52, kPad = 14, kSide = 236, kGap = 10, kRow = 32, kAtos = 46;
++static const CGFloat kPad = 14, kSide = 236, kGap = 10, kAtos = 46;
 +static const CGFloat kRail = 40;        // the collapsed column (prototype .collapsed .sidebar)
 +static const CGFloat kLightsEnd = 86;   // the traffic lights end at 72; prototype leaves 12+2 pt
 +static NSString* const kCollapsedKey = @"AgensSidebarCollapsed";
 +static NSString* const kBookmarkBarKey = @"AgensBookmarkBar";  // the bookmarks bar shows (⌘⇧B)
 +static NSString* const kTabsOnTopKey = @"AgensTabsOnTop";  // tabs in a strip above the bar (⌘⇧S)
-+static const CGFloat kStrip = 52;  // the top tab strip, same height as the bar so the lights center
++// Density (Configurações › Aparência; prototype .dense): compact lowers the bar, the tab strip
++// and the tabs.
++static NSString* const kDenseKey = @"AgensDense";
++static int g_dense = -1;
++static BOOL Dense() {
++  if (g_dense < 0) g_dense = [NSUserDefaults.standardUserDefaults boolForKey:kDenseKey];
++  return g_dense;
++}
++static CGFloat BarH() { return Dense() ? 44 : 52; }    // the toolbar
++static CGFloat StripH() { return Dense() ? 40 : 52; }  // the top tab strip
++static CGFloat RowH() { return Dense() ? 28 : 32; }    // a tab in the column or on top
++static CGFloat OmniH() { return Dense() ? 30 : 34; }   // the address well
++// Roundness follows the theme (prototype --round, --pill): Grafite and Seu 1×, Vidro 1.3× and
++// Brasa 1.45× with pill-shaped tabs on top.
++static CGFloat Round() { return Theme() == 1 ? 1.45 : Theme() == 2 ? 1.3 : 1; }
++static BOOL Pill() { return Theme() == 1 || Theme() == 2; }
 +
 +static NSImage* Symbol(NSString* name, CGFloat size = 15) {
 +  NSImage* image = [NSImage imageWithSystemSymbolName:name accessibilityDescription:nil];
@@ -1860,6 +1894,8 @@ index 0000000000..49e5b776c5
 +@interface AgensHoverView : AgensDragView
 +@property(nonatomic) BOOL selected;
 +@property(nonatomic) BOOL hovered;
++@property(nonatomic) CGFloat radius;  // at roundness 1×; the theme scales it
++@property(nonatomic) BOOL pill;       // fully round where the theme has pills
 +@property(nonatomic, copy) void (^onPress)(void);
 +- (void)refresh;
 +@end
@@ -1868,13 +1904,24 @@ index 0000000000..49e5b776c5
 +}
 +@synthesize selected = _selected;
 +@synthesize hovered = _hovered;
++@synthesize radius = _radius;
++@synthesize pill = _pill;
 +@synthesize onPress = _onPress;
 +- (instancetype)initWithFrame:(NSRect)frame {
 +  if ((self = [super initWithFrame:frame])) {
 +    self.wantsLayer = YES;
++    _radius = 8;
 +    self.layer.cornerRadius = 8;
 +  }
 +  return self;
++}
++- (void)setRadius:(CGFloat)radius {
++  _radius = radius;
++  [self refresh];
++}
++- (void)setPill:(BOOL)pill {
++  _pill = pill;
++  [self refresh];
 +}
 +- (void)updateTrackingAreas {
 +  [super updateTrackingAreas];
@@ -1897,6 +1944,7 @@ index 0000000000..49e5b776c5
 +- (void)refresh {
 +  self.layer.backgroundColor =
 +      _selected ? CG(kRaise, self) : _hovered ? CG(kHover, self) : NSColor.clearColor.CGColor;
++  self.layer.cornerRadius = _pill && Pill() ? NSHeight(self.bounds) / 2 : _radius * Round();
 +}
 +- (void)viewDidChangeEffectiveAppearance {
 +  [super viewDidChangeEffectiveAppearance];
@@ -2061,7 +2109,8 @@ index 0000000000..49e5b776c5
 +- (void)setLook:(TabLook)look {
 +  _look = look;
 +  _title.font = [NSFont systemFontOfSize:look == kLookTop ? 12.5 : 13];
-+  self.layer.cornerRadius = look == kLookRow ? 8 : 9;
++  self.radius = look == kLookRow ? 8 : 9;
++  self.pill = look == kLookTop;
 +  [self refresh];
 +}
 +- (void)layout {
@@ -2237,7 +2286,6 @@ index 0000000000..49e5b776c5
 +- (instancetype)initWithFrame:(NSRect)frame {
 +  if ((self = [super initWithFrame:frame])) {
 +    self.wantsLayer = YES;
-+    self.layer.cornerRadius = 11;
 +    _mark = [[NSImageView alloc] init];
 +    _mark.imageScaling = NSImageScaleProportionallyUpOrDown;
 +    _mark.accessibilityElement = NO;
@@ -2245,7 +2293,6 @@ index 0000000000..49e5b776c5
 +    _greeting.alignment = NSTextAlignmentCenter;
 +    _well = [[NSView alloc] init];
 +    _well.wantsLayer = YES;
-+    _well.layer.cornerRadius = 14;
 +    _well.layer.borderWidth = 1;
 +    _searchIcon = [NSImageView imageViewWithImage:Symbol(@"magnifyingglass", 15)];
 +    _searchIcon.contentTintColor = kDim.color();
@@ -2266,6 +2313,8 @@ index 0000000000..49e5b776c5
 +}
 +- (void)refreshTheme {
 +  self.layer.backgroundColor = CG(kBg, self);
++  self.layer.cornerRadius = 12 * Round() - 1;  // inside the page card
++  _well.layer.cornerRadius = 14 * Round();
 +  _well.layer.backgroundColor = CG(kSunk, self);
 +  _well.layer.borderColor = CG(kLine, self);
 +  const char* svg = IsDark(self.effectiveAppearance) ? kAgensMarkDarkSvg : kAgensMarkLightSvg;
@@ -2307,7 +2356,7 @@ index 0000000000..49e5b776c5
 +}
 +- (instancetype)initWithIcon:(NSString*)icon title:(NSString*)title key:(NSString*)key {
 +  if ((self = [super initWithFrame:NSZeroRect])) {
-+    self.layer.cornerRadius = 7;
++    self.radius = 7;
 +    _icon = [NSImageView imageViewWithImage:AgensIcon(icon)];
 +    _icon.contentTintColor = kDim.color();
 +    _title = Label(13, NSFontWeightRegular, kMute);
@@ -2358,7 +2407,7 @@ index 0000000000..49e5b776c5
 +@synthesize onCancel = _onCancel;
 +- (instancetype)initWithFrame:(NSRect)frame {
 +  if ((self = [super initWithFrame:frame])) {
-+    self.layer.cornerRadius = 7;
++    self.radius = 7;
 +    _icon = [NSImageView imageViewWithImage:AgensIcon(kIconDown)];
 +    _icon.contentTintColor = kDim.color();
 +    _name = Label(13, NSFontWeightRegular, kInk);
@@ -3071,7 +3120,9 @@ index 0000000000..49e5b776c5
 +  bar.target = self;
 +  bar.action = @selector(setBookmarkBar:);
 +  y = [self option:@"Barra de favoritos" detail:@"⌘⇧B alterna." control:bar y:y];
-+  y = [self info:@"Densidade" detail:nil note:@"Ainda não existe" y:y];
++  y = [self option:@"Densidade" detail:@"Compacta deixa a barra e as abas mais baixas."
++           control:[self segments:@[ @"Normal", @"Compacta" ] selected:Dense() ? 1 : 0 action:@selector(setDense:)]
++                 y:y];
 +  return y;
 +}
 +- (void)themeDidChange {
@@ -3115,6 +3166,11 @@ index 0000000000..49e5b776c5
 +}
 +- (void)setMode:(NSSegmentedControl*)seg {
 +  if (_browser) SetMode(_browser, (AgensColorMode)seg.selectedSegment);
++}
++- (void)setDense:(NSSegmentedControl*)seg {
++  [NSUserDefaults.standardUserDefaults setBool:seg.selectedSegment == 1 forKey:kDenseKey];
++  g_dense = -1;
++  [self themeDidChange];
 +}
 +- (void)setBookmarkBar:(NSSwitch*)sw {
 +  [NSUserDefaults.standardUserDefaults setBool:sw.state == NSControlStateValueOn forKey:kBookmarkBarKey];
@@ -3264,8 +3320,11 @@ index 0000000000..49e5b776c5
 +  agens_reset_settings(_browser, ResetFinished, (__bridge void*)self);
 +  SetMode(_browser, kAgensModeSystem);
 +  NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
-+  for (NSString* k in @[ kThemeKey, kTintKey, kOpacityKey, kBlurKey, kImageKey, kTabsOnTopKey ]) [d removeObjectForKey:k];
++  for (NSString* k in @[ kThemeKey, kTintKey, kOpacityKey, kBlurKey, kImageKey, kTabsOnTopKey, kDenseKey, kBookmarkBarKey ]) {
++    [d removeObjectForKey:k];
++  }
 +  g_theme = -1;
++  g_dense = -1;
 +  [self themeDidChange];
 +}
 +- (void)resetFinished {
@@ -3902,7 +3961,6 @@ index 0000000000..49e5b776c5
 +- (instancetype)initWithTitle:(NSString*)title search:(NSString*)search action:(NSString*)action note:(NSString*)note {
 +  if ((self = [super initWithFrame:NSZeroRect])) {
 +    self.wantsLayer = YES;
-+    self.layer.cornerRadius = 11;
 +    self.layer.masksToBounds = YES;
 +    _items = @[];
 +    _scroll = [[NSScrollView alloc] init];
@@ -3936,6 +3994,7 @@ index 0000000000..49e5b776c5
 +}
 +- (void)refreshTheme {
 +  self.layer.backgroundColor = CG(kBg, self);
++  self.layer.cornerRadius = 12 * Round() - 1;  // inside the page card
 +}
 +- (void)viewDidChangeEffectiveAppearance {
 +  [super viewDidChangeEffectiveAppearance];
@@ -4137,7 +4196,7 @@ index 0000000000..49e5b776c5
 +}
 +- (instancetype)initWithTitle:(NSString*)title folder:(BOOL)folder site:(NSString*)site {
 +  if ((self = [super initWithFrame:NSZeroRect])) {
-+    self.layer.cornerRadius = 7;
++    self.radius = 7;
 +    if (folder) {
 +      NSImageView* icon = [NSImageView imageViewWithImage:Symbol(@"folder", 11)];
 +      icon.contentTintColor = kDim.color();
@@ -4304,7 +4363,6 @@ index 0000000000..49e5b776c5
 +
 +    _omni = [[NSView alloc] init];
 +    _omni.wantsLayer = YES;
-+    _omni.layer.cornerRadius = 10;
 +    _omni.layer.borderWidth = 1;
 +    _omniIcon = [NSImageView imageViewWithImage:Symbol(@"magnifyingglass", 12)];
 +    _omniIcon.contentTintColor = kDim.color();
@@ -4317,10 +4375,10 @@ index 0000000000..49e5b776c5
 +    _address.target = self;
 +    _address.action = @selector(go:);
 +    _star = [[AgensToolButton alloc] initWithSymbol:@"star" label:@"Adicionar aos favoritos (⌘D)" size:12];
-+    _star.layer.cornerRadius = 7;
++    _star.radius = 7;
 +    _star.onPress = ^{ [weak run:agens_window_toggle_bookmark]; };
 +    _sound = [[AgensToolButton alloc] initWithSymbol:@"speaker.wave.2.fill" label:@"Silenciar a aba" size:12];
-+    _sound.layer.cornerRadius = 7;
++    _sound.radius = 7;
 +    _sound.hidden = YES;
 +    _sound.onPress = ^{
 +      AgensChrome* strong = weak;
@@ -4331,7 +4389,7 @@ index 0000000000..49e5b776c5
 +    [_omni addSubview:_sound];
 +    [_omni addSubview:_star];
 +    _siteButton = [[AgensHoverView alloc] init];
-+    _siteButton.layer.cornerRadius = 7;
++    _siteButton.radius = 7;
 +    _siteButton.toolTip = @"Ver informações do site";
 +    _siteButton.accessibilityLabel = @"Informações do site";
 +    _siteButton.onPress = ^{ [weak run:agens_window_show_site_info]; };
@@ -4351,7 +4409,6 @@ index 0000000000..49e5b776c5
 +    [_loadbar.layer addSublayer:_loadGlow];
 +    _statusPill = [[AgensPassThroughView alloc] init];
 +    _statusPill.wantsLayer = YES;
-+    _statusPill.layer.cornerRadius = 7;
 +    _statusPill.layer.borderWidth = 1;
 +    _statusPill.hidden = YES;
 +    _statusText = Label(12, NSFontWeightRegular, kMute);
@@ -4361,7 +4418,6 @@ index 0000000000..49e5b776c5
 +
 +    _suggest = [[NSView alloc] init];
 +    _suggest.wantsLayer = YES;
-+    _suggest.layer.cornerRadius = 12;
 +    _suggest.layer.borderWidth = 1;
 +    _suggest.hidden = YES;
 +    _suggest.accessibilityRole = NSAccessibilityListRole;
@@ -4506,6 +4562,9 @@ index 0000000000..49e5b776c5
 +}
 +
 +- (void)refreshTheme {
++  _omni.layer.cornerRadius = 10 * Round();
++  _suggest.layer.cornerRadius = 12 * Round();
++  _statusPill.layer.cornerRadius = 7 * Round();
 +  _omni.layer.backgroundColor = CG(kSunk, self);
 +  _omni.layer.borderColor = CG(_address.currentEditor ? kLineStrong : kLine, self);
 +  _suggest.layer.backgroundColor = CG(kFloat, self);
@@ -4588,6 +4647,8 @@ index 0000000000..49e5b776c5
 +- (void)themeChanged:(NSNotification*)note {
 +  [self setTop:[NSUserDefaults.standardUserDefaults boolForKey:kTabsOnTopKey]];
 +  _barShown = [NSUserDefaults.standardUserDefaults boolForKey:kBookmarkBarKey];
++  // Density or tabs position may change the titlebar height; the frame asks again on layout.
++  self.window.contentView.superview.needsLayout = YES;
 +  [self refreshBackdrop];
 +  RefreshTree(self);
 +
@@ -4642,18 +4703,19 @@ index 0000000000..49e5b776c5
 +    if (row.look != look) row.look = look;
 +  }
 +
-+  const CGFloat barY = top ? kStrip : 0;
++  const CGFloat bar = BarH(), strip = StripH(), rowH = RowH(), omniH = OmniH();
++  const CGFloat barY = top ? strip : 0, btnY = barY + (bar - 28) / 2;
 +  CGFloat columnEnd = kPad + side;
 +  CGFloat navX = top ? kPad - 30 : MAX(kLightsEnd, columnEnd - 118);
-+  _toggle.frame = NSMakeRect(navX, 12, 28, 28);
-+  _back.frame = NSMakeRect(navX + 30, barY + 12, 28, 28);
-+  _forward.frame = NSMakeRect(navX + 60, barY + 12, 28, 28);
-+  _reload.frame = NSMakeRect(navX + 90, barY + 12, 28, 28);
++  _toggle.frame = NSMakeRect(navX, btnY, 28, 28);
++  _back.frame = NSMakeRect(navX + 30, btnY, 28, 28);
++  _forward.frame = NSMakeRect(navX + 60, btnY, 28, 28);
++  _reload.frame = NSMakeRect(navX + 90, btnY, 28, 28);
 +  CGFloat omniX = top ? NSMaxX(_reload.frame) + 10 : MAX(columnEnd + kGap, navX + 126);
-+  _menu.frame = NSMakeRect(width - kPad - 28, barY + 12, 28, 28);
++  _menu.frame = NSMakeRect(width - kPad - 28, btnY, 28, 28);
 +  CGFloat omniEnd = NSMinX(_menu.frame) - 4;
 +  if (!_downloadsButton.hidden) {
-+    _downloadsButton.frame = NSMakeRect(NSMinX(_menu.frame) - 30, barY + 12, 28, 28);
++    _downloadsButton.frame = NSMakeRect(NSMinX(_menu.frame) - 30, btnY, 28, 28);
 +    omniEnd = NSMinX(_downloadsButton.frame) - 4;
 +  }
 +
@@ -4678,17 +4740,17 @@ index 0000000000..49e5b776c5
 +    CGFloat x = omniEnd - foot.count * 32 + 2;
 +    omniEnd = x - 10;
 +    for (NSView* v in foot) {
-+      v.frame = NSMakeRect(x, barY + 12, 30, 28);
++      v.frame = NSMakeRect(x, btnY, 30, 28);
 +      x += 32;
 +    }
 +  }
-+  _omni.frame = NSMakeRect(omniX, barY + 9, omniEnd - omniX, 34);
-+  _omniIcon.frame = NSMakeRect(12, 10, 14, 14);
++  _omni.frame = NSMakeRect(omniX, barY + (bar - omniH) / 2, omniEnd - omniX, omniH);
++  _omniIcon.frame = NSMakeRect(12, (omniH - 14) / 2, 14, 14);
 +  _siteButton.frame = NSInsetRect(_omniIcon.frame, -6, -6);
-+  _star.frame = NSMakeRect(NSWidth(_omni.frame) - 4 - 26, 4, 26, 26);
-+  _sound.frame = NSMakeRect(NSMinX(_star.frame) - 26, 4, 26, 26);
++  _star.frame = NSMakeRect(NSWidth(_omni.frame) - 4 - 26, (omniH - 26) / 2, 26, 26);
++  _sound.frame = NSMakeRect(NSMinX(_star.frame) - 26, (omniH - 26) / 2, 26, 26);
 +  const CGFloat addressEnd = _sound.hidden ? NSMinX(_star.frame) : NSMinX(_sound.frame);
-+  _address.frame = NSMakeRect(33, 8, addressEnd - 6 - 33, 18);
++  _address.frame = NSMakeRect(33, (omniH - 18) / 2, addressEnd - 6 - 33, 18);
 +
 +  NSMutableArray<AgensTabRow*>* pins = [NSMutableArray array];
 +  NSMutableArray<AgensTabRow*>* list = [NSMutableArray array];
@@ -4697,7 +4759,7 @@ index 0000000000..49e5b776c5
 +  if (top) {
 +    // The strip: pinned tabs as 44 pt icons, the rest share what's left (prototype .ttab: up to
 +    // 220 pt, at least 44). The "+" stays at the right end.
-+    _newTabTop.frame = NSMakeRect(width - kPad - 28, 12, 28, 28);
++    _newTabTop.frame = NSMakeRect(width - kPad - 28, (strip - 28) / 2, 28, 28);
 +    const CGFloat x0 = kLightsEnd, end = NSMinX(_newTabTop.frame) - 6;
 +    const CGFloat pinsW = pins.count * 48;
 +    const CGFloat w = list.count ? MAX(44, MIN(220, (end - x0 - pinsW + 4) / list.count - 4)) : 0;
@@ -4705,7 +4767,7 @@ index 0000000000..49e5b776c5
 +    _listX = x0 + pinsW;
 +    CGFloat x = x0;
 +    for (AgensTabRow* row in pins) {
-+      row.frame = NSMakeRect(x, 10, 44, 32);
++      row.frame = NSMakeRect(x, (strip - rowH) / 2, 44, rowH);
 +      row.hidden = x + 44 > end;
 +      x += 48;
 +    }
@@ -4713,24 +4775,24 @@ index 0000000000..49e5b776c5
 +    for (AgensTabRow* row in list) {
 +      if (row == _dragged) continue;  // it follows the pointer (dragRow:by:)
 +      if (_dragged && slot == _dropIndex - _pinnedCount) x += w + 4;  // where it will land
-+      row.frame = NSMakeRect(x, 10, w, 32);
++      row.frame = NSMakeRect(x, (strip - rowH) / 2, w, rowH);
 +      // shortcut: tabs past the end are hidden, not scrolled; add strip scrolling if people keep 30+ tabs on top.
 +      row.hidden = x + w > end;
 +      x += w + 4;
 +      ++slot;
 +    }
-+    page = NSMakeRect(kPad, kStrip + 52, width - 2 * kPad, height - kStrip - 52 - kPad);
++    page = NSMakeRect(kPad, strip + bar, width - 2 * kPad, height - strip - bar - kPad);
 +    page = [self roomForBar:page];
 +  } else {
 +    // Column: ato title (prototype .space-title), pinned tiles, separator, new tab, tabs.
-+    CGFloat y = kToolbar;
++    CGFloat y = bar;
 +    CGFloat inset = narrow ? (side - 18) / 2 : 8;
-+    _atoTile.frame = NSMakeRect(kPad + inset, y + 7, 18, 18);
-+    _atoName.frame = NSMakeRect(kPad + 35, y + 7, kSide - 43, 18);
++    _atoTile.frame = NSMakeRect(kPad + inset, y + (rowH - 18) / 2, 18, 18);
++    _atoName.frame = NSMakeRect(kPad + 35, y + (rowH - 18) / 2, kSide - 43, 18);
 +    _atoName.hidden = narrow;
-+    y += kRow + 6;
++    y += rowH + 6;
 +    // Pinned (prototype .pinned): a grid of four 36 pt tiles; one per line in the rail.
-+    const CGFloat tileW = narrow ? side : (side - 12) / 4, tileH = narrow ? kRow : 36;
++    const CGFloat tileW = narrow ? side : (side - 12) / 4, tileH = narrow ? rowH : (Dense() ? 32 : 36);
 +    for (NSUInteger i = 0; i < pins.count; ++i) {
 +      const NSUInteger col = narrow ? 0 : i % 4, line = narrow ? i : i / 4;
 +      pins[i].hidden = NO;
@@ -4741,11 +4803,11 @@ index 0000000000..49e5b776c5
 +    if (pins.count) y += ((narrow ? pins.count : (pins.count + 3) / 4) * (tileH + 4)) + 2;
 +    _separator.frame = NSMakeRect(kPad + (narrow ? 6 : 8), y, side - (narrow ? 12 : 16), 1);
 +    y += 7;
-+    _newTab.frame = NSMakeRect(kPad, y, side, kRow);
-+    _newTabPlus.frame = NSMakeRect(narrow ? (side - 16) / 2 : 8, 8, 16, 16);
-+    _newTabLabel.frame = NSMakeRect(34, 7, 150, 18);
++    _newTab.frame = NSMakeRect(kPad, y, side, rowH);
++    _newTabPlus.frame = NSMakeRect(narrow ? (side - 16) / 2 : 8, (rowH - 16) / 2, 16, 16);
++    _newTabLabel.frame = NSMakeRect(34, (rowH - 18) / 2, 150, 18);
 +    _newTabLabel.hidden = narrow;
-+    y += kRow + 1;
++    y += rowH + 1;
 +
 +    // Atos at the foot with a line above (prototype .spaces): a centered row when open, a column
 +    // when collapsed. The warm dot marks the current one: under it, or to its left in the column.
@@ -4786,15 +4848,14 @@ index 0000000000..49e5b776c5
 +    for (AgensTabRow* row in list) {
 +      row.hidden = NO;
 +      if (row == _dragged) continue;  // it follows the pointer (dragRow:by:)
-+      if (_dragged && slot == _dropIndex - _pinnedCount) rowY += kRow + 1;  // where it will land
-+      row.frame = NSMakeRect(0, rowY, side, kRow);
-+      rowY += kRow + 1;
++      if (_dragged && slot == _dropIndex - _pinnedCount) rowY += rowH + 1;  // where it will land
++      row.frame = NSMakeRect(0, rowY, side, rowH);
++      rowY += rowH + 1;
 +      ++slot;
 +    }
-+    if (_dragged && !_dragged.pinned) rowY += kRow + 1;
++    if (_dragged && !_dragged.pinned) rowY += rowH + 1;
 +    _tabsDoc.frame = NSMakeRect(0, 0, side, MAX(rowY, NSHeight(_tabsScroll.frame)));
-+    page = NSMakeRect(columnEnd + kGap, kToolbar, width - (columnEnd + kGap) - kPad,
-+                      height - kToolbar - kPad);
++    page = NSMakeRect(columnEnd + kGap, bar, width - (columnEnd + kGap) - kPad, height - bar - kPad);
 +    page = [self roomForBar:page];
 +  }
 +
@@ -4828,7 +4889,7 @@ index 0000000000..49e5b776c5
 +- (void)setTabs:(const AgensTab*)tabs count:(int)count {
 +  __weak AgensChrome* weak = self;
 +  while ((int)_rows.count < count) {
-+    AgensTabRow* row = [[AgensTabRow alloc] initWithFrame:NSMakeRect(0, 0, kSide, kRow)];
++    AgensTabRow* row = [[AgensTabRow alloc] initWithFrame:NSMakeRect(0, 0, kSide, RowH())];
 +    __weak AgensTabRow* weakRow = row;
 +    row.onPress = ^{ [weak activate:weakRow.index]; };
 +    row.onDrag = ^(NSPoint delta) { [weak dragRow:weakRow by:delta]; };
@@ -5077,7 +5138,7 @@ index 0000000000..49e5b776c5
 +- (NSView*)popoverWidth:(CGFloat)w height:(CGFloat)h under:(NSView*)anchor {
 +  NSView* panel = [[NSView alloc] initWithFrame:NSMakeRect(MAX(8, NSMaxX(anchor.frame) - w), NSMaxY(anchor.frame) + 6, w, h)];
 +  panel.wantsLayer = YES;
-+  panel.layer.cornerRadius = 12;
++  panel.layer.cornerRadius = 12 * Round();
 +  panel.layer.borderWidth = 1;
 +  panel.layer.backgroundColor = CG(kFloat, self);
 +  panel.layer.borderColor = CG(kLineStrong, self);
@@ -5259,7 +5320,7 @@ index 0000000000..49e5b776c5
 +    _dropIndex = _pinnedCount + (int)lround((x - _listX) / _tabStep);
 +    f.origin.x = x;
 +  } else {
-+    const CGFloat step = kRow + 1;
++    const CGFloat step = RowH() + 1;
 +    CGFloat y = MAX(0, MIN(slot * step + delta.y, last * step));
 +    _dropIndex = _pinnedCount + (int)lround(y / step);
 +    f.origin.y = y;
@@ -5472,6 +5533,12 @@ index 0000000000..49e5b776c5
 +}
 +void agens_ui_colors(void* chrome, unsigned* window, unsigned* page, unsigned* line) {
 +  [(__bridge AgensChrome*)chrome colorsWindow:window page:page line:line];
++}
++float agens_ui_card_radius(void*) {
++  return 12 * Round();
++}
++float agens_ui_titlebar_height(void* chrome) {
++  return [(__bridge AgensChrome*)chrome tabsOnTop] ? StripH() : BarH();
 +}
 +int agens_ui_command(void* chrome, AgensCommand command) {
 +  return [(__bridge AgensChrome*)chrome command:command];
@@ -5806,7 +5873,7 @@ index f83d197409..5199edb952 100644
  
  WebUIBrowserSidePanelUI* WebUIBrowserWindow::GetWebUIBrowserSidePanelUI() {
 diff --git a/chrome/browser/ui/webui_browser/webui_browser_window_mac.mm b/chrome/browser/ui/webui_browser/webui_browser_window_mac.mm
-index 7188576c05..3a6546a9c8 100644
+index 7188576c05..3f0c832740 100644
 --- a/chrome/browser/ui/webui_browser/webui_browser_window_mac.mm
 +++ b/chrome/browser/ui/webui_browser/webui_browser_window_mac.mm
 @@ -7,6 +7,7 @@
@@ -5822,8 +5889,8 @@ index 7188576c05..3a6546a9c8 100644
                                      float* titlebar_height) override {
      *override_titlebar_height = true;
 -    *titlebar_height = 40;
-+    // agens: the traffic lights center on our 52 pt toolbar.
-+    *titlebar_height = agens::IsNativeShellEnabled() ? 52 : 40;
++    // agens: the traffic lights center on our toolbar (52 pt, 44 compact).
++    *titlebar_height = agens::IsNativeShellEnabled() ? agens::NativeTitlebarHeight(GetWidget()) : 40;
    }
  
    raw_ptr<BrowserWindowInterface> browser_;
