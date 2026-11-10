@@ -1,9 +1,9 @@
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
 new file mode 100644
-index 0000000000..c753f8fb34
+index 0000000000..cf14158a03
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embed.h
-@@ -0,0 +1,129 @@
+@@ -0,0 +1,130 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The boundary between the engine and any interface (the browser's own chrome today, the Agens
 +// app later). Plain C on purpose: no Chromium or C++ types cross it, Swift imports it as is, and
@@ -50,6 +50,7 @@ index 0000000000..c753f8fb34
 +void agens_window_new_tab(AgensWindow* window);
 +void agens_window_activate_tab(AgensWindow* window, int index);
 +void agens_window_close_tab(AgensWindow* window, int index);
++void agens_window_move_tab(AgensWindow* window, int from, int to);
 +// Address or search text, as typed; the engine decides which it is.
 +void agens_window_navigate(AgensWindow* window, const char* text);
 +void agens_window_back(AgensWindow* window);
@@ -547,10 +548,10 @@ index 0000000000..3a513e84ee
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
 new file mode 100644
-index 0000000000..b95ce31d3b
+index 0000000000..041b4e541e
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.cc
-@@ -0,0 +1,169 @@
+@@ -0,0 +1,174 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The embed API (agens_embed.h) on top of AgensWindow. Same code on every platform.
 +
@@ -634,6 +635,11 @@ index 0000000000..b95ce31d3b
 +  if (w->model()->ContainsIndex(index)) {
 +    w->model()->CloseWebContentsAt(
 +        index, TabCloseTypes::CLOSE_USER_GESTURE | TabCloseTypes::CLOSE_CREATE_HISTORICAL_TAB);
++  }
++}
++void agens_window_move_tab(AgensWindow* w, int from, int to) {
++  if (w->model()->ContainsIndex(from) && w->model()->ContainsIndex(to) && from != to) {
++    w->model()->MoveWebContentsAt(from, to, /*select_after_move=*/false);
 +  }
 +}
 +void agens_window_navigate(AgensWindow* w, const char* text) {
@@ -926,10 +932,10 @@ index 0000000000..64f981ee02
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..826500b9b0
+index 0000000000..cd4611a3c7
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,1517 @@
+@@ -0,0 +1,1574 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -1258,9 +1264,13 @@ index 0000000000..826500b9b0
 +@interface AgensTabRow : AgensHoverView
 +@property(nonatomic) int index;
 +@property(nonatomic, copy) void (^onClose)(void);
++@property(nonatomic, copy) void (^onDrag)(CGFloat dy);  // pointer moved dy since mouse down
++@property(nonatomic, copy) void (^onDrop)(void);
 +- (void)updateWith:(const AgensTab&)tab;
 +@end
 +@implementation AgensTabRow {
++  CGFloat _downY;
++  BOOL _dragging;
 +  NSImageView* _favicon;
 +  NSProgressIndicator* _spinner;
 +  NSTextField* _title;
@@ -1268,6 +1278,27 @@ index 0000000000..826500b9b0
 +}
 +@synthesize index = _index;
 +@synthesize onClose = _onClose;
++@synthesize onDrag = _onDrag;
++@synthesize onDrop = _onDrop;
++// Click activates on release; a drag of more than 4 pt reorders instead.
++- (void)mouseDown:(NSEvent*)event {
++  _downY = [self.superview convertPoint:event.locationInWindow fromView:nil].y;
++  _dragging = NO;
++}
++- (void)mouseDragged:(NSEvent*)event {
++  CGFloat dy = [self.superview convertPoint:event.locationInWindow fromView:nil].y - _downY;
++  if (!_dragging && fabs(dy) < 4) return;
++  _dragging = YES;
++  if (_onDrag) _onDrag(dy);
++}
++- (void)mouseUp:(NSEvent*)event {
++  if (_dragging) {
++    if (_onDrop) _onDrop();
++  } else if (self.onPress) {
++    self.onPress();
++  }
++  _dragging = NO;
++}
 +- (instancetype)initWithFrame:(NSRect)frame {
 +  if ((self = [super initWithFrame:frame])) {
 +    _favicon = [[NSImageView alloc] initWithFrame:NSMakeRect(8, 8, 16, 16)];
@@ -1683,6 +1714,8 @@ index 0000000000..826500b9b0
 +  AgensHoverView* _newTab;
 +  NSMutableArray<AgensTabRow*>* _rows;
 +  NSScrollView* _tabsScroll;  // the tab list scrolls between "Nova aba" and the atos
++  AgensTabRow* _dragged;      // the tab being dragged to a new place, if any
++  int _dropIndex;
 +  AgensDragView* _tabsDoc;
 +  AgensToolButton* _moreAtos;  // "⋯" when the atos don't fit
 +  NSMutableArray<NSString*>* _atoNames;
@@ -1976,10 +2009,15 @@ index 0000000000..826500b9b0
 +  _tabsScroll.verticalScroller.alphaValue = 1;
 +  _tabsScroll.frame = NSMakeRect(kPad, y, side, MAX(0, footY - 6 - y));
 +  CGFloat rowY = 0;
++  int slot = 0;
 +  for (AgensTabRow* row in _rows) {
++    if (row == _dragged) continue;  // it follows the pointer (dragRow:by:)
++    if (_dragged && slot == _dropIndex) rowY += kRow + 1;  // the gap where it will land
 +    row.frame = NSMakeRect(0, rowY, side, kRow);
 +    rowY += kRow + 1;
++    ++slot;
 +  }
++  if (_dragged) rowY += kRow + 1;
 +  _tabsDoc.frame = NSMakeRect(0, 0, side, MAX(rowY, NSHeight(_tabsScroll.frame)));
 +
 +  _page = NSMakeRect(columnEnd + kGap, kToolbar, width - (columnEnd + kGap) - kPad,
@@ -2012,6 +2050,8 @@ index 0000000000..826500b9b0
 +    AgensTabRow* row = [[AgensTabRow alloc] initWithFrame:NSMakeRect(0, 0, kSide, kRow)];
 +    __weak AgensTabRow* weakRow = row;
 +    row.onPress = ^{ [weak activate:weakRow.index]; };
++    row.onDrag = ^(CGFloat dy) { [weak dragRow:weakRow by:dy]; };
++    row.onDrop = ^{ [weak dropRow:weakRow]; };
 +    row.onClose = ^{ [weak close:weakRow.index]; };
 +    [_tabsDoc addSubview:row];
 +    [_rows addObject:row];
@@ -2390,6 +2430,29 @@ index 0000000000..826500b9b0
 +}
 +- (void)reloadOrStop {
 +  [self run:_loading ? agens_window_stop : agens_window_reload];
++}
++- (void)dragRow:(AgensTabRow*)row by:(CGFloat)dy {
++  if (!_dragged) {
++    _dragged = row;
++    [_tabsDoc addSubview:row positioned:NSWindowAbove relativeTo:nil];  // on top of the others
++  }
++  const CGFloat step = kRow + 1;
++  CGFloat y = MAX(0, MIN(row.index * step + dy, (_rows.count - 1) * step));
++  _dropIndex = (int)lround(y / step);
++  [NSAnimationContext runAnimationGroup:^(NSAnimationContext* ctx) {
++    ctx.duration = 0.12;
++    ctx.allowsImplicitAnimation = YES;
++    [self relayout];
++  }];
++  NSRect f = row.frame;
++  f.origin.y = y;
++  row.frame = f;
++}
++- (void)dropRow:(AgensTabRow*)row {
++  const int from = row.index, to = _dropIndex;
++  _dragged = nil;
++  if (_window && from != to) agens_window_move_tab(_window, from, to);
++  [self relayout];
 +}
 +- (void)activate:(int)index {
 +  if (_window) agens_window_activate_tab(_window, index);
