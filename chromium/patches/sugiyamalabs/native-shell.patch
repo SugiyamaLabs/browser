@@ -1,9 +1,9 @@
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
 new file mode 100644
-index 0000000000..11ea80182d
+index 0000000000..fd23d9cae5
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embed.h
-@@ -0,0 +1,172 @@
+@@ -0,0 +1,177 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The boundary between the engine and any interface (the browser's own chrome today, the Agens
 +// app later). Plain C on purpose: no Chromium or C++ types cross it, Swift imports it as is, and
@@ -29,6 +29,9 @@ index 0000000000..11ea80182d
 +  int can_go_back;
 +  int can_go_forward;
 +  int bookmarked;  // the page is in Favoritos
++  int pinned;      // kept at the front, as an icon; Chromium keeps pinned tabs first
++  int audible;     // playing sound now
++  int muted;       // sound turned off by the person
 +} AgensTab;
 +
 +// Things the window's menu opens (Chromium's own pages for now).
@@ -51,6 +54,8 @@ index 0000000000..11ea80182d
 +void agens_window_activate_tab(AgensWindow* window, int index);
 +void agens_window_close_tab(AgensWindow* window, int index);
 +void agens_window_move_tab(AgensWindow* window, int from, int to);
++void agens_window_set_pinned(AgensWindow* window, int index, int pinned);
++void agens_window_toggle_mute(AgensWindow* window, int index);
 +// Address or search text, as typed; the engine decides which it is.
 +void agens_window_navigate(AgensWindow* window, const char* text);
 +void agens_window_back(AgensWindow* window);
@@ -178,10 +183,10 @@ index 0000000000..11ea80182d
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EMBED_H_
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
 new file mode 100644
-index 0000000000..3a513e84ee
+index 0000000000..246a46b29d
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_window.h
-@@ -0,0 +1,406 @@
+@@ -0,0 +1,408 @@
 +// Copyright 2026 SugiyamaLabs.
 +// One browser window as the embed API sees it (agens_embed.h): tabs, suggestions, atos, search
 +// default, bookmarks. Platform-neutral; each platform's shell (native_shell_mac.mm, later
@@ -493,7 +498,9 @@ index 0000000000..3a513e84ee
 +                 static_cast<int>(icons[i].size()), i == model()->active_index(),
 +                 contents->IsLoading(), contents->WasDiscarded(),
 +                 contents->GetController().CanGoBack(), contents->GetController().CanGoForward(),
-+                 bookmarks && bookmarks->IsBookmarked(contents->GetVisibleURL())};
++                 bookmarks && bookmarks->IsBookmarked(contents->GetVisibleURL()),
++                 model()->IsTabPinned(i), contents->IsCurrentlyAudible(),
++                 contents->IsAudioMuted()};
 +    }
 +    observer(context, tabs.data(), static_cast<int>(tabs.size()));
 +  }
@@ -590,10 +597,10 @@ index 0000000000..3a513e84ee
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
 new file mode 100644
-index 0000000000..6ad4aa481c
+index 0000000000..f4db9ab0c9
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.cc
-@@ -0,0 +1,313 @@
+@@ -0,0 +1,321 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The embed API (agens_embed.h) on top of AgensWindow. Same code on every platform.
 +
@@ -822,6 +829,14 @@ index 0000000000..6ad4aa481c
 +  if (w->model()->ContainsIndex(from) && w->model()->ContainsIndex(to) && from != to) {
 +    w->model()->MoveWebContentsAt(from, to, /*select_after_move=*/false);
 +  }
++}
++void agens_window_set_pinned(AgensWindow* w, int index, int pinned) {
++  if (w->model()->ContainsIndex(index)) w->model()->SetTabPinned(index, pinned);
++}
++void agens_window_toggle_mute(AgensWindow* w, int index) {
++  if (!w->model()->ContainsIndex(index)) return;
++  content::WebContents* contents = w->model()->GetWebContentsAt(index);
++  contents->SetAudioMuted(!contents->IsAudioMuted());
 +}
 +void agens_window_navigate(AgensWindow* w, const char* text) {
 +  content::WebContents* active = w->model()->GetActiveWebContents();
@@ -1115,10 +1130,10 @@ index 0000000000..fb231e798b
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..fc08b61f35
+index 0000000000..f85f888dd4
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,2512 @@
+@@ -0,0 +1,2719 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -1209,6 +1224,8 @@ index 0000000000..fc08b61f35
 +static const CGFloat kRail = 40;        // the collapsed column (prototype .collapsed .sidebar)
 +static const CGFloat kLightsEnd = 86;   // the traffic lights end at 72; prototype leaves 12+2 pt
 +static NSString* const kCollapsedKey = @"AgensSidebarCollapsed";
++static NSString* const kTabsOnTopKey = @"AgensTabsOnTop";  // tabs in a strip above the bar (⌘⇧S)
++static const CGFloat kStrip = 52;  // the top tab strip, same height as the bar so the lights center
 +
 +static NSImage* Symbol(NSString* name, CGFloat size = 15) {
 +  NSImage* image = [NSImage imageWithSystemSymbolName:name accessibilityDescription:nil];
@@ -1492,36 +1509,50 @@ index 0000000000..fc08b61f35
 +}
 +@end
 +
-+// One tab in the column: favicon (or spinner), title, close on hover.
++// One tab: favicon (or spinner), title, sound, close on hover. Three looks: a row in the column,
++// a pinned tile (prototype .pin) and a pill in the top strip (prototype .ttab).
++typedef enum { kLookRow, kLookPin, kLookTop } TabLook;
 +@interface AgensTabRow : AgensHoverView
 +@property(nonatomic) int index;
++@property(nonatomic) TabLook look;
++@property(nonatomic, readonly) BOOL pinned;
 +@property(nonatomic, copy) void (^onClose)(void);
-+@property(nonatomic, copy) void (^onDrag)(CGFloat dy);  // pointer moved dy since mouse down
++@property(nonatomic, copy) void (^onPin)(void);
++@property(nonatomic, copy) void (^onMute)(void);
++@property(nonatomic, copy) void (^onDrag)(NSPoint delta);  // pointer moved this much since mouse down
 +@property(nonatomic, copy) void (^onDrop)(void);
 +- (void)updateWith:(const AgensTab&)tab;
 +@end
 +@implementation AgensTabRow {
-+  CGFloat _downY;
++  NSPoint _down;
 +  BOOL _dragging;
++  BOOL _muted;
++  BOOL _audible;
 +  NSImageView* _favicon;
 +  NSProgressIndicator* _spinner;
 +  NSTextField* _title;
++  NSButton* _sound;
 +  NSButton* _close;
 +}
 +@synthesize index = _index;
++@synthesize look = _look;
++@synthesize pinned = _pinned;
 +@synthesize onClose = _onClose;
++@synthesize onPin = _onPin;
++@synthesize onMute = _onMute;
 +@synthesize onDrag = _onDrag;
 +@synthesize onDrop = _onDrop;
 +// Click activates on release; a drag of more than 4 pt reorders instead.
 +- (void)mouseDown:(NSEvent*)event {
-+  _downY = [self.superview convertPoint:event.locationInWindow fromView:nil].y;
++  _down = [self.superview convertPoint:event.locationInWindow fromView:nil];
 +  _dragging = NO;
 +}
 +- (void)mouseDragged:(NSEvent*)event {
-+  CGFloat dy = [self.superview convertPoint:event.locationInWindow fromView:nil].y - _downY;
-+  if (!_dragging && fabs(dy) < 4) return;
++  NSPoint p = [self.superview convertPoint:event.locationInWindow fromView:nil];
++  NSPoint delta = NSMakePoint(p.x - _down.x, p.y - _down.y);
++  if (!_dragging && hypot(delta.x, delta.y) < 4) return;
 +  _dragging = YES;
-+  if (_onDrag) _onDrag(dy);
++  if (_onDrag) _onDrag(delta);
 +}
 +- (void)mouseUp:(NSEvent*)event {
 +  if (_dragging) {
@@ -1539,26 +1570,41 @@ index 0000000000..fc08b61f35
 +    _spinner.controlSize = NSControlSizeSmall;
 +    _spinner.displayedWhenStopped = NO;
 +    _title = Label(13, NSFontWeightRegular, kMute);
++    _sound = [NSButton buttonWithImage:Symbol(@"speaker.wave.2.fill", 10) target:self action:@selector(mute:)];
++    _sound.bordered = NO;
 +    _close = [NSButton buttonWithImage:Symbol(@"xmark", 10) target:self action:@selector(closeTab:)];
 +    _close.bordered = NO;
 +    _close.contentTintColor = kDim.color();
 +    _close.toolTip = @"Fechar aba";
 +    _close.accessibilityLabel = @"Fechar aba";
-+    for (NSView* v in @[ _favicon, _spinner, _title, _close ]) [self addSubview:v];
++    for (NSView* v in @[ _favicon, _spinner, _title, _sound, _close ]) [self addSubview:v];
 +  }
 +  return self;
 +}
 +- (BOOL)compact {
-+  return NSWidth(self.bounds) < 60;  // collapsed column: the favicon only
++  return NSWidth(self.bounds) < 60;  // collapsed column, pinned tile, narrow pill: the favicon only
++}
++- (void)setLook:(TabLook)look {
++  _look = look;
++  _title.font = [NSFont systemFontOfSize:look == kLookTop ? 12.5 : 13];
++  self.layer.cornerRadius = look == kLookRow ? 8 : 9;
++  [self refresh];
 +}
 +- (void)layout {
 +  [super layout];
-+  CGFloat w = NSWidth(self.bounds);
-+  CGFloat iconX = self.compact ? (w - 16) / 2 : 8;
-+  _favicon.frame = NSMakeRect(iconX, 8, 16, 16);
++  const CGFloat w = NSWidth(self.bounds), h = NSHeight(self.bounds);
++  const CGFloat iconX = self.compact ? (w - 16) / 2 : _look == kLookTop ? 10 : 8;
++  _favicon.frame = NSMakeRect(iconX, (h - 16) / 2, 16, 16);
 +  _spinner.frame = _favicon.frame;
-+  _close.frame = NSMakeRect(w - 26, 6, 20, 20);
-+  _title.frame = NSMakeRect(34, 7, w - 34 - 30, 18);
++  _close.frame = NSMakeRect(w - 26, (h - 20) / 2, 20, 20);
++  if (self.compact) {
++    _sound.frame = NSMakeRect(w - 15, 1, 14, 14);  // a badge on the tile's corner
++  } else {
++    _sound.frame = NSMakeRect(NSMinX(_close.frame) - 20, (h - 20) / 2, 20, 20);
++  }
++  const CGFloat titleX = NSMaxX(_favicon.frame) + (_look == kLookTop ? 8 : 10);
++  const CGFloat titleEnd = (_sound.hidden ? NSMinX(_close.frame) : NSMinX(_sound.frame)) - 4;
++  _title.frame = NSMakeRect(titleX, (h - 18) / 2, titleEnd - titleX, 18);
 +  _title.hidden = self.compact;
 +  [self refresh];
 +}
@@ -1584,18 +1630,45 @@ index 0000000000..fc08b61f35
 +    [_spinner stopAnimation:nil];
 +  }
 +  _favicon.hidden = tab.loading;
++  _pinned = tab.pinned;
++  _muted = tab.muted;
++  _audible = tab.audible;
++  _sound.image = Symbol(_muted ? @"speaker.slash.fill" : @"speaker.wave.2.fill", 10);
++  _sound.toolTip = _muted ? @"Ativar o som da aba" : @"Silenciar a aba";
++  _sound.accessibilityLabel = _sound.toolTip;
++  _sound.hidden = !(_audible || _muted);
 +  self.selected = tab.active;
++  self.needsLayout = YES;
 +}
 +- (void)refresh {
 +  [super refresh];
 +  _title.textColor = (self.selected || self.hovered) ? kInk.color() : kMute.color();
 +  _close.hidden = self.compact || !(self.selected || self.hovered);
++  _sound.contentTintColor = _muted ? kLight3.color() : kDim.color();
++  // Pinned tiles always have the line; top pills only when selected.
++  const BOOL border = _look == kLookPin || (_look == kLookTop && self.selected);
++  self.layer.borderWidth = border ? 1 : 0;
++  self.layer.borderColor = CG(kLine, self);
++}
++- (NSMenu*)menuForEvent:(NSEvent*)event {
++  NSMenu* menu = [[NSMenu alloc] initWithTitle:@"Aba"];
++  [menu addItemWithTitle:_pinned ? @"Desafixar aba" : @"Fixar aba" action:@selector(pin:) keyEquivalent:@""].target = self;
++  [menu addItemWithTitle:_muted ? @"Ativar o som da aba" : @"Silenciar a aba" action:@selector(mute:) keyEquivalent:@""].target = self;
++  [menu addItem:NSMenuItem.separatorItem];
++  [menu addItemWithTitle:@"Fechar aba" action:@selector(closeTab:) keyEquivalent:@""].target = self;
++  return menu;
 +}
 +- (void)otherMouseDown:(NSEvent*)event {  // middle click closes, like every browser
 +  if (_onClose) _onClose();
 +}
 +- (void)closeTab:(id)sender {
 +  if (_onClose) _onClose();
++}
++- (void)pin:(id)sender {
++  if (_onPin) _onPin();
++}
++- (void)mute:(id)sender {
++  if (_onMute) _onMute();
 +}
 +@end
 +
@@ -1903,6 +1976,8 @@ index 0000000000..fc08b61f35
 +@protocol AgensSettingsHost <NSObject>
 +- (BOOL)collapsed;
 +- (void)toggleSidebar;
++- (BOOL)tabsOnTop;
++- (void)toggleTabsPosition;
 +- (NSArray<NSString*>*)atoNamesForSettings;
 +@end
 +
@@ -2433,10 +2508,15 @@ index 0000000000..fc08b61f35
 +                                     action:@selector(setMode:)];
 +  mode.enabled = !brasa;
 +  y = [self option:@"Modo" detail:brasa ? @"A Brasa é sempre escura." : nil control:mode y:y];
-+  y = [self option:@"Lateral" detail:@"⌘S alterna."
-+           control:[self segments:@[ @"Aberta", @"Recolhida" ] selected:[_chrome collapsed] ? 1 : 0 action:@selector(setSide:)]
++  y = [self option:@"Abas" detail:@"⌘⇧S alterna."
++           control:[self segments:@[ @"Na lateral", @"Em cima" ] selected:[_chrome tabsOnTop] ? 1 : 0 action:@selector(setTabsPosition:)]
 +                 y:y];
-+  y = [self info:@"Abas em cima, densidade, barra de favoritos" detail:nil note:@"Ainda não existem" y:y];
++  if (![_chrome tabsOnTop]) {
++    y = [self option:@"Lateral" detail:@"⌘S alterna."
++             control:[self segments:@[ @"Aberta", @"Recolhida" ] selected:[_chrome collapsed] ? 1 : 0 action:@selector(setSide:)]
++                   y:y];
++  }
++  y = [self info:@"Densidade, barra de favoritos" detail:nil note:@"Ainda não existem" y:y];
 +  return y;
 +}
 +- (void)themeDidChange {
@@ -2480,6 +2560,10 @@ index 0000000000..fc08b61f35
 +}
 +- (void)setMode:(NSSegmentedControl*)seg {
 +  if (_browser) agens_window_set_color_mode(_browser, (AgensColorMode)seg.selectedSegment);
++}
++- (void)setTabsPosition:(NSSegmentedControl*)seg {
++  if ((seg.selectedSegment == 1) != [_chrome tabsOnTop]) [_chrome toggleTabsPosition];
++  [self showSection:@"aparencia"];  // "Lateral" only applies to tabs in the column
 +}
 +- (void)setSide:(NSSegmentedControl*)seg {
 +  if ((seg.selectedSegment == 1) != [_chrome collapsed]) [_chrome toggleSidebar];
@@ -2772,6 +2856,12 @@ index 0000000000..fc08b61f35
 +  NSView* _atoDot;
 +  AgensToolButton* _toggle;
 +  AgensToolButton* _star;  // in the address, right side (prototype .star)
++  AgensToolButton* _sound;  // in the address, left of the star, while the page plays or is muted
++  AgensToolButton* _newTabTop;  // "+" at the end of the top strip
++  BOOL _top;                    // tabs on top instead of the column
++  int _pinnedCount;             // Chromium keeps pinned tabs first: rows [0, _pinnedCount)
++  int _activeIndex;
++  CGFloat _tabStep, _listX;  // top strip: the width of one unpinned tab plus the gap, and where they start
 +  AgensToolButton* _menu;  // "⋯" after the address
 +  NSView* _menuView;       // the open panel (menu or downloads), shown under its button
 +  __weak NSView* _popoverAnchor;
@@ -2827,8 +2917,16 @@ index 0000000000..fc08b61f35
 +    _star = [[AgensToolButton alloc] initWithSymbol:@"star" label:@"Adicionar aos favoritos (⌘D)" size:12];
 +    _star.layer.cornerRadius = 7;
 +    _star.onPress = ^{ [weak run:agens_window_toggle_bookmark]; };
++    _sound = [[AgensToolButton alloc] initWithSymbol:@"speaker.wave.2.fill" label:@"Silenciar a aba" size:12];
++    _sound.layer.cornerRadius = 7;
++    _sound.hidden = YES;
++    _sound.onPress = ^{
++      AgensChrome* strong = weak;
++      if (strong && strong->_window) agens_window_toggle_mute(strong->_window, strong->_activeIndex);
++    };
 +    [_omni addSubview:_omniIcon];
 +    [_omni addSubview:_address];
++    [_omni addSubview:_sound];
 +    [_omni addSubview:_star];
 +    _siteButton = [[AgensHoverView alloc] init];
 +    _siteButton.layer.cornerRadius = 7;
@@ -2874,6 +2972,9 @@ index 0000000000..fc08b61f35
 +    _newTab.toolTip = @"Nova aba (⌘T)";
 +    _newTab.accessibilityLabel = @"Nova aba";
 +    _newTab.onPress = ^{ [weak run:agens_window_new_tab]; };
++    _newTabTop = [[AgensToolButton alloc] initWithSymbol:@"plus" label:@"Nova aba (⌘T)"];
++    _newTabTop.onPress = ^{ [weak run:agens_window_new_tab]; };
++    _top = [NSUserDefaults.standardUserDefaults boolForKey:kTabsOnTopKey];
 +
 +    _tabsScroll = [[NSScrollView alloc] init];
 +    _tabsScroll.drawsBackground = NO;
@@ -2902,9 +3003,15 @@ index 0000000000..fc08b61f35
 +                                       AgensChrome* strong = weak;
 +                                       NSEventModifierFlags mods = event.modifierFlags &
 +                                           NSEventModifierFlagDeviceIndependentFlagsMask;
-+                                       if (strong && event.window == strong.window &&
-+                                           mods == NSEventModifierFlagCommand &&
-+                                           [event.charactersIgnoringModifiers isEqualToString:@"s"]) {
++                                       if (!strong || event.window != strong.window ||
++                                           ![event.charactersIgnoringModifiers.lowercaseString isEqualToString:@"s"]) {
++                                         return event;
++                                       }
++                                       if (mods == (NSEventModifierFlagCommand | NSEventModifierFlagShift)) {
++                                         [strong toggleTabsPosition];
++                                         return nil;
++                                       }
++                                       if (mods == NSEventModifierFlagCommand && !strong->_top) {
 +                                         [strong toggleSidebar];
 +                                         return nil;
 +                                       }
@@ -2920,7 +3027,7 @@ index 0000000000..fc08b61f35
 +    _ntp.field.action = @selector(go:);
 +    _ntp.field.delegate = self;
 +
-+    for (NSView* v in @[ _toggle, _back, _forward, _reload, _omni, _downloadsButton, _menu, _tabsScroll, _moreAtos, _atoTile, _atoName, _separator, _newTab,
++    for (NSView* v in @[ _toggle, _back, _forward, _reload, _omni, _downloadsButton, _menu, _tabsScroll, _moreAtos, _atoTile, _atoName, _separator, _newTab, _newTabTop,
 +                         _atosLine, _addAto, _atoDot, _ntp, _statusPill, _suggest ]) {
 +      [self addSubview:v];
 +    }
@@ -2998,6 +3105,7 @@ index 0000000000..fc08b61f35
 +  }
 +}
 +- (void)themeChanged:(NSNotification*)note {
++  [self setTop:[NSUserDefaults.standardUserDefaults boolForKey:kTabsOnTopKey]];
 +  [self refreshBackdrop];
 +  RefreshTree(self);
 +
@@ -3032,47 +3140,44 @@ index 0000000000..fc08b61f35
 +  // address has the page card's edges). Collapsed: the buttons follow the traffic lights.
 +  // During the animation everything follows the current width: the buttons slide from the end
 +  // of the column to after the traffic lights, and the labels switch at the halfway point.
-+  const CGFloat side = _sideW;
++  // Tabs on top (prototype .layout-top): a strip of pills by the lights, the bar under it with
++  // the atos before the menu, and the page card across the whole width.
++  const BOOL top = _top;
++  const CGFloat side = top ? 0 : _sideW;
 +  const BOOL narrow = side < (kRail + kSide) / 2;
++  for (NSView* v in @[ _toggle, _atoTile, _atoName, _separator, _newTab, _tabsScroll, _atosLine ]) v.hidden = top;
++  _newTabTop.hidden = !top;
++  for (AgensTabRow* row in _rows) {
++    NSView* parent = top || row.pinned ? self : _tabsDoc;
++    if (row.superview != parent) {
++      if (parent == self) {
++        [self addSubview:row positioned:NSWindowBelow relativeTo:_ntp];
++      } else {
++        [parent addSubview:row];
++      }
++    }
++    TabLook look = top ? kLookTop : row.pinned ? kLookPin : kLookRow;
++    if (row.look != look) row.look = look;
++  }
++
++  const CGFloat barY = top ? kStrip : 0;
 +  CGFloat columnEnd = kPad + side;
-+  CGFloat navX = MAX(kLightsEnd, columnEnd - 118);
++  CGFloat navX = top ? kPad - 30 : MAX(kLightsEnd, columnEnd - 118);
 +  _toggle.frame = NSMakeRect(navX, 12, 28, 28);
-+  _back.frame = NSMakeRect(navX + 30, 12, 28, 28);
-+  _forward.frame = NSMakeRect(navX + 60, 12, 28, 28);
-+  _reload.frame = NSMakeRect(navX + 90, 12, 28, 28);
-+  CGFloat omniX = MAX(columnEnd + kGap, navX + 126);
-+  _menu.frame = NSMakeRect(width - kPad - 28, 12, 28, 28);
++  _back.frame = NSMakeRect(navX + 30, barY + 12, 28, 28);
++  _forward.frame = NSMakeRect(navX + 60, barY + 12, 28, 28);
++  _reload.frame = NSMakeRect(navX + 90, barY + 12, 28, 28);
++  CGFloat omniX = top ? NSMaxX(_reload.frame) + 10 : MAX(columnEnd + kGap, navX + 126);
++  _menu.frame = NSMakeRect(width - kPad - 28, barY + 12, 28, 28);
 +  CGFloat omniEnd = NSMinX(_menu.frame) - 4;
 +  if (!_downloadsButton.hidden) {
-+    _downloadsButton.frame = NSMakeRect(NSMinX(_menu.frame) - 30, 12, 28, 28);
++    _downloadsButton.frame = NSMakeRect(NSMinX(_menu.frame) - 30, barY + 12, 28, 28);
 +    omniEnd = NSMinX(_downloadsButton.frame) - 4;
 +  }
-+  _omni.frame = NSMakeRect(omniX, 9, omniEnd - omniX, 34);
-+  _omniIcon.frame = NSMakeRect(12, 10, 14, 14);
-+  _siteButton.frame = NSInsetRect(_omniIcon.frame, -6, -6);
-+  _star.frame = NSMakeRect(NSWidth(_omni.frame) - 4 - 26, 4, 26, 26);
-+  _address.frame = NSMakeRect(33, 8, NSMinX(_star.frame) - 6 - 33, 18);
 +
-+  // Column: ato title (prototype .space-title), separator, new tab, tabs.
-+  CGFloat y = kToolbar;
-+  CGFloat inset = narrow ? (side - 18) / 2 : 8;
-+  _atoTile.frame = NSMakeRect(kPad + inset, y + 7, 18, 18);
-+  _atoName.frame = NSMakeRect(kPad + 35, y + 7, kSide - 43, 18);
-+  _atoName.hidden = narrow;
-+  y += kRow + 6;
-+  _separator.frame = NSMakeRect(kPad + (narrow ? 6 : 8), y, side - (narrow ? 12 : 16), 1);
-+  y += 7;
-+  _newTab.frame = NSMakeRect(kPad, y, side, kRow);
-+  _newTabPlus.frame = NSMakeRect(narrow ? (side - 16) / 2 : 8, 8, 16, 16);
-+  _newTabLabel.frame = NSMakeRect(34, 7, 150, 18);
-+  _newTabLabel.hidden = narrow;
-+  y += kRow + 1;
-+
-+  // Atos at the foot with a line above (prototype .spaces): a centered row when open, a column
-+  // when collapsed. Only what fits (6 open, 5 collapsed); past that the last slot is "⋯" with the
-+  // full list, and the current ato always stays in view. The warm dot marks the current one:
-+  // under it, or to its left in the column.
-+  const NSUInteger n = _atoButtons.count, cap = narrow ? 5 : 6;
++  // Atos: only what fits (6 in the open column, 5 collapsed, 4 on the bar); past that the last
++  // slot is "⋯" with the full list, and the current ato always stays in view.
++  const NSUInteger n = _atoButtons.count, cap = top ? 4 : narrow ? 5 : 6;
 +  const BOOL overflow = n > cap;
 +  std::vector<int> shown;
 +  for (int i = 0; i < (int)(overflow ? cap - 1 : n); ++i) shown.push_back(i);
@@ -3087,52 +3192,129 @@ index 0000000000..fc08b61f35
 +  if (overflow) [foot addObject:_moreAtos];
 +  [foot addObject:_addAto];
 +  _atoDot.hidden = YES;
-+  CGFloat footY;
-+  if (!narrow) {
-+    footY = height - kPad - kAtos;
-+    _atosLine.frame = NSMakeRect(kPad, footY, side, 1);
-+    CGFloat x = kPad + (side - foot.count * 32) / 2;
++  if (top) {  // on the bar, before downloads and the menu (prototype .profiles)
++    CGFloat x = omniEnd - foot.count * 32 + 2;
++    omniEnd = x - 10;
 +    for (NSView* v in foot) {
-+      v.frame = NSMakeRect(x, footY + 8, 30, 28);
-+      if ([v isKindOfClass:AgensAtoButton.class] && ((AgensAtoButton*)v).selected) {
-+        _atoDot.frame = NSMakeRect(x + 13, footY + 8 + 28 + 3, 4, 4);
-+        _atoDot.hidden = NO;
-+      }
++      v.frame = NSMakeRect(x, barY + 12, 30, 28);
 +      x += 32;
 +    }
-+  } else {
-+    footY = height - kPad - 8 - foot.count * 32;
-+    _atosLine.frame = NSMakeRect(kPad + 6, footY, side - 12, 1);
-+    CGFloat x = kPad + (side - 30) / 2, by = footY + 8;
-+    for (NSView* v in foot) {
-+      v.frame = NSMakeRect(x, by, 30, 28);
-+      if ([v isKindOfClass:AgensAtoButton.class] && ((AgensAtoButton*)v).selected) {
-+        _atoDot.frame = NSMakeRect(x - 5, by + 12, 4, 4);
-+        _atoDot.hidden = NO;
-+      }
-+      by += 32;
++  }
++  _omni.frame = NSMakeRect(omniX, barY + 9, omniEnd - omniX, 34);
++  _omniIcon.frame = NSMakeRect(12, 10, 14, 14);
++  _siteButton.frame = NSInsetRect(_omniIcon.frame, -6, -6);
++  _star.frame = NSMakeRect(NSWidth(_omni.frame) - 4 - 26, 4, 26, 26);
++  _sound.frame = NSMakeRect(NSMinX(_star.frame) - 26, 4, 26, 26);
++  const CGFloat addressEnd = _sound.hidden ? NSMinX(_star.frame) : NSMinX(_sound.frame);
++  _address.frame = NSMakeRect(33, 8, addressEnd - 6 - 33, 18);
++
++  NSMutableArray<AgensTabRow*>* pins = [NSMutableArray array];
++  NSMutableArray<AgensTabRow*>* list = [NSMutableArray array];
++  for (AgensTabRow* row in _rows) [row.pinned ? pins : list addObject:row];
++  NSRect page;
++  if (top) {
++    // The strip: pinned tabs as 44 pt icons, the rest share what's left (prototype .ttab: up to
++    // 220 pt, at least 44). The "+" stays at the right end.
++    _newTabTop.frame = NSMakeRect(width - kPad - 28, 12, 28, 28);
++    const CGFloat x0 = kLightsEnd, end = NSMinX(_newTabTop.frame) - 6;
++    const CGFloat pinsW = pins.count * 48;
++    const CGFloat w = list.count ? MAX(44, MIN(220, (end - x0 - pinsW + 4) / list.count - 4)) : 0;
++    _tabStep = w + 4;
++    _listX = x0 + pinsW;
++    CGFloat x = x0;
++    for (AgensTabRow* row in pins) {
++      row.frame = NSMakeRect(x, 10, 44, 32);
++      row.hidden = x + 44 > end;
++      x += 48;
 +    }
++    int slot = 0;
++    for (AgensTabRow* row in list) {
++      if (row == _dragged) continue;  // it follows the pointer (dragRow:by:)
++      if (_dragged && slot == _dropIndex - _pinnedCount) x += w + 4;  // where it will land
++      row.frame = NSMakeRect(x, 10, w, 32);
++      // shortcut: tabs past the end are hidden, not scrolled; add strip scrolling if people keep 30+ tabs on top.
++      row.hidden = x + w > end;
++      x += w + 4;
++      ++slot;
++    }
++    page = NSMakeRect(kPad, kStrip + 52, width - 2 * kPad, height - kStrip - 52 - kPad);
++  } else {
++    // Column: ato title (prototype .space-title), pinned tiles, separator, new tab, tabs.
++    CGFloat y = kToolbar;
++    CGFloat inset = narrow ? (side - 18) / 2 : 8;
++    _atoTile.frame = NSMakeRect(kPad + inset, y + 7, 18, 18);
++    _atoName.frame = NSMakeRect(kPad + 35, y + 7, kSide - 43, 18);
++    _atoName.hidden = narrow;
++    y += kRow + 6;
++    // Pinned (prototype .pinned): a grid of four 36 pt tiles; one per line in the rail.
++    const CGFloat tileW = narrow ? side : (side - 12) / 4, tileH = narrow ? kRow : 36;
++    for (NSUInteger i = 0; i < pins.count; ++i) {
++      const NSUInteger col = narrow ? 0 : i % 4, line = narrow ? i : i / 4;
++      pins[i].hidden = NO;
++      if (pins[i] != _dragged) {
++        pins[i].frame = NSMakeRect(kPad + col * (tileW + 4), y + line * (tileH + 4), tileW, tileH);
++      }
++    }
++    if (pins.count) y += ((narrow ? pins.count : (pins.count + 3) / 4) * (tileH + 4)) + 2;
++    _separator.frame = NSMakeRect(kPad + (narrow ? 6 : 8), y, side - (narrow ? 12 : 16), 1);
++    y += 7;
++    _newTab.frame = NSMakeRect(kPad, y, side, kRow);
++    _newTabPlus.frame = NSMakeRect(narrow ? (side - 16) / 2 : 8, 8, 16, 16);
++    _newTabLabel.frame = NSMakeRect(34, 7, 150, 18);
++    _newTabLabel.hidden = narrow;
++    y += kRow + 1;
++
++    // Atos at the foot with a line above (prototype .spaces): a centered row when open, a column
++    // when collapsed. The warm dot marks the current one: under it, or to its left in the column.
++    CGFloat footY;
++    if (!narrow) {
++      footY = height - kPad - kAtos;
++      _atosLine.frame = NSMakeRect(kPad, footY, side, 1);
++      CGFloat x = kPad + (side - foot.count * 32) / 2;
++      for (NSView* v in foot) {
++        v.frame = NSMakeRect(x, footY + 8, 30, 28);
++        if ([v isKindOfClass:AgensAtoButton.class] && ((AgensAtoButton*)v).selected) {
++          _atoDot.frame = NSMakeRect(x + 13, footY + 8 + 28 + 3, 4, 4);
++          _atoDot.hidden = NO;
++        }
++        x += 32;
++      }
++    } else {
++      footY = height - kPad - 8 - foot.count * 32;
++      _atosLine.frame = NSMakeRect(kPad + 6, footY, side - 12, 1);
++      CGFloat x = kPad + (side - 30) / 2, by = footY + 8;
++      for (NSView* v in foot) {
++        v.frame = NSMakeRect(x, by, 30, 28);
++        if ([v isKindOfClass:AgensAtoButton.class] && ((AgensAtoButton*)v).selected) {
++          _atoDot.frame = NSMakeRect(x - 5, by + 12, 4, 4);
++          _atoDot.hidden = NO;
++        }
++        by += 32;
++      }
++    }
++
++    // The tabs fill what's left and scroll. The collapsed rail is too narrow for a scroller next
++    // to the icons; it still scrolls with the trackpad or wheel.
++    _tabsScroll.hasVerticalScroller = !narrow;
++    _tabsScroll.verticalScroller.alphaValue = 1;
++    _tabsScroll.frame = NSMakeRect(kPad, y, side, MAX(0, footY - 6 - y));
++    CGFloat rowY = 0;
++    int slot = 0;
++    for (AgensTabRow* row in list) {
++      row.hidden = NO;
++      if (row == _dragged) continue;  // it follows the pointer (dragRow:by:)
++      if (_dragged && slot == _dropIndex - _pinnedCount) rowY += kRow + 1;  // where it will land
++      row.frame = NSMakeRect(0, rowY, side, kRow);
++      rowY += kRow + 1;
++      ++slot;
++    }
++    if (_dragged && !_dragged.pinned) rowY += kRow + 1;
++    _tabsDoc.frame = NSMakeRect(0, 0, side, MAX(rowY, NSHeight(_tabsScroll.frame)));
++    page = NSMakeRect(columnEnd + kGap, kToolbar, width - (columnEnd + kGap) - kPad,
++                      height - kToolbar - kPad);
 +  }
 +
-+  // The tabs fill what's left and scroll. The collapsed rail is too narrow for a scroller next to
-+  // the icons; it still scrolls with the trackpad or wheel.
-+  _tabsScroll.hasVerticalScroller = !narrow;
-+  _tabsScroll.verticalScroller.alphaValue = 1;
-+  _tabsScroll.frame = NSMakeRect(kPad, y, side, MAX(0, footY - 6 - y));
-+  CGFloat rowY = 0;
-+  int slot = 0;
-+  for (AgensTabRow* row in _rows) {
-+    if (row == _dragged) continue;  // it follows the pointer (dragRow:by:)
-+    if (_dragged && slot == _dropIndex) rowY += kRow + 1;  // the gap where it will land
-+    row.frame = NSMakeRect(0, rowY, side, kRow);
-+    rowY += kRow + 1;
-+    ++slot;
-+  }
-+  if (_dragged) rowY += kRow + 1;
-+  _tabsDoc.frame = NSMakeRect(0, 0, side, MAX(rowY, NSHeight(_tabsScroll.frame)));
-+
-+  _page = NSMakeRect(columnEnd + kGap, kToolbar, width - (columnEnd + kGap) - kPad,
-+                     height - kToolbar - kPad);
++  _page = page;
 +  _ntp.frame = NSInsetRect(_page, 1, 1);
 +  CGFloat statusW = MIN(ceil(_statusText.fittingSize.width) + 24, NSWidth(_page) / 2);
 +  _statusPill.frame = NSMakeRect(NSMinX(_page) + 8, NSMaxY(_page) - 8 - 22, statusW, 22);
@@ -3161,9 +3343,17 @@ index 0000000000..fc08b61f35
 +    AgensTabRow* row = [[AgensTabRow alloc] initWithFrame:NSMakeRect(0, 0, kSide, kRow)];
 +    __weak AgensTabRow* weakRow = row;
 +    row.onPress = ^{ [weak activate:weakRow.index]; };
-+    row.onDrag = ^(CGFloat dy) { [weak dragRow:weakRow by:dy]; };
++    row.onDrag = ^(NSPoint delta) { [weak dragRow:weakRow by:delta]; };
 +    row.onDrop = ^{ [weak dropRow:weakRow]; };
 +    row.onClose = ^{ [weak close:weakRow.index]; };
++    row.onPin = ^{
++      AgensChrome* strong = weak;
++      if (strong && strong->_window) agens_window_set_pinned(strong->_window, weakRow.index, !weakRow.pinned);
++    };
++    row.onMute = ^{
++      AgensChrome* strong = weak;
++      if (strong && strong->_window) agens_window_toggle_mute(strong->_window, weakRow.index);
++    };
 +    [_tabsDoc addSubview:row];
 +    [_rows addObject:row];
 +  }
@@ -3172,11 +3362,19 @@ index 0000000000..fc08b61f35
 +    [_rows removeLastObject];
 +  }
 +  int activeTab = -1;
++  _pinnedCount = 0;
 +  for (int i = 0; i < count; ++i) {
 +    _rows[i].index = i;
 +    [_rows[i] updateWith:tabs[i]];
++    if (tabs[i].pinned) ++_pinnedCount;
 +    if (tabs[i].active) activeTab = i;
 +    if (!tabs[i].active) continue;
++    _activeIndex = i;
++    _sound.hidden = !(tabs[i].audible || tabs[i].muted);
++    [_sound setSymbol:tabs[i].muted ? @"speaker.slash.fill" : @"speaker.wave.2.fill"];
++    [_sound setTint:tabs[i].muted ? kLight3 : kDim];
++    _sound.accessibilityLabel = tabs[i].muted ? @"Ativar o som da aba" : @"Silenciar a aba";
++    _sound.toolTip = _sound.accessibilityLabel;
 +    _url = @(tabs[i].url);
 +    _loading = tabs[i].loading;
 +    _bookmarked = tabs[i].bookmarked;
@@ -3198,7 +3396,7 @@ index 0000000000..fc08b61f35
 +  _ntp.hidden = _url.length > 0;
 +  if (!_ntp.hidden && !wasNTP) _ntp.field.stringValue = @"";
 +  [self relayout];
-+  if (activeTab >= 0) [_tabsDoc scrollRectToVisible:_rows[activeTab].frame];
++  if (activeTab >= 0 && _rows[activeTab].superview == _tabsDoc) [_tabsDoc scrollRectToVisible:_rows[activeTab].frame];
 +}
 +
 +// The address as the prototype shows it: no https:// or www., no lone trailing slash.
@@ -3548,28 +3746,52 @@ index 0000000000..fc08b61f35
 +- (void)reloadOrStop {
 +  [self run:_loading ? agens_window_stop : agens_window_reload];
 +}
-+- (void)dragRow:(AgensTabRow*)row by:(CGFloat)dy {
++// Unpinned tabs reorder by dragging: up and down the column, sideways on top. Pinned ones stay put.
++- (void)dragRow:(AgensTabRow*)row by:(NSPoint)delta {
++  if (row.pinned) return;
 +  if (!_dragged) {
 +    _dragged = row;
-+    [_tabsDoc addSubview:row positioned:NSWindowAbove relativeTo:nil];  // on top of the others
++    [row.superview addSubview:row positioned:NSWindowAbove relativeTo:nil];  // on top of the others
 +  }
-+  const CGFloat step = kRow + 1;
-+  CGFloat y = MAX(0, MIN(row.index * step + dy, (_rows.count - 1) * step));
-+  _dropIndex = (int)lround(y / step);
++  const int slot = row.index - _pinnedCount, last = (int)_rows.count - 1 - _pinnedCount;
++  NSRect f = row.frame;
++  if (_top) {
++    CGFloat x = MAX(_listX, MIN(_listX + slot * _tabStep + delta.x, _listX + last * _tabStep));
++    _dropIndex = _pinnedCount + (int)lround((x - _listX) / _tabStep);
++    f.origin.x = x;
++  } else {
++    const CGFloat step = kRow + 1;
++    CGFloat y = MAX(0, MIN(slot * step + delta.y, last * step));
++    _dropIndex = _pinnedCount + (int)lround(y / step);
++    f.origin.y = y;
++  }
 +  [NSAnimationContext runAnimationGroup:^(NSAnimationContext* ctx) {
 +    ctx.duration = 0.12;
 +    ctx.allowsImplicitAnimation = YES;
 +    [self relayout];
 +  }];
-+  NSRect f = row.frame;
-+  f.origin.y = y;
 +  row.frame = f;
 +}
 +- (void)dropRow:(AgensTabRow*)row {
++  if (row != _dragged) return;
 +  const int from = row.index, to = _dropIndex;
 +  _dragged = nil;
 +  if (_window && from != to) agens_window_move_tab(_window, from, to);
 +  [self relayout];
++}
++// Tabs on top or in the column (⌘⇧S and Configurações › Aparência), for every window.
++- (BOOL)tabsOnTop {
++  return _top;
++}
++- (void)toggleTabsPosition {
++  [NSUserDefaults.standardUserDefaults setBool:!_top forKey:kTabsOnTopKey];
++  [NSNotificationCenter.defaultCenter postNotificationName:kThemeChanged object:nil];
++}
++- (void)setTop:(BOOL)top {
++  if (top == _top) return;
++  [_sideTimer invalidate];
++  _sideW = _collapsed ? kRail : kSide;
++  _top = top;
 +}
 +- (void)activate:(int)index {
 +  if (_window) agens_window_activate_tab(_window, index);
