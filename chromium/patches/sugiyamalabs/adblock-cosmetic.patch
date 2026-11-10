@@ -1,0 +1,899 @@
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -830,6 +830,12 @@
+ 
+ source_set("core") {
+   sources = [
++    "agens_adblock/cosmetic_engine.cc",  # SugiyamaLabs
++    "agens_adblock/cosmetic_engine.h",
++    "agens_adblock/cosmetic_service.cc",
++    "agens_adblock/cosmetic_service.h",
++    "agens_adblock/youtube_scriptlet.cc",
++    "agens_adblock/youtube_scriptlet.h",
+     "about_flags.cc",
+     "after_startup_task_utils.cc",
+     "browser_about_handler.cc",
+@@ -883,6 +889,7 @@
+   }
+ 
+   deps = [
++    "//chrome/common/agens_adblock:mojo_bindings",  # SugiyamaLabs
+     ":active_use_util",
+     ":after_startup_task_utils",
+     ":bad_message",
+diff --git a/chrome/browser/chrome_browser_interface_binders.cc b/chrome/browser/chrome_browser_interface_binders.cc
+--- a/chrome/browser/chrome_browser_interface_binders.cc
++++ b/chrome/browser/chrome_browser_interface_binders.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/chrome_browser_interface_binders.h"
++#include "chrome/browser/agens_adblock/cosmetic_service.h"  // SugiyamaLabs
+ 
+ #include <utility>
+ 
+@@ -429,6 +430,9 @@
+ void PopulateChromeFrameBinders(
+     mojo::BinderMapWithContext<content::RenderFrameHost*>* map,
+     content::RenderFrameHost* render_frame_host) {
++  agens_adblock::PrimeCosmeticLists();  // SugiyamaLabs
++  map->Add<agens_adblock::mojom::CosmeticFilter>(
++      &agens_adblock::BindCosmeticFilter);
+   map->Add<glic::mojom::WebClientHandler>(&glic::BindGlicWebClientHandler);
+   // Defense in depth: privileged capability interfaces are not even registered
+   // for a frame outside a privileged process, so a non-PWC frame cannot
+diff --git a/chrome/renderer/BUILD.gn b/chrome/renderer/BUILD.gn
+--- a/chrome/renderer/BUILD.gn
++++ b/chrome/renderer/BUILD.gn
+@@ -63,6 +63,8 @@
+   configs = []
+   configs = [ "//third_party/tflite:tflite_shim_config" ] + _configs
+   sources = [
++    "agens_adblock/cosmetic_observer.cc",  # SugiyamaLabs
++    "agens_adblock/cosmetic_observer.h",
+     "benchmarking_bindings.cc",
+     "benchmarking_bindings.h",
+     "browser_exposed_renderer_interfaces.cc",
+@@ -127,6 +129,7 @@
+ 
+   deps = [
+     ":process_state",
++    "//chrome/common/agens_adblock:mojo_bindings",  # SugiyamaLabs
+     "//base/allocator:buildflags",
+     "//build:chromeos_buildflags",
+     "//chrome:resources",
+diff --git a/chrome/renderer/chrome_content_renderer_client.cc b/chrome/renderer/chrome_content_renderer_client.cc
+--- a/chrome/renderer/chrome_content_renderer_client.cc
++++ b/chrome/renderer/chrome_content_renderer_client.cc
+@@ -56,6 +56,7 @@
+ #include "chrome/renderer/benchmarking_bindings.h"
+ #include "chrome/renderer/browser_exposed_renderer_interfaces.h"
+ #include "chrome/renderer/chrome_content_settings_agent_delegate.h"
++#include "chrome/renderer/agens_adblock/cosmetic_observer.h"  // SugiyamaLabs
+ #include "chrome/renderer/chrome_render_frame_observer.h"
+ #include "chrome/renderer/chrome_render_thread_observer.h"
+ #include "chrome/renderer/controlled_frame/controlled_frame_extensions_renderer_api_provider.h"
+@@ -655,6 +656,7 @@
+   service_manager::BinderRegistry* registry = render_frame_observer->registry();
+ 
+   new prerender::NoStatePrefetchRenderFrameObserver(render_frame);
++  new agens_adblock::CosmeticObserver(render_frame);  // SugiyamaLabs
+ 
+   auto content_settings_delegate =
+       std::make_unique<ChromeContentSettingsAgentDelegate>(render_frame);
+diff --git a/chrome/browser/agens_adblock/cosmetic_engine.cc b/chrome/browser/agens_adblock/cosmetic_engine.cc
+new file mode 100644
+--- /dev/null
++++ b/chrome/browser/agens_adblock/cosmetic_engine.cc
+@@ -0,0 +1,187 @@
++// Copyright 2026 SugiyamaLabs. All rights reserved.
++#include "chrome/browser/agens_adblock/cosmetic_engine.h"
++
++#include <algorithm>
++
++namespace agens_adblock {
++namespace {
++
++constexpr std::string_view kRuleSuffix = "{display:none!important}\n";
++
++// Syntax only uBlock/ABP extensions understand (or that would break the
++// stylesheet); the browser cannot apply it as plain CSS, so these are dropped.
++constexpr std::string_view kUnsupported[] = {
++    ":has-text(", ":contains(", ":-abp-",       ":xpath(",   ":matches-",
++    ":min-text", ":upward(",    ":remove(",     ":style(",   ":others(",
++    ":nth-ancestor(", ":watch-attr(", ":if(",   ":if-not(",  ":not-has(",
++    ":-js(",     "+js(",        "{",            "}",         ";",
++    "/*",        "@",           "\n"};
++
++bool SelectorOk(std::string_view s) {
++  if (s.empty() || s[0] == '^') return false;
++  for (auto bad : kUnsupported)
++    if (s.find(bad) != std::string_view::npos) return false;
++  int paren = 0, bracket = 0;
++  for (char c : s) {
++    paren += (c == '(') - (c == ')');
++    bracket += (c == '[') - (c == ']');
++    if (paren < 0 || bracket < 0) return false;
++  }
++  return paren == 0 && bracket == 0;
++}
++
++bool DomainsOk(std::string_view d) {
++  for (char c : d)
++    if (!(isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-' ||
++          c == ',' || c == '~' || c == '_'))
++      return false;  // `*` entities (site.*) and junk: not supported
++  return true;
++}
++
++bool HostIn(std::string_view host, const std::string& d) {
++  return host == d ||
++         (host.size() > d.size() &&
++          host.compare(host.size() - d.size(), d.size(), d) == 0 &&
++          host[host.size() - d.size() - 1] == '.');
++}
++
++}  // namespace
++
++void CosmeticEngine::AddRule(std::string_view domains,
++                             std::string_view sel,
++                             ListClass cls) {
++  Store& st = stores_[cls];
++  std::vector<std::string> pos, neg;
++  size_t i = 0;
++  while (!domains.empty() && i <= domains.size()) {
++    size_t j = domains.find(',', i);
++    if (j == std::string_view::npos) j = domains.size();
++    std::string_view d = domains.substr(i, j - i);
++    if (!d.empty())
++      (d[0] == '~' ? neg : pos).emplace_back(d.substr(d[0] == '~'));
++    i = j + 1;
++  }
++  rule_count_++;
++  if (pos.empty()) {
++    if (neg.empty())
++      pending_generic_[cls].emplace_back(sel);
++    else
++      st.generic_excl.push_back({std::string(sel), std::move(neg)});
++    return;
++  }
++  for (auto& d : pos) st.by_domain[d].push_back({std::string(sel), neg});
++}
++
++void CosmeticEngine::AddList(std::string_view text, ListClass cls) {
++  size_t pos = 0;
++  while (pos < text.size()) {
++    size_t eol = text.find('\n', pos);
++    if (eol == std::string_view::npos) eol = text.size();
++    std::string_view line = text.substr(pos, eol - pos);
++    pos = eol + 1;
++    while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
++      line.remove_suffix(1);
++    if (line.size() < 3 || line[0] == '!' || line[0] == '[') continue;
++    size_t h = line.find('#');
++    if (h == std::string_view::npos) continue;
++    bool exception;
++    size_t sel_at;
++    if (line.compare(h, 2, "##") == 0) {
++      exception = false;
++      sel_at = h + 2;
++    } else if (line.compare(h, 3, "#@#") == 0) {
++      exception = true;
++      sel_at = h + 3;
++    } else {
++      continue;  // #?# #$# #%# ...: procedural / snippet rules
++    }
++    std::string_view domains = line.substr(0, h);
++    std::string_view sel = line.substr(sel_at);
++    if (!DomainsOk(domains) || !SelectorOk(sel)) continue;
++    if (!exception) {
++      AddRule(domains, sel, cls);
++      continue;
++    }
++    if (domains.empty()) {
++      generic_exceptions_.emplace(sel);
++      continue;
++    }
++    size_t i = 0;
++    while (i <= domains.size()) {
++      size_t j = domains.find(',', i);
++      if (j == std::string_view::npos) j = domains.size();
++      std::string_view d = domains.substr(i, j - i);
++      if (!d.empty() && d[0] != '~')
++        domain_exceptions_[std::string(d)].emplace(sel);
++      i = j + 1;
++    }
++  }
++}
++
++void CosmeticEngine::Finish() {
++  for (int c = 0; c < kNumClasses; ++c) {
++    auto& v = pending_generic_[c];
++    std::sort(v.begin(), v.end());
++    v.erase(std::unique(v.begin(), v.end()), v.end());
++    std::string& css = stores_[c].generic_css;
++    css.clear();
++    for (auto& s : v)
++      if (!generic_exceptions_.count(s)) css.append(s).append(kRuleSuffix);
++    std::vector<std::string>().swap(v);
++  }
++}
++
++std::string CosmeticEngine::CssFor(std::string_view host,
++                                   unsigned class_mask,
++                                   bool include_generic) const {
++  std::string out;
++  std::unordered_set<std::string> dropped;
++  std::vector<std::string_view> suffixes;
++  for (size_t at = 0;;) {
++    suffixes.push_back(host.substr(at));
++    at = host.find('.', at);
++    if (at == std::string_view::npos) break;
++    ++at;
++  }
++  for (auto s : suffixes) {
++    auto it = domain_exceptions_.find(std::string(s));
++    if (it != domain_exceptions_.end())
++      dropped.insert(it->second.begin(), it->second.end());
++  }
++  if (include_generic)
++    for (int c = 0; c < kNumClasses; ++c)
++      if (class_mask & (1u << c)) out += stores_[c].generic_css;
++  if (include_generic) {
++    // shortcut: linear scan per excepted selector; rare, upgrade if a host
++    // ever has hundreds of exceptions.
++    for (auto& d : dropped) {
++      std::string needle = d + std::string(kRuleSuffix);
++      for (size_t p = out.find(needle); p != std::string::npos;
++           p = out.find(needle, p)) {
++        if (p == 0 || out[p - 1] == '\n')
++          out.erase(p, needle.size());
++        else
++          p += needle.size();
++      }
++    }
++  }
++  auto emit = [&](const Rule& r) {
++    if (dropped.count(r.sel) || generic_exceptions_.count(r.sel)) return;
++    for (auto& e : r.excl)
++      if (HostIn(host, e)) return;
++    out.append(r.sel).append(kRuleSuffix);
++  };
++  for (int c = 0; c < kNumClasses; ++c) {
++    if (!(class_mask & (1u << c))) continue;
++    for (auto s : suffixes) {
++      auto it = stores_[c].by_domain.find(std::string(s));
++      if (it != stores_[c].by_domain.end())
++        for (auto& r : it->second) emit(r);
++    }
++    if (include_generic)
++      for (auto& r : stores_[c].generic_excl) emit(r);
++  }
++  return out;
++}
++
++}  // namespace agens_adblock
+diff --git a/chrome/browser/agens_adblock/cosmetic_engine.h b/chrome/browser/agens_adblock/cosmetic_engine.h
+new file mode 100644
+--- /dev/null
++++ b/chrome/browser/agens_adblock/cosmetic_engine.h
+@@ -0,0 +1,57 @@
++// Copyright 2026 SugiyamaLabs. All rights reserved.
++// Element-hiding rules (`##sel`, `domain##sel`, `#@#` exceptions) from
++// EasyList-syntax lists, turned into one CSS string per host. Std-only so it
++// can be tested standalone.
++#ifndef CHROME_BROWSER_AGENS_ADBLOCK_COSMETIC_ENGINE_H_
++#define CHROME_BROWSER_AGENS_ADBLOCK_COSMETIC_ENGINE_H_
++
++#include <string>
++#include <string_view>
++#include <unordered_map>
++#include <unordered_set>
++#include <vector>
++
++namespace agens_adblock {
++
++// Which user-facing level / pref a list belongs to.
++enum ListClass { kStandard = 0, kCookie = 1, kStrong = 2, kNumClasses = 3 };
++
++class CosmeticEngine {
++ public:
++  // Parses one list; call for every list, then Finish() once.
++  void AddList(std::string_view text, ListClass cls);
++  void Finish();
++
++  // CSS hiding the elements for |host|, from the lists in |class_mask| (bit
++  // per ListClass). Generic rules are left out when |include_generic| is
++  // false (used for subframes: keeps the per-frame stylesheet small).
++  std::string CssFor(std::string_view host,
++                     unsigned class_mask,
++                     bool include_generic) const;
++
++  size_t rule_count() const { return rule_count_; }
++
++ private:
++  struct Rule {
++    std::string sel;
++    std::vector<std::string> excl;  // hosts where a `~domain` disables it
++  };
++  struct Store {
++    std::string generic_css;  // finished, one rule per line
++    std::vector<Rule> generic_excl;
++    std::unordered_map<std::string, std::vector<Rule>> by_domain;
++  };
++
++  void AddRule(std::string_view domains, std::string_view sel, ListClass cls);
++
++  Store stores_[kNumClasses];
++  std::vector<std::string> pending_generic_[kNumClasses];
++  std::unordered_set<std::string> generic_exceptions_;
++  std::unordered_map<std::string, std::unordered_set<std::string>>
++      domain_exceptions_;
++  size_t rule_count_ = 0;
++};
++
++}  // namespace agens_adblock
++
++#endif  // CHROME_BROWSER_AGENS_ADBLOCK_COSMETIC_ENGINE_H_
+diff --git a/chrome/browser/agens_adblock/cosmetic_service.cc b/chrome/browser/agens_adblock/cosmetic_service.cc
+new file mode 100644
+--- /dev/null
++++ b/chrome/browser/agens_adblock/cosmetic_service.cc
+@@ -0,0 +1,230 @@
++// Copyright 2026 SugiyamaLabs. All rights reserved.
++#include "chrome/browser/agens_adblock/cosmetic_service.h"
++
++#include <memory>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "base/apple/bundle_locations.h"
++#include "base/command_line.h"
++#include "base/files/file_enumerator.h"
++#include "base/files/file_util.h"
++#include "base/logging.h"
++#include "base/no_destructor.h"
++#include "base/path_service.h"
++#include "base/strings/string_util.h"
++#include "base/task/thread_pool.h"
++#include "base/time/time.h"
++#include "base/timer/elapsed_timer.h"
++#include "chrome/browser/agens_adblock/cosmetic_engine.h"
++#include "chrome/browser/agens_adblock/youtube_scriptlet.h"
++#include "chrome/browser/browser_process.h"
++#include "chrome/browser/content_settings/host_content_settings_map_factory.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/common/chrome_paths.h"
++#include "components/content_settings/core/browser/host_content_settings_map.h"
++#include "components/prefs/pref_service.h"
++#include "content/public/browser/render_frame_host.h"
++#include "mojo/public/cpp/bindings/self_owned_receiver.h"
++
++namespace agens_adblock {
++namespace {
++
++// Test-only: read the lists from this directory instead of the profile / app.
++constexpr char kListsDirSwitch[] = "agens-adblock-lists-dir";
++// Prefs owned by the levels work; only read here, by name.
++constexpr char kLevelPref[] = "agens.adblock.level";
++constexpr char kCookiePref[] = "agens.adblock.hide_cookie_notices";
++constexpr base::TimeDelta kRecheckEvery = base::Minutes(10);
++
++struct Loaded {
++  std::unique_ptr<CosmeticEngine> engine;
++  std::string signature;  // file names + sizes + mtimes
++  double ms = 0;
++};
++
++base::FilePath FindListsDir() {
++  std::vector<base::FilePath> candidates;
++  auto* cl = base::CommandLine::ForCurrentProcess();
++  if (cl->HasSwitch(kListsDirSwitch)) {
++    candidates.push_back(cl->GetSwitchValuePath(kListsDirSwitch));
++  } else {
++    base::FilePath user_data;
++    if (base::PathService::Get(chrome::DIR_USER_DATA, &user_data))
++      candidates.push_back(user_data.Append("AgensAdblock").Append("lists"));
++#if BUILDFLAG(IS_MAC)
++    candidates.push_back(base::apple::FrameworkBundlePath()
++                             .Append("Resources")
++                             .Append("adblock_lists"));
++    candidates.push_back(base::apple::MainBundlePath()
++                             .Append("Contents")
++                             .Append("Resources")
++                             .Append("adblock_lists"));
++#endif
++  }
++  for (auto& dir : candidates) {
++    base::FileEnumerator e(dir, false, base::FileEnumerator::FILES, "*.txt");
++    if (!e.Next().empty()) return dir;
++  }
++  return base::FilePath();
++}
++
++ListClass ClassOf(const std::string& lower_name) {
++  if (lower_name.find("cookie") != std::string::npos) return kCookie;
++  if (lower_name.find("ublock") != std::string::npos) return kStrong;
++  return kStandard;
++}
++
++// Runs on a thread pool. Returns null engine when nothing changed.
++Loaded LoadLists(const std::string& old_signature) {
++  base::ElapsedTimer timer;
++  Loaded out;
++  base::FilePath dir = FindListsDir();
++  if (dir.empty()) return out;
++  std::vector<std::pair<base::FilePath, ListClass>> files;
++  base::FileEnumerator e(dir, false, base::FileEnumerator::FILES, "*.txt");
++  for (auto p = e.Next(); !p.empty(); p = e.Next()) {
++    auto info = e.GetInfo();
++    out.signature += p.value() + ":" + std::to_string(info.GetSize()) + ":" +
++                     std::to_string(info.GetLastModifiedTime().ToTimeT()) + ";";
++    files.emplace_back(
++        p, ClassOf(base::ToLowerASCII(p.BaseName().MaybeAsASCII())));
++  }
++  if (out.signature == old_signature) return out;
++  auto engine = std::make_unique<CosmeticEngine>();
++  for (auto& [path, cls] : files) {
++    std::string text;
++    if (base::ReadFileToString(path, &text)) engine->AddList(text, cls);
++  }
++  engine->Finish();
++  out.engine = std::move(engine);
++  out.ms = timer.Elapsed().InMillisecondsF();
++  return out;
++}
++
++class Lists {
++ public:
++  static Lists& Get() {
++    static base::NoDestructor<Lists> instance;
++    return *instance;
++  }
++
++  // UI thread. Starts the first load / a periodic refresh check.
++  const CosmeticEngine* engine() {
++    base::TimeTicks now = base::TimeTicks::Now();
++    if (!loading_ && (last_check_.is_null() || now - last_check_ > kRecheckEvery)) {
++      loading_ = true;
++      last_check_ = now;
++      base::ThreadPool::PostTaskAndReplyWithResult(
++          FROM_HERE,
++          {base::MayBlock(), base::TaskPriority::USER_VISIBLE,
++           base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN},
++          base::BindOnce(&LoadLists, signature_),
++          base::BindOnce(&Lists::OnLoaded, base::Unretained(this)));
++    }
++    return engine_.get();
++  }
++
++ private:
++  friend class base::NoDestructor<Lists>;
++  Lists() = default;
++
++  void OnLoaded(Loaded loaded) {
++    loading_ = false;
++    if (!loaded.engine) return;
++    engine_ = std::move(loaded.engine);
++    signature_ = std::move(loaded.signature);
++    LOG(INFO) << "AgensAdblock: cosmetic lists loaded, " << engine_->rule_count()
++              << " rules in " << loaded.ms << " ms";
++  }
++
++  std::unique_ptr<CosmeticEngine> engine_;
++  std::string signature_;
++  bool loading_ = false;
++  base::TimeTicks last_check_;
++};
++
++// Pref names may not be registered (levels work lands separately): defaults.
++void ReadSettings(Profile* profile, int* level, bool* cookies) {
++  *level = 2;
++  *cookies = true;
++  if (PrefService* ls = g_browser_process->local_state()) {
++    if (ls->FindPreference(kLevelPref)) *level = ls->GetInteger(kLevelPref);
++    if (ls->FindPreference(kCookiePref)) {
++      *cookies = ls->GetBoolean(kCookiePref);
++      return;
++    }
++  }
++  if (PrefService* p = profile->GetPrefs()) {
++    if (p->FindPreference(kCookiePref)) *cookies = p->GetBoolean(kCookiePref);
++  }
++}
++
++class CosmeticFilterImpl : public mojom::CosmeticFilter {
++ public:
++  explicit CosmeticFilterImpl(content::GlobalRenderFrameHostId id) : id_(id) {}
++
++  void GetForDocument(const GURL& document_url,
++                      bool is_main_frame,
++                      GetForDocumentCallback callback) override {
++    auto [css, script] = Compute(document_url, is_main_frame);
++    std::move(callback).Run(css, script);
++  }
++
++ private:
++  std::pair<std::string, std::string> Compute(const GURL& url, bool is_main) {
++    base::ElapsedTimer timer;
++    content::RenderFrameHost* rfh = content::RenderFrameHost::FromID(id_);
++    if (!rfh || !url.SchemeIsHTTPOrHTTPS()) return {};
++    Profile* profile = Profile::FromBrowserContext(rfh->GetBrowserContext());
++    int level;
++    bool cookies;
++    ReadSettings(profile, &level, &cookies);
++    if (level <= 0) return {};
++    // A site the user allowed (content setting ADS = ALLOW) gets nothing. A
++    // subframe follows its top-level page.
++    GURL top = url;
++    if (!is_main) {
++      GURL main = rfh->GetOutermostMainFrame()->GetLastCommittedURL();
++      if (main.is_valid() && !main.is_empty()) top = main;
++    }
++    ContentSetting ads = HostContentSettingsMapFactory::GetForProfile(profile)
++                             ->GetContentSetting(top, GURL(),
++                                                 ContentSettingsType::ADS);
++    VLOG(1) << "AgensAdblock: " << top.spec() << " ads setting " << ads;
++    if (ads == CONTENT_SETTING_ALLOW) return {};
++
++    std::pair<std::string, std::string> result;
++    // Padrao = EasyList + cookie notices (+ YouTube); Forte adds uBlock lists.
++    unsigned mask = 1u << kStandard;
++    if (cookies) mask |= 1u << kCookie;
++    if (level >= 2) mask |= 1u << kStrong;
++    if (const CosmeticEngine* engine = Lists::Get().engine())
++      result.first = engine->CssFor(url.host(), mask, is_main);
++    if (IsYoutubeHost(url.host())) {
++      result.first += kYoutubeCss;
++      result.second = std::string(kYoutubeScriptlet);
++    }
++    VLOG(1) << "AgensAdblock: " << url.host() << " css " << result.first.size()
++            << " bytes in " << timer.Elapsed().InMicroseconds() << " us";
++    return result;
++  }
++
++  content::GlobalRenderFrameHostId id_;
++};
++
++}  // namespace
++
++void PrimeCosmeticLists() {
++  Lists::Get().engine();
++}
++
++void BindCosmeticFilter(content::RenderFrameHost* host,
++                        mojo::PendingReceiver<mojom::CosmeticFilter> receiver) {
++  mojo::MakeSelfOwnedReceiver(
++      std::make_unique<CosmeticFilterImpl>(host->GetGlobalId()),
++      std::move(receiver));
++}
++
++}  // namespace agens_adblock
+diff --git a/chrome/browser/agens_adblock/cosmetic_service.h b/chrome/browser/agens_adblock/cosmetic_service.h
+new file mode 100644
+--- /dev/null
++++ b/chrome/browser/agens_adblock/cosmetic_service.h
+@@ -0,0 +1,23 @@
++// Copyright 2026 SugiyamaLabs. All rights reserved.
++#ifndef CHROME_BROWSER_AGENS_ADBLOCK_COSMETIC_SERVICE_H_
++#define CHROME_BROWSER_AGENS_ADBLOCK_COSMETIC_SERVICE_H_
++
++#include "chrome/common/agens_adblock/cosmetic_filter.mojom.h"
++#include "mojo/public/cpp/bindings/pending_receiver.h"
++
++namespace content {
++class RenderFrameHost;
++}
++
++namespace agens_adblock {
++
++// Starts loading the lists (off the UI thread) if not done yet; cheap.
++void PrimeCosmeticLists();
++
++// Binder for the frame's BrowserInterfaceBroker.
++void BindCosmeticFilter(content::RenderFrameHost* host,
++                        mojo::PendingReceiver<mojom::CosmeticFilter> receiver);
++
++}  // namespace agens_adblock
++
++#endif  // CHROME_BROWSER_AGENS_ADBLOCK_COSMETIC_SERVICE_H_
+diff --git a/chrome/browser/agens_adblock/youtube_scriptlet.cc b/chrome/browser/agens_adblock/youtube_scriptlet.cc
+new file mode 100644
+--- /dev/null
++++ b/chrome/browser/agens_adblock/youtube_scriptlet.cc
+@@ -0,0 +1,135 @@
++// Copyright 2026 SugiyamaLabs. All rights reserved.
++#include "chrome/browser/agens_adblock/youtube_scriptlet.h"
++
++namespace agens_adblock {
++
++const std::string_view kYoutubeScriptlet = R"JS((function () {
++  'use strict';
++  // The browser may inject twice into one window; wrap only once.
++  var once = Symbol.for('agens.yt');
++  if (window[once]) return;
++  Object.defineProperty(window, once, { value: 1 });
++  var KEYS = ['adPlacements', 'playerAds', 'adSlots'];
++  var URL_RE = /\/youtubei\/v1\/(player|get_watch)/;
++  var HAS_AD = /"(adPlacements|playerAds|adSlots)"/;
++
++  function prune(o) {
++    if (!o || typeof o !== 'object') return o;
++    if (Array.isArray(o)) {
++      for (var i = 0; i < o.length; i++) prune(o[i]);
++      return o;
++    }
++    var targets = [o, o.playerResponse];
++    for (var t = 0; t < targets.length; t++) {
++      var x = targets[t];
++      if (!x || typeof x !== 'object') continue;
++      for (var k = 0; k < KEYS.length; k++) {
++        if (KEYS[k] in x) delete x[KEYS[k]];
++      }
++      var m = x.auxiliaryUi && x.auxiliaryUi.messageRenderers;
++      if (m && m.enforcementMessageViewModel) delete m.enforcementMessageViewModel;
++    }
++    return o;
++  }
++
++  // 1. Inline `var ytInitialPlayerResponse = {...}` in the watch page.
++  try {
++    var held;
++    Object.defineProperty(window, 'ytInitialPlayerResponse', {
++      configurable: true,
++      enumerable: true,
++      get: function () { return held; },
++      set: function (v) { held = prune(v); }
++    });
++  } catch (e) {}
++
++  // 2. JSON.parse: the player parses some responses by itself.
++  try {
++    var nativeParse = JSON.parse;
++    JSON.parse = function () {
++      var r = nativeParse.apply(this, arguments);
++      try {
++        if (r && typeof r === 'object' &&
++            (r.adPlacements || r.playerAds || r.adSlots ||
++             (r.playerResponse && typeof r.playerResponse === 'object'))) prune(r);
++      } catch (e) {}
++      return r;
++    };
++  } catch (e) {}
++
++  // 3. fetch() of /youtubei/v1/player (SPA navigation to the next video).
++  try {
++    var nativeFetch = window.fetch;
++    window.fetch = function (input) {
++      var p = nativeFetch.apply(this, arguments);
++      var u = typeof input === 'string' ? input : (input && input.url) || '';
++      if (!URL_RE.test(u)) return p;
++      return p.then(function (r) {
++        return r.clone().text().then(function (text) {
++          if (!HAS_AD.test(text)) return r;
++          var body = JSON.stringify(prune(nativeParse(text)));
++          return new Response(body, {
++            status: r.status, statusText: r.statusText, headers: r.headers
++          });
++        }).catch(function () { return r; });
++      });
++    };
++  } catch (e) {}
++
++  // 4. XMLHttpRequest to the same endpoints.
++  try {
++    var X = XMLHttpRequest.prototype;
++    var nativeOpen = X.open;
++    X.open = function (method, url) {
++      this.__agensYt = URL_RE.test(String(url));
++      return nativeOpen.apply(this, arguments);
++    };
++    var fix = function (xhr, val) {
++      if (xhr.__agensYt && typeof val === 'string' && HAS_AD.test(val)) {
++        try { return JSON.stringify(prune(nativeParse(val))); } catch (e) {}
++      }
++      return val;
++    };
++    ['responseText', 'response'].forEach(function (name) {
++      var d = Object.getOwnPropertyDescriptor(X, name);
++      if (!d || !d.get) return;
++      Object.defineProperty(X, name, {
++        configurable: true, enumerable: d.enumerable,
++        get: function () { return fix(this, d.get.call(this)); }
++      });
++    });
++  } catch (e) {}
++
++  // 5. Safety net: if an ad still starts, skip it right away.
++  try {
++    setInterval(function () {
++      var p = document.getElementById('movie_player');
++      if (!p || !p.classList.contains('ad-showing')) return;
++      var v = p.querySelector('video');
++      if (v && isFinite(v.duration) && v.duration > 0) v.currentTime = v.duration;
++      var b = p.querySelector('.ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern');
++      if (b) b.click();
++      window.__agensYtSkips = (window.__agensYtSkips || 0) + 1;
++    }, 500);
++  } catch (e) {}
++})();
++)JS";
++
++const std::string_view kYoutubeCss =
++    "#masthead-ad{display:none!important}\n"
++    "ytd-ad-slot-renderer,ytd-in-feed-ad-layout-renderer,"
++    "ytd-display-ad-renderer,ytd-promoted-sparkles-web-renderer,"
++    "ytd-banner-promo-renderer,#player-ads,.ytp-ad-overlay-container,"
++    "ytd-companion-slot-renderer{display:none!important}\n";
++
++bool IsYoutubeHost(std::string_view host) {
++  for (std::string_view d : {"youtube.com", "youtube-nocookie.com"}) {
++    if (host == d ||
++        (host.size() > d.size() && host.ends_with(d) &&
++         host[host.size() - d.size() - 1] == '.'))
++      return true;
++  }
++  return false;
++}
++
++}  // namespace agens_adblock
+diff --git a/chrome/browser/agens_adblock/youtube_scriptlet.h b/chrome/browser/agens_adblock/youtube_scriptlet.h
+new file mode 100644
+--- /dev/null
++++ b/chrome/browser/agens_adblock/youtube_scriptlet.h
+@@ -0,0 +1,22 @@
++// Copyright 2026 SugiyamaLabs. All rights reserved.
++#ifndef CHROME_BROWSER_AGENS_ADBLOCK_YOUTUBE_SCRIPTLET_H_
++#define CHROME_BROWSER_AGENS_ADBLOCK_YOUTUBE_SCRIPTLET_H_
++
++#include <string_view>
++
++namespace agens_adblock {
++
++// Main-world script for YouTube, run at document start. Same idea as
++// uBlock Origin's `json-prune` / `set-constant` scriptlets: drop the ad
++// fields from the player JSON before the player sees them (inline
++// ytInitialPlayerResponse, fetch and XHR to /youtubei/v1/player).
++extern const std::string_view kYoutubeScriptlet;
++
++// Extra element hiding for YouTube, on top of the list rules.
++extern const std::string_view kYoutubeCss;
++
++bool IsYoutubeHost(std::string_view host);
++
++}  // namespace agens_adblock
++
++#endif  // CHROME_BROWSER_AGENS_ADBLOCK_YOUTUBE_SCRIPTLET_H_
+diff --git a/chrome/common/agens_adblock/BUILD.gn b/chrome/common/agens_adblock/BUILD.gn
+new file mode 100644
+--- /dev/null
++++ b/chrome/common/agens_adblock/BUILD.gn
+@@ -0,0 +1,7 @@
++# Copyright 2026 SugiyamaLabs. All rights reserved.
++import("//mojo/public/tools/bindings/mojom.gni")
++
++mojom("mojo_bindings") {
++  sources = [ "cosmetic_filter.mojom" ]
++  public_deps = [ "//url/mojom:url_mojom_gurl" ]
++}
+diff --git a/chrome/common/agens_adblock/cosmetic_filter.mojom b/chrome/common/agens_adblock/cosmetic_filter.mojom
+new file mode 100644
+--- /dev/null
++++ b/chrome/common/agens_adblock/cosmetic_filter.mojom
+@@ -0,0 +1,16 @@
++// Copyright 2026 SugiyamaLabs. All rights reserved.
++module agens_adblock.mojom;
++
++import "url/mojom/url.mojom";
++
++// Renderer -> browser, once per new http(s) document, before the page runs.
++// Sync on purpose: the answer is a hash lookup in the browser process and the
++// page must not paint or run a script before the CSS / scriptlets are in.
++interface CosmeticFilter {
++  // Returns CSS to insert and a script to run in the page's main world (both
++  // empty when nothing applies: level off, site allowed by the user, lists not
++  // loaded yet).
++  [Sync]
++  GetForDocument(url.mojom.Url document_url, bool is_main_frame) =>
++      (string css, string main_world_script);
++};
+diff --git a/chrome/renderer/agens_adblock/cosmetic_observer.cc b/chrome/renderer/agens_adblock/cosmetic_observer.cc
+new file mode 100644
+--- /dev/null
++++ b/chrome/renderer/agens_adblock/cosmetic_observer.cc
+@@ -0,0 +1,52 @@
++// Copyright 2026 SugiyamaLabs. All rights reserved.
++#include "chrome/renderer/agens_adblock/cosmetic_observer.h"
++
++#include "content/public/renderer/render_frame.h"
++#include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
++#include "third_party/blink/public/platform/web_string.h"
++#include "third_party/blink/public/web/web_document.h"
++#include "third_party/blink/public/web/web_local_frame.h"
++#include "third_party/blink/public/web/web_script_source.h"
++
++namespace agens_adblock {
++
++CosmeticObserver::CosmeticObserver(content::RenderFrame* render_frame)
++    : content::RenderFrameObserver(render_frame) {}
++
++CosmeticObserver::~CosmeticObserver() = default;
++
++// One sync call per document, shared by the two hooks below.
++bool CosmeticObserver::Fetch() {
++  GURL url = render_frame()->GetWebFrame()->GetDocument().Url();
++  if (!url.SchemeIsHTTPOrHTTPS()) return false;
++  if (url == url_ && fetched_) return true;
++  if (!filter_.is_bound())
++    render_frame()->GetBrowserInterfaceBroker().GetInterface(
++        filter_.BindNewPipeAndPassReceiver());
++  // shortcut: sync call; the browser side is a hash lookup. Move to a pushed
++  // message if UI thread stalls ever show up in navigation traces.
++  fetched_ = filter_->GetForDocument(url, render_frame()->IsMainFrame(), &css_,
++                                     &script_);
++  url_ = url;
++  return fetched_;
++}
++
++// The page's main-world global exists but no page script has run yet.
++void CosmeticObserver::DidClearWindowObject() {
++  fetched_ = false;  // new document: ask again
++  if (!Fetch() || script_.empty()) return;
++  render_frame()->GetWebFrame()->ExecuteScript(
++      blink::WebScriptSource(blink::WebString::FromUtf8(script_)));
++}
++
++void CosmeticObserver::DidCreateDocumentElement() {
++  if (!Fetch() || css_.empty()) return;
++  render_frame()->GetWebFrame()->GetDocument().InsertStyleSheet(
++      blink::WebString::FromUtf8(css_), nullptr, blink::WebCssOrigin::kUser);
++}
++
++void CosmeticObserver::OnDestruct() {
++  delete this;
++}
++
++}  // namespace agens_adblock
+diff --git a/chrome/renderer/agens_adblock/cosmetic_observer.h b/chrome/renderer/agens_adblock/cosmetic_observer.h
+new file mode 100644
+--- /dev/null
++++ b/chrome/renderer/agens_adblock/cosmetic_observer.h
+@@ -0,0 +1,36 @@
++// Copyright 2026 SugiyamaLabs. All rights reserved.
++#ifndef CHROME_RENDERER_AGENS_ADBLOCK_COSMETIC_OBSERVER_H_
++#define CHROME_RENDERER_AGENS_ADBLOCK_COSMETIC_OBSERVER_H_
++
++#include <string>
++
++#include "chrome/common/agens_adblock/cosmetic_filter.mojom.h"
++#include "content/public/renderer/render_frame_observer.h"
++#include "mojo/public/cpp/bindings/remote.h"
++#include "url/gurl.h"
++
++namespace agens_adblock {
++
++// For each new http(s) document, before any script of the page runs: asks the
++// browser for the element-hiding CSS and the main-world scriptlets and applies
++// both. Deletes itself with the frame.
++class CosmeticObserver : public content::RenderFrameObserver {
++ public:
++  explicit CosmeticObserver(content::RenderFrame* render_frame);
++  ~CosmeticObserver() override;
++
++ private:
++  bool Fetch();
++  void DidClearWindowObject() override;
++  void DidCreateDocumentElement() override;
++  void OnDestruct() override;
++
++  mojo::Remote<mojom::CosmeticFilter> filter_;
++  GURL url_;
++  bool fetched_ = false;
++  std::string css_, script_;
++};
++
++}  // namespace agens_adblock
++
++#endif  // CHROME_RENDERER_AGENS_ADBLOCK_COSMETIC_OBSERVER_H_

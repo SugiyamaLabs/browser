@@ -1,0 +1,172 @@
+diff --git a/chrome/browser/ui/webui/BUILD.gn b/chrome/browser/ui/webui/BUILD.gn
+index efb8fba86c..7fb23c18be 100644
+--- a/chrome/browser/ui/webui/BUILD.gn
++++ b/chrome/browser/ui/webui/BUILD.gn
+@@ -33,6 +33,8 @@ source_set("configs") {
+   sources = [
+     "chrome_untrusted_web_ui_configs.cc",
+     "chrome_untrusted_web_ui_configs.h",
++    "agens_light_pages.cc",
++    "agens_light_pages.h",
+     "chrome_web_ui_configs.cc",
+     "chrome_web_ui_configs.h",
+   ]
+diff --git a/chrome/browser/ui/webui/agens_light_pages.cc b/chrome/browser/ui/webui/agens_light_pages.cc
+new file mode 100644
+index 0000000000..b8b6af4939
+--- /dev/null
++++ b/chrome/browser/ui/webui/agens_light_pages.cc
+@@ -0,0 +1,70 @@
++// Copyright 2026 SugiyamaLabs.
++#include "chrome/browser/ui/webui/agens_light_pages.h"
++
++#include <memory>
++#include <string>
++
++#include "base/functional/bind.h"
++#include "base/memory/ref_counted_memory.h"
++#include "chrome/common/webui_url_constants.h"
++#include "content/public/browser/browser_context.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_ui.h"
++#include "content/public/browser/web_ui_controller.h"
++#include "content/public/browser/web_ui_data_source.h"
++#include "content/public/browser/webui_config.h"
++#include "content/public/browser/webui_config_map.h"
++#include "content/public/common/url_constants.h"
++
++namespace {
++
++// No script, no Mojo: just a title and a background that follows the system theme.
++std::string Html(const std::string& title) {
++  return "<!doctype html><html><head><meta charset=\"utf-8\"><title>" + title +
++         "</title><meta name=\"color-scheme\" content=\"light dark\">"
++         "<style>:root{color-scheme:light dark}html,body{margin:0;background:Canvas}"
++         "</style></head><body></body></html>";
++}
++
++class LightController : public content::WebUIController {
++ public:
++  LightController(content::WebUI* web_ui, const std::string& host, const std::string& title)
++      : content::WebUIController(web_ui) {
++    auto* source = content::WebUIDataSource::CreateAndAdd(
++        web_ui->GetWebContents()->GetBrowserContext(), host);
++    source->SetRequestFilter(
++        base::BindRepeating([](const std::string&) { return true; }),
++        base::BindRepeating(
++            [](const std::string& html, const std::string&,
++               content::WebUIDataSource::GotDataCallback callback) {
++              std::move(callback).Run(base::MakeRefCounted<base::RefCountedString>(html));
++            },
++            Html(title)));
++  }
++};
++
++class LightConfig : public content::WebUIConfig {
++ public:
++  LightConfig(const char* host, const char* title)
++      : WebUIConfig(content::kChromeUIScheme, host), title_(title) {}
++
++  std::unique_ptr<content::WebUIController> CreateWebUIController(
++      content::WebUI* web_ui, const GURL& url) override {
++    return std::make_unique<LightController>(web_ui, host(), title_);
++  }
++
++ private:
++  std::string title_;
++};
++
++}  // namespace
++
++void RegisterAgensLightPageConfigs(content::WebUIConfigMap& map) {
++  // newtab covers incognito/guest; the other two are what chrome://newtab is rewritten to.
++  for (const char* host : {chrome::kChromeUINewTabHost, chrome::kChromeUINewTabPageHost,
++                           chrome::kChromeUINewTabPageThirdPartyHost}) {
++    map.AddWebUIConfig(std::make_unique<LightConfig>(host, "Nova aba"));
++  }
++  map.AddWebUIConfig(std::make_unique<LightConfig>(chrome::kChromeUIHistoryHost, "Histórico"));
++  map.AddWebUIConfig(std::make_unique<LightConfig>(chrome::kChromeUIBookmarksHost, "Favoritos"));
++}
+diff --git a/chrome/browser/ui/webui/agens_light_pages.h b/chrome/browser/ui/webui/agens_light_pages.h
+new file mode 100644
+index 0000000000..7d8e98872b
+--- /dev/null
++++ b/chrome/browser/ui/webui/agens_light_pages.h
+@@ -0,0 +1,14 @@
++// Copyright 2026 SugiyamaLabs.
++// Trivial stand-ins for the history, bookmarks and new tab WebUI pages. The native shell draws
++// those views itself over the page card, so the heavy WebUI underneath only wastes memory.
++#ifndef CHROME_BROWSER_UI_WEBUI_AGENS_LIGHT_PAGES_H_
++#define CHROME_BROWSER_UI_WEBUI_AGENS_LIGHT_PAGES_H_
++
++namespace content {
++class WebUIConfigMap;
++}
++
++// Registers the light pages for every host the native shell covers.
++void RegisterAgensLightPageConfigs(content::WebUIConfigMap& map);
++
++#endif  // CHROME_BROWSER_UI_WEBUI_AGENS_LIGHT_PAGES_H_
+diff --git a/chrome/browser/ui/webui/chrome_web_ui_configs.cc b/chrome/browser/ui/webui/chrome_web_ui_configs.cc
+index eacc9e15f7..728ff34b3d 100644
+--- a/chrome/browser/ui/webui/chrome_web_ui_configs.cc
++++ b/chrome/browser/ui/webui/chrome_web_ui_configs.cc
+@@ -4,6 +4,9 @@
+ 
+ #include "chrome/browser/ui/webui/chrome_web_ui_configs.h"
+ 
++#include "chrome/browser/agens/embed/native_shell.h"
++#include "chrome/browser/ui/webui/agens_light_pages.h"
++
+ #include "build/android_buildflags.h"
+ #include "build/branding_buildflags.h"
+ #include "build/build_config.h"
+@@ -264,6 +267,9 @@ void RegisterChromeWebUIConfigs() {
+ #endif  // BUILDFLAG(IS_CHROMEOS)
+ 
+   auto& map = content::WebUIConfigMap::GetInstance();
++  // agens: the native shell draws history, bookmarks and the new tab itself.
++  const bool light_pages = agens::IsNativeShellEnabled();
++  if (light_pages) RegisterAgensLightPageConfigs(map);
+   map.AddWebUIConfig(std::make_unique<AccessibilityUIConfig>());
+   map.AddWebUIConfig(std::make_unique<AutofillInternalsUIConfig>());
+   map.AddWebUIConfig(std::make_unique<BluetoothInternalsUIConfig>());
+@@ -332,7 +338,7 @@ void RegisterChromeWebUIConfigs() {
+   map.AddWebUIConfig(std::make_unique<WebRtcLogsUIConfig>());
+   map.AddWebUIConfig(std::make_unique<RegionalCapabilitiesInternalsUIConfig>());
+ #if BUILDFLAG(ENABLE_WEBUI_NTP)
+-  map.AddWebUIConfig(std::make_unique<NewTabPageUIConfig>());
++  if (!light_pages) map.AddWebUIConfig(std::make_unique<NewTabPageUIConfig>());  // agens
+   map.AddWebUIConfig(std::make_unique<CustomizeChromeUIConfig>());
+ #endif  // BUILDFLAG(ENABLE_WEBUI_NTP)
+ 
+@@ -357,7 +363,7 @@ void RegisterChromeWebUIConfigs() {
+   map.AddWebUIConfig(std::make_unique<actor::ui::ActorOverlayUIConfig>());
+   map.AddWebUIConfig(std::make_unique<AppServiceInternalsUIConfig>());
+   map.AddWebUIConfig(std::make_unique<BookmarksSidePanelUIConfig>());
+-  map.AddWebUIConfig(std::make_unique<BookmarksUIConfig>());
++  if (!light_pages) map.AddWebUIConfig(std::make_unique<BookmarksUIConfig>());  // agens
+   map.AddWebUIConfig(std::make_unique<ColorPipelineInternalsUIConfig>());
+   map.AddWebUIConfig(std::make_unique<CommentsSidePanelUIConfig>());
+   map.AddWebUIConfig(
+@@ -368,7 +374,7 @@ void RegisterChromeWebUIConfigs() {
+   map.AddWebUIConfig(std::make_unique<DownloadsUIConfig>());
+   map.AddWebUIConfig(std::make_unique<DrivePickerHostUIConfig>());
+   map.AddWebUIConfig(std::make_unique<FeedbackUIConfig>());
+-  map.AddWebUIConfig(std::make_unique<HistoryUIConfig>());
++  if (!light_pages) map.AddWebUIConfig(std::make_unique<HistoryUIConfig>());  // agens
+   map.AddWebUIConfig(std::make_unique<HistorySidePanelUIConfig>());
+   map.AddWebUIConfig(std::make_unique<HistoryClustersSidePanelUIConfig>());
+   map.AddWebUIConfig(std::make_unique<InfobarInternalsUIConfig>());
+@@ -385,9 +391,9 @@ void RegisterChromeWebUIConfigs() {
+           multistep_filter_internals::MultistepFilterInternalsUIConfig>());
+ #if BUILDFLAG(ENABLE_WEBUI_NTP)
+   map.AddWebUIConfig(std::make_unique<NewTabFooterUIConfig>());
+-  map.AddWebUIConfig(std::make_unique<NewTabPageThirdPartyUIConfig>());
++  if (!light_pages) map.AddWebUIConfig(std::make_unique<NewTabPageThirdPartyUIConfig>());  // agens
+ #endif  // BUILDFLAG(ENABLE_WEBUI_NTP)
+-  map.AddWebUIConfig(std::make_unique<NewTabUIConfig>());
++  if (!light_pages) map.AddWebUIConfig(std::make_unique<NewTabUIConfig>());  // agens
+   map.AddWebUIConfig(std::make_unique<OmniboxEverywhereUIConfig>());
+   map.AddWebUIConfig(std::make_unique<OmniboxPopupUIConfig>());
+   map.AddWebUIConfig(std::make_unique<OrganizerPanelUIConfig>());
