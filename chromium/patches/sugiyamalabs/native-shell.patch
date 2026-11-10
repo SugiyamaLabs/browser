@@ -1,9 +1,9 @@
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
 new file mode 100644
-index 0000000000..6b428cacc7
+index 0000000000..8cbfbecbca
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embed.h
-@@ -0,0 +1,281 @@
+@@ -0,0 +1,293 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The boundary between the engine and any interface (the browser's own chrome today, the Agens
 +// app later). Plain C on purpose: no Chromium or C++ types cross it, Swift imports it as is, and
@@ -237,6 +237,17 @@ index 0000000000..6b428cacc7
 +void agens_find(AgensWindow* window, const char* text, int forward);
 +void agens_find_stop(AgensWindow* window);
 +
++// Saving a password the person just used on the active page. Fills `out` (strings valid until
++// the next call) and returns 1 while there is one to save or update.
++typedef struct {
++  const char* site;
++  const char* username;
++  int update;  // a new password for a login already saved
++} AgensPasswordPrompt;
++int agens_password_prompt(AgensWindow* window, AgensPasswordPrompt* out);
++typedef enum { kAgensPasswordSave, kAgensPasswordNever, kAgensPasswordNotNow } AgensPasswordAnswer;
++void agens_password_answer(AgensWindow* window, AgensPasswordAnswer answer);
++
 +// Histórico of this window's ato, newest first, one entry per page per day, at most 300.
 +// `text` filters by title and address ("" for all). Calls `fn` later, once.
 +typedef struct {
@@ -267,6 +278,7 @@ index 0000000000..6b428cacc7
 +  kAgensCommandFind,         // ⌘F
 +  kAgensCommandFindNext,     // ⌘G
 +  kAgensCommandFindPrevious, // ⌘⇧G
++  kAgensCommandPasswordPrompt,  // the page has a password to save or update: ask (see below)
 +} AgensCommand;
 +int agens_ui_command(void* chrome, AgensCommand command);
 +// Where Chromium anchors its bubbles (permissions, site info): the address's site icon.
@@ -815,10 +827,10 @@ index 0000000000..9c82824c92
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
 new file mode 100644
-index 0000000000..9b5262005f
+index 0000000000..416670812f
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.cc
-@@ -0,0 +1,624 @@
+@@ -0,0 +1,666 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The embed API (agens_embed.h) on top of AgensWindow. Same code on every platform.
 +
@@ -833,6 +845,9 @@ index 0000000000..9b5262005f
 +#include "base/memory/scoped_refptr.h"
 +#include "base/supports_user_data.h"
 +#include "chrome/browser/history/history_service_factory.h"
++#include "chrome/browser/ui/passwords/manage_passwords_ui_controller.h"
++#include "components/password_manager/core/browser/password_form.h"
++#include "components/password_manager/core/common/password_manager_ui.h"
 +#include "components/history/core/browser/history_service.h"
 +#include "components/history/core/browser/history_types.h"
 +#include "chrome/browser/browsing_data/chrome_browsing_data_remover_constants.h"
@@ -1282,6 +1297,45 @@ index 0000000000..9b5262005f
 +  w->bookmark_model->AddFolder(bar, bar->children().size(), base::UTF8ToUTF16(title));
 +}
 +
++static ManagePasswordsUIController* PendingPasswords(AgensWindow* w) {
++  content::WebContents* active = w->model()->GetActiveWebContents();
++  auto* controller = active ? ManagePasswordsUIController::FromWebContents(active) : nullptr;
++  if (!controller) return nullptr;
++  const auto state = controller->GetState();
++  return state == password_manager::ui::PENDING_PASSWORD_STATE ||
++                 state == password_manager::ui::PENDING_PASSWORD_UPDATE_STATE
++             ? controller
++             : nullptr;
++}
++int agens_password_prompt(AgensWindow* w, AgensPasswordPrompt* out) {
++  static base::NoDestructor<std::string> site, username;
++  ManagePasswordsUIController* controller = PendingPasswords(w);
++  if (!controller || !out) return 0;
++  const password_manager::PasswordForm& form = controller->GetPendingPassword();
++  *site = form.url.is_valid() ? std::string(form.url.host()) : form.signon_realm;
++  *username = base::UTF16ToUTF8(form.username_value);
++  *out = {site->c_str(), username->c_str(),
++          controller->GetState() == password_manager::ui::PENDING_PASSWORD_UPDATE_STATE};
++  controller->OnBubbleShown();  // our panel is the bubble
++  return 1;
++}
++void agens_password_answer(AgensWindow* w, AgensPasswordAnswer answer) {
++  ManagePasswordsUIController* controller = PendingPasswords(w);
++  if (!controller) return;
++  const bool update = controller->GetState() == password_manager::ui::PENDING_PASSWORD_UPDATE_STATE;
++  if (answer == kAgensPasswordSave) {
++    const password_manager::PasswordForm& form = controller->GetPendingPassword();
++    controller->SavePassword(form.username_value, form.password_value);
++  } else if (answer == kAgensPasswordNever && !update) {
++    controller->NeverSavePassword();
++  } else if (update) {
++    controller->OnNopeUpdateClicked();
++  } else {
++    controller->OnNotNowClicked();
++  }
++  controller->OnBubbleHidden();
++}
++
 +void agens_history(AgensWindow* w, const char* text, AgensHistoryFn fn, void* context) {
 +  history::HistoryService* history = HistoryServiceFactory::GetForProfile(
 +      w->browser->GetProfile(), ServiceAccessType::EXPLICIT_ACCESS);
@@ -1492,10 +1546,10 @@ index 0000000000..04fb6f0162
 +#endif  // CHROME_BROWSER_AGENS_EMBED_NATIVE_SHELL_H_
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
 new file mode 100644
-index 0000000000..e07df98db2
+index 0000000000..b5a81738bc
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
-@@ -0,0 +1,187 @@
+@@ -0,0 +1,188 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The macOS host: the views::View that fills the Webium window, puts the UI's chrome (an NSView)
 +// over it and the active tab in the page card. Everything else is shared (agens_window.h,
@@ -1657,6 +1711,7 @@ index 0000000000..e07df98db2
 +    case IDC_FIND: command = kAgensCommandFind; break;
 +    case IDC_FIND_NEXT: command = kAgensCommandFindNext; break;
 +    case IDC_FIND_PREVIOUS: command = kAgensCommandFindPrevious; break;
++    case IDC_MANAGE_PASSWORDS_FOR_PAGE: command = kAgensCommandPasswordPrompt; break;
 +    default: return false;
 +  }
 +  if (!IsNativeShellEnabled() || !browser->GetWindow()) return false;
@@ -1685,10 +1740,10 @@ index 0000000000..e07df98db2
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..e8c6c546ea
+index 0000000000..e818150d5d
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,4193 @@
+@@ -0,0 +1,4246 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -4647,6 +4702,7 @@ index 0000000000..e8c6c546ea
 +  long long _barId;
 +  AgensFindBar* _find;
 +  AgensErrorView* _error;
++  BOOL _passwordAsked;  // our "save password?" panel is open and not answered yet
 +  NSView* _bar;  // the bookmarks bar
 +  BOOL _barShown;
 +  NSView* _backdrop;  // under the whole window, for Vidro and Seu (glass, blur, image)
@@ -5569,6 +5625,10 @@ index 0000000000..e8c6c546ea
 +  }
 +}
 +- (void)closeMenu {
++  if (_passwordAsked) {  // closed without an answer
++    _passwordAsked = NO;
++    if (_window) agens_password_answer(_window, kAgensPasswordNotNow);
++  }
 +  [_menuView removeFromSuperview];
 +  _menuView = nil;
 +  _popoverAnchor = nil;
@@ -5820,6 +5880,51 @@ index 0000000000..e8c6c546ea
 +    }
 +  }];
 +}
++// "Salvar a senha?" under the address bar, on its right (where Chrome shows its key). Closing the
++// panel any other way counts as "Agora não".
++- (void)askToSavePassword {
++  AgensPasswordPrompt prompt;
++  if (!_window || !agens_password_prompt(_window, &prompt)) return;
++  NSString* site = @(prompt.site);
++  NSString* user = prompt.username[0] ? @(prompt.username) : @"sem usuário";
++  const CGFloat w = 320, h = 104;
++  NSView* panel = [self popoverWidth:w height:h under:_omni];
++  panel.frame = NSMakeRect(NSMaxX(_omni.frame) - w, NSMaxY(_omni.frame) + 6, w, h);
++  panel.accessibilityRole = NSAccessibilityGroupRole;
++  NSTextField* title = Label(13.5, NSFontWeightSemibold, kInk);
++  title.stringValue = [NSString stringWithFormat:prompt.update ? @"Atualizar a senha de %@?" : @"Salvar a senha de %@?", site];
++  title.lineBreakMode = NSLineBreakByTruncatingMiddle;
++  title.frame = NSMakeRect(16, h - 16 - 20, w - 32, 20);
++  NSTextField* who = Label(12.5, NSFontWeightRegular, kMute);
++  who.stringValue = [NSString stringWithFormat:@"%@ · fica só neste Mac, neste ato", user];
++  who.frame = NSMakeRect(16, NSMinY(title.frame) - 4 - 18, w - 32, 18);
++  NSButton* save = [NSButton buttonWithTitle:prompt.update ? @"Atualizar" : @"Salvar" target:self action:@selector(answerPassword:)];
++  save.tag = kAgensPasswordSave;
++  save.keyEquivalent = @"\r";
++  NSButton* later = [NSButton buttonWithTitle:@"Agora não" target:self action:@selector(answerPassword:)];
++  later.tag = kAgensPasswordNotNow;
++  for (NSButton* b in @[ save, later ]) [b sizeToFit];
++  save.frame = NSMakeRect(w - 16 - NSWidth(save.frame), 14, NSWidth(save.frame), NSHeight(save.frame));
++  later.frame = NSMakeRect(NSMinX(save.frame) - 8 - NSWidth(later.frame), 14, NSWidth(later.frame), NSHeight(later.frame));
++  for (NSView* v in @[ title, who, save, later ]) [panel addSubview:v];
++  if (!prompt.update) {
++    NSButton* never = [NSButton buttonWithTitle:@"Nunca neste site" target:self action:@selector(answerPassword:)];
++    never.tag = kAgensPasswordNever;
++    never.bordered = NO;
++    never.font = [NSFont systemFontOfSize:12];
++    never.contentTintColor = kMute.color();
++    [never sizeToFit];
++    never.frame = NSMakeRect(10, 16, NSWidth(never.frame) + 8, NSHeight(never.frame));
++    [panel addSubview:never];
++  }
++  [self presentPopover:panel anchor:_omni];
++  _passwordAsked = YES;
++}
++- (void)answerPassword:(NSButton*)button {
++  _passwordAsked = NO;
++  if (_window) agens_password_answer(_window, (AgensPasswordAnswer)button.tag);
++  [self closeMenu];
++}
 +- (int)command:(AgensCommand)command {
 +  switch (command) {
 +    case kAgensCommandSettings:
@@ -5830,6 +5935,9 @@ index 0000000000..e8c6c546ea
 +      return 1;
 +    case kAgensCommandFind:
 +      [_find open];
++      return 1;
++    case kAgensCommandPasswordPrompt:
++      [self askToSavePassword];
 +      return 1;
 +    case kAgensCommandFindNext:
 +      [_find step:YES];
@@ -5918,7 +6026,7 @@ index 8277fe0aba..e496cb7ab4 100644
    } else {
      chrome::OpenOptionsWindow(profile);
 diff --git a/chrome/browser/ui/browser_command_controller.cc b/chrome/browser/ui/browser_command_controller.cc
-index d2224772cc..abc72ab6e7 100644
+index d2224772cc..cd3d1c68d9 100644
 --- a/chrome/browser/ui/browser_command_controller.cc
 +++ b/chrome/browser/ui/browser_command_controller.cc
 @@ -24,6 +24,7 @@
@@ -5929,14 +6037,15 @@ index d2224772cc..abc72ab6e7 100644
  #include "chrome/app/chrome_command_ids.h"
  #include "chrome/browser/actor/ui/actor_overlay_web_view.h"
  #include "chrome/browser/bookmarks/bookmark_model_factory.h"
-@@ -665,6 +666,7 @@ void BrowserCommandController::HandleCommandWithDisposition(
+@@ -639,6 +640,8 @@ bool BrowserCommandController::ExecuteCommandWithDispositionAndContext(
      WindowOpenDisposition disposition,
+     std::optional<actions::ActionInvocationContext> context,
      base::TimeTicks time_stamp) {
-   DCHECK(IsCommandEnabled(id)) << "Invalid/disabled command " << id;
-+  if (agens::HandleNativeCommand(browser_, id)) return;  // agens: our settings, bookmarks, find
- 
-   // The order of commands in this switch statement must match the function
-   // declaration order in browser.h!
++  // agens: before the enabled check; some (the password prompt) stay disabled in our window.
++  if (agens::HandleNativeCommand(browser_, id)) return true;
+   if (!SupportsCommand(id) || !IsCommandEnabled(id)) {
+     return false;
+   }
 diff --git a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc b/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
 index 3bc40bcc91..9e4154d594 100644
 --- a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
@@ -5978,6 +6087,33 @@ index 3bc40bcc91..9e4154d594 100644
      StatusBubbleViews* status_bubble_views =
          static_cast<StatusBubbleViews*>(status_bubble);
      ContentsWebView* anchor =
+diff --git a/chrome/browser/ui/passwords/manage_passwords_ui_controller.cc b/chrome/browser/ui/passwords/manage_passwords_ui_controller.cc
+index 0d2c0bbb5b..a28a885d1a 100644
+--- a/chrome/browser/ui/passwords/manage_passwords_ui_controller.cc
++++ b/chrome/browser/ui/passwords/manage_passwords_ui_controller.cc
+@@ -4,6 +4,9 @@
+ 
+ #include "chrome/browser/ui/passwords/manage_passwords_ui_controller.h"
+ 
++#include "chrome/browser/agens/embed/native_shell.h"
++#include "chrome/app/chrome_command_ids.h"
++
+ #include <algorithm>
+ #include <optional>
+ #include <string>
+@@ -1534,6 +1537,12 @@ bool ManagePasswordsUIController::BubbleManagerHasPasswordBubbleInQueue()
+ }
+ 
+ void ManagePasswordsUIController::ShowBubble() {
++  // agens: our window has no Views bubble anchor; the native shell asks instead.
++  if (BrowserWindowInterface* browser =
++          GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(web_contents());
++      browser && agens::HandleNativeCommand(browser, IDC_MANAGE_PASSWORDS_FOR_PAGE)) {
++    return;
++  }
+   if (TabDialogs* tab_dialogs = TabDialogs::FromWebContents(web_contents())) {
+     tab_dialogs->ShowManagePasswordsBubble(user_action_);
+   }
 diff --git a/chrome/browser/ui/profiles/profile_picker.cc b/chrome/browser/ui/profiles/profile_picker.cc
 index 886649ae98..3adfa8a130 100644
 --- a/chrome/browser/ui/profiles/profile_picker.cc
