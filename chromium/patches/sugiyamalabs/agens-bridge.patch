@@ -915,10 +915,10 @@ index 0000000000..341970043c
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_CONTROL_KEYS_H_
 diff --git a/chrome/browser/agens/bridge/control_ops.cc b/chrome/browser/agens/bridge/control_ops.cc
 new file mode 100644
-index 0000000000..b0172270ee
+index 0000000000..be514460cf
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_ops.cc
-@@ -0,0 +1,420 @@
+@@ -0,0 +1,429 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The control session (docs/protocolo.md, "control, tab, page"): an app, after the person's OK,
 +// drives tabs of one ato. It belongs to the connection and ends on control.stop, when the
@@ -1112,6 +1112,10 @@ index 0000000000..b0172270ee
 +  ProfileAttributesEntry* entry = FindAto(*id);
 +  if (!entry) {
 +    std::move(reply).Run(ErrorReply(&request.id, kNotFound, *id));
++    return;
++  }
++  if (AgensWindow::AtoSharesCookies(entry->GetPath())) {
++    std::move(reply).Run(ErrorReply(&request.id, kIsolationOff, "this ato shares cookies with other atos"));
 +    return;
 +  }
 +  const std::string name = client.name.empty() ? "app" : client.name;
@@ -1320,6 +1324,11 @@ index 0000000000..b0172270ee
 +    return;
 +  }
 +  Session& session = it->second;
++  // The person can turn sharing on while a session runs: from then on the ato is not isolated.
++  if (AgensWindow::AtoSharesCookies(session.ato)) {
++    std::move(reply).Run(ErrorReply(&request.id, kIsolationOff, "this ato shares cookies with other atos"));
++    return;
++  }
 +  if (op == "tab.open") {
 +    TabOpen(client, std::move(request), std::move(reply));
 +  } else if (op == "tab.navigate") {
@@ -2248,10 +2257,10 @@ index 0000000000..4cd937924e
 +}  // namespace agens::bridge
 diff --git a/chrome/browser/agens/bridge/protocol.h b/chrome/browser/agens/bridge/protocol.h
 new file mode 100644
-index 0000000000..1647ec285f
+index 0000000000..dcdbdbe3a4
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/protocol.h
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,62 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The socket's wire format (docs/agens.md, "O socket"): one JSON object per line. Pure logic, no
 +// sockets or threads, so protocol_selfcheck.cc can exercise it with only //base.
@@ -2277,6 +2286,7 @@ index 0000000000..1647ec285f
 +inline constexpr char kNotFound[] = "not_found";
 +inline constexpr char kUnauthorized[] = "unauthorized";
 +inline constexpr char kDenied[] = "denied";
++inline constexpr char kIsolationOff[] = "isolation_off";  // the ato shares cookies, so it is not isolated
 +
 +// Splits a byte stream into lines (without the "\n"). Empty lines are skipped.
 +class LineFramer {
