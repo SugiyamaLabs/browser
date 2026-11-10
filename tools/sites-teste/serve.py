@@ -46,7 +46,7 @@ class H(http.server.BaseHTTPRequestHandler):
         self.reply(404, b"not found")
 
     def login(self):
-        self.redirect("/app/", [f"sid={SID}; Path=/; HttpOnly", "d=fake-d-cookie-456; Path=/"])
+        self.redirect("/app/", [f"sid={SID}; Path=/; Max-Age=3600; HttpOnly", "d=fake-d-cookie-456; Path=/; Max-Age=3600"])  # persistent: they survive a browser restart
 
     def do_POST(self):
         if self.path != "/login":
