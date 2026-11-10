@@ -2490,10 +2490,10 @@ index 0000000000..8d10fddb69
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..b06fd503b0
+index 0000000000..29c06664f4
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,4746 @@
+@@ -0,0 +1,4750 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -5612,7 +5612,7 @@ index 0000000000..b06fd503b0
 +    _address.delegate = self;
 +    ((AgensAddressField*)_address).onFocus = ^{
 +      AgensChrome* strong = weak;
-+      if (strong && strong->_url.length) strong->_address.stringValue = strong->_url;  // the full address while editing
++      if (strong && strong->_url.length) strong->_address.stringValue = AgensScheme(strong->_url);  // the full address while editing
 +    };
 +    _address.target = self;
 +    _address.action = @selector(go:);
@@ -6338,11 +6338,15 @@ index 0000000000..b06fd503b0
 +  if (activeTab >= 0 && _rows[activeTab].superview == _tabsDoc) [_tabsDoc scrollRectToVisible:_rows[activeTab].frame];
 +}
 +
++// Chromium's internal pages show as agens:// (typing agens:// opens them: url_fixer, agens-scheme.patch).
++static NSString* AgensScheme(NSString* url) {
++  return [url hasPrefix:@"chrome://"] ? [@"agens://" stringByAppendingString:[url substringFromIndex:9]] : url;
++}
 +// The address as the prototype shows it: no https:// or www., no lone trailing slash.
 +- (NSString*)displayURL {
 +  if ([_url hasPrefix:@"chrome://history"]) return @"Histórico";
 +  if ([_url hasPrefix:@"chrome://bookmarks"]) return @"Favoritos";
-+  NSString* s = _url;
++  NSString* s = AgensScheme(_url);
 +  for (NSString* p in @[ @"https://", @"www." ]) {
 +    if ([s hasPrefix:p]) s = [s substringFromIndex:p.length];
 +  }
@@ -7193,7 +7197,7 @@ index 0000000000..b06fd503b0
 +    [self.window makeFirstResponder:_ntp.field];
 +    return;
 +  }
-+  _address.stringValue = _url;  // the full address while editing
++  _address.stringValue = AgensScheme(_url);  // the full address while editing
 +  [self.window makeFirstResponder:_address];
 +}
 +@end
@@ -7289,6 +7293,54 @@ index 6f5c220aae..5f70397a82 100644
    registry->RegisterStringPref(
        prefs::kPrintPreviewDefaultDestinationSelectionRules, std::string());
  #if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
+diff --git a/chrome/browser/renderer_context_menu/render_view_context_menu.cc b/chrome/browser/renderer_context_menu/render_view_context_menu.cc
+index 0750eb56c0..2ace27d0d9 100644
+--- a/chrome/browser/renderer_context_menu/render_view_context_menu.cc
++++ b/chrome/browser/renderer_context_menu/render_view_context_menu.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "chrome/browser/renderer_context_menu/render_view_context_menu.h"
+ 
++#include "chrome/browser/agens/embed/native_shell.h"
++
+ #include <stddef.h>
+ 
+ #include <algorithm>
+@@ -1550,6 +1552,34 @@ void RenderViewContextMenu::InitMenu() {
+     AppendPrintPreviewItems();
+   }
+ 
++  // agens: drop what needs Google services or Chrome panels we don't have (Gemini, Lens, QR,
++  // send to devices, Cast, reading list/mode, read aloud, notes). Inspect stays.
++  if (agens::IsNativeShellEnabled()) {
++    static constexpr int kDropped[] = {
++        IDC_CONTENT_CONTEXT_ADD_LINK_TO_READING_LIST, IDC_CONTENT_CONTEXT_ARCHIVE_GLIC,
++        IDC_CONTENT_CONTEXT_ASK_GOOGLE_ABOUT_THIS_PAGE, IDC_CONTENT_CONTEXT_AUTOFILL_FEEDBACK,
++        IDC_CONTENT_CONTEXT_CONTEXTUAL_TASKS_SUBMENU, IDC_CONTENT_CONTEXT_GENERATE_QR_CODE,
++        IDC_CONTENT_CONTEXT_GLIC, IDC_CONTENT_CONTEXT_GLICSHAREIMAGE, IDC_CONTENT_CONTEXT_LENS_REGION_SEARCH,
++        IDC_CONTENT_CONTEXT_LISTEN_TO_THIS_PAGE, IDC_CONTENT_CONTEXT_OPEN_IN_READING_MODE,
++        IDC_CONTENT_CONTEXT_RELOAD_GLIC, IDC_CONTENT_CONTEXT_SAVE_TO_MEMORY_BANKS,
++        IDC_CONTENT_CONTEXT_SEARCHLENSFORIMAGE, IDC_CONTENT_CONTEXT_SEARCHLENSFORVIDEOFRAME,
++        IDC_CONTENT_CONTEXT_SHARING_SUBMENU, IDC_CONTENT_CONTEXT_WEB_REGION_SEARCH,
++        IDC_CONTENT_CONTEXT_AUTOFILL_FALLBACK_AT_MEMORY, IDC_SEND_TAB_TO_SELF, IDC_ROUTE_MEDIA,
++    };
++    for (int id : kDropped) {
++      if (std::optional<size_t> index = menu_model_.GetIndexOfCommandId(id)) {
++        menu_model_.RemoveItemAt(*index);
++      }
++    }
++    // What was between them can leave separators side by side, or one first.
++    for (size_t i = menu_model_.GetItemCount(); i-- > 0;) {
++      const bool separator = menu_model_.GetTypeAt(i) == ui::MenuModel::TYPE_SEPARATOR;
++      if (separator && (i == 0 || menu_model_.GetTypeAt(i - 1) == ui::MenuModel::TYPE_SEPARATOR)) {
++        menu_model_.RemoveItemAt(i);
++      }
++    }
++  }
++
+   // Remove any redundant trailing separator.
+   size_t count = menu_model_.GetItemCount();
+   if (count > 0 &&
 diff --git a/chrome/browser/ui/browser_command_controller.cc b/chrome/browser/ui/browser_command_controller.cc
 index d2224772cc..cd3d1c68d9 100644
 --- a/chrome/browser/ui/browser_command_controller.cc
@@ -7544,15 +7596,17 @@ index 12bb0ac5fb..52735f7a84 100644
    if (ShouldIgnorePermissionRequest(web_contents, delegate)) {
      return nullptr;
 diff --git a/chrome/browser/ui/webui_browser/BUILD.gn b/chrome/browser/ui/webui_browser/BUILD.gn
-index db2aba2a32..09328bfc13 100644
+index db2aba2a32..60bdff1d4c 100644
 --- a/chrome/browser/ui/webui_browser/BUILD.gn
 +++ b/chrome/browser/ui/webui_browser/BUILD.gn
-@@ -77,10 +77,22 @@ source_set("impl") {
+@@ -77,10 +77,25 @@ source_set("impl") {
      "webui_browser_window.cc",
      "webui_stub_location_bar.cc",
      "zoom_bubble_manager_webui_browser.cc",
 +
 +    # agens: the embed API and its platform-neutral side (docs/casca.md).
++    "//chrome/browser/agens/embed/agens_credits.cc",
++    "//chrome/browser/agens/embed/agens_credits.h",
 +    "//chrome/browser/agens/embed/agens_embed.h",
 +    "//chrome/browser/agens/embed/agens_window.h",
 +    "//chrome/browser/agens/embed/native_shell.cc",
@@ -7564,6 +7618,7 @@ index db2aba2a32..09328bfc13 100644
 +    sources += [
 +      "//chrome/browser/agens/embed/native_shell_mac.mm",
 +      "//chrome/browser/agens/ui/chrome_mac.mm",
++      "//chrome/browser/agens/ui/credits_mac.mm",
 +      "//chrome/browser/agens/ui/logo_svg.h",
 +      "webui_browser_window_mac.mm",
 +    ]
@@ -7571,6 +7626,14 @@ index db2aba2a32..09328bfc13 100644
    }
  
    deps = [
+@@ -121,6 +136,7 @@ source_set("impl") {
+     "//chrome/browser/ui/tabs/tab_strip_api/controllers",
+     "//chrome/browser/ui/toolbar",
+     "//chrome/browser/ui/views:bubble_anchor_util_views",
++    "//components/webui/about",  # agens: the credits page parses its about_credits.html
+     "//chrome/browser/ui/views:find_bar_views",
+     "//chrome/browser/ui/views:tab_search_bubble_host",
+     "//chrome/browser/ui/views/exclusive_access",
 diff --git a/chrome/browser/ui/webui_browser/webui_browser_exclusive_access_context.cc b/chrome/browser/ui/webui_browser/webui_browser_exclusive_access_context.cc
 index 1dc8329849..103a27ea84 100644
 --- a/chrome/browser/ui/webui_browser/webui_browser_exclusive_access_context.cc
