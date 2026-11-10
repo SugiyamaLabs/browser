@@ -798,10 +798,10 @@ index 0000000000..ac8013e4eb
 +}  // namespace agens::bridge
 diff --git a/chrome/browser/agens/bridge/control_keys.cc b/chrome/browser/agens/bridge/control_keys.cc
 new file mode 100644
-index 0000000000..a5efca6faf
+index 0000000000..f7bd696093
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_keys.cc
-@@ -0,0 +1,126 @@
+@@ -0,0 +1,164 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/control_keys.h"
@@ -890,12 +890,50 @@ index 0000000000..a5efca6faf
 +  return !key.edits && !key.meta && !key.alt && !key.ctrl;
 +}
 +
-+std::string ControlAlwaysKey(std::string_view identity, std::string_view ato, std::vector<std::string> shares_with) {
++bool KeyAllowed(const Key& key, bool on_password, bool clipboard) {
++  if (TouchesClipboard(key)) return clipboard;
++  return !on_password || AllowedOnPassword(key);
++}
++
++std::optional<std::vector<std::string>> ParseAllow(const base::Value* value) {
++  std::vector<std::string> allow;
++  if (!value) return allow;
++  if (!value->is_list()) return std::nullopt;
++  for (const base::Value& item : value->GetList()) {
++    const std::string* s = item.GetIfString();
++    if (!s || (*s != "passwords" && *s != "clipboard")) return std::nullopt;
++    if (!std::ranges::contains(allow, *s)) allow.push_back(*s);
++  }
++  std::ranges::sort(allow);
++  return allow;
++}
++
++std::string AllowDetail(const std::vector<std::string>& allow) {
++  std::vector<std::string> asks;
++  if (std::ranges::contains(allow, std::string("passwords"))) asks.push_back("usar extensões e senhas salvas");
++  if (std::ranges::contains(allow, std::string("clipboard"))) asks.push_back("copiar e colar");
++  if (asks.empty()) return std::string();
++  std::string detail = "Pede também: " + JoinNames(asks);
++  if (std::ranges::contains(allow, std::string("clipboard"))) detail += "\n\nCom copiar e colar, o agente pode acabar vendo uma senha.";
++  return detail;
++}
++
++std::string ControlAlwaysKey(std::string_view identity,
++                             std::string_view ato,
++                             std::vector<std::string> shares_with,
++                             const std::vector<std::string>& allow) {
 +  std::ranges::sort(shares_with);
 +  base::ListValue key;  // JSON: no separator a name could contain
 +  key.Append(identity);
 +  key.Append(ato);
 +  for (std::string& folder : shares_with) key.Append(std::move(folder));
++  if (!allow.empty()) {  // a dict, so it never reads as a folder; none keeps the older keys as they were
++    base::ListValue asked;
++    for (const std::string& a : allow) asked.Append(a);
++    base::DictValue wrapped;
++    wrapped.Set("allow", std::move(asked));
++    key.Append(std::move(wrapped));
++  }
 +  return base::WriteJson(key).value_or(std::string());
 +}
 +
@@ -930,10 +968,10 @@ index 0000000000..a5efca6faf
 +}  // namespace agens::bridge
 diff --git a/chrome/browser/agens/bridge/control_keys.h b/chrome/browser/agens/bridge/control_keys.h
 new file mode 100644
-index 0000000000..4421b9b2cc
+index 0000000000..a9bb81876d
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_keys.h
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,68 @@
 +// Copyright 2026 SugiyamaLabs.
 +// page.key's key names and the password rules that depend on them (docs/protocolo.md, "control,
 +// tab, page"). Pure logic, checked by protocol_selfcheck.cc with only //base.
@@ -971,10 +1009,23 @@ index 0000000000..4421b9b2cc
 +// Copy, cut or paste: never, so the clipboard stays out of the controller's reach.
 +bool TouchesClipboard(const Key& key);
 +
++// While a password field has the focus (`on_password`), or not: whether page.key may send `key`.
++// Copy, cut and paste only with control.start's "clipboard" (then also on a password field).
++bool KeyAllowed(const Key& key, bool on_password, bool clipboard);
++
++// control.start's `allow`: a list of "passwords" and "clipboard", sorted, without repeats; nullopt
++// for anything else (not a list, another value). Null `value` (omitted) is an empty list.
++std::optional<std::vector<std::string>> ParseAllow(const base::Value* value);
++// What the approval sheet says about `allow` (from ParseAllow), after the reason; empty for none.
++std::string AllowDetail(const std::vector<std::string>& allow);
++
 +// control.start's "Permitir sempre": what Local State remembers, one string per answer. The
-+// app's identity, the ato's folder and the folders of the atos it shares cookies with (any order),
-+// so that a change in that group asks again.
-+std::string ControlAlwaysKey(std::string_view identity, std::string_view ato, std::vector<std::string> shares_with);
++// app's identity, the ato's folder, the folders of the atos it shares cookies with (any order)
++// and the `allow` list (sorted), so that a change in that group or asking for more asks again.
++std::string ControlAlwaysKey(std::string_view identity,
++                             std::string_view ato,
++                             std::vector<std::string> shares_with,
++                             const std::vector<std::string>& allow = {});
 +
 +// Text the shell shows (control.start's agent, control.status): valid UTF-8, 1 to `max`
 +// characters, no control characters and no bidi controls that could reorder what is shown.
@@ -991,10 +1042,10 @@ index 0000000000..4421b9b2cc
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_CONTROL_KEYS_H_
 diff --git a/chrome/browser/agens/bridge/control_ops.cc b/chrome/browser/agens/bridge/control_ops.cc
 new file mode 100644
-index 0000000000..02b6a09e05
+index 0000000000..3f8e6d1dc5
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_ops.cc
-@@ -0,0 +1,594 @@
+@@ -0,0 +1,607 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The control session (docs/protocolo.md, "control, tab, page"): an app, after the person's OK,
 +// drives tabs of one ato. It belongs to the connection and ends on control.stop, when the
@@ -1128,6 +1179,7 @@ index 0000000000..02b6a09e05
 +  std::string reason;  // control.start's, on one line: the pill's default detail
 +  std::string title, detail;  // control.status; empty for the defaults
 +  bool paused = false;  // the person took over
++  bool passwords = false, clipboard = false;  // control.start's allow
 +  base::FilePath ato;  // the ato's profile folder
 +  std::vector<std::string> shares_with;  // SharesWith(ato) when the person agreed
 +  std::vector<std::unique_ptr<Tab>> tabs;
@@ -1155,6 +1207,8 @@ index 0000000000..02b6a09e05
 +    mark->title = session.title.empty() ? session.agent + " está usando esta aba" : session.title;
 +    mark->detail = session.detail.empty() ? session.reason : session.detail;
 +    mark->paused = session.paused;
++    mark->passwords = session.passwords;
++    tab->page.clipboard = session.clipboard;
 +    contents->NotifyNavigationStateChanged(content::INVALIDATE_TYPE_TAB);
 +  }
 +}
@@ -1271,6 +1325,7 @@ index 0000000000..02b6a09e05
 +// What control.start asked for, carried through the approval.
 +struct Wanted {
 +  std::string agent, reason;
++  std::vector<std::string> allow;  // ParseAllow
 +};
 +
 +void Start(const Client& client, Request request, ReplyCallback reply) {
@@ -1283,6 +1338,11 @@ index 0000000000..02b6a09e05
 +  std::optional<std::string> reason = StringParam(request.body, "reason");
 +  if (!id || !reason || !AtMostChars(*reason, kMaxReasonChars)) {
 +    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs ato and reason (up to 1024 characters)"));
++    return;
++  }
++  std::optional<std::vector<std::string>> allow = ParseAllow(request.body.Find("allow"));
++  if (!allow) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "allow is a list of \"passwords\" and \"clipboard\""));
 +    return;
 +  }
 +  const base::Value* agent_param = request.body.Find("agent");
@@ -1299,9 +1359,11 @@ index 0000000000..02b6a09e05
 +  Wanted wanted;
 +  wanted.agent = agent_param ? agent_param->GetString() : name;
 +  wanted.reason = base::CollapseWhitespaceASCII(*reason, /*trim_sequences_with_line_breaks=*/false);
++  wanted.allow = std::move(*allow);
 +  const std::string ato_name = AgensWindow::AtoName(entry);
 +  std::vector<std::string> shares_with = SharesWith(entry->GetPath());
 +  std::string detail = *reason;
++  if (std::string asks = AllowDetail(wanted.allow); !asks.empty()) detail += (detail.empty() ? "" : "\n\n") + asks;
 +  if (!shares_with.empty()) {
 +    std::vector<std::string> names;
 +    for (const std::string& folder : shares_with) {
@@ -1313,7 +1375,7 @@ index 0000000000..02b6a09e05
 +  // "Permitir sempre" only for a signed app, and only for this ato with this sharing group.
 +  const bool signed_client = !client.identity.empty();
 +  const std::string always_key =
-+      signed_client ? ControlAlwaysKey(client.identity, entry->GetPath().BaseName().AsUTF8Unsafe(), shares_with)
++      signed_client ? ControlAlwaysKey(client.identity, entry->GetPath().BaseName().AsUTF8Unsafe(), shares_with, wanted.allow)
 +                    : std::string();
 +  auto begin = [](uint64_t connection, Wanted wanted, base::FilePath ato, std::vector<std::string> shares_with,
 +                  std::string always_key, Request request, ReplyCallback reply, AgensApprovalAnswer answer) {
@@ -1338,6 +1400,8 @@ index 0000000000..02b6a09e05
 +    Session& session = Sessions()[connection];
 +    session.agent = std::move(wanted.agent);
 +    session.reason = std::move(wanted.reason);
++    session.passwords = std::ranges::contains(wanted.allow, std::string("passwords"));
++    session.clipboard = std::ranges::contains(wanted.allow, std::string("clipboard"));
 +    session.ato = std::move(ato);
 +    session.shares_with = std::move(shares_with);
 +    std::move(reply).Run(OkReply(request.id));
@@ -1618,7 +1682,7 @@ index 0000000000..eda9e71d52
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_CONTROL_OPS_H_
 diff --git a/chrome/browser/agens/bridge/control_page.cc b/chrome/browser/agens/bridge/control_page.cc
 new file mode 100644
-index 0000000000..a8073e5307
+index 0000000000..2801066935
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_page.cc
 @@ -0,0 +1,492 @@
@@ -2050,12 +2114,12 @@ index 0000000000..a8073e5307
 +}
 +
 +void Page::PressKey(base::Value id, Key key, ReplyCallback reply) {
-+  if (TouchesClipboard(key)) return Fail(id, reply, kDenied, "copy, cut and paste are not available");
++  if (!clipboard && TouchesClipboard(key)) return Fail(id, reply, kDenied, "copy, cut and paste are not available");
 +  FocusIsPassword(base::BindOnce(
 +      [](base::WeakPtr<Page> self, base::Value id, Key key, ReplyCallback reply, std::optional<bool> password) {
 +        if (!self) return Fail(id, reply, kFailed, "the tab is no longer controlled");
 +        if (!password) return Fail(id, reply, kFailed, "could not read the page");
-+        if (*password && !AllowedOnPassword(key)) {
++        if (!KeyAllowed(key, *password, self->clipboard)) {
 +          return Fail(id, reply, kDenied, "the focus is on a password field: only keys that move");
 +        }
 +        content::RenderWidgetHost* widget = self->FocusedWidget();
@@ -2116,10 +2180,10 @@ index 0000000000..a8073e5307
 +}  // namespace agens::bridge::control
 diff --git a/chrome/browser/agens/bridge/control_page.h b/chrome/browser/agens/bridge/control_page.h
 new file mode 100644
-index 0000000000..f87cc2be7b
+index 0000000000..3fb3858da9
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_page.h
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,105 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The page side of a controlled tab (page.* in docs/protocolo.md): its accessibility tree with
 +// refs, real input on its widget, and screenshots. UI thread. Password rules, checked against the
@@ -2127,7 +2191,7 @@ index 0000000000..f87cc2be7b
 +// - a field that is or was a password field (Blink keeps that for the element's life) shows no
 +//   value and takes no typing; while one has the focus, only keys that move go through;
 +// - no screenshot while such a field shows its text;
-+// - the clipboard is never touched.
++// - the clipboard is never touched, unless the session was allowed "clipboard".
 +#ifndef CHROME_BROWSER_AGENS_BRIDGE_CONTROL_PAGE_H_
 +#define CHROME_BROWSER_AGENS_BRIDGE_CONTROL_PAGE_H_
 +
@@ -2172,6 +2236,8 @@ index 0000000000..f87cc2be7b
 +
 +  // Runs with the point (DIPs, from the page's top-left) of each real click, for the shell's cursor.
 +  base::RepeatingCallback<void(gfx::PointF)> on_pointer;
++  // control.start's "clipboard": copy, cut and paste keys go through, also on a password field.
++  bool clipboard = false;
 +
 +  // The ops, for Run. Each answers `reply` once, for the request `id`.
 +  void Snapshot(base::Value id, ReplyCallback reply);
@@ -2662,10 +2728,10 @@ index 0000000000..82537f5b69
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_PROTOCOL_H_
 diff --git a/chrome/browser/agens/bridge/protocol_selfcheck.cc b/chrome/browser/agens/bridge/protocol_selfcheck.cc
 new file mode 100644
-index 0000000000..ea7194e643
+index 0000000000..dafd0e7415
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/protocol_selfcheck.cc
-@@ -0,0 +1,165 @@
+@@ -0,0 +1,198 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Assert-based check of the wire format (protocol.h). Build and run:
 +//   ninja -C out/Dev agens_bridge_selfcheck && out/Dev/agens_bridge_selfcheck
@@ -2812,8 +2878,41 @@ index 0000000000..ea7194e643
 +    CHECK_TRUE(ControlAlwaysKey("T/app", "Profile 1", {}) != ControlAlwaysKey("T/app", "Profile 1", {"Default"}));
 +    CHECK_TRUE(ControlAlwaysKey("T/app", "Profile 1", {}) != ControlAlwaysKey("T/app", "Profile 2", {}));
 +    CHECK_TRUE(ControlAlwaysKey("T/a", "b", {}) != ControlAlwaysKey("T/a\",\"b", "", {}));
++    CHECK_TRUE(ControlAlwaysKey("T/app", "Profile 1", {}) == ControlAlwaysKey("T/app", "Profile 1", {}, {}));
++    CHECK_TRUE(ControlAlwaysKey("T/app", "Profile 1", {}) != ControlAlwaysKey("T/app", "Profile 1", {}, {"clipboard"}));
++    CHECK_TRUE(ControlAlwaysKey("T/app", "Profile 1", {}, {"clipboard"}) !=
++               ControlAlwaysKey("T/app", "Profile 1", {}, {"clipboard", "passwords"}));
++    CHECK_TRUE(ControlAlwaysKey("T/app", "Profile 1", {"clipboard"}) !=
++               ControlAlwaysKey("T/app", "Profile 1", {}, {"clipboard"}));  // a folder named like it
 +    CHECK_TRUE(JoinNames({}) == "" && JoinNames({"A"}) == "A" && JoinNames({"A", "B"}) == "A e B");
 +    CHECK_TRUE(JoinNames({"A", "B", "C"}) == "A, B e C");
++  }
++  // control.start's allow, its sheet text, and what clipboard opens.
++  {
++    auto list = [](std::vector<std::string> items) {
++      base::ListValue l;
++      for (auto& i : items) l.Append(i);
++      return base::Value(std::move(l));
++    };
++    CHECK_TRUE(ParseAllow(nullptr) && ParseAllow(nullptr)->empty());
++    base::Value both = list({"passwords", "clipboard", "passwords"});
++    CHECK_TRUE(ParseAllow(&both) == std::vector<std::string>({"clipboard", "passwords"}));
++    base::Value unknown = list({"passwords", "camera"}), text("passwords"), empty = list({});
++    CHECK_TRUE(!ParseAllow(&unknown) && !ParseAllow(&text) && ParseAllow(&empty)->empty());
++    base::ListValue mixed;
++    mixed.Append(1);
++    base::Value mixed_list(std::move(mixed));
++    CHECK_TRUE(!ParseAllow(&mixed_list));
++    CHECK_TRUE(AllowDetail({}).empty());
++    CHECK_TRUE(AllowDetail({"passwords"}) == "Pede também: usar extensões e senhas salvas");
++    CHECK_TRUE(AllowDetail({"clipboard"}).find("pode acabar vendo uma senha") != std::string::npos);
++    CHECK_TRUE(AllowDetail({"passwords"}).find("senha.") == std::string::npos);
++    base::ListValue meta;
++    meta.Append("meta");
++    base::Value meta_list(std::move(meta));
++    const Key paste = *ParseKey("v", &meta_list), a = *ParseKey("a", nullptr), tab = *ParseKey("Tab", nullptr);
++    CHECK_TRUE(!KeyAllowed(paste, false, false) && KeyAllowed(paste, false, true) && KeyAllowed(paste, true, true));
++    CHECK_TRUE(KeyAllowed(a, false, false) && !KeyAllowed(a, true, true) && KeyAllowed(tab, true, false));
 +  }
 +  // control.start's agent and control.status lines; what a pause blocks.
 +  {
@@ -4416,14 +4515,14 @@ index 0000000000..7d791e90d7
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_VIEW_OPS_H_
 diff --git a/chrome/browser/agens/embed/agens_controlled.h b/chrome/browser/agens/embed/agens_controlled.h
 new file mode 100644
-index 0000000000..b6839860a3
+index 0000000000..d476a0e4a4
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_controlled.h
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,39 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Marks a tab an app drives over the socket (bridge/control_ops.cc, docs/agens.md "Controle").
-+// The shell shows it (AgensTab.controller: the pill with Assumir / Devolver); saved passwords,
-+// autofill and downloads stay out of it.
++// The shell shows it (AgensTab.controller: the pill with Assumir / Devolver); downloads stay out
++// of it, and saved passwords and autofill too unless the session was allowed "passwords".
 +#ifndef CHROME_BROWSER_AGENS_EMBED_AGENS_CONTROLLED_H_
 +#define CHROME_BROWSER_AGENS_EMBED_AGENS_CONTROLLED_H_
 +
@@ -4435,10 +4534,16 @@ index 0000000000..b6839860a3
 +class AgensControlled : public content::WebContentsUserData<AgensControlled> {
 + public:
 +  static bool Is(content::WebContents* contents) { return contents && FromWebContents(contents); }
++  // The built-in password manager and autofill stay out, unless the session was allowed "passwords".
++  static bool KeepsPasswordsOut(content::WebContents* contents) {
++    const AgensControlled* mark = contents ? FromWebContents(contents) : nullptr;
++    return mark && !mark->passwords;
++  }
 +
 +  std::string by;               // the agent's name, for the pill and "Controlado pelo …"
 +  std::string title, detail;    // the pill's two lines while the agent works (control.status)
 +  bool paused = false;          // the person took over ("Assumir")
++  bool passwords = false;       // control.start's allow has "passwords"
 +  // Where the agent last clicked or hovered, in DIPs from the page's top-left; x < 0 when never.
 +  float cursor_x = -1, cursor_y = -1;
 +  base::RepeatingClosure stop;       // "Encerrar": ends the whole control session
@@ -6215,7 +6320,7 @@ index 2c467f4524..2aee2739bd 100644
    if (tab_groups::RestrictDownloadOnSyncedTabs() &&
        TabGroupSyncTabState::FromWebContents(web_contents)) {
 diff --git a/chrome/browser/password_manager/chrome_password_manager_client.cc b/chrome/browser/password_manager/chrome_password_manager_client.cc
-index f7819e353a..50d2631dca 100644
+index f7819e353a..f4194c180c 100644
 --- a/chrome/browser/password_manager/chrome_password_manager_client.cc
 +++ b/chrome/browser/password_manager/chrome_password_manager_client.cc
 @@ -3,6 +3,7 @@
@@ -6230,15 +6335,15 @@ index f7819e353a..50d2631dca 100644
  
  bool ChromePasswordManagerClient::IsPasswordManagementEnabledForCurrentPage(
      const GURL& url) const {
-+  // agens: no saving or filling in a tab an app drives over the socket.
-+  if (AgensControlled::Is(web_contents())) {
++  // agens: no saving or filling in a tab an app drives over the socket, unless it was allowed.
++  if (AgensControlled::KeepsPasswordsOut(web_contents())) {
 +    return false;
 +  }
  #if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX) || \
      BUILDFLAG(IS_CHROMEOS)
    if (IsPasswordManagerForUrlDisallowedByPolicy(url)) {
 diff --git a/chrome/browser/ui/autofill/chrome_autofill_client.cc b/chrome/browser/ui/autofill/chrome_autofill_client.cc
-index 242bac51ca..966a9f641e 100644
+index 242bac51ca..9b04fdb59f 100644
 --- a/chrome/browser/ui/autofill/chrome_autofill_client.cc
 +++ b/chrome/browser/ui/autofill/chrome_autofill_client.cc
 @@ -3,6 +3,7 @@
@@ -6249,12 +6354,13 @@ index 242bac51ca..966a9f641e 100644
  
  #include <utility>
  
-@@ -1418,6 +1419,10 @@ void ChromeAutofillClient::ShowAutofillSuggestionsImpl(
+@@ -1418,6 +1419,11 @@ void ChromeAutofillClient::ShowAutofillSuggestionsImpl(
      const PopupOpenArgs& open_args,
      base::WeakPtr<AutofillSuggestionDelegate> delegate,
      FieldGlobalId expected_field_id) {
-+  // agens: no suggestions (addresses, cards, passwords) in a tab an app drives over the socket.
-+  if (AgensControlled::Is(web_contents())) {
++  // agens: no suggestions (addresses, cards, passwords) in a tab an app drives over the socket,
++  // unless it was allowed "passwords".
++  if (AgensControlled::KeepsPasswordsOut(web_contents())) {
 +    return;
 +  }
    if (expected_field_id &&
