@@ -172,6 +172,10 @@ Quem desenha a interface é o app hospedeiro: barra de endereço, abas, atos, o 
 
 **Quem pode.** A conexão que manda `host.attach` vira a do hospedeiro. Tem de ser o processo que abriu o motor, e só pode haver uma. As outras conexões (a Engine, o MCP) seguem como clientes comuns e não usam `view.*`.
 
+**Quem conecta no motor embutido.** O processo que abriu o motor, sempre. Outros apps só se forem assinados com o nosso Team ID e o identificador de assinatura deles estiver na lista que o hospedeiro passa ao abrir o motor (`--agens-allowed-clients=<id>,<id>`). Não há folha de conexão. Em build de desenvolvimento, `--agens-accept-unsigned` deixa entrar cliente sem assinatura.
+
+**O que ainda não chega ao hospedeiro.** Menu de `select`, escolher arquivo, login HTTP, pedido de permissão do site e instalar extensão são cancelados na hora; `alert`, `confirm` e `prompt` de aba sem agente também.
+
 ```
 → {"id": 1, "op": "host.attach"}
 ← {"id": 1, "ok": true}
@@ -188,7 +192,7 @@ Quem desenha a interface é o app hospedeiro: barra de endereço, abas, atos, o 
 - **Entrada.** O app manda o que a vista recebeu: `view.focus {tab, on}`, `view.mouse {tab, data, x, y}`, `view.mouse.leave {tab}`, `view.wheel {tab, data, x, y}`, `view.key {tab, data, text, commands, marked, sel_start, sel_end, had_marked, unmarked}` e `view.edit {tab, command}` (`cut`, `copy`, `paste`, `selectAll`, `undo`, `redo`). `data` é o `NSEvent` serializado (`CGEventCreateData`, em base64); `x` e `y` contam do canto de cima da vista, em pontos. Sem `id`, o motor não responde.
 - **Aba com agente.** Quando um agente controla a aba, `view.tab` traz `control: {agent, title, detail, state}`, com `state` `"working"` ou `"paused"`, para o app desenhar o aviso. O app manda `view.control {tab, action}` com `take` (Assumir), `give` (Devolver) ou `end` (encerrar). A pessoa pode ver a aba do agente o tempo todo; com `take`, as teclas e os cliques dela passam a valer e os do agente respondem `paused`.
 - **Aprovações.** Embutido, o motor não mostra folha: manda `approval.ask {ask, title, detail, offer_always}` ao hospedeiro, que desenha e responde `approval.answer {ask, answer}` com `allow`, `always` ou `deny`. Sem hospedeiro ligado, a resposta é `denied`.
-- **Detalhes do formato.** `view.attach`, `view.resize` e `view.detach` vão com `id` e têm resposta; as operações de entrada vão sem `id`. Em `view.key`, só `tab` e `data` são obrigatórios (soltar tecla e mudar modificador não mandam o resto). `width` e `height` são pontos inteiros; `scale`, `x` e `y` podem ter decimais; `context` é um número de 32 bits sem sinal. `ask` é texto. `control` ausente ou `null` quer dizer sem agente. Toda aba que aparece num ato gera `view.tab`, inclusive as que o próprio hospedeiro abriu. `hello` continua devolvendo `protocol` 1: um motor sem estas operações responde `unknown_op` a `host.attach`.
+- **Detalhes do formato.** `view.attach`, `view.resize` e `view.detach` vão com `id` e têm resposta; as operações de entrada vão sem `id`. Em `view.key`, só `tab` e `data` são obrigatórios (soltar tecla e mudar modificador não mandam o resto). `width` e `height` são pontos inteiros, até 8192; `scale`, `x` e `y` podem ter decimais; `context` é um número de 32 bits sem sinal. `ask` é texto. `control` ausente ou `null` quer dizer sem agente. Toda aba que aparece num ato gera `view.tab`, inclusive as que o próprio hospedeiro abriu. `hello` continua devolvendo `protocol` 1: um motor sem estas operações responde `unknown_op` a `host.attach`.
 - **Se o motor cair**, a conexão fecha. O app abre o motor de novo, refaz `host.attach` e religa as vistas; os ids `v…` antigos não valem mais.
 
 ## Erros
