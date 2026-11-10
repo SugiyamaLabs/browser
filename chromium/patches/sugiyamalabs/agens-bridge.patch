@@ -1,24 +1,32 @@
 diff --git a/chrome/browser/agens/bridge/BUILD.gn b/chrome/browser/agens/bridge/BUILD.gn
 new file mode 100644
-index 0000000000..d31857a1a6
+index 0000000000..815f7eea06
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/BUILD.gn
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,28 @@
 +# Copyright 2026 SugiyamaLabs.
 +# The local control socket (docs/agens.md). The server and its ops build inside
 +# //chrome/browser/ui/webui_browser:impl next to the embed glue they call; only the wire format
-+# lives here, so the self-check below needs nothing but //base.
++# lives here, so the self-check below needs nothing but //base and //url.
 +
 +source_set("protocol") {
 +  sources = [
 +    "protocol.cc",
 +    "protocol.h",
++    "session_need.cc",
++    "session_need.h",
 +  ]
-+  public_deps = [ "//base" ]
++  public_deps = [
++    "//base",
++    "//url",
++  ]
 +}
 +
 +executable("agens_bridge_selfcheck") {
-+  sources = [ "protocol_selfcheck.cc" ]
++  sources = [
++    "protocol_selfcheck.cc",
++    "session_need_selfcheck.cc",
++  ]
 +  deps = [
 +    ":protocol",
 +    "//base",
@@ -1244,10 +1252,10 @@ index 0000000000..1647ec285f
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_PROTOCOL_H_
 diff --git a/chrome/browser/agens/bridge/protocol_selfcheck.cc b/chrome/browser/agens/bridge/protocol_selfcheck.cc
 new file mode 100644
-index 0000000000..6684ee0021
+index 0000000000..578056d3b7
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/protocol_selfcheck.cc
-@@ -0,0 +1,106 @@
+@@ -0,0 +1,109 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Assert-based check of the wire format (protocol.h). Build and run:
 +//   ninja -C out/Dev agens_bridge_selfcheck && out/Dev/agens_bridge_selfcheck
@@ -1261,6 +1269,8 @@ index 0000000000..6684ee0021
 +#include "chrome/browser/agens/bridge/protocol.h"
 +
 +using namespace agens::bridge;
++
++void RunSessionNeedChecks();  // session_need_selfcheck.cc
 +
 +#define CHECK_TRUE(x)                                              \
 +  do {                                                             \
@@ -1352,31 +1362,509 @@ index 0000000000..6684ee0021
 +    CHECK_TRUE(AtMostChars("\xF0\x9F\x98\x80", 1));  // one emoji, 4 bytes
 +  }
 +  std::printf("agens bridge protocol: ok\n");
++  RunSessionNeedChecks();
 +  return 0;
++}
+diff --git a/chrome/browser/agens/bridge/session_need.cc b/chrome/browser/agens/bridge/session_need.cc
+new file mode 100644
+index 0000000000..719ce44b6d
+--- /dev/null
++++ b/chrome/browser/agens/bridge/session_need.cc
+@@ -0,0 +1,83 @@
++// Copyright 2026 SugiyamaLabs.
++
++#include "chrome/browser/agens/bridge/session_need.h"
++
++#include <algorithm>
++#include <tuple>
++
++#include "base/json/json_writer.h"
++#include "base/strings/string_util.h"
++#include "chrome/browser/agens/bridge/protocol.h"
++#include "url/gurl.h"
++
++namespace agens::bridge::session {
++
++namespace {
++
++constexpr size_t kMaxOriginBytes = 2048;
++
++bool KnownType(std::string_view type) {
++  return type == "cookie" || type == "localStorage" || type == "header";
++}
++
++}  // namespace
++
++std::optional<url::Origin> ParseOrigin(std::string_view text) {
++  if (text.size() > kMaxOriginBytes) return std::nullopt;
++  const GURL url(text);
++  if (!url.is_valid() || !url.SchemeIsHTTPOrHTTPS() || url.has_username() || url.has_password()) return std::nullopt;
++  url::Origin origin = url::Origin::Create(url);
++  if (origin.GetURL() != url) return std::nullopt;  // a path, query or fragment
++  return origin;
++}
++
++bool ValidName(std::string_view name) {
++  if (name.empty() || !AtMostChars(name, kMaxNameChars)) return false;
++  return std::ranges::none_of(name, [](unsigned char c) { return c < 0x20 || c == 0x7f; });
++}
++
++std::optional<std::vector<Item>> ParseNeed(const base::Value* need, std::string& error) {
++  error = "need must be a list of 1 to 32 items {type: cookie|localStorage|header, from: http(s) origin, name}";
++  if (!need || !need->is_list() || need->GetList().empty() || need->GetList().size() > kMaxItems) return std::nullopt;
++  std::vector<Item> items;
++  for (const base::Value& value : need->GetList()) {
++    if (!value.is_dict()) return std::nullopt;
++    const std::string* type = value.GetDict().FindString("type");
++    const std::string* from = value.GetDict().FindString("from");
++    const std::string* name = value.GetDict().FindString("name");
++    if (!type || !from || !name || !KnownType(*type) || !ValidName(*name)) return std::nullopt;
++    std::optional<url::Origin> origin = ParseOrigin(*from);
++    if (!origin) return std::nullopt;
++    // The Cookie header would hand over every cookie of that origin: ask for the cookies by name.
++    if (*type == "header" && base::EqualsCaseInsensitiveASCII(*name, "cookie")) {
++      error = "header Cookie is not allowed; ask for each cookie by name";
++      return std::nullopt;
++    }
++    Item item{*type, *from, *origin, *name};
++    const bool repeat = std::ranges::any_of(items, [&](const Item& other) {
++      return other.type == item.type && other.origin == item.origin && other.name == item.name;
++    });
++    if (!repeat) items.push_back(std::move(item));
++  }
++  error.clear();
++  return items;
++}
++
++std::string Describe(const Item& item) {
++  std::string where = item.origin.Serialize();
++  if (item.origin.scheme() == "https") where = where.substr(std::string_view("https://").size());
++  return item.type + " " + item.name + " de " + where;
++}
++
++std::string ApprovalKey(std::string_view identity, std::string_view ato, const std::vector<Item>& items) {
++  std::vector<std::tuple<std::string, std::string, std::string>> sorted;
++  for (const Item& item : items) sorted.emplace_back(item.type, item.origin.Serialize(), item.name);
++  std::ranges::sort(sorted);
++  sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
++  base::ListValue list;
++  for (const auto& [type, origin, name] : sorted) list.Append(base::ListValue().Append(type).Append(origin).Append(name));
++  // JSON, so no separator inside a name can make two different sets collide.
++  return base::WriteJson(base::ListValue().Append(identity).Append(ato).Append(std::move(list))).value_or("");
++}
++
++}  // namespace agens::bridge::session
+diff --git a/chrome/browser/agens/bridge/session_need.h b/chrome/browser/agens/bridge/session_need.h
+new file mode 100644
+index 0000000000..7200546383
+--- /dev/null
++++ b/chrome/browser/agens/bridge/session_need.h
+@@ -0,0 +1,49 @@
++// Copyright 2026 SugiyamaLabs.
++// The pure part of the session ops (session_ops.h): reading a `need` list, the words the approval
++// sheet shows for each item, and the key "Permitir sempre" is remembered under. Only //base and
++// //url, so protocol_selfcheck.cc can exercise it.
++#ifndef CHROME_BROWSER_AGENS_BRIDGE_SESSION_NEED_H_
++#define CHROME_BROWSER_AGENS_BRIDGE_SESSION_NEED_H_
++
++#include <optional>
++#include <string>
++#include <string_view>
++#include <vector>
++
++#include "base/values.h"
++#include "url/origin.h"
++
++namespace agens::bridge::session {
++
++// Local State. ApprovalKey()s answered "Permitir sempre" (never for an unsigned client).
++inline constexpr char kAlwaysPref[] = "agens.bridge.session_always";
++
++inline constexpr size_t kMaxItems = 32;
++inline constexpr size_t kMaxNameChars = 256;
++
++struct Item {
++  std::string type;  // "cookie", "localStorage" or "header"
++  std::string from;  // as the client sent it, echoed back
++  url::Origin origin;
++  std::string name;
++};
++
++// An http(s) origin and nothing more (no path, query, fragment or credentials).
++std::optional<url::Origin> ParseOrigin(std::string_view text);
++// A cookie, storage key or header name: 1..kMaxNameChars characters, no control characters (it is
++// shown on the sheet, one item per line).
++bool ValidName(std::string_view name);
++
++// `need` from the request: 1..kMaxItems items, repeats dropped. On failure fills `error` (the
++// bad_request message) and returns nullopt.
++std::optional<std::vector<Item>> ParseNeed(const base::Value* need, std::string& error);
++
++// One line of the sheet, e.g. "cookie d de app.slack.com" (https is implied, other schemes shown).
++std::string Describe(const Item& item);
++
++// The same for the same client, ato and set of items, whatever their order.
++std::string ApprovalKey(std::string_view identity, std::string_view ato, const std::vector<Item>& items);
++
++}  // namespace agens::bridge::session
++
++#endif  // CHROME_BROWSER_AGENS_BRIDGE_SESSION_NEED_H_
+diff --git a/chrome/browser/agens/bridge/session_need_selfcheck.cc b/chrome/browser/agens/bridge/session_need_selfcheck.cc
+new file mode 100644
+index 0000000000..168e6239f8
+--- /dev/null
++++ b/chrome/browser/agens/bridge/session_need_selfcheck.cc
+@@ -0,0 +1,98 @@
++// Copyright 2026 SugiyamaLabs.
++// Assert-based check of session_need.h, run by agens_bridge_selfcheck (protocol_selfcheck.cc).
++
++#include <cstdio>
++#include <cstdlib>
++#include <string>
++
++#include "base/json/json_reader.h"
++#include "chrome/browser/agens/bridge/session_need.h"
++
++using namespace agens::bridge::session;
++
++#define NEED_CHECK(x)                                                     \
++  do {                                                                    \
++    if (!(x)) {                                                           \
++      std::fprintf(stderr, "FAILED %s:%d: %s\n", __FILE__, __LINE__, #x); \
++      std::exit(1);                                                       \
++    }                                                                     \
++  } while (0)
++
++static std::optional<std::vector<Item>> Need(const std::string& json) {
++  std::optional<base::Value> v = base::JSONReader::Read(json, base::JSON_PARSE_RFC);
++  NEED_CHECK(v);
++  std::string error;
++  std::optional<std::vector<Item>> items = ParseNeed(&*v, error);
++  NEED_CHECK(items.has_value() == error.empty());
++  return items;
++}
++
++void RunSessionNeedChecks() {
++  // Origins: http(s), nothing past the host and port.
++  NEED_CHECK(ParseOrigin("https://app.slack.com"));
++  NEED_CHECK(ParseOrigin("https://app.slack.com/"));
++  NEED_CHECK(ParseOrigin("http://127.0.0.1:8765")->Serialize() == "http://127.0.0.1:8765");
++  NEED_CHECK(!ParseOrigin("https://app.slack.com/path"));
++  NEED_CHECK(!ParseOrigin("https://app.slack.com/?q=1"));
++  NEED_CHECK(!ParseOrigin("https://app.slack.com/#x"));
++  NEED_CHECK(!ParseOrigin("https://user:pw@app.slack.com"));
++  NEED_CHECK(!ParseOrigin("ftp://app.slack.com"));
++  NEED_CHECK(!ParseOrigin("javascript:alert(1)"));
++  NEED_CHECK(!ParseOrigin("app.slack.com"));
++  NEED_CHECK(!ParseOrigin(""));
++
++  // Names: no control characters (they would forge lines on the sheet), capped.
++  NEED_CHECK(ValidName("d"));
++  NEED_CHECK(!ValidName(""));
++  NEED_CHECK(!ValidName("a\nheader Authorization de bank.com"));
++  NEED_CHECK(!ValidName(std::string("a\0b", 3)));
++  NEED_CHECK(ValidName(std::string(kMaxNameChars, 'n')));
++  NEED_CHECK(!ValidName(std::string(kMaxNameChars + 1, 'n')));
++
++  // Need lists.
++  std::optional<std::vector<Item>> items = Need(
++      R"([{"type":"cookie","from":"https://app.slack.com","name":"d"},
++          {"type":"localStorage","from":"http://127.0.0.1:8765","name":"token"},
++          {"type":"header","from":"https://outlook.office.com","name":"Authorization"},
++          {"type":"cookie","from":"https://app.slack.com/","name":"d"}])");
++  NEED_CHECK(items && items->size() == 3);  // the repeat is dropped
++  NEED_CHECK((*items)[0].from == "https://app.slack.com" && (*items)[1].name == "token");
++  NEED_CHECK(Describe((*items)[0]) == "cookie d de app.slack.com");
++  NEED_CHECK(Describe((*items)[1]) == "localStorage token de http://127.0.0.1:8765");
++  NEED_CHECK(Describe((*items)[2]) == "header Authorization de outlook.office.com");
++
++  NEED_CHECK(!Need("[]"));
++  NEED_CHECK(!Need("{}"));
++  NEED_CHECK(!Need("[1]"));
++  NEED_CHECK(!Need(R"([{"type":"password","from":"https://a.com","name":"x"}])"));
++  NEED_CHECK(!Need(R"([{"type":"cookie","from":"https://a.com/x","name":"x"}])"));
++  NEED_CHECK(!Need(R"([{"type":"cookie","from":"https://a.com","name":""}])"));
++  NEED_CHECK(!Need(R"([{"type":"cookie","from":"https://a.com"}])"));
++  NEED_CHECK(!Need(R"([{"type":"cookie","from":"https://a.com","name":7}])"));
++  NEED_CHECK(!Need(R"([{"type":"header","from":"https://a.com","name":"COOKIE"}])"));
++  NEED_CHECK(Need(R"([{"type":"cookie","from":"https://a.com","name":"Cookie"}])"));
++  auto many = [](size_t n) {
++    std::string list = "[";
++    for (size_t i = 0; i < n; ++i) {
++      list += (i ? "," : "") + std::string(R"({"type":"cookie","from":"https://a.com","name":"c)") +
++              std::to_string(i) + "\"}";
++    }
++    return list + "]";
++  };
++  NEED_CHECK(!Need(many(kMaxItems + 1)));
++  NEED_CHECK(Need(many(kMaxItems))->size() == kMaxItems);
++
++  // The "always" key: order and repeats do not matter; client, ato and every item do.
++  std::optional<std::vector<Item>> ab = Need(
++      R"([{"type":"cookie","from":"https://a.com","name":"x"},{"type":"header","from":"https://b.com","name":"H"}])");
++  std::optional<std::vector<Item>> ba = Need(
++      R"([{"type":"header","from":"https://b.com/","name":"H"},{"type":"cookie","from":"https://a.com","name":"x"}])");
++  std::optional<std::vector<Item>> a = Need(R"([{"type":"cookie","from":"https://a.com","name":"x"}])");
++  NEED_CHECK(ApprovalKey("T/app", "Profile 1", *ab) == ApprovalKey("T/app", "Profile 1", *ba));
++  NEED_CHECK(ApprovalKey("T/app", "Profile 1", *ab) != ApprovalKey("T/app", "Profile 1", *a));
++  NEED_CHECK(ApprovalKey("T/app", "Profile 1", *a) != ApprovalKey("T/other", "Profile 1", *a));
++  NEED_CHECK(ApprovalKey("T/app", "Profile 1", *a) != ApprovalKey("T/app", "Profile 2", *a));
++  NEED_CHECK(!ApprovalKey("T/app", "Profile 1", *a).empty());
++
++  std::printf("agens bridge session need: ok\n");
 +}
 diff --git a/chrome/browser/agens/bridge/session_ops.cc b/chrome/browser/agens/bridge/session_ops.cc
 new file mode 100644
-index 0000000000..393ff20a85
+index 0000000000..89d41fd0ae
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/session_ops.cc
-@@ -0,0 +1,19 @@
+@@ -0,0 +1,248 @@
 +// Copyright 2026 SugiyamaLabs.
++// Session values (cookie, localStorage and header values) live only in memory on their way to the
++// socket: never in a log line, pref, file or error message.
 +
 +#include "chrome/browser/agens/bridge/session_ops.h"
 +
++#include <list>
++#include <map>
++#include <memory>
 +#include <utility>
 +
++#include "base/functional/bind.h"
++#include "base/no_destructor.h"
++#include "base/strings/string_util.h"
++#include "base/task/sequenced_task_runner.h"
++#include "chrome/browser/agens/bridge/session_need.h"
++#include "chrome/browser/agens/embed/agens_window.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/profiles/profile_window.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/browser/ui/navigator/browser_navigator.h"
++#include "chrome/browser/ui/navigator/browser_navigator_params.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/storage_partition.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "mojo/public/cpp/bindings/receiver.h"
++#include "net/cookies/cookie_change_dispatcher.h"
++#include "net/cookies/cookie_options.h"
++#include "net/cookies/cookie_partition_key_collection.h"
++#include "services/network/public/mojom/cookie_manager.mojom.h"
++#include "url/gurl.h"
++
 +namespace agens::bridge::session {
++
++namespace {
++
++constexpr char kFailed[] = "failed";
++constexpr char kCancelled[] = "cancelled";
++
++// The ato whose folder is `id`, among the atos the UI lists (as ops.cc), so a client never names a path.
++ProfileAttributesEntry* FindAto(const std::string& id) {
++  for (ProfileAttributesEntry* entry : AgensWindow::Atos()) {
++    if (entry->GetPath().BaseName().AsUTF8Unsafe() == id) return entry;
++  }
++  return nullptr;
++}
++
++network::mojom::CookieManager* CookiesOf(Profile* profile) {
++  return profile->GetDefaultStoragePartition()->GetCookieManagerForBrowserProcess();
++}
++
++// The cookie `name` the ato would send to `origin` (httpOnly included), or nullopt.
++void ReadCookie(Profile* profile,
++                const url::Origin& origin,
++                const std::string& name,
++                base::OnceCallback<void(std::optional<std::string>)> done) {
++  CookiesOf(profile)->GetCookieList(
++      origin.GetURL(), net::CookieOptions::MakeAllInclusive(), net::CookiePartitionKeyCollection(),
++      base::BindOnce(
++          [](std::string name, base::OnceCallback<void(std::optional<std::string>)> done,
++             const std::vector<net::CookieWithAccessResult>& cookies, const std::vector<net::CookieWithAccessResult>&) {
++            for (const net::CookieWithAccessResult& cookie : cookies) {
++              if (cookie.cookie.Name() == name) {
++                std::move(done).Run(cookie.cookie.Value());
++                return;
++              }
++            }
++            std::move(done).Run(std::nullopt);
++          },
++          name, std::move(done)));
++}
++
++bool IsInsertion(net::CookieChangeCause cause) {
++  return cause == net::CookieChangeCause::INSERTED || cause == net::CookieChangeCause::INSERTED_NO_CHANGE_OVERWRITE ||
++         cause == net::CookieChangeCause::INSERTED_NO_VALUE_CHANGE_OVERWRITE;
++}
++
++class LoginWatch;
++
++// What this area keeps per connection; dropped in OnConnectionClosed.
++struct ConnectionState {
++  std::list<std::unique_ptr<LoginWatch>> logins;
++};
++std::map<uint64_t, ConnectionState>& Connections() {
++  static base::NoDestructor<std::map<uint64_t, ConnectionState>> connections;
++  return *connections;
++}
++
++// A `login` in progress: the tab it opened and its `done` rule. Replies once and deletes itself;
++// deleted early (the connection closed), it stops watching and leaves the tab open.
++class LoginWatch : public content::WebContentsObserver, public network::mojom::CookieChangeListener {
++ public:
++  LoginWatch(uint64_t connection,
++             base::Value id,
++             ReplyCallback reply,
++             std::string url_prefix,
++             std::optional<url::Origin> cookie_origin,
++             std::string cookie_name)
++      : connection_(connection),
++        id_(std::move(id)),
++        reply_(std::move(reply)),
++        url_prefix_(std::move(url_prefix)),
++        cookie_origin_(std::move(cookie_origin)),
++        cookie_name_(std::move(cookie_name)) {}
++
++  void Start(Profile* profile, content::WebContents* tab) {
++    Observe(tab);
++    if (!cookie_origin_) return;
++    CookiesOf(profile)->AddCookieChangeListener(cookie_origin_->GetURL(), cookie_name_,
++                                                receiver_.BindNewPipeAndPassRemote());
++    // The person may already be logged in.
++    ReadCookie(profile, *cookie_origin_, cookie_name_,
++               base::BindOnce(
++                   [](base::WeakPtr<LoginWatch> self, std::optional<std::string> value) {
++                     if (self && value) self->Finish(OkReply(self->id_), /*close_tab=*/true);
++                   },
++                   weak_factory_.GetWeakPtr()));
++  }
++
++  void Fail() { Finish(ErrorReply(&id_, kFailed, "could not open the ato"), /*close_tab=*/false); }
++
++ private:
++  // content::WebContentsObserver:
++  void DidFinishNavigation(content::NavigationHandle* navigation) override {
++    if (!url_prefix_.empty() && navigation->IsInPrimaryMainFrame() && navigation->HasCommitted() &&
++        !navigation->IsErrorPage() && base::StartsWith(navigation->GetURL().spec(), url_prefix_)) {
++      Finish(OkReply(id_), /*close_tab=*/true);
++    }
++  }
++  void WebContentsDestroyed() override {
++    Finish(ErrorReply(&id_, kCancelled, "the tab was closed"), /*close_tab=*/false);
++  }
++
++  // network::mojom::CookieChangeListener:
++  void OnCookieChange(const net::CookieChangeInfo& change) override {
++    if (change.cookie.Name() == cookie_name_ && IsInsertion(change.cause)) Finish(OkReply(id_), /*close_tab=*/true);
++  }
++
++  // Deletes this.
++  void Finish(std::string line, bool close_tab) {
++    std::move(reply_).Run(std::move(line));
++    if (close_tab && web_contents()) {
++      // Posted: not from inside the tab's own observer call.
++      base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++          FROM_HERE, base::BindOnce(
++                         [](base::WeakPtr<content::WebContents> tab) {
++                           if (tab) tab->ClosePage();
++                         },
++                         web_contents()->GetWeakPtr()));
++    }
++    Observe(nullptr);
++    std::erase_if(Connections()[connection_].logins, [this](const auto& watch) { return watch.get() == this; });
++  }
++
++  const uint64_t connection_;
++  const base::Value id_;
++  ReplyCallback reply_;
++  const std::string url_prefix_;  // spec of the URL; empty for a cookie rule
++  const std::optional<url::Origin> cookie_origin_;
++  const std::string cookie_name_;
++  mojo::Receiver<network::mojom::CookieChangeListener> receiver_{this};
++  base::WeakPtrFactory<LoginWatch> weak_factory_{this};
++};
++
++void Login(const Client& client, Request request, ReplyCallback reply) {
++  std::optional<std::string> id = StringParam(request.body, "ato");
++  const GURL url(StringParam(request.body, "url").value_or(""));
++  const base::DictValue* done = request.body.FindDict("done");
++  std::string url_prefix;
++  std::optional<url::Origin> cookie_origin;
++  std::string cookie_name;
++  bool done_ok = false;
++  if (done && done->size() == 1) {
++    const GURL prefix(StringParam(*done, "url_prefix").value_or(""));
++    if (prefix.is_valid() && prefix.SchemeIsHTTPOrHTTPS()) {
++      url_prefix = prefix.spec();
++      done_ok = true;
++    }
++  } else if (done && done->size() == 2) {
++    std::optional<std::string> name = StringParam(*done, "cookie");
++    std::optional<std::string> from = StringParam(*done, "from");
++    cookie_origin = from ? ParseOrigin(*from) : std::nullopt;
++    if (name && ValidName(*name) && cookie_origin) {
++      cookie_name = *name;
++      done_ok = true;
++    }
++  }
++  if (!id || !url.is_valid() || !url.SchemeIsHTTPOrHTTPS() || !done_ok) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest,
++                                    "needs ato, url (http or https) and done: {cookie, from} or {url_prefix}"));
++    return;
++  }
++  ProfileAttributesEntry* entry = FindAto(*id);
++  if (!entry) {
++    std::move(reply).Run(ErrorReply(&request.id, kNotFound, *id));
++    return;
++  }
++  auto owned = std::make_unique<LoginWatch>(client.connection, request.id.Clone(), std::move(reply),
++                                            std::move(url_prefix), std::move(cookie_origin), std::move(cookie_name));
++  LoginWatch* watch = owned.get();
++  Connections()[client.connection].logins.push_back(std::move(owned));
++  // Loads the profile when it isn't, and opens (or brings up) its window.
++  profiles::SwitchToProfile(
++      entry->GetPath(), /*always_create=*/false,
++      base::BindOnce(
++          [](uint64_t connection, LoginWatch* watch, GURL url, BrowserWindowInterface* browser) {
++            // The connection may have closed meanwhile, taking the watch with it.
++            auto it = Connections().find(connection);
++            if (it == Connections().end() ||
++                !std::ranges::any_of(it->second.logins, [&](const auto& w) { return w.get() == watch; })) {
++              return;
++            }
++            content::WebContents* tab = nullptr;
++            if (browser) {
++              NavigateParams params(browser, url, ui::PAGE_TRANSITION_LINK);
++              params.disposition = WindowOpenDisposition::NEW_FOREGROUND_TAB;
++              Navigate(&params);
++              tab = params.navigated_or_inserted_contents;
++            }
++            if (tab) {
++              watch->Start(browser->GetProfile(), tab);
++            } else {
++              watch->Fail();
++            }
++          },
++          client.connection, watch, url));
++}
++
++}  // namespace
 +
 +bool Handles(std::string_view op) {
 +  return op == "login" || op == "session" || op == "renew";
 +}
 +
 +void HandleOp(const Client& client, Request request, ReplyCallback reply) {
-+  std::move(reply).Run(ErrorReply(&request.id, kUnknownOp, request.op));  // phase 2
++  if (request.op == "login") {
++    Login(client, std::move(request), std::move(reply));
++  } else {
++    std::move(reply).Run(ErrorReply(&request.id, kUnknownOp, request.op));
++  }
 +}
 +
-+void OnConnectionClosed(uint64_t connection) {}
++void OnConnectionClosed(uint64_t connection) {
++  Connections().erase(connection);
++}
 +
 +}  // namespace agens::bridge::session
 diff --git a/chrome/browser/agens/bridge/session_ops.h b/chrome/browser/agens/bridge/session_ops.h
