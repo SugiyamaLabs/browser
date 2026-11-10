@@ -22,6 +22,7 @@ Prévia: `previa.html`.
 | Arquivo | O que é |
 |---|---|
 | `agens-navegador-escuro.icns` / `-claro.icns` | ícone do app no macOS, de 16 a 1024 px (com @2x) |
+| `agens-navegador-escuro.car` / `-claro.car` | catálogo de assets (`Assets.car`) com o `AppIcon`, feito pelo `actool` a partir do `.icns`; o `chromium/rebrand.py` copia o escuro para o app |
 | `agens-navegador-escuro.ico` / `-claro.ico` | ícone do app no Windows: 16, 24, 32 (marca pequena), 48, 64, 128, 256 |
 | `macos-*-{64..1024}.png`, `windows-*-{16..256}.png` | PNG soltos, para site, docs e lojas |
 

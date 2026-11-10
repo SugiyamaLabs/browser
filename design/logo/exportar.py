@@ -5,12 +5,12 @@ Usage: python3 design/logo/exportar.py [path-to-chromium]
 Renders each SVG at the exact pixel size with headless Chromium (transparent background, scale 1),
 then packs the macOS iconset with Apple's iconutil and writes the .ico by hand (PNG entries).
 """
-import os, struct, subprocess, sys, tempfile
+import json, os, struct, subprocess, sys, tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 OUT = HERE / "exportados"
-CHROME = sys.argv[1] if len(sys.argv) > 1 else str(Path.home() / "browser-work/ungoogled-chromium-macos/build/src/out/Default/Chromium.app/Contents/MacOS/Chromium")
+CHROME = sys.argv[1] if len(sys.argv) > 1 else str(Path.home() / "browser-work/ungoogled-chromium-macos/build/src/out/Default/Agens.app/Contents/MacOS/Agens")
 
 # macOS iconset: name -> pixel size
 ICNS = {"icon_16x16": 16, "icon_16x16@2x": 32, "icon_32x32": 32, "icon_32x32@2x": 64, "icon_128x128": 128,
@@ -43,6 +43,29 @@ def write_ico(pngs: list[tuple[int, Path]], dest: Path):
     dest.write_bytes(header + entries + blobs)
 
 
+def write_car(icns: Path, dest: Path):
+    """Asset catalog (Assets.car) with the AppIcon, from the .icns: macOS reads CFBundleIconName from it first."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        icon = tmp / "A.xcassets/AppIcon.appiconset"
+        icon.mkdir(parents=True)
+        subprocess.run(["iconutil", "-c", "iconset", str(icns), "-o", str(tmp / "i.iconset")], check=True)
+        images = []
+        for png in sorted((tmp / "i.iconset").glob("*.png")):
+            size, scale = (png.stem.removeprefix("icon_").split("@") + ["1x"])[:2]
+            images.append({"idiom": "mac", "size": size, "scale": scale, "filename": png.name})
+            (icon / png.name).write_bytes(png.read_bytes())
+        info = {"version": 1, "author": "xcode"}
+        (icon / "Contents.json").write_text(json.dumps({"images": images, "info": info}))
+        (tmp / "A.xcassets/Contents.json").write_text(json.dumps({"info": info}))
+        (tmp / "out").mkdir()
+        subprocess.run(["xcrun", "actool", "--compile", str(tmp / "out"), "--platform", "macosx",
+                        "--minimum-deployment-target", "12.0", "--app-icon", "AppIcon",
+                        "--output-partial-info-plist", str(tmp / "p.plist"), str(tmp / "A.xcassets")],
+                       check=True, capture_output=True)
+        dest.write_bytes((tmp / "out/Assets.car").read_bytes())
+
+
 def main():
     OUT.mkdir(exist_ok=True)
     for theme in ("escuro", "claro"):
@@ -52,6 +75,7 @@ def main():
         for name, size in ICNS.items():
             render(HERE / f"icone-macos-{theme}.svg", size, iconset / f"{name}.png")
         subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(OUT / f"agens-navegador-{theme}.icns")], check=True)
+        write_car(OUT / f"agens-navegador-{theme}.icns", OUT / f"agens-navegador-{theme}.car")
         # Windows: the small mark (two cards) up to 32 px, the full mark above
         pngs = []
         for size in ICO_SIZES:

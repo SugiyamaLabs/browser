@@ -21,8 +21,8 @@ SRC = WORK / "ungoogled-chromium-macos/build/src"
 BROWSERS = {
     "brave": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
     "chrome": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "ungoogled": str(SRC / "out/Default/Chromium.app/Contents/MacOS/Chromium"),
-    "dev": str(SRC / "out/Dev/Chromium.app/Contents/MacOS/Chromium"),
+    "ungoogled": str(SRC / "out/Default/Agens.app/Contents/MacOS/Agens"),
+    "dev": str(SRC / "out/Dev/Agens.app/Contents/MacOS/Agens"),
 }
 PORT = 9333
 
