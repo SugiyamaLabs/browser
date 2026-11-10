@@ -1,0 +1,148 @@
+diff --git a/chrome/browser/extensions/chrome_content_browser_client_extensions_part.cc b/chrome/browser/extensions/chrome_content_browser_client_extensions_part.cc
+index 561929d05a..f19c67ae31 100644
+--- a/chrome/browser/extensions/chrome_content_browser_client_extensions_part.cc
++++ b/chrome/browser/extensions/chrome_content_browser_client_extensions_part.cc
+@@ -684,6 +684,9 @@ std::vector<url::Origin> ChromeContentBrowserClientExtensionsPart::
+     GetOriginsRequiringDedicatedProcess() {
+   std::vector<url::Origin> list;
+ 
++  // agens: the store installs extensions, so it gets its own process again (crbug.com/40094229).
++  list.push_back(url::Origin::Create(extension_urls::GetWebstoreLaunchURL()));
++  list.push_back(url::Origin::Create(extension_urls::GetNewWebstoreLaunchURL()));
+   return list;
+ }
+ 
+diff --git a/chrome/browser/extensions/updater/extension_updater.cc b/chrome/browser/extensions/updater/extension_updater.cc
+index b538f65c4a..b3ba983c1f 100644
+--- a/chrome/browser/extensions/updater/extension_updater.cc
++++ b/chrome/browser/extensions/updater/extension_updater.cc
+@@ -273,7 +273,10 @@ void ExtensionUpdater::NextCheck() {
+   if (!alive_) {
+     return;
+   }
+-  CheckNow(CheckParams());
++  // agens: the person can turn the periodic check off (Configurações › Extensões).
++  if (!prefs_ || prefs_->GetBoolean("agens.extensions.auto_update")) {
++    CheckNow(CheckParams());
++  }
+   ScheduleNextCheck();
+ }
+ 
+diff --git a/extensions/browser/extension_prefs.cc b/extensions/browser/extension_prefs.cc
+index f1760c5b03..87ad6297ba 100644
+--- a/extensions/browser/extension_prefs.cc
++++ b/extensions/browser/extension_prefs.cc
+@@ -2235,6 +2235,8 @@ void ExtensionPrefs::RegisterLocalStatePrefs(PrefRegistrySimple* registry) {
+ void ExtensionPrefs::RegisterProfilePrefs(
+     user_prefs::PrefRegistrySyncable* registry) {
+   registry->RegisterDictionaryPref(pref_names::kExtensions);
++  // agens: extensions check the store for updates on their own (Configurações › Extensões).
++  registry->RegisterBooleanPref("agens.extensions.auto_update", true);
+   registry->RegisterListPref(pref_names::kPinnedExtensions,
+                              user_prefs::PrefRegistrySyncable::SYNCABLE_PREF);
+   registry->RegisterListPref(pref_names::kDeletedComponentExtensions);
+diff --git a/extensions/browser/updater/extension_downloader.cc b/extensions/browser/updater/extension_downloader.cc
+index 3ab7bc1c8f..a3f679ebe5 100644
+--- a/extensions/browser/updater/extension_downloader.cc
++++ b/extensions/browser/updater/extension_downloader.cc
+@@ -157,8 +157,8 @@ bool IncrementAuthUserIndex(GURL* url) {
+ std::optional<GURL> SanitizeUpdateURL(const ExtensionId& extension_id,
+                                       const GURL& update_url) {
+   if (update_url.is_empty()) {
+-    // Fill in default update URL.
+-    return std::nullopt;
++    // Fill in default update URL. agens: the store's, as in Chrome (webstore.py restores it).
++    return extension_urls::GetWebstoreUpdateUrl();
+   }
+ 
+   // Skip extensions with non-empty invalid update URLs.
+@@ -176,7 +176,11 @@ std::optional<GURL> SanitizeUpdateURL(const ExtensionId& extension_id,
+     return std::nullopt;
+   }
+ 
+-
++  // Make sure we use SSL for store-hosted extensions.
++  if (extension_urls::IsWebstoreUpdateUrl(update_url) &&
++      !update_url.SchemeIsCryptographic()) {
++    return extension_urls::GetWebstoreUpdateUrl();
++  }
+   return update_url;
+ }
+ 
+@@ -347,6 +351,12 @@ void ExtensionDownloader::DoStartAllPending() {
+     AddToFetches(fetches_preparing, std::move(task));
+   pending_tasks_.clear();
+ 
++  // agens: extensions update again (ungoogled had removed the checks).
++  for (auto& fetch_list : fetches_preparing) {
++    for (auto& fetch : fetch_list.second) {
++      StartUpdateCheck(std::move(fetch));
++    }
++  }
+ }
+ 
+ void ExtensionDownloader::SetIdentityManager(
+diff --git a/extensions/browser/webstore_installer.cc b/extensions/browser/webstore_installer.cc
+index 3f49bc9571..47336f6b51 100644
+--- a/extensions/browser/webstore_installer.cc
++++ b/extensions/browser/webstore_installer.cc
+@@ -98,6 +98,12 @@ const char kAuthUserQueryKey[] = "authuser";
+ 
+ constexpr base::TimeDelta kTimeRemainingThreshold = base::Seconds(1);
+ 
++// agens: the store installs again (the Inox patch had removed the download).
++// Folder for downloading crx files from the webstore. This is used so that the
++// crx files don't go via the usual downloads folder.
++const base::FilePath::CharType kWebstoreDownloadFolder[] =
++    FILE_PATH_LITERAL("Webstore Downloads");
++
+ base::FilePath* g_download_directory_for_tests = nullptr;
+ 
+ [[maybe_unused]]
+@@ -477,6 +483,21 @@ void WebstoreInstaller::DownloadNextPendingModule() {
+ 
+ void WebstoreInstaller::DownloadCrx(const ExtensionId& extension_id,
+                                     InstallSource source) {
++  download_url_ = GetWebstoreInstallURL(extension_id, source);
++  MaybeAppendAuthUserParameter(approval_->authuser, download_url_);
++
++  base::FilePath user_data_dir =
++      ExtensionsBrowserClient::Get()->GetUserDataDir();
++  base::FilePath download_path = user_data_dir.Append(kWebstoreDownloadFolder);
++
++  base::FilePath download_directory(g_download_directory_for_tests
++                                        ? *g_download_directory_for_tests
++                                        : download_path);
++
++  GetExtensionFileTaskRunner()->PostTaskAndReplyWithResult(
++      FROM_HERE,
++      base::BindOnce(&GetDownloadFilePath, download_directory, extension_id),
++      base::BindOnce(&WebstoreInstaller::StartDownload, this, extension_id));
+ }
+ 
+ // http://crbug.com/40957413
+@@ -631,6 +652,24 @@ void WebstoreInstaller::UpdateDownloadProgress() {
+ void WebstoreInstaller::StartCrxInstaller(const DownloadItem& download) {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
+   DCHECK(!crx_installer_.get());
++
++  const InstallApproval* approval = GetAssociatedApproval(download);
++  DCHECK(approval);
++
++  crx_installer_ =
++      ExtensionsBrowserClient::Get()->CreateCrxInstallerFromDownloadItem(
++          browser_context_, download);
++
++  crx_installer_->set_expected_id(approval->extension_id);
++  crx_installer_->set_is_gallery_install(true);
++  crx_installer_->set_allow_silent_install(true);
++  crx_installer_->AddInstallerCallback(base::BindOnce(
++      &WebstoreInstaller::OnInstallerDone, weak_ptr_factory_.GetWeakPtr()));
++  if (approval->withhold_permissions) {
++    crx_installer_->set_withhold_permissions();
++  }
++
++  crx_installer_->InstallCrx(download.GetFullPath());
+ }
+ 
+ void WebstoreInstaller::ReportFailure(const std::string& error,
