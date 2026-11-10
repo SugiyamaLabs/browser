@@ -1,0 +1,713 @@
+diff --git a/chrome/BUILD.gn b/chrome/BUILD.gn
+index e73729d22a..dd06f62905 100644
+--- a/chrome/BUILD.gn
++++ b/chrome/BUILD.gn
+@@ -1096,6 +1096,7 @@ if (is_win) {
+       ":packed_resources",
+       "//chrome/app_shim:app_mode_loader_plist_bundle_data",
+       "//chrome/browser/mac:install",
++      "//third_party/sugiyamalabs_adblock:bundle_data",  # SugiyamaLabs
+     ]
+ 
+     if (icu_use_data_file) {
+diff --git a/chrome/app/chrome_main_delegate.cc b/chrome/app/chrome_main_delegate.cc
+index c6dfce70e6..bcb6a55f0b 100644
+--- a/chrome/app/chrome_main_delegate.cc
++++ b/chrome/app/chrome_main_delegate.cc
+@@ -43,6 +43,9 @@
+ #include "chrome/common/buildflags.h"
+ #include "chrome/common/channel_info.h"
+ #include "chrome/common/chrome_constants.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/sugiyamalabs/adblock.h"  // SugiyamaLabs
++#endif
+ #include "chrome/common/chrome_content_client.h"
+ #include "chrome/common/chrome_features.h"
+ #include "chrome/common/chrome_paths.h"
+@@ -1182,6 +1185,13 @@ std::optional<int> ChromeMainDelegate::BasicStartupComplete() {
+ #if !defined(BUILDING_CHROME_RENDERER)
+   const base::CommandLine& command_line =
+       *base::CommandLine::ForCurrentProcess();
++#if BUILDFLAG(IS_MAC)
++  // SugiyamaLabs: this process is the ad blocker's list converter, not a browser.
++  if (std::optional<int> exit_code =
++          sugiyamalabs::adblock::MaybeRunRulesConverter(command_line)) {
++    return exit_code;
++  }
++#endif
+ #endif  // !defined(BUILDING_CHROME_RENDERER)
+ 
+   // Only allow disabling web security via the command-line flag if the user has
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index ce58abe..357009b 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -834,6 +834,8 @@ source_set("core") {
+     "after_startup_task_utils.cc",
+     "browser_about_handler.cc",
+     "browser_process_impl.cc",
++    "sugiyamalabs/adblock.cc",  # SugiyamaLabs
++    "sugiyamalabs/adblock.h",
+     "chrome_browser_field_trials.cc",
+     "chrome_browser_interface_binders.cc",
+     "chrome_browser_interface_binders.h",
+@@ -1230,6 +1232,7 @@ source_set("core") {
+     "//components/subresource_filter/content/browser",
+     "//components/subresource_filter/content/mojom",
+     "//components/subresource_filter/core/browser",
++    "//components/subresource_filter/tools/ruleset_converter:support",  # SugiyamaLabs
+     "//components/supervised_user/core/browser:device_parental_controls",
+     "//components/surface_embed/browser",
+     "//components/surface_embed/common",
+diff --git a/chrome/browser/browser_process_impl.cc b/chrome/browser/browser_process_impl.cc
+index 6a895d3c80..433fa42fa4 100644
+--- a/chrome/browser/browser_process_impl.cc
++++ b/chrome/browser/browser_process_impl.cc
+@@ -18,6 +18,7 @@
+ #include "base/compiler_specific.h"
+ #include "base/debug/leak_annotations.h"
+ #include "base/files/file_path.h"
++#include "base/files/file_util.h"
+ #include "base/functional/bind.h"
+ #include "base/functional/callback.h"
+ #include "base/functional/callback_helpers.h"
+@@ -83,6 +84,7 @@
+ #include "chrome/browser/printing/background_printing_manager.h"
+ #include "chrome/browser/printing/print_job_manager.h"
+ #include "chrome/browser/profiles/profile_manager.h"
++#include "chrome/browser/sugiyamalabs/adblock.h"
+ #include "chrome/browser/resource_coordinator/resource_coordinator_parts.h"
+ #include "chrome/browser/serial/serial_policy_allowed_ports.h"
+ #include "chrome/browser/shell_integration.h"
+@@ -1342,6 +1344,8 @@ BuildState* BrowserProcessImpl::GetBuildState() {
+ 
+ // static
+ void BrowserProcessImpl::RegisterPrefs(PrefRegistrySimple* registry) {
++  sugiyamalabs::adblock::RegisterPrefs(registry);  // SugiyamaLabs
++
+   registry->RegisterBooleanPref(prefs::kDefaultBrowserSettingEnabled, false);
+ 
+   registry->RegisterBooleanPref(prefs::kAllowCrossOriginAuthPrompt, false);
+@@ -1844,6 +1848,11 @@ void BrowserProcessImpl::CreateSubresourceFilterRulesetService() {
+           subresource_filter::kSafeBrowsingRulesetConfig, local_state(),
+           user_data_dir,
+           subresource_filter::SafeBrowsingRulesetPublisher::Factory());
++
++  // SugiyamaLabs: ad blocker level, ruleset indexing and daily list update.
++  if (base::FeatureList::IsEnabled(subresource_filter::kNativeAdblock)) {
++    sugiyamalabs::adblock::Start();
++  }
+ }
+ 
+ #if !BUILDFLAG(IS_ANDROID)
+diff --git a/chrome/browser/component_updater/registration.cc b/chrome/browser/component_updater/registration.cc
+index 56360c6cc5..c8ac220977 100644
+--- a/chrome/browser/component_updater/registration.cc
++++ b/chrome/browser/component_updater/registration.cc
+@@ -49,6 +49,7 @@
+ #include "components/optimization_guide/core/model_execution/model_execution_util.h"
+ #include "components/prefs/pref_service.h"
+ #include "components/safe_browsing/core/common/features.h"
++#include "components/subresource_filter/core/browser/subresource_filter_features.h"
+ #include "device/vr/buildflags/buildflags.h"
+ #include "extensions/buildflags/buildflags.h"
+ #include "third_party/widevine/cdm/buildflags.h"
+@@ -150,7 +151,10 @@ void RegisterComponentsForUpdate() {
+   RegisterWidevineCdmComponent(cus);
+ #endif  // BUILDFLAG(ENABLE_WIDEVINE_CDM_COMPONENT)
+ 
+-  RegisterSubresourceFilterComponent(cus);
++  // SugiyamaLabs: the ad blocker ruleset ships with the app, never downloaded.
++  if (!base::FeatureList::IsEnabled(subresource_filter::kNativeAdblock)) {
++    RegisterSubresourceFilterComponent(cus);
++  }
+   RegisterOnDeviceHeadSuggestComponent(
+       cus, g_browser_process->GetApplicationLocale());
+   RegisterOptimizationHintsComponent(cus);
+diff --git a/components/subresource_filter/content/browser/content_subresource_filter_throttle_manager.cc b/components/subresource_filter/content/browser/content_subresource_filter_throttle_manager.cc
+index e440b4d7a8..b86273d720 100644
+--- a/components/subresource_filter/content/browser/content_subresource_filter_throttle_manager.cc
++++ b/components/subresource_filter/content/browser/content_subresource_filter_throttle_manager.cc
+@@ -664,7 +664,18 @@ ContentSubresourceFilterThrottleManager::
+   if (IsInSubresourceFilterRoot(&navigation_handle)) {
+     auto throttle = ActivationStateComputingNavigationThrottle::CreateForRoot(
+         registry, kSafeBrowsingRulesetConfig.uma_tag);
+-    if (base::FeatureList::IsEnabled(kAdTagging)) {
++    if (base::FeatureList::IsEnabled(kNativeAdblock)) {
++      // SugiyamaLabs: activate on every page, not only on Safe Browsing lists,
++      // unless the ad blocker is off or the site is allowed (ADS exception).
++      if (IsNativeAdblockActive() &&
++          !profile_interaction_manager_->IsSiteAllowlisted(
++              navigation_handle.GetURL())) {
++        mojom::ActivationState adblock_state;
++        adblock_state.activation_level = mojom::ActivationLevel::kEnabled;
++        throttle->NotifyPageActivationWithRuleset(EnsureRulesetHandle(),
++                                                  adblock_state);
++      }
++    } else if (base::FeatureList::IsEnabled(kAdTagging)) {
+       mojom::ActivationState ad_tagging_state;
+       ad_tagging_state.activation_level = mojom::ActivationLevel::kDryRun;
+       throttle->NotifyPageActivationWithRuleset(EnsureRulesetHandle(),
+diff --git a/components/subresource_filter/content/browser/profile_interaction_manager.cc b/components/subresource_filter/content/browser/profile_interaction_manager.cc
+index 63e1b6c386..a6b1bcc5b3 100644
+--- a/components/subresource_filter/content/browser/profile_interaction_manager.cc
++++ b/components/subresource_filter/content/browser/profile_interaction_manager.cc
+@@ -128,6 +128,11 @@ mojom::ActivationLevel ProfileInteractionManager::OnPageActivationComputed(
+   return effective_activation_level;
+ }
+ 
++bool ProfileInteractionManager::IsSiteAllowlisted(const GURL& url) {
++  return profile_context_->settings_manager()->GetSitePermission(url) ==
++         CONTENT_SETTING_ALLOW;
++}
++
+ void ProfileInteractionManager::MaybeShowNotification() {
+   // The caller should make sure this is only called from pages that are
+   // currently primary.
+diff --git a/components/subresource_filter/content/browser/profile_interaction_manager.h b/components/subresource_filter/content/browser/profile_interaction_manager.h
+index e3be19ef0a..046fa95b54 100644
+--- a/components/subresource_filter/content/browser/profile_interaction_manager.h
++++ b/components/subresource_filter/content/browser/profile_interaction_manager.h
+@@ -64,6 +64,9 @@ class ProfileInteractionManager
+   // has been installed in web_contents() by the embedder.
+   void MaybeShowNotification();
+ 
++  // SugiyamaLabs: true when the person allowed ads on `url` (ADS exception).
++  bool IsSiteAllowlisted(const GURL& url);
++
+   // SafeBrowsingPageActivationThrottle::Delegate:
+   mojom::ActivationLevel OnPageActivationComputed(
+       content::NavigationHandle* navigation_handle,
+diff --git a/components/subresource_filter/core/browser/subresource_filter_features.cc b/components/subresource_filter/core/browser/subresource_filter_features.cc
+index 5a27b46796..090ccf5454 100644
+--- a/components/subresource_filter/core/browser/subresource_filter_features.cc
++++ b/components/subresource_filter/core/browser/subresource_filter_features.cc
+@@ -5,6 +5,7 @@
+ #include "components/subresource_filter/core/browser/subresource_filter_features.h"
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <map>
+ #include <ostream>
+ #include <sstream>
+@@ -246,6 +247,16 @@ BASE_FEATURE(kSafeBrowsingSubresourceFilter,
+ 
+ BASE_FEATURE(kFilterAdsOnAbusiveSites, base::FEATURE_ENABLED_BY_DEFAULT);
+ 
++BASE_FEATURE(kNativeAdblock, base::FEATURE_ENABLED_BY_DEFAULT);
++
++std::atomic<bool> g_native_adblock_active{true};
++void SetNativeAdblockActive(bool active) {
++  g_native_adblock_active = active;
++}
++bool IsNativeAdblockActive() {
++  return g_native_adblock_active;
++}
++
+ BASE_FEATURE(kAdsInterventionsEnforced, base::FEATURE_DISABLED_BY_DEFAULT);
+ 
+ const base::FeatureParam<base::TimeDelta> kAdsInterventionDuration = {
+diff --git a/components/subresource_filter/core/browser/subresource_filter_features.h b/components/subresource_filter/core/browser/subresource_filter_features.h
+index 159f1886a1..199de1ad33 100644
+--- a/components/subresource_filter/core/browser/subresource_filter_features.h
++++ b/components/subresource_filter/core/browser/subresource_filter_features.h
+@@ -185,6 +185,13 @@ scoped_refptr<ConfigurationList> GetAndSetActivateConfigurations(
+ // The primary toggle to enable/disable the Safe Browsing Subresource Filter.
+ BASE_DECLARE_FEATURE(kSafeBrowsingSubresourceFilter);
+ 
++// SugiyamaLabs: blocks ads and trackers on every site with the ruleset that
++// ships inside the app (EasyList, EasyPrivacy, uBlock filters).
++BASE_DECLARE_FEATURE(kNativeAdblock);
++// SugiyamaLabs: false while the ad blocker level is 0 (off).
++void SetNativeAdblockActive(bool active);
++bool IsNativeAdblockActive();
++
+ // Enables the blocking of ads on sites that are abusive.
+ BASE_DECLARE_FEATURE(kFilterAdsOnAbusiveSites);
+ 
+diff --git a/chrome/browser/sugiyamalabs/adblock.cc b/chrome/browser/sugiyamalabs/adblock.cc
+new file mode 100644
+index 0000000000..6496b68d80
+--- /dev/null
++++ b/chrome/browser/sugiyamalabs/adblock.cc
+@@ -0,0 +1,345 @@
++// SugiyamaLabs: ad blocker levels, daily list update and the in-app rules converter.
++// See docs/bloqueador.md in our repository.
++
++#include "chrome/browser/sugiyamalabs/adblock.h"
++
++#include <algorithm>
++#include <map>
++#include <memory>
++#include <optional>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "base/command_line.h"
++#include "base/files/file_util.h"
++#include "base/functional/bind.h"
++#include "base/logging.h"
++#include "base/no_destructor.h"
++#include "base/path_service.h"
++#include "base/process/launch.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_util.h"
++#include "base/task/single_thread_task_runner.h"
++#include "base/task/thread_pool.h"
++#include "base/timer/timer.h"
++#include "chrome/browser/browser_process.h"
++#include "chrome/browser/net/system_network_context_manager.h"
++#include "chrome/common/chrome_paths.h"
++#include "components/prefs/pref_change_registrar.h"
++#include "components/prefs/pref_registry_simple.h"
++#include "components/prefs/pref_service.h"
++#include "components/subresource_filter/content/browser/ruleset_service.h"
++#include "components/subresource_filter/core/browser/subresource_filter_features.h"
++#include "components/subresource_filter/tools/ruleset_converter/ruleset_converter.h"
++#include "net/base/load_flags.h"
++#include "net/http/http_response_headers.h"
++#include "net/traffic_annotation/network_traffic_annotation.h"
++#include "services/network/public/cpp/resource_request.h"
++#include "services/network/public/cpp/shared_url_loader_factory.h"
++#include "services/network/public/cpp/simple_url_loader.h"
++#include "services/network/public/mojom/fetch_api.mojom.h"
++#include "services/network/public/mojom/url_response_head.mojom.h"
++#include "url/gurl.h"
++
++namespace sugiyamalabs::adblock {
++namespace {
++
++// The only host the browser talks to for lists.
++constexpr char kDefaultListsUrl[] =
++    "https://raw.githubusercontent.com/SugiyamaLabs/browser/main/chromium/adblock/lists/";
++constexpr char kConvertSwitch[] = "agens-convert-rules";
++constexpr char kConvertInputsSwitch[] = "agens-convert-inputs";
++// The largest download SimpleURLLoader::DownloadToString allows. shortcut: EasyList is 2 MB today;
++// move to DownloadToFile if a list nears 5 MB.
++constexpr size_t kMaxListBytes = 5 * 1024 * 1024;
++
++// Level 1 uses the first two lists, level 2 all of them.
++constexpr const char* kLists[] = {"easylist.txt", "easyprivacy.txt", "ublock-filters.txt",
++                                  "ublock-privacy.txt", "easylist-cookie.txt"};
++constexpr size_t kListCount[] = {0, 2, 5};
++
++bool g_updating = false;
++base::Time g_last_attempt;
++
++base::FilePath AdblockDir() {
++  base::FilePath dir;
++  base::PathService::Get(chrome::DIR_USER_DATA, &dir);
++  return dir.AppendASCII("AgensAdblock");
++}
++
++// Rules for `level`: the ones built from downloaded lists if there are any, else the app's.
++struct Pick {
++  base::FilePath path;
++  std::string version;
++};
++Pick PickRules(int level) {
++  const std::string name = "rules_" + base::NumberToString(level);
++  base::FilePath path = AdblockDir().AppendASCII(name);
++  base::File::Info info;
++  if (!base::GetFileInfo(path, &info)) {
++    base::PathService::Get(chrome::DIR_RESOURCES, &path);
++    path = path.AppendASCII("adblock_rules_" + base::NumberToString(level));
++    if (!base::GetFileInfo(path, &info)) {
++      return {};
++    }
++  }
++  return {path, base::NumberToString(level) + "-" + base::NumberToString(info.size) + "-" +
++                    base::NumberToString(info.last_modified.InMillisecondsSinceUnixEpoch())};
++}
++
++void ApplyLevel() {
++  const int level = GetLevel();
++  subresource_filter::SetNativeAdblockActive(level > 0);
++  if (level == 0) {
++    return;
++  }
++  base::ThreadPool::PostTaskAndReplyWithResult(
++      FROM_HERE, {base::MayBlock(), base::TaskPriority::BEST_EFFORT},
++      base::BindOnce(&PickRules, level), base::BindOnce([](Pick pick) {
++        subresource_filter::RulesetService* service =
++            g_browser_process ? g_browser_process->subresource_filter_ruleset_service()
++                              : nullptr;
++        if (!service || pick.version.empty()) {
++          return;
++        }
++        subresource_filter::UnindexedRulesetInfo info;
++        info.content_version = std::move(pick.version);
++        info.ruleset_path = pick.path;
++        service->IndexAndStoreAndPublishRulesetIfNeeded(info);
++      }));
++}
++
++// --- update ---------------------------------------------------------------------------------
++
++using DoneCallback = base::OnceCallback<void(bool, std::string)>;
++
++void Finish(DoneCallback done, bool ok, std::string message) {
++  g_updating = false;
++  if (ok) {
++    g_browser_process->local_state()->SetTime(kLastUpdatePref, base::Time::Now());
++    ApplyLevel();
++  }
++  if (done) {
++    std::move(done).Run(ok, std::move(message));
++  }
++}
++
++bool ConvertInChild(const std::vector<base::FilePath>& inputs, const base::FilePath& output) {
++  base::FilePath exe;
++  if (!base::PathService::Get(base::FILE_EXE, &exe)) {
++    return false;
++  }
++  std::vector<std::string> paths;
++  for (const auto& p : inputs) {
++    paths.push_back(p.AsUTF8Unsafe());
++  }
++  base::CommandLine command(exe);
++  command.AppendSwitchPath(kConvertSwitch, output);
++  command.AppendSwitchASCII(kConvertInputsSwitch, base::JoinString(paths, ","));
++  base::Process process = base::LaunchProcess(command, base::LaunchOptions());
++  int code = -1;
++  if (!process.IsValid() || !process.WaitForExitWithTimeout(base::Minutes(3), &code)) {
++    process.Terminate(1, false);
++    return false;
++  }
++  return code == 0 && base::PathExists(output);
++}
++
++// Writes the downloaded lists and the two rulesets built from them next to each other, then
++// swaps them in, so a failure in the middle keeps the previous ones. Returns "" on success.
++std::string InstallBlocking(std::map<std::string, std::string> bodies) {
++  const base::FilePath dir = AdblockDir();
++  const base::FilePath staging = dir.AppendASCII("staging");
++  base::DeletePathRecursively(staging);
++  if (!base::CreateDirectory(staging) || !base::CreateDirectory(dir.AppendASCII("lists"))) {
++    return "Não foi possível gravar as listas.";
++  }
++  for (const auto& [name, body] : bodies) {
++    if (!base::WriteFile(staging.AppendASCII(name), body)) {
++      base::DeletePathRecursively(staging);
++      return "Não foi possível gravar as listas.";
++    }
++  }
++  for (int level = 1; level <= 2; ++level) {
++    std::vector<base::FilePath> inputs;
++    for (size_t i = 0; i < kListCount[level]; ++i) {
++      inputs.push_back(staging.AppendASCII(kLists[i]));
++    }
++    if (!ConvertInChild(inputs, staging.AppendASCII("rules_" + base::NumberToString(level)))) {
++      base::DeletePathRecursively(staging);
++      return "Não foi possível converter as listas; as anteriores continuam valendo.";
++    }
++  }
++  for (const char* name : kLists) {
++    base::ReplaceFile(staging.AppendASCII(name), dir.AppendASCII("lists").AppendASCII(name),
++                      nullptr);
++  }
++  for (int level = 1; level <= 2; ++level) {
++    const std::string name = "rules_" + base::NumberToString(level);
++    base::ReplaceFile(staging.AppendASCII(name), dir.AppendASCII(name), nullptr);
++  }
++  base::DeletePathRecursively(staging);
++  return std::string();
++}
++
++struct Download {
++  std::unique_ptr<network::SimpleURLLoader> loader;
++  std::map<std::string, std::string> bodies;
++  DoneCallback done;
++};
++
++void FetchNext(std::unique_ptr<Download> d);
++
++void OnDownloaded(std::unique_ptr<Download> d, std::optional<std::string> body) {
++  const auto* headers = d->loader->ResponseInfo() ? d->loader->ResponseInfo()->headers.get()
++                                                  : nullptr;
++  // A filter list starts with "[Adblock…]" or a "!" comment; anything else (an HTML error
++  // page, an empty file) means the download is not a list.
++  if (!body || !headers || headers->response_code() != 200 || body->size() < 1024 ||
++      (body->front() != '[' && body->front() != '!')) {
++    Finish(std::move(d->done), false,
++           "Não foi possível baixar as listas; as anteriores continuam valendo.");
++    return;
++  }
++  d->bodies[kLists[d->bodies.size()]] = std::move(*body);
++  FetchNext(std::move(d));
++}
++
++void FetchNext(std::unique_ptr<Download> d) {
++  if (d->bodies.size() == std::size(kLists)) {
++    base::ThreadPool::PostTaskAndReplyWithResult(
++        FROM_HERE,
++        {base::MayBlock(), base::WithBaseSyncPrimitives(), base::TaskPriority::BEST_EFFORT},
++        base::BindOnce(&InstallBlocking, std::move(d->bodies)),
++        base::BindOnce(
++            [](DoneCallback done, std::string error) {
++              Finish(std::move(done), error.empty(),
++                     error.empty() ? "Listas atualizadas." : error);
++            },
++            std::move(d->done)));
++    return;
++  }
++  std::string base_url = kDefaultListsUrl;
++  const base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
++  if (command_line->HasSwitch(kListsUrlSwitch)) {
++    base_url = command_line->GetSwitchValueASCII(kListsUrlSwitch);
++  }
++  auto request = std::make_unique<network::ResourceRequest>();
++  request->url = GURL(base_url + kLists[d->bodies.size()]);
++  request->credentials_mode = network::mojom::CredentialsMode::kOmit;  // no cookies
++  request->load_flags = net::LOAD_DISABLE_CACHE;
++  net::NetworkTrafficAnnotationTag annotation = net::DefineNetworkTrafficAnnotation(
++      "agens_adblock_lists", R"(
++        semantics {
++          sender: "Ad blocker list update"
++          description:
++            "Once a day, downloads the ad blocker filter lists from the SugiyamaLabs "
++            "repository on GitHub, so blocking follows the lists without an app update."
++          trigger: "Daily, or when the person taps Atualizar agora."
++          data: "Nothing is sent: a plain GET with no cookies and no identifiers."
++          destination: OTHER
++          internal { contacts { email: "contact@sugiyamalabs.com" } }
++          user_data { type: NONE }
++          last_reviewed: "2026-11-10"
++        }
++        policy {
++          cookies_allowed: NO
++          setting: "Configurações > Bloqueador > Atualizar as listas todo dia."
++          policy_exception_justification: "Not implemented."
++        })");
++  d->loader = network::SimpleURLLoader::Create(std::move(request), annotation);
++  network::SimpleURLLoader* loader = d->loader.get();
++  loader->DownloadToString(
++      g_browser_process->system_network_context_manager()->GetSharedURLLoaderFactory().get(),
++      base::BindOnce(&OnDownloaded, std::move(d)), kMaxListBytes);
++}
++
++void MaybeAutoUpdate() {
++  if (!GetAutoUpdate() || GetLevel() == 0 || g_updating) {
++    return;
++  }
++  const base::Time now = base::Time::Now();
++  if (!GetLastUpdate().is_null() && now - GetLastUpdate() < base::Hours(24)) {
++    return;
++  }
++  if (!g_last_attempt.is_null() && now - g_last_attempt < base::Hours(6)) {
++    return;  // a failed update is retried in a few hours, not every hour
++  }
++  g_last_attempt = now;
++  UpdateNow(DoneCallback());
++}
++
++}  // namespace
++
++void RegisterPrefs(PrefRegistrySimple* registry) {
++  registry->RegisterIntegerPref(kLevelPref, 2);
++  registry->RegisterBooleanPref(kAutoUpdatePref, true);
++  registry->RegisterTimePref(kLastUpdatePref, base::Time());
++  registry->RegisterBooleanPref(kHideCookieNoticesPref, true);
++}
++
++void Start() {
++  static bool started = false;
++  if (started) {
++    return;
++  }
++  started = true;
++  static base::NoDestructor<PrefChangeRegistrar> registrar;
++  registrar->Init(g_browser_process->local_state());
++  registrar->Add(kLevelPref, base::BindRepeating(&ApplyLevel));
++  ApplyLevel();
++
++  // Never on the startup path: first check 2 minutes in (5 s with the test switch), then hourly.
++  static base::NoDestructor<base::RepeatingTimer> timer;
++  timer->Start(FROM_HERE, base::Hours(1), base::BindRepeating(&MaybeAutoUpdate));
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++      FROM_HERE, base::BindOnce(&MaybeAutoUpdate),
++      base::CommandLine::ForCurrentProcess()->HasSwitch(kListsUrlSwitch) ? base::Seconds(5)
++                                                                         : base::Minutes(2));
++}
++
++int GetLevel() {
++  return std::clamp(g_browser_process->local_state()->GetInteger(kLevelPref), 0, 2);
++}
++void SetLevel(int level) {
++  g_browser_process->local_state()->SetInteger(kLevelPref, std::clamp(level, 0, 2));
++}
++bool GetAutoUpdate() {
++  return g_browser_process->local_state()->GetBoolean(kAutoUpdatePref);
++}
++void SetAutoUpdate(bool enabled) {
++  g_browser_process->local_state()->SetBoolean(kAutoUpdatePref, enabled);
++}
++base::Time GetLastUpdate() {
++  return g_browser_process->local_state()->GetTime(kLastUpdatePref);
++}
++
++void UpdateNow(DoneCallback done) {
++  if (g_updating) {
++    if (done) {
++      std::move(done).Run(false, "Já está atualizando.");
++    }
++    return;
++  }
++  g_updating = true;
++  auto d = std::make_unique<Download>();
++  d->done = std::move(done);
++  FetchNext(std::move(d));
++}
++
++std::optional<int> MaybeRunRulesConverter(const base::CommandLine& command_line) {
++  if (!command_line.HasSwitch(kConvertSwitch)) {
++    return std::nullopt;
++  }
++  logging::SetMinLogLevel(logging::LOGGING_FATAL);  // one warning per dropped rule otherwise
++  subresource_filter::RulesetConverter converter;
++  const bool ok =
++      converter.SetInputFiles(command_line.GetSwitchValueNative(kConvertInputsSwitch)) &&
++      converter.SetOutputFileUrl(command_line.GetSwitchValuePath(kConvertSwitch)) &&
++      converter.SetInputFormat("filter-list") && converter.SetOutputFormat("unindexed-ruleset") &&
++      converter.Convert();
++  return ok ? 0 : 1;
++}
++
++}  // namespace sugiyamalabs::adblock
+diff --git a/chrome/browser/sugiyamalabs/adblock.h b/chrome/browser/sugiyamalabs/adblock.h
+new file mode 100644
+index 0000000000..f2f44a500f
+--- /dev/null
++++ b/chrome/browser/sugiyamalabs/adblock.h
+@@ -0,0 +1,50 @@
++// SugiyamaLabs: ad blocker levels, daily list update and the in-app rules converter.
++#ifndef CHROME_BROWSER_SUGIYAMALABS_ADBLOCK_H_
++#define CHROME_BROWSER_SUGIYAMALABS_ADBLOCK_H_
++
++#include <optional>
++#include <string>
++
++#include "base/functional/callback.h"
++#include "base/time/time.h"
++
++class PrefRegistrySimple;
++
++namespace base {
++class CommandLine;
++}
++
++namespace sugiyamalabs::adblock {
++
++// Local State. Level: 0 off, 1 Padrao (EasyList + EasyPrivacy), 2 Forte (+ uBlock filters,
++// uBlock privacy, EasyList Cookie List). Default 2.
++inline constexpr char kLevelPref[] = "agens.adblock.level";
++inline constexpr char kAutoUpdatePref[] = "agens.adblock.auto_update";
++inline constexpr char kLastUpdatePref[] = "agens.adblock.last_update";
++inline constexpr char kHideCookieNoticesPref[] = "agens.adblock.hide_cookie_notices";
++
++// Test-only: where the lists are downloaded from, instead of our GitHub.
++inline constexpr char kListsUrlSwitch[] = "agens-adblock-lists-url";
++
++void RegisterPrefs(PrefRegistrySimple* registry);
++
++// Applies the level and schedules the daily update. Call once, with the ruleset service up.
++void Start();
++
++int GetLevel();
++void SetLevel(int level);  // clamped to 0..2; applies now
++bool GetAutoUpdate();
++void SetAutoUpdate(bool enabled);
++base::Time GetLastUpdate();  // null when never updated
++
++// Downloads the lists from our GitHub and re-indexes. `done` gets (ok, message). Never blocks.
++void UpdateNow(base::OnceCallback<void(bool, std::string)> done);
++
++// The converter runs in a child process (this same executable, `--agens-convert-rules`), so a
++// malformed list cannot crash the browser. Call first thing in ChromeMainDelegate; returns the
++// exit code when this process is the converter.
++std::optional<int> MaybeRunRulesConverter(const base::CommandLine& command_line);
++
++}  // namespace sugiyamalabs::adblock
++
++#endif  // CHROME_BROWSER_SUGIYAMALABS_ADBLOCK_H_
+diff --git a/third_party/sugiyamalabs_adblock/BUILD.gn b/third_party/sugiyamalabs_adblock/BUILD.gn
+new file mode 100644
+index 0000000000..d53ed43ca1
+--- /dev/null
++++ b/third_party/sugiyamalabs_adblock/BUILD.gn
+@@ -0,0 +1,73 @@
++# SugiyamaLabs: ad blocker rulesets, built from the filter lists that
++# chromium/fetch.sh copies into lists/ (from chromium/adblock/lists in our repo).
++# The lists that ship in the app are the starting point: once a day the browser
++# may download newer ones from our GitHub (see chrome/browser/sugiyamalabs/adblock.cc).
++#
++# One ruleset per level (the subresource filter takes a single ruleset):
++#   adblock_rules_1  Padrao: EasyList + EasyPrivacy
++#   adblock_rules_2  Forte:  Padrao + uBlock filters + uBlock privacy + EasyList Cookie List
++
++import("//build/compiled_action.gni")
++
++_level_1 = [
++  "lists/easylist.txt",
++  "lists/easyprivacy.txt",
++]
++_level_2 = _level_1 + [
++      "lists/ublock-filters.txt",
++      "lists/ublock-privacy.txt",
++      "lists/easylist-cookie.txt",
++    ]
++
++template("adblock_ruleset") {
++  compiled_action(target_name) {
++    tool = "//components/subresource_filter/tools:ruleset_converter"
++    inputs = invoker.lists
++    outputs = [ "$target_gen_dir/${invoker.output}" ]
++    args = [
++      "--input_format=filter-list",
++      "--output_format=unindexed-ruleset",
++      "--input_files=" +
++          string_join(",", rebase_path(invoker.lists, root_build_dir)),
++
++      # URL rules only. shortcut: no cosmetic (CSS) rules, the style indexer
++      # DCHECKs on the list order; the cosmetic filter reads the raw lists.
++      "--output_file_url=" + rebase_path(outputs[0], root_build_dir),
++    ]
++  }
++}
++
++adblock_ruleset("ruleset_1") {
++  lists = _level_1
++  output = "adblock_rules_1"
++}
++
++adblock_ruleset("ruleset_2") {
++  lists = _level_2
++  output = "adblock_rules_2"
++}
++
++if (is_mac) {
++  bundle_data("rules_bundle") {
++    sources = get_target_outputs(":ruleset_1") + get_target_outputs(":ruleset_2")
++    outputs = [ "{{bundle_resources_dir}}/{{source_file_part}}" ]
++    public_deps = [
++      ":ruleset_1",
++      ":ruleset_2",
++    ]
++  }
++
++  # The raw lists, for the cosmetic filter and as the first copy of what the
++  # daily update replaces: Resources/adblock_lists/*.txt.
++  bundle_data("lists_bundle") {
++    sources = _level_2
++    outputs = [ "{{bundle_resources_dir}}/adblock_lists/{{source_file_part}}" ]
++  }
++
++  group("bundle_data") {
++    public_deps = [
++      ":lists_bundle",
++      ":rules_bundle",
++    ]
++  }
++}

@@ -31,3 +31,7 @@ docs/            decisões, protocolo da sessão e medições
 - CEF, Electron ou WebView do sistema.
 - Telemetria, sync do Google ou qualquer serviço que mande dado para fora.
 - Gastar dinheiro (certificado, máquina, serviço) sem o OK do Willian.
+
+## Licença
+
+BSD-3, a mesma do Chromium e do ungoogled-chromium. Veja [LICENSE](LICENSE). As listas do bloqueador em `chromium/adblock/lists/` mantêm as licenças delas (GPLv3 ou CC BY-SA 3.0).
