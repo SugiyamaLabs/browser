@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""Local test sites for the AgensBrowser socket phases. Binds 127.0.0.1 only. Usage: serve.py [PORT]"""
+import http.server, sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+PAGES = {"/login": "login.html", "/app/": "app.html", "/form": "form.html", "/other": "other.html"}
+SID = "sid-fake-123"  # fake test values only
+
+
+class H(http.server.BaseHTTPRequestHandler):
+    def reply(self, code, body=b"", headers=(), ctype="text/html; charset=utf-8"):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        for k, v in headers:
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def redirect(self, to, cookies=()):
+        self.reply(303, headers=[("Location", to), *[("Set-Cookie", c) for c in cookies]])
+
+    def logged_in(self):
+        return f"sid={SID}" in self.headers.get("Cookie", "")
+
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        if path == "/app":
+            return self.redirect("/app/")
+        if path == "/":
+            return self.redirect("/login")
+        if path == "/app/" and not self.logged_in():
+            return self.redirect("/login")
+        if path == "/logout":
+            return self.redirect("/login", ["sid=; Path=/; Max-Age=0; HttpOnly", "d=; Path=/; Max-Age=0"])
+        if path == "/api/ping":
+            auth = self.headers.get("Authorization", "")
+            return self.reply(200, ('{"ok": true, "bearer": %s}' % str(auth == "Bearer test-bearer-123").lower()).encode(),
+                              ctype="application/json")
+        if path in PAGES:
+            return self.reply(200, (HERE / PAGES[path]).read_bytes())
+        self.reply(404, b"not found")
+
+    def do_POST(self):
+        if self.path != "/login":
+            return self.reply(404, b"not found")
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))  # any credentials work: they are fake
+        self.redirect("/app/", [f"sid={SID}; Path=/; HttpOnly", "d=fake-d-cookie-456; Path=/"])
+
+    def log_message(self, *a):
+        pass
+
+
+if __name__ == "__main__":
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
+    print(f"test sites on http://127.0.0.1:{port}/login", flush=True)
+    http.server.ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
