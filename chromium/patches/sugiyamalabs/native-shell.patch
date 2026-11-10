@@ -1409,10 +1409,10 @@ index 0000000000..fb231e798b
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..8232fcdc85
+index 0000000000..56c86444c5
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,3226 @@
+@@ -0,0 +1,3245 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -1553,8 +1553,23 @@ index 0000000000..8232fcdc85
 +  return label;
 +}
 +// A sunk, bordered well around a borderless text field (prototype .omni-field).
++// Like every browser's address bar: the first click selects everything, so typing replaces it.
++@interface AgensAddressField : NSTextField
++@property(nonatomic, copy) void (^onFocus)(void);  // e.g. swap the short address for the full one
++@end
++@implementation AgensAddressField
++@synthesize onFocus = _onFocus;
++- (BOOL)becomeFirstResponder {
++  if (![super becomeFirstResponder]) return NO;
++  if (_onFocus) _onFocus();
++  // After the click's own tracking, which would otherwise drop the caret where it landed.
++  [self performSelector:@selector(selectText:) withObject:nil afterDelay:0];
++  return YES;
++}
++@end
++
 +static NSTextField* WellField(CGFloat size, NSString* placeholder, NSString* accessibility) {
-+  NSTextField* field = [[NSTextField alloc] init];
++  NSTextField* field = [[AgensAddressField alloc] init];
 +  field.bordered = NO;
 +  field.drawsBackground = NO;
 +  field.focusRingType = NSFocusRingTypeNone;
@@ -3677,6 +3692,10 @@ index 0000000000..8232fcdc85
 +    _omniIcon.contentTintColor = kDim.color();
 +    _address = WellField(13, @"Buscar ou digitar endereço", @"Endereço e busca");
 +    _address.delegate = self;
++    ((AgensAddressField*)_address).onFocus = ^{
++      AgensChrome* strong = weak;
++      if (strong && strong->_url.length) strong->_address.stringValue = strong->_url;  // the full address while editing
++    };
 +    _address.target = self;
 +    _address.action = @selector(go:);
 +    _star = [[AgensToolButton alloc] initWithSymbol:@"star" label:@"Adicionar aos favoritos (⌘D)" size:12];
