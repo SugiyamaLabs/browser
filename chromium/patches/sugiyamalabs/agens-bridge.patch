@@ -198,10 +198,10 @@ index 0000000000..f9a53def1b
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_APPROVAL_H_
 diff --git a/chrome/browser/agens/bridge/bridge.h b/chrome/browser/agens/bridge/bridge.h
 new file mode 100644
-index 0000000000..392ac29938
+index 0000000000..1184ce2d94
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/bridge.h
-@@ -0,0 +1,30 @@
+@@ -0,0 +1,32 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The local control socket, `<user data dir>/agens.sock` (docs/agens.md, "O socket"). Accepts and
 +// reads on the IO thread, runs each operation on the UI thread (ops.cc) and writes the reply back.
@@ -221,6 +221,8 @@ index 0000000000..392ac29938
 +inline constexpr char kAcceptUnsignedPref[] = "agens.bridge.accept_unsigned";
 +// Clients answered "Permitir sempre": "<team id>/<signing identifier>".
 +inline constexpr char kAllowedClientsPref[] = "agens.bridge.allowed_clients";
++// control.start answered "Permitir sempre": ControlAlwaysKey (control_keys.h) strings.
++inline constexpr char kControlAlwaysPref[] = "agens.bridge.control_always";
 +
 +void RegisterPrefs(PrefRegistrySimple* registry);
 +// UI thread. Start once the threads run; Stop at teardown removes the socket file.
@@ -234,10 +236,10 @@ index 0000000000..392ac29938
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_BRIDGE_H_
 diff --git a/chrome/browser/agens/bridge/bridge_mac.mm b/chrome/browser/agens/bridge/bridge_mac.mm
 new file mode 100644
-index 0000000000..bf1ef3a6cc
+index 0000000000..7d1d1de5a3
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/bridge_mac.mm
-@@ -0,0 +1,534 @@
+@@ -0,0 +1,535 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The socket server on macOS: a Unix socket in the user data dir, the peer's code signature read
 +// from its audit token, and the approval of the person before a signed client gets in.
@@ -734,6 +736,7 @@ index 0000000000..bf1ef3a6cc
 +void RegisterPrefs(PrefRegistrySimple* registry) {
 +  registry->RegisterBooleanPref(kAcceptUnsignedPref, false);
 +  registry->RegisterListPref(kAllowedClientsPref);
++  registry->RegisterListPref(kControlAlwaysPref);
 +}
 +
 +void Start() {
@@ -774,14 +777,17 @@ index 0000000000..bf1ef3a6cc
 +}  // namespace agens::bridge
 diff --git a/chrome/browser/agens/bridge/control_keys.cc b/chrome/browser/agens/bridge/control_keys.cc
 new file mode 100644
-index 0000000000..2b88d3ff08
+index 0000000000..6f41b799ed
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_keys.cc
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,112 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/control_keys.h"
 +
++#include <algorithm>
++
++#include "base/json/json_writer.h"
 +#include "base/strings/utf_string_conversions.h"
 +
 +namespace agens::bridge {
@@ -862,6 +868,24 @@ index 0000000000..2b88d3ff08
 +  return !key.edits && !key.meta && !key.alt && !key.ctrl;
 +}
 +
++std::string ControlAlwaysKey(std::string_view identity, std::string_view ato, std::vector<std::string> shares_with) {
++  std::ranges::sort(shares_with);
++  base::ListValue key;  // JSON: no separator a name could contain
++  key.Append(identity);
++  key.Append(ato);
++  for (std::string& folder : shares_with) key.Append(std::move(folder));
++  return base::WriteJson(key).value_or(std::string());
++}
++
++std::string JoinNames(const std::vector<std::string>& names) {
++  std::string out;
++  for (size_t i = 0; i < names.size(); ++i) {
++    if (i) out += i + 1 == names.size() ? " e " : ", ";
++    out += names[i];
++  }
++  return out;
++}
++
 +bool TouchesClipboard(const Key& key) {
 +  if (key.key == "Delete" && key.shift) return true;  // cut, on Windows and Linux
 +  if (!key.meta && !key.ctrl) return false;
@@ -871,10 +895,10 @@ index 0000000000..2b88d3ff08
 +}  // namespace agens::bridge
 diff --git a/chrome/browser/agens/bridge/control_keys.h b/chrome/browser/agens/bridge/control_keys.h
 new file mode 100644
-index 0000000000..05ebd4cd2b
+index 0000000000..972a04f6a5
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_keys.h
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,48 @@
 +// Copyright 2026 SugiyamaLabs.
 +// page.key's key names and the password rules that depend on them (docs/protocolo.md, "control,
 +// tab, page"). Pure logic, checked by protocol_selfcheck.cc with only //base.
@@ -884,6 +908,7 @@ index 0000000000..05ebd4cd2b
 +#include <optional>
 +#include <string>
 +#include <string_view>
++#include <vector>
 +
 +#include "base/values.h"
 +
@@ -911,15 +936,23 @@ index 0000000000..05ebd4cd2b
 +// Copy, cut or paste: never, so the clipboard stays out of the controller's reach.
 +bool TouchesClipboard(const Key& key);
 +
++// control.start's "Permitir sempre": what Local State remembers, one string per answer. The
++// app's identity, the ato's folder and the folders of the atos it shares cookies with (any order),
++// so that a change in that group asks again.
++std::string ControlAlwaysKey(std::string_view identity, std::string_view ato, std::vector<std::string> shares_with);
++
++// "A", "A e B", "A, B e C".
++std::string JoinNames(const std::vector<std::string>& names);
++
 +}  // namespace agens::bridge
 +
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_CONTROL_KEYS_H_
 diff --git a/chrome/browser/agens/bridge/control_ops.cc b/chrome/browser/agens/bridge/control_ops.cc
 new file mode 100644
-index 0000000000..856c1de711
+index 0000000000..60916496fa
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_ops.cc
-@@ -0,0 +1,463 @@
+@@ -0,0 +1,498 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The control session (docs/protocolo.md, "control, tab, page"): an app, after the person's OK,
 +// drives tabs of one ato. It belongs to the connection and ends on control.stop, when the
@@ -944,6 +977,7 @@ index 0000000000..856c1de711
 +#include "base/strings/utf_string_conversions.h"
 +#include "base/timer/timer.h"
 +#include "chrome/browser/agens/bridge/approval.h"
++#include "chrome/browser/agens/bridge/bridge.h"
 +#include "chrome/browser/agens/bridge/control_keys.h"
 +#include "chrome/browser/agens/bridge/control_page.h"
 +#include "chrome/browser/agens/embed/agens_controlled.h"
@@ -1032,6 +1066,7 @@ index 0000000000..856c1de711
 +struct Session {
 +  std::string client;  // the app's name, shown on its tabs
 +  base::FilePath ato;  // the ato's profile folder
++  std::vector<std::string> shares_with;  // SharesWith(ato) when the person agreed
 +  std::vector<std::unique_ptr<Tab>> tabs;
 +  int next_tab = 1;
 +
@@ -1094,19 +1129,38 @@ index 0000000000..856c1de711
 +  Stop(connection, "user");
 +}
 +
-+// The person turned "Compartilhar cookies" on for an ato under control: it is no longer isolated.
-+void IsolationChanged() {
++// The folders of the atos whose cookies `ato` shares ("Compartilhar cookies"), sorted; empty when
++// it shares with none. Their logins are within reach of whoever controls `ato`.
++std::vector<std::string> SharesWith(const base::FilePath& ato) {
++  std::vector<std::string> folders;
++  if (!AgensWindow::AtoSharesCookies(ato)) return folders;
++  for (ProfileAttributesEntry* entry : AgensWindow::Atos()) {
++    if (entry->GetPath() != ato && AgensWindow::AtoSharesCookies(entry->GetPath())) {
++      folders.push_back(entry->GetPath().BaseName().AsUTF8Unsafe());
++    }
++  }
++  std::ranges::sort(folders);
++  return folders;
++}
++
++// The person's consent described the ato's cookie sharing at the time: when that changes, the
++// session ends.
++void SharingChanged() {
 +  std::vector<uint64_t> ended;
 +  for (const auto& [connection, session] : Sessions()) {
-+    if (AgensWindow::AtoSharesCookies(session.ato)) ended.push_back(connection);
++    if (SharesWith(session.ato) != session.shares_with) ended.push_back(connection);
 +  }
-+  for (uint64_t connection : ended) Stop(connection, "isolation_off");
++  for (uint64_t connection : ended) Stop(connection, "sharing_changed");
 +}
-+void WatchIsolation() {
++void WatchSharing() {
 +  static base::NoDestructor<PrefChangeRegistrar> prefs;
 +  if (!prefs->IsEmpty()) return;
 +  prefs->Init(g_browser_process->local_state());
-+  prefs->Add(AgensWindow::kAtosPref, base::BindRepeating(&IsolationChanged));
++  prefs->Add(AgensWindow::kAtosPref, base::BindRepeating(&SharingChanged));
++}
++
++bool ControlAlways(const std::string& key) {
++  return std::ranges::contains(g_browser_process->local_state()->GetList(kControlAlwaysPref), base::Value(key));
 +}
 +
 +std::optional<GURL> WebURL(const Request& request) {
@@ -1135,39 +1189,58 @@ index 0000000000..856c1de711
 +    std::move(reply).Run(ErrorReply(&request.id, kNotFound, *id));
 +    return;
 +  }
-+  if (AgensWindow::AtoSharesCookies(entry->GetPath())) {
-+    std::move(reply).Run(ErrorReply(&request.id, kIsolationOff, "this ato shares cookies with other atos"));
++  const std::string name = client.name.empty() ? "app" : client.name;
++  const std::string ato_name = AgensWindow::AtoName(entry);
++  std::vector<std::string> shares_with = SharesWith(entry->GetPath());
++  std::string detail = *reason;
++  if (!shares_with.empty()) {
++    std::vector<std::string> names;
++    for (const std::string& folder : shares_with) {
++      if (ProfileAttributesEntry* other = FindAto(folder)) names.push_back(AgensWindow::AtoName(other));
++    }
++    detail += (detail.empty() ? "" : "\n\n") + ato_name + " compartilha cookies com " + JoinNames(names) +
++              ": os logins deles também ficam ao alcance.";
++  }
++  // "Permitir sempre" only for a signed app, and only for this ato with this sharing group.
++  const bool signed_client = !client.identity.empty();
++  const std::string always_key =
++      signed_client ? ControlAlwaysKey(client.identity, entry->GetPath().BaseName().AsUTF8Unsafe(), shares_with)
++                    : std::string();
++  auto begin = [](uint64_t connection, std::string name, base::FilePath ato, std::vector<std::string> shares_with,
++                  std::string always_key, Request request, ReplyCallback reply, AgensApprovalAnswer answer) {
++    // Gone from Asking: the connection closed while the sheet was up.
++    if (!Asking().erase(connection)) return;
++    if (answer == kAgensApprovalDeny) {
++      std::move(reply).Run(ErrorReply(&request.id, kDenied));
++      return;
++    }
++    if (!AgensWindow::Storage().GetProfileAttributesWithPath(ato)) {
++      std::move(reply).Run(ErrorReply(&request.id, kNotFound, "the ato is gone"));
++      return;
++    }
++    if (SharesWith(ato) != shares_with) {  // the sheet no longer says what the app could reach
++      std::move(reply).Run(ErrorReply(&request.id, kDenied, "the ato's cookie sharing changed while asking"));
++      return;
++    }
++    if (answer == kAgensApprovalAllowAlways && !always_key.empty() && !ControlAlways(always_key)) {
++      ScopedListPrefUpdate(g_browser_process->local_state(), kControlAlwaysPref)->Append(always_key);
++    }
++    WatchSharing();
++    Session& session = Sessions()[connection];
++    session.client = std::move(name);
++    session.ato = std::move(ato);
++    session.shares_with = std::move(shares_with);
++    std::move(reply).Run(OkReply(request.id));
++  };
++  Asking().insert(connection);
++  if (signed_client && ControlAlways(always_key)) {
++    begin(connection, name, entry->GetPath(), std::move(shares_with), always_key, std::move(request), std::move(reply),
++          kAgensApprovalAllow);
 +    return;
 +  }
-+  const std::string name = client.name.empty() ? "app" : client.name;
-+  Asking().insert(connection);
-+  AskApproval(connection, "O " + name + " quer usar abas do ato " + AgensWindow::AtoName(entry), *reason,
-+              /*offer_always=*/false,
-+              base::BindOnce(
-+                  [](uint64_t connection, std::string name, base::FilePath ato, Request request, ReplyCallback reply,
-+                     AgensApprovalAnswer answer) {
-+                    // Gone from Asking: the connection closed while the sheet was up.
-+                    if (!Asking().erase(connection)) return;
-+                    if (answer == kAgensApprovalDeny) {
-+                      std::move(reply).Run(ErrorReply(&request.id, kDenied));
-+                      return;
-+                    }
-+                    if (!AgensWindow::Storage().GetProfileAttributesWithPath(ato)) {
-+                      std::move(reply).Run(ErrorReply(&request.id, kNotFound, "the ato is gone"));
-+                      return;
-+                    }
-+                    if (AgensWindow::AtoSharesCookies(ato)) {  // turned on while the sheet was up
-+                      std::move(reply).Run(
-+                          ErrorReply(&request.id, kIsolationOff, "this ato shares cookies with other atos"));
-+                      return;
-+                    }
-+                    WatchIsolation();
-+                    Session& session = Sessions()[connection];
-+                    session.client = std::move(name);
-+                    session.ato = std::move(ato);
-+                    std::move(reply).Run(OkReply(request.id));
-+                  },
-+                  connection, name, entry->GetPath(), std::move(request), std::move(reply)));
++  AskApproval(connection, "O " + name + " quer usar abas do ato " + ato_name, detail, /*offer_always=*/signed_client,
++              base::BindOnce(begin, connection, name, entry->GetPath(), std::move(shares_with), always_key,
++                             std::move(request), std::move(reply)));
 +}
 +
 +// A new foreground tab in `browser` (the ato's window), controlled by the session.
@@ -1359,11 +1432,6 @@ index 0000000000..856c1de711
 +    return;
 +  }
 +  Session& session = it->second;
-+  // The person can turn sharing on while a session runs: from then on the ato is not isolated.
-+  if (AgensWindow::AtoSharesCookies(session.ato)) {
-+    std::move(reply).Run(ErrorReply(&request.id, kIsolationOff, "this ato shares cookies with other atos"));
-+    return;
-+  }
 +  if (op == "tab.open") {
 +    TabOpen(client, std::move(request), std::move(reply));
 +  } else if (op == "tab.navigate") {
@@ -2366,10 +2434,10 @@ index 0000000000..4cd937924e
 +}  // namespace agens::bridge
 diff --git a/chrome/browser/agens/bridge/protocol.h b/chrome/browser/agens/bridge/protocol.h
 new file mode 100644
-index 0000000000..dcdbdbe3a4
+index 0000000000..1647ec285f
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/protocol.h
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,61 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The socket's wire format (docs/agens.md, "O socket"): one JSON object per line. Pure logic, no
 +// sockets or threads, so protocol_selfcheck.cc can exercise it with only //base.
@@ -2395,7 +2463,6 @@ index 0000000000..dcdbdbe3a4
 +inline constexpr char kNotFound[] = "not_found";
 +inline constexpr char kUnauthorized[] = "unauthorized";
 +inline constexpr char kDenied[] = "denied";
-+inline constexpr char kIsolationOff[] = "isolation_off";  // the ato shares cookies, so it is not isolated
 +
 +// Splits a byte stream into lines (without the "\n"). Empty lines are skipped.
 +class LineFramer {
@@ -2434,10 +2501,10 @@ index 0000000000..dcdbdbe3a4
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_PROTOCOL_H_
 diff --git a/chrome/browser/agens/bridge/protocol_selfcheck.cc b/chrome/browser/agens/bridge/protocol_selfcheck.cc
 new file mode 100644
-index 0000000000..ac3c349f96
+index 0000000000..a72cd4fa7c
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/protocol_selfcheck.cc
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,149 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Assert-based check of the wire format (protocol.h). Build and run:
 +//   ninja -C out/Dev agens_bridge_selfcheck && out/Dev/agens_bridge_selfcheck
@@ -2572,6 +2639,16 @@ index 0000000000..ac3c349f96
 +    CHECK_TRUE(!AllowedOnPassword(*ParseKey("a", nullptr)) && !AllowedOnPassword(*ParseKey("Backspace", nullptr)));
 +    CHECK_TRUE(!AllowedOnPassword(*ParseKey("Delete", nullptr)) && !AllowedOnPassword(*ParseKey("ArrowLeft", &list)));
 +    CHECK_TRUE(TouchesClipboard(*ParseKey("Delete", &shift_list)) && !TouchesClipboard(*ParseKey("c", nullptr)));
++  }
++  // control.start's "Permitir sempre" key and the names in its sheet.
++  {
++    CHECK_TRUE(ControlAlwaysKey("T/app", "Profile 1", {"Profile 3", "Default"}) ==
++               ControlAlwaysKey("T/app", "Profile 1", {"Default", "Profile 3"}));
++    CHECK_TRUE(ControlAlwaysKey("T/app", "Profile 1", {}) != ControlAlwaysKey("T/app", "Profile 1", {"Default"}));
++    CHECK_TRUE(ControlAlwaysKey("T/app", "Profile 1", {}) != ControlAlwaysKey("T/app", "Profile 2", {}));
++    CHECK_TRUE(ControlAlwaysKey("T/a", "b", {}) != ControlAlwaysKey("T/a\",\"b", "", {}));
++    CHECK_TRUE(JoinNames({}) == "" && JoinNames({"A"}) == "A" && JoinNames({"A", "B"}) == "A e B");
++    CHECK_TRUE(JoinNames({"A", "B", "C"}) == "A, B e C");
 +  }
 +  std::printf("agens bridge protocol: ok\n");
 +  RunSessionNeedChecks();
