@@ -23,4 +23,6 @@ tools/sites-teste/serve.py [PORTA]   # padrão 8765
 | `/ui/pick` | `<input type=file>` simples (`.txt`), `multiple`, um `<select>` (Brasil, Chile desligado, Peru), um campo de texto e um link. Cada botão "Open … later" abre o controle 2,5 s depois do clique, ainda dentro da ativação do usuário: o agente clica e a pessoa assume a aba antes do pedido. Títulos: `file:nome`, `files:a,b`, `select:pe`. |
 | `/auth`, `/auth/NOME` | Responde 401 com `WWW-Authenticate: Basic realm="teste"` (em `/auth/NOME` o realm é `teste-NOME`, porque o Chromium reaproveita a credencial de um realm repetido). Aceita `test-user` / `fake-password` (título "Auth ok"); sem credencial o título é "Auth 401". |
 
+`/` vai para `/app/` com o cookie `sid` e para `/login` sem ele: `session` e `renew` carregam a raiz da origem numa aba escondida, então é por aqui que chegam ao `localStorage` e ao header. Valores falsos que o gate `tools/gates/sessao.sh` espera: cookie `sid` = `sid-fake-123` (httpOnly), cookie `d` = `fake-d-cookie-456`, `localStorage` `token` = `fake-local-token-789`, header `Authorization` = `Bearer test-bearer-123`.
+
 `/login?auto=1` entra sozinho (grava os cookies e vai para `/app/`), para os gates que não podem digitar.

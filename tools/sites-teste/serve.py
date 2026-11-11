@@ -31,8 +31,8 @@ class H(http.server.BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path == "/app":
             return self.redirect("/app/")
-        if path == "/":
-            return self.redirect("/login")
+        if path == "/":  # renew and session load the origin's root: logged in, it leads to the app
+            return self.redirect("/app/" if self.logged_in() else "/login")
         if path == "/app/" and not self.logged_in():
             return self.redirect("/login")
         if path == "/logout":

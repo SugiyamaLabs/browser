@@ -8,7 +8,7 @@ Referência para quem escreve um cliente (o time do Agens, em Go). O plano e o p
 |---|---|---|
 | 1 | `hello`, `atos.*` | implementado |
 | 2 | `login` | implementado |
-| 2 | `session`, `renew`, evento `session.lost` | especificado, **não implementado** |
+| 2 | `session`, `renew`, evento `session.lost` | implementado, **menos a leitura dos valores** (`session_read.cc`, ver [sessao.md](sessao.md)): hoje todo item volta como inexistente |
 | 3 | `control.*`, `tab.*`, `page.*` | implementado |
 | 5 | `host.*`, `view.*`, `ui.*` (a página dentro de outro app) | implementado |
 
@@ -113,6 +113,14 @@ Tipos de `need`:
 - `localStorage`: lido numa aba do ato aberta naquela origem.
 - `header`: capturado das requisições que a própria página faz para `from`; só dura enquanto o pedido está aberto.
 
+Regras:
+- **`need`**: de 1 a 32 itens `{type, from, name}`; `from` é só a origem (`https://host:porta`, sem caminho); `name` até 256 caracteres, sem caractere de controle. Repetidos contam uma vez. `header` `Cookie` dá `bad_request`: peça cada cookie pelo nome. `reason` até 1024 caracteres (pode ser vazio).
+- **A folha**: título "Entregar ao <app>: <primeiro item>" (com "…" quando há mais), e embaixo o `reason`, o ato e uma linha por item (`cookie d de app.slack.com`). Se o ato compartilha cookies, a folha diz com quais atos. Se esse grupo mudar com a folha aberta, a resposta é `denied`.
+- **Permitir sempre**: só para app assinado, e vale para o mesmo app, ato e conjunto exato de itens (a ordem não importa). Pedir um item a mais ou a menos mostra a folha de novo.
+- **Onde lê**: `localStorage` e `header` são lidos numa aba escondida do ato, que carrega a raiz de `from` (`https://app.slack.com/`) e fecha ao fim; o site precisa levar dali à página que grava a chave ou faz a requisição. Uma aba por origem, até 4 origens por pedido. Depois da aprovação, a leitura tem teto de 20 s; o que não chegou até lá conta como inexistente.
+- **Item que não existe**: a resposta é tudo ou nada. Se algum item aprovado não existir (cookie ausente, chave que não existe, requisição que não veio a tempo), a resposta é `not_found`, e `message` diz quais (só nomes, nunca valores). Nenhum valor sai.
+- **Limite**: até 4 `session` e `renew` em andamento por conexão, contando os que esperam a folha; o quinto dá `bad_request`.
+
 ### renew (fase 2)
 
 Pega de novo sem janela, numa aba escondida do ato.
@@ -122,6 +130,10 @@ Pega de novo sem janela, numa aba escondida do ato.
 ← {"id": 9, "ok": true, "items": [...]}
 ← {"id": 9, "ok": false, "error": "needs_login"}
 ```
+
+- **Sem folha, só o que já foi aprovado.** `renew` vale para o mesmo `ato` e o mesmo conjunto exato de itens de um `session` que a pessoa aprovou **nesta conexão**, ou que ela marcou com **Permitir sempre** (app assinado). Fora disso, `unauthorized`: peça com `session` primeiro. Ao reconectar, o primeiro pedido é `session` de novo (com "Permitir sempre" ele passa sem folha).
+- Lê como `session` (mesmo teto de 20 s e mesmos limites). Se algum item faltar, a resposta é `needs_login` (e `message` diz quais, só nomes): em geral o site pediu login; use `login`.
+- **`session.lost`**: cada cookie entregue por `session` ou `renew` passa a ser vigiado no cookie store do ato para aquela conexão. Quando ele é apagado ou expira, chega `session.lost {ato, from, name}` uma vez, e a vigília acaba. Trocar o valor não conta como perda. Só cookies (nunca `localStorage` nem `header`), até 64 por conexão; acabam quando a conexão fecha.
 
 ### control, tab, page (fase 3)
 
@@ -248,20 +260,20 @@ Um mecanismo só, no formato de `approval.ask` / `approval.answer`: o motor mand
 |---|---|
 | `bad_request` | JSON inválido, campo faltando ou com tipo errado. |
 | `unknown_op` | Operação que o navegador não conhece (inclusive fases ainda não implementadas). |
-| `not_found` | Ato, aba ou `ref` que não existe. |
-| `unauthorized` | O cliente não passou na checagem de assinatura ou de aprovação, ou usou `tab`/`page` sem `control.start` nesta conexão. |
+| `not_found` | Ato, aba ou `ref` que não existe; em `session`, item aprovado que não existe. |
+| `unauthorized` | O cliente não passou na checagem de assinatura ou de aprovação, usou `tab`/`page` sem `control.start` nesta conexão, ou pediu `renew` de itens que não foram aprovados. |
 | `denied` | A pessoa tocou em **Não permitir**, ou a operação é proibida (ex.: `page.type` em campo de senha). |
 | `failed` | O navegador não conseguiu criar ou abrir o ato, ou está fechando. |
 | `paused` | A pessoa assumiu a aba: o agente espera ela devolver. |
 | `dialog_open` | A aba tem um diálogo aberto: responda com `page.dialog`. |
 | `cancelled` | `login`: a pessoa fechou a aba antes do fim. |
-| `needs_login` | `renew`: o site pediu login; use `login`. |
+| `needs_login` | `renew`: algum item não veio (em geral o site pediu login); use `login`. |
 
 ## Eventos
 
 | Evento | Campos | Quando |
 |---|---|---|
-| `session.lost` | `ato`, `from`, `name` | Um item de sessão vigiado sumiu ou expirou no cookie store do ato. |
+| `session.lost` | `ato`, `from`, `name` | Um cookie entregue por `session`/`renew` nesta conexão foi apagado ou expirou no cookie store do ato. |
 | `control.paused` / `control.resumed` | — | A pessoa tocou em Assumir ou em Devolver. |
 | `page.dialog` | `tab`, `type`, `message` | Uma aba controlada abriu um diálogo e espera resposta. |
 | `approval.ask` | `ask`, `title`, `detail`, `offer_always` | (fase 5, só o hospedeiro) O motor embutido pede uma aprovação; responda com `approval.answer`. |

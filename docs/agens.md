@@ -71,7 +71,7 @@ Os dois saem do mesmo repositório e do mesmo build, empacotados de dois jeitos,
 
 ### Sessão (as pontes)
 
-**Só `login` está feito.** `session`, `renew` e `session.lost` seguem como plano: hoje o navegador responde `unknown_op`.
+**`login`, `session`, `renew` e `session.lost` estão feitos, menos a leitura dos valores** (`session_read.cc`, ver [sessao.md](sessao.md)): até ela ser escrita, todo item volta como inexistente (`session` dá `not_found`, `renew` dá `needs_login`).
 
 | Operação | O que faz |
 |---|---|
@@ -121,7 +121,7 @@ O agente nunca vê as abas que a pessoa abriu, só as que ele abriu, e só no at
 |---|---|---|---|---|
 | 0 | Este plano e o protocolo aprovados | Willian aprova | — | feito |
 | 1 | Socket, autenticação do cliente, `hello`, atos com `tag`, `agensctl`, `protocolo.md` | `agensctl atos create "Cliente A" --cor blue --tag t1` cria o ato, e ele aparece na lateral | ~1 dia | feito |
-| 2 | `login`, `session`, `renew`, `session.lost`, folhas de aprovação, aviso quando o ato compartilha cookies | Login num Slack de teste por `agensctl login`, depois `session` entrega o cookie `d` só depois do OK. Um header Bearer capturado de um site de teste | 1–2 dias | **parcial:** `login`, folha de aprovação e aviso de cookies compartilhados feitos; **`session`, `renew` e `session.lost` não** |
+| 2 | `login`, `session`, `renew`, `session.lost`, folhas de aprovação, aviso quando o ato compartilha cookies | Login num Slack de teste por `agensctl login`, depois `session` entrega o cookie `d` só depois do OK. Um header Bearer capturado de um site de teste | 1–2 dias | **parcial:** `login`, `session`, `renew`, `session.lost`, folha e aviso de cookies compartilhados feitos; **falta a leitura dos valores** (`session_read.cc`, [sessao.md](sessao.md)) |
 | 3 | Controle: `control.*`, `tab.*`, `page.*`, aviso visível, recusa em senha | `agensctl` abre um site, lê o snapshot, clica e digita; a pílula aparece; digitar em senha é recusado | 2–3 dias | feito (com Assumir, Devolver e bolha de parar) |
 | 4 | Prova do embed: um app Swift de exemplo mostra uma aba do motor auxiliar | A aba aparece e responde a clique e teclado dentro do app de exemplo, com o motor em outro processo | ~1 semana, a parte mais incerta | feito, sem `remote_cocoa` (camada por `context`) |
 | 5 | `BrowserKit` e o empacotamento dentro do `Agens.app` | O Agens importa o kit, abre o motor auxiliar sem ícone no Dock e mostra uma aba do ato do time num painel | ~1 semana | feito, incluindo `ui.ask` (o hospedeiro desenha o que a página abre) e o painel no Agens (PR rascunho SugiyamaLabs/agens#306, outro repositório) |

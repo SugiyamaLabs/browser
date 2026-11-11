@@ -248,10 +248,10 @@ index 0000000000..1184ce2d94
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_BRIDGE_H_
 diff --git a/chrome/browser/agens/bridge/bridge_mac.mm b/chrome/browser/agens/bridge/bridge_mac.mm
 new file mode 100644
-index 0000000000..915c24eb88
+index 0000000000..99bf2d7b3a
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/bridge_mac.mm
-@@ -0,0 +1,576 @@
+@@ -0,0 +1,578 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The socket server on macOS: a Unix socket in the user data dir, the peer's code signature read
 +// from its audit token, and the approval of the person before a signed client gets in.
@@ -295,6 +295,7 @@ index 0000000000..915c24eb88
 +#include "base/task/sequenced_task_runner.h"
 +#include "base/task/thread_pool.h"
 +#include "chrome/browser/agens/bridge/approval.h"
++#include "chrome/browser/agens/bridge/session_need.h"
 +#include "chrome/browser/agens/bridge/ops.h"
 +#include "chrome/browser/agens/bridge/protocol.h"
 +#include "chrome/browser/agens/embed/agens_embedded.h"
@@ -790,6 +791,7 @@ index 0000000000..915c24eb88
 +  registry->RegisterBooleanPref(kAcceptUnsignedPref, false);
 +  registry->RegisterListPref(kAllowedClientsPref);
 +  registry->RegisterListPref(kControlAlwaysPref);
++  registry->RegisterListPref(session::kAlwaysPref);
 +}
 +
 +void Start() {
@@ -1112,10 +1114,10 @@ index 0000000000..178c1cd18f
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_CONTROL_KEYS_H_
 diff --git a/chrome/browser/agens/bridge/control_ops.cc b/chrome/browser/agens/bridge/control_ops.cc
 new file mode 100644
-index 0000000000..c94f7d6189
+index 0000000000..5f766303d3
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_ops.cc
-@@ -0,0 +1,881 @@
+@@ -0,0 +1,883 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The control session (docs/protocolo.md, "control, tab, page"): an app, after the person's OK,
 +// drives tabs of one ato. It belongs to the connection and ends on control.stop, when the
@@ -1527,8 +1529,8 @@ index 0000000000..c94f7d6189
 +  Stop(connection, "user");
 +}
 +
-+// The folders of the atos whose cookies `ato` shares ("Compartilhar cookies"), sorted; empty when
-+// it shares with none. Their logins are within reach of whoever controls `ato`.
++}  // namespace
++
 +std::vector<std::string> SharesWith(const base::FilePath& ato) {
 +  std::vector<std::string> folders;
 +  if (!AgensWindow::AtoSharesCookies(ato)) return folders;
@@ -1540,6 +1542,8 @@ index 0000000000..c94f7d6189
 +  std::ranges::sort(folders);
 +  return folders;
 +}
++
++namespace {
 +
 +// The person's consent described the ato's cookie sharing at the time: when that changes, the
 +// session ends.
@@ -1999,10 +2003,10 @@ index 0000000000..c94f7d6189
 +}  // namespace agens::bridge::control
 diff --git a/chrome/browser/agens/bridge/control_ops.h b/chrome/browser/agens/bridge/control_ops.h
 new file mode 100644
-index 0000000000..eda9e71d52
+index 0000000000..d999ff7d50
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_ops.h
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,30 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Agent control ops: control.*, tab.*, page.* (docs/agens.md, "Controle"). UI thread; see ops.h
 +// for what a handler gets.
@@ -2010,7 +2014,11 @@ index 0000000000..eda9e71d52
 +#define CHROME_BROWSER_AGENS_BRIDGE_CONTROL_OPS_H_
 +
 +#include <cstdint>
++#include <string>
 +#include <string_view>
++#include <vector>
++
++#include "base/files/file_path.h"
 +
 +#include "chrome/browser/agens/bridge/ops.h"
 +
@@ -2020,6 +2028,11 @@ index 0000000000..eda9e71d52
 +bool Handles(std::string_view op);
 +void HandleOp(const Client& client, Request request, ReplyCallback reply);
 +void OnConnectionClosed(uint64_t connection);
++
++// The folders of the atos whose cookies `ato` shares ("Compartilhar cookies"), sorted; empty when
++// it shares with none. Their logins are within reach of whoever controls `ato` or reads its
++// cookies (session_ops.cc).
++std::vector<std::string> SharesWith(const base::FilePath& ato);
 +
 +}  // namespace agens::bridge::control
 +
@@ -3563,10 +3576,10 @@ index 0000000000..f81d56005e
 +}
 diff --git a/chrome/browser/agens/bridge/session_need.cc b/chrome/browser/agens/bridge/session_need.cc
 new file mode 100644
-index 0000000000..719ce44b6d
+index 0000000000..28228cb5b4
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/session_need.cc
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,110 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/session_need.h"
@@ -3576,6 +3589,7 @@ index 0000000000..719ce44b6d
 +
 +#include "base/json/json_writer.h"
 +#include "base/strings/string_util.h"
++#include "chrome/browser/agens/bridge/control_keys.h"
 +#include "chrome/browser/agens/bridge/protocol.h"
 +#include "url/gurl.h"
 +
@@ -3649,13 +3663,39 @@ index 0000000000..719ce44b6d
 +  return base::WriteJson(base::ListValue().Append(identity).Append(ato).Append(std::move(list))).value_or("");
 +}
 +
++std::string SheetTitle(std::string_view app, const std::vector<Item>& items) {
++  return "Entregar ao " + std::string(app) + ": " + Describe(items.front()) + (items.size() > 1 ? "…" : "");
++}
++
++std::string SheetDetail(std::string_view reason,
++                        std::string_view ato_name,
++                        const std::vector<Item>& items,
++                        const std::vector<std::string>& shares_with) {
++  std::string detail = reason.empty() ? "" : std::string(reason) + "\n\n";
++  detail += "Do ato " + std::string(ato_name) + ":";
++  for (const Item& item : items) detail += "\n" + Describe(item);
++  if (!shares_with.empty()) {
++    detail += "\n\n" + std::string(ato_name) + " compartilha cookies com " + JoinNames(shares_with) +
++              ": estes cookies são também os deles.";
++  }
++  return detail;
++}
++
++std::vector<url::Origin> PageOrigins(const std::vector<Item>& items) {
++  std::vector<url::Origin> origins;
++  for (const Item& item : items) {
++    if (item.type != "cookie" && !std::ranges::contains(origins, item.origin)) origins.push_back(item.origin);
++  }
++  return origins;
++}
++
 +}  // namespace agens::bridge::session
 diff --git a/chrome/browser/agens/bridge/session_need.h b/chrome/browser/agens/bridge/session_need.h
 new file mode 100644
-index 0000000000..7200546383
+index 0000000000..6f7a2d8788
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/session_need.h
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,61 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The pure part of the session ops (session_ops.h): reading a `need` list, the words the approval
 +// sheet shows for each item, and the key "Permitir sempre" is remembered under. Only //base and
@@ -3702,15 +3742,27 @@ index 0000000000..7200546383
 +// The same for the same client, ato and set of items, whatever their order.
 +std::string ApprovalKey(std::string_view identity, std::string_view ato, const std::vector<Item>& items);
 +
++// The sheet's question: "Entregar ao <app>: <first item>", with "…" when there are more.
++std::string SheetTitle(std::string_view app, const std::vector<Item>& items);
++// The text under it: the reason, the ato and one Describe() line per item, then the atos whose
++// cookies it shares (their names; none when empty).
++std::string SheetDetail(std::string_view reason,
++                        std::string_view ato_name,
++                        const std::vector<Item>& items,
++                        const std::vector<std::string>& shares_with);
++
++// The origins of the items that need a page (localStorage, header), each once, in order.
++std::vector<url::Origin> PageOrigins(const std::vector<Item>& items);
++
 +}  // namespace agens::bridge::session
 +
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_SESSION_NEED_H_
 diff --git a/chrome/browser/agens/bridge/session_need_selfcheck.cc b/chrome/browser/agens/bridge/session_need_selfcheck.cc
 new file mode 100644
-index 0000000000..168e6239f8
+index 0000000000..a0a3787460
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/session_need_selfcheck.cc
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,113 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Assert-based check of session_need.h, run by agens_bridge_selfcheck (protocol_selfcheck.cc).
 +
@@ -3807,14 +3859,29 @@ index 0000000000..168e6239f8
 +  NEED_CHECK(ApprovalKey("T/app", "Profile 1", *a) != ApprovalKey("T/app", "Profile 2", *a));
 +  NEED_CHECK(!ApprovalKey("T/app", "Profile 1", *a).empty());
 +
++  // The sheet: the first item in the question, every item under it, the sharing atos last.
++  NEED_CHECK(SheetTitle("Agens", *a) == "Entregar ao Agens: cookie x de a.com");
++  NEED_CHECK(SheetTitle("Agens", *ab) == "Entregar ao Agens: cookie x de a.com…");
++  NEED_CHECK(SheetDetail("Ponte", "Cliente A", *ab, {}) == "Ponte\n\nDo ato Cliente A:\ncookie x de a.com\nheader H de b.com");
++  NEED_CHECK(SheetDetail("", "Cliente A", *a, {}) == "Do ato Cliente A:\ncookie x de a.com");
++  NEED_CHECK(SheetDetail("", "A", *a, {"B", "C"}) ==
++             "Do ato A:\ncookie x de a.com\n\nA compartilha cookies com B e C: estes cookies são também os deles.");
++
++  // One page per origin of localStorage and header items; cookies need none.
++  NEED_CHECK(PageOrigins(*a).empty());
++  NEED_CHECK(PageOrigins(*items).size() == 2 && PageOrigins(*items)[0].Serialize() == "http://127.0.0.1:8765");
++  std::optional<std::vector<Item>> same = Need(
++      R"([{"type":"header","from":"https://b.com","name":"H"},{"type":"localStorage","from":"https://b.com","name":"k"}])");
++  NEED_CHECK(PageOrigins(*same).size() == 1);
++
 +  std::printf("agens bridge session need: ok\n");
 +}
 diff --git a/chrome/browser/agens/bridge/session_ops.cc b/chrome/browser/agens/bridge/session_ops.cc
 new file mode 100644
-index 0000000000..ab81719bc2
+index 0000000000..a35b3fd87f
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/session_ops.cc
-@@ -0,0 +1,267 @@
+@@ -0,0 +1,584 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Session values (cookie, localStorage and header values) live only in memory on their way to the
 +// socket: never in a log line, pref, file or error message.
@@ -3824,19 +3891,32 @@ index 0000000000..ab81719bc2
 +#include <list>
 +#include <map>
 +#include <memory>
++#include <set>
 +#include <utility>
++#include <vector>
 +
 +#include "base/functional/bind.h"
++#include "base/memory/raw_ptr.h"
 +#include "base/no_destructor.h"
++#include "base/scoped_observation.h"
 +#include "base/strings/string_util.h"
 +#include "base/task/sequenced_task_runner.h"
++#include "chrome/browser/agens/bridge/approval.h"
++#include "chrome/browser/agens/bridge/control_keys.h"
++#include "chrome/browser/agens/bridge/control_ops.h"
 +#include "chrome/browser/agens/bridge/session_need.h"
++#include "chrome/browser/agens/bridge/session_read.h"
 +#include "chrome/browser/agens/embed/agens_window.h"
++#include "chrome/browser/browser_process.h"
 +#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/profiles/profile_manager.h"
++#include "chrome/browser/profiles/profile_observer.h"
 +#include "chrome/browser/profiles/profile_window.h"
 +#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 +#include "chrome/browser/ui/navigator/browser_navigator.h"
 +#include "chrome/browser/ui/navigator/browser_navigator_params.h"
++#include "components/prefs/pref_service.h"
++#include "components/prefs/scoped_user_pref_update.h"
 +#include "content/public/browser/navigation_handle.h"
 +#include "content/public/browser/storage_partition.h"
 +#include "content/public/browser/web_contents.h"
@@ -3857,9 +3937,20 @@ index 0000000000..ab81719bc2
 +constexpr char kFailed[] = "failed";
 +constexpr char kCancelled[] = "cancelled";
 +
++constexpr char kNeedsLogin[] = "needs_login";
++
 +// Per connection, and how long one may wait for the person (also covers a profile that never opens).
 +constexpr size_t kMaxLoginsInFlight = 4;
 +constexpr base::TimeDelta kMaxLoginTime = base::Minutes(15);
++
++constexpr size_t kMaxReasonChars = 1024;
++// session and renew per connection (one waiting on the sheet counts), the hidden tabs one may
++// open (one per origin of its localStorage and header items), how long reading may take once
++// approved, and the cookies a connection may have watched for session.lost.
++constexpr size_t kMaxReadsInFlight = 4;
++constexpr size_t kMaxPageOrigins = 4;
++constexpr base::TimeDelta kPageWait = base::Seconds(20);
++constexpr size_t kMaxWatches = 64;
 +
 +// The ato whose folder is `id`, among the atos the UI lists (as ops.cc), so a client never names a path.
 +ProfileAttributesEntry* FindAto(const std::string& id) {
@@ -3891,11 +3982,27 @@ index 0000000000..ab81719bc2
 +         cause == net::CookieChangeCause::INSERTED_NO_VALUE_CHANGE_OVERWRITE;
 +}
 +
++// Deleted or expired. OVERWRITE is only the old copy of a cookie being replaced: the new one
++// follows as an insertion.
++bool IsLoss(net::CookieChangeCause cause) {
++  return !IsInsertion(cause) && cause != net::CookieChangeCause::OVERWRITE;
++}
++
++bool AlwaysAllowed(const std::string& key) {
++  return std::ranges::contains(g_browser_process->local_state()->GetList(kAlwaysPref), base::Value(key));
++}
++
 +class LoginWatch;
++class Read;
++class CookieWatch;
 +
 +// What this area keeps per connection; dropped in OnConnectionClosed.
 +struct ConnectionState {
 +  std::list<std::unique_ptr<LoginWatch>> logins;
++  std::list<std::unique_ptr<Read>> reads;  // session and renew in flight
++  // ApprovalKey()s the person allowed on this connection: what renew may fetch again.
++  std::set<std::string> approved;
++  std::list<std::unique_ptr<CookieWatch>> watches;  // cookies handed out, for session.lost
 +};
 +std::map<uint64_t, ConnectionState>& Connections() {
 +  static base::NoDestructor<std::map<uint64_t, ConnectionState>> connections;
@@ -4063,6 +4170,281 @@ index 0000000000..ab81719bc2
 +          client.connection, watch, url));
 +}
 +
++
++// A cookie handed out on a connection: session.lost to it once the cookie is deleted or expires
++// in the ato's store, then the watch ends. Names only, never the value.
++class CookieWatch : public network::mojom::CookieChangeListener {
++ public:
++  CookieWatch(uint64_t connection, std::string ato, Item item)
++      : connection_(connection), ato_(std::move(ato)), item_(std::move(item)) {}
++
++  void Start(Profile* profile) {
++    CookiesOf(profile)->AddCookieChangeListener(item_.origin.GetURL(), item_.name, receiver_.BindNewPipeAndPassRemote());
++    // The store went away (the ato closed, the network service restarted): nothing to tell.
++    receiver_.set_disconnect_handler(base::BindOnce(&CookieWatch::Drop, base::Unretained(this)));
++  }
++
++  bool Watches(const std::string& ato, const Item& item) const {
++    return ato == ato_ && item.origin == item_.origin && item.name == item_.name;
++  }
++
++ private:
++  // network::mojom::CookieChangeListener:
++  void OnCookieChange(const net::CookieChangeInfo& change) override {
++    if (change.cookie.Name() != item_.name || !IsLoss(change.cause)) return;
++    base::DictValue fields;
++    fields.Set("ato", ato_);
++    fields.Set("from", item_.from);
++    fields.Set("name", item_.name);
++    SendEventTo(connection_, "session.lost", std::move(fields));
++    Drop();
++  }
++
++  // Deletes this.
++  void Drop() {
++    std::erase_if(Connections()[connection_].watches, [this](const auto& watch) { return watch.get() == this; });
++  }
++
++  const uint64_t connection_;
++  const std::string ato_;
++  const Item item_;
++  mojo::Receiver<network::mojom::CookieChangeListener> receiver_{this};
++};
++
++void Watch(uint64_t connection, const std::string& ato, Profile* profile, const Item& item) {
++  std::list<std::unique_ptr<CookieWatch>>& watches = Connections()[connection].watches;
++  // shortcut: past kMaxWatches a cookie is handed out unwatched; upgrade if a bridge needs more.
++  if (watches.size() >= kMaxWatches ||
++      std::ranges::any_of(watches, [&](const auto& watch) { return watch->Watches(ato, item); })) {
++    return;
++  }
++  watches.push_back(std::make_unique<CookieWatch>(connection, ato, item));
++  watches.back()->Start(profile);
++}
++
++// One session or renew, from the request to the reply: the approval (session), loading the ato,
++// reading each item (session_read.h), the reply. Replies once and deletes itself; deleted early
++// (the connection closed), it closes its hidden tabs without replying.
++class Read : public ProfileObserver {
++ public:
++  Read(uint64_t connection, bool renew, std::string ato, base::FilePath path, std::vector<Item> items, base::Value id,
++       ReplyCallback reply)
++      : connection_(connection),
++        renew_(renew),
++        ato_(std::move(ato)),
++        path_(std::move(path)),
++        items_(std::move(items)),
++        id_(std::move(id)),
++        reply_(std::move(reply)),
++        values_(items_.size()) {}
++
++  base::WeakPtr<Read> GetWeakPtr() { return weak_factory_.GetWeakPtr(); }
++
++  // The person's answer to the sheet; `shares_with` is what the sheet said.
++  void Approved(std::string key, bool signed_client, std::vector<std::string> shares_with, AgensApprovalAnswer answer) {
++    if (answer == kAgensApprovalDeny) return Fail(kDenied, "");
++    if (!AgensWindow::Storage().GetProfileAttributesWithPath(path_)) return Fail(kNotFound, "the ato is gone");
++    if (control::SharesWith(path_) != shares_with) {
++      return Fail(kDenied, "the ato's cookie sharing changed while asking");
++    }
++    if (answer == kAgensApprovalAllowAlways && signed_client && !AlwaysAllowed(key)) {
++      ScopedListPrefUpdate(g_browser_process->local_state(), kAlwaysPref)->Append(key);
++    }
++    Connections()[connection_].approved.insert(std::move(key));
++    Start();
++  }
++
++  // Wakes the ato when it sleeps (no window), then reads.
++  void Start() {
++    ProfileManager* manager = g_browser_process->profile_manager();
++    if (Profile* profile = manager->GetProfileByPath(path_)) return Loaded(profile);
++    // The callback runs once in every case, with null when loading fails.
++    manager->LoadProfileByPath(path_, /*incognito=*/false, base::BindOnce(&Read::Loaded, GetWeakPtr()));
++  }
++
++  // Deletes this.
++  void Fail(std::string_view code, std::string_view message) {
++    std::move(reply_).Run(ErrorReply(&id_, code, message));
++    Drop();
++  }
++
++ private:
++  static constexpr size_t kNoPage = static_cast<size_t>(-1);
++
++  // A hidden tab of the ato at one origin, and what reads it.
++  struct Page {
++    std::unique_ptr<content::WebContents> tab;
++    std::unique_ptr<PageReader> reader;  // declared after the tab: always destroyed before it
++  };
++
++  void Loaded(Profile* profile) {
++    if (!profile) return Fail(kFailed, "could not open the ato");
++    profile_ = profile;
++    profile_observation_.Observe(profile);
++    timeout_.Start(FROM_HERE, kPageWait, base::BindOnce(&Read::Finish, base::Unretained(this)));
++    std::vector<size_t> cookies;
++    for (size_t i = 0; i < items_.size(); ++i) {
++      if (items_[i].type == "cookie") cookies.push_back(i);
++    }
++    if (!cookies.empty()) {
++      ++pending_;
++      ReadCookies(profile, Pick(cookies), base::BindOnce(&Read::Got, GetWeakPtr(), cookies, kNoPage));
++    }
++    for (const url::Origin& origin : PageOrigins(items_)) {
++      std::vector<size_t> indices;
++      for (size_t i = 0; i < items_.size(); ++i) {
++        if (items_[i].type != "cookie" && items_[i].origin == origin) indices.push_back(i);
++      }
++      content::WebContents::CreateParams params(profile);
++      params.initially_hidden = true;
++      Page page;
++      page.tab = content::WebContents::Create(params);
++      page.tab->SetAudioMuted(true);
++      page.reader = ReadFromPage(page.tab.get(), origin, Pick(indices),
++                                 base::BindOnce(&Read::Got, GetWeakPtr(), indices, pages_.size()));
++      content::WebContents* tab = page.tab.get();
++      pages_.push_back(std::move(page));
++      ++pending_;
++      tab->GetController().LoadURL(origin.GetURL(), content::Referrer(), ui::PAGE_TRANSITION_AUTO_TOPLEVEL,
++                                   std::string());
++    }
++  }
++
++  std::vector<Item> Pick(const std::vector<size_t>& indices) const {
++    std::vector<Item> items;
++    for (size_t i : indices) items.push_back(items_[i]);
++    return items;
++  }
++
++  void Got(std::vector<size_t> indices, size_t page, Values values) {
++    if (values.size() == indices.size()) {
++      for (size_t i = 0; i < indices.size(); ++i) values_[indices[i]] = std::move(values[i]);
++    }
++    if (page != kNoPage) {
++      pages_[page].reader.reset();
++      pages_[page].tab.reset();
++    }
++    if (--pending_ == 0) Finish();
++  }
++
++  // Every item read, or kPageWait passed: what is still missing stays missing. Deletes this.
++  void Finish() {
++    std::vector<std::string> missing;
++    for (size_t i = 0; i < items_.size(); ++i) {
++      if (!values_[i]) missing.push_back(Describe(items_[i]));
++    }
++    if (!missing.empty()) {
++      // Names only, never a value.
++      return renew_ ? Fail(kNeedsLogin, "missing: " + base::JoinString(missing, "; "))
++                    : Fail(kNotFound, "missing: " + base::JoinString(missing, "; "));
++    }
++    base::ListValue list;
++    for (size_t i = 0; i < items_.size(); ++i) {
++      base::DictValue item;
++      item.Set("type", items_[i].type);
++      item.Set("from", items_[i].from);
++      item.Set("name", items_[i].name);
++      item.Set("value", std::move(*values_[i]));
++      list.Append(std::move(item));
++    }
++    base::DictValue result;
++    result.Set("items", std::move(list));
++    std::move(reply_).Run(OkReply(id_, std::move(result)));
++    for (const Item& item : items_) {
++      if (item.type == "cookie") Watch(connection_, ato_, profile_, item);
++    }
++    Drop();
++  }
++
++  // ProfileObserver: the tabs must go before their profile does.
++  void OnProfileWillBeDestroyed(Profile* profile) override {
++    pages_.clear();
++    profile_observation_.Reset();
++    Fail(kFailed, "the ato closed");
++  }
++
++  // Deletes this.
++  void Drop() {
++    std::erase_if(Connections()[connection_].reads, [this](const auto& read) { return read.get() == this; });
++  }
++
++  const uint64_t connection_;
++  const bool renew_;
++  const std::string ato_;
++  const base::FilePath path_;
++  const std::vector<Item> items_;
++  const base::Value id_;
++  ReplyCallback reply_;
++  Values values_;  // one per item; never logged
++  size_t pending_ = 0;
++  raw_ptr<Profile> profile_ = nullptr;
++  base::ScopedObservation<Profile, ProfileObserver> profile_observation_{this};
++  std::vector<Page> pages_;
++  base::OneShotTimer timeout_;
++  base::WeakPtrFactory<Read> weak_factory_{this};
++};
++
++// session and renew: the same checks, then the sheet (session) or a past approval (renew).
++void SessionOrRenew(const Client& client, Request request, ReplyCallback reply) {
++  const bool renew = request.op == "renew";
++  std::optional<std::string> id = StringParam(request.body, "ato");
++  std::optional<std::string> reason = renew ? std::string() : StringParam(request.body, "reason");
++  if (!id || !reason || (!reason->empty() && !IsDisplayText(*reason, kMaxReasonChars))) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest,
++                                    renew ? "needs ato and need"
++                                          : "needs ato, need and reason (up to 1024 characters, no control characters)"));
++    return;
++  }
++  std::string error;
++  std::optional<std::vector<Item>> items = ParseNeed(request.body.Find("need"), error);
++  if (!items) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, error));
++    return;
++  }
++  if (PageOrigins(*items).size() > kMaxPageOrigins) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "localStorage and header items of at most 4 origins at once"));
++    return;
++  }
++  ConnectionState& state = Connections()[client.connection];
++  if (state.reads.size() >= kMaxReadsInFlight) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "at most 4 session or renew at once per connection"));
++    return;
++  }
++  ProfileAttributesEntry* entry = FindAto(*id);
++  if (!entry) {
++    std::move(reply).Run(ErrorReply(&request.id, kNotFound, *id));
++    return;
++  }
++  // "Permitir sempre" only for a signed app, for this ato and exactly these items.
++  const bool signed_client = !client.identity.empty();
++  std::string key = ApprovalKey(client.identity, *id, *items);
++  const bool always = signed_client && AlwaysAllowed(key);
++  // renew never shows a sheet: it fetches again what the person already allowed.
++  if (renew && !always && !state.approved.contains(key)) {
++    std::move(reply).Run(ErrorReply(&request.id, kUnauthorized,
++                                    "not approved: ask for these exact items with session first, on this connection"));
++    return;
++  }
++  const std::vector<std::string> shares_with = control::SharesWith(entry->GetPath());
++  auto owned = std::make_unique<Read>(client.connection, renew, *id, entry->GetPath(), *items, request.id.Clone(),
++                                      std::move(reply));
++  Read* read = owned.get();
++  state.reads.push_back(std::move(owned));
++  if (renew || always) {
++    if (always) state.approved.insert(std::move(key));
++    read->Start();
++    return;
++  }
++  std::vector<std::string> names;
++  for (const std::string& folder : shares_with) {
++    if (ProfileAttributesEntry* other = FindAto(folder)) names.push_back(AgensWindow::AtoName(other));
++  }
++  const std::string app = client.name.empty() ? "app" : client.name;
++  AskApproval(client.connection, SheetTitle(app, *items), SheetDetail(*reason, AgensWindow::AtoName(entry), *items, names),
++              /*offer_always=*/signed_client,
++              base::BindOnce(&Read::Approved, read->GetWeakPtr(), std::move(key), signed_client, shares_with));
++}
++
 +}  // namespace
 +
 +bool Handles(std::string_view op) {
@@ -4072,6 +4454,8 @@ index 0000000000..ab81719bc2
 +void HandleOp(const Client& client, Request request, ReplyCallback reply) {
 +  if (request.op == "login") {
 +    Login(client, std::move(request), std::move(reply));
++  } else if (request.op == "session" || request.op == "renew") {
++    SessionOrRenew(client, std::move(request), std::move(reply));
 +  } else {
 +    std::move(reply).Run(ErrorReply(&request.id, kUnknownOp, request.op));
 +  }
@@ -4109,6 +4493,163 @@ index 0000000000..2a1a874d47
 +}  // namespace agens::bridge::session
 +
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_SESSION_OPS_H_
+diff --git a/chrome/browser/agens/bridge/session_read.cc b/chrome/browser/agens/bridge/session_read.cc
+new file mode 100644
+index 0000000000..886b6be228
+--- /dev/null
++++ b/chrome/browser/agens/bridge/session_read.cc
+@@ -0,0 +1,50 @@
++// Copyright 2026 SugiyamaLabs.
++// STUB: every item is "not found" (session answers not_found, renew needs_login). The real
++// reading is to be written here by hand, following session_read.h; docs/sessao.md has the brief.
++
++#include "chrome/browser/agens/bridge/session_read.h"
++
++#include <utility>
++
++#include "base/functional/bind.h"
++#include "base/memory/weak_ptr.h"
++#include "base/task/sequenced_task_runner.h"
++
++namespace agens::bridge::session {
++
++namespace {
++
++void Nothing(size_t count, ValuesCallback done) {
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE,
++                                                           base::BindOnce(std::move(done), Values(count)));
++}
++
++class StubPageReader : public PageReader {
++ public:
++  StubPageReader(size_t count, ValuesCallback done) {
++    // Through a weak pointer: destroyed first, it never answers (as session_read.h asks).
++    Nothing(count, base::BindOnce(
++                       [](base::WeakPtr<StubPageReader> self, ValuesCallback done, Values values) {
++                         if (self) std::move(done).Run(std::move(values));
++                       },
++                       weak_factory_.GetWeakPtr(), std::move(done)));
++  }
++
++ private:
++  base::WeakPtrFactory<StubPageReader> weak_factory_{this};
++};
++
++}  // namespace
++
++void ReadCookies(Profile* profile, const std::vector<Item>& items, ValuesCallback done) {
++  Nothing(items.size(), std::move(done));
++}
++
++std::unique_ptr<PageReader> ReadFromPage(content::WebContents* tab,
++                                         const url::Origin& origin,
++                                         const std::vector<Item>& items,
++                                         ValuesCallback done) {
++  return std::make_unique<StubPageReader>(items.size(), std::move(done));
++}
++
++}  // namespace agens::bridge::session
+diff --git a/chrome/browser/agens/bridge/session_read.h b/chrome/browser/agens/bridge/session_read.h
+new file mode 100644
+index 0000000000..ef8bfc467e
+--- /dev/null
++++ b/chrome/browser/agens/bridge/session_read.h
+@@ -0,0 +1,95 @@
++// Copyright 2026 SugiyamaLabs.
++// Reading the values of session items: the one piece of `session` and `renew` that touches a
++// secret (docs/protocolo.md, "session", "renew"; docs/sessao.md). session_ops.cc does everything
++// around it: validation, the approval sheet, loading the ato, the hidden tab, the timeout, the
++// reply, session.lost. These functions only fetch values. session_read.cc is a stub that finds
++// nothing; tools/gates/sessao.sh says which checks wait for it.
++//
++// Rules for both functions:
++// - UI thread: they are called on it, and `done` runs on it.
++// - `done` runs at most once, always from a task of its own (post it): never from inside the
++//   call itself, nor from inside an observer, mojo or DevTools callback of the tab, because
++//   running it may destroy the reader and the tab at once. Touch nothing after it. It gets exactly
++//   one entry per item, in the order of `items`: the value, or nullopt when that item does not
++//   exist or cannot be read. An empty string is a value (the cookie exists, empty).
++// - Values reach only `done`: never a log line (LOG, VLOG, DVLOG, the console), a crash key, a
++//   histogram, a pref, a file or an error message. Nothing here needs logging.
++// - Only the items asked: never read, keep or return other cookies, keys or headers (filter as
++//   early as possible and drop the rest), and keep a value no longer than it takes to run `done`.
++#ifndef CHROME_BROWSER_AGENS_BRIDGE_SESSION_READ_H_
++#define CHROME_BROWSER_AGENS_BRIDGE_SESSION_READ_H_
++
++#include <memory>
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "base/functional/callback.h"
++#include "chrome/browser/agens/bridge/session_need.h"
++#include "url/origin.h"
++
++class Profile;
++
++namespace content {
++class WebContents;
++}
++
++namespace agens::bridge::session {
++
++// One entry per item asked, same order: the value, or nullopt.
++using Values = std::vector<std::optional<std::string>>;
++using ValuesCallback = base::OnceCallback<void(Values)>;
++
++// Cookie items, read straight from the ato's cookie store (no page involved).
++// - `profile`: the ato, loaded. Valid during the call only: do not keep it.
++// - `items`: all of type "cookie", 1 to kMaxItems, possibly of several origins.
++// - For each item: the value of the cookie named `name` that the ato would send to
++//   `origin.GetURL()`, httpOnly included; when several match (path, domain), the first of the
++//   list. Pointer: the ato's
++//     profile->GetDefaultStoragePartition()->GetCookieManagerForBrowserProcess()->GetCookieList(
++//         url, net::CookieOptions::MakeAllInclusive(), net::CookiePartitionKeyCollection(), ...)
++//   is the same call HasCookie() in session_ops.cc makes (it only checks the name).
++// - If the store goes away (the profile closes, the network service restarts), mojo drops the
++//   callback and `done` never runs: fine, the caller has a timeout.
++void ReadCookies(Profile* profile, const std::vector<Item>& items, ValuesCallback done);
++
++// Reads the page items of one origin while it lives. Destroying it stops everything: observers
++// removed, DevTools session detached, and `done` never runs afterwards (weak pointers).
++class PageReader {
++ public:
++  virtual ~PageReader() = default;
++};
++
++// localStorage and header items of `origin`, from a page of that origin.
++// - `tab`: a hidden WebContents of the ato, in no window, without a delegate, created by the
++//   caller. This is called right before the caller loads `origin.GetURL()` in it, so a DevTools
++//   session attached here sees the very first request. The caller owns `tab` and the returned
++//   reader, and always destroys the reader before the tab: when `done` has run, when its
++//   timeout passes (kPageWait in session_ops.cc), when the client disconnects or when the ato's
++//   profile is about to go. Never navigate, show or close `tab`.
++// - `items`: all of `origin`, of type "localStorage" or "header", 1 to kMaxItems.
++// - "localStorage": the value of key `name` in the localStorage of `origin`, once the main frame
++//   has a loaded document of that origin. Missing key: nullopt. The page ended on another
++//   origin (a login redirect): nullopt. Pointers: content::WebContentsObserver (DidFinishLoad,
++//   PrimaryMainFrame()->GetLastCommittedOrigin()), then localStorage.getItem in an isolated
++//   world (RenderFrameHost::ExecuteJavaScriptInIsolatedWorld, chrome_isolated_world_ids.h) so
++//   the page cannot see or patch it, or DevTools DOMStorage.getDOMStorageItems.
++// - "header": the value of header `name` (case-insensitive) on a request the page itself makes
++//   to a URL of `origin` while the reader lives; the first one wins. Pointers: an internal
++//   DevTools session, content::DevToolsAgentHost::GetOrCreateFor(tab)->AttachClient(client) with
++//   a content::DevToolsAgentHostClient; send Network.enable; read Network.requestWillBeSent
++//   (params.request.url, params.request.headers) and Network.requestWillBeSentExtraInfo
++//   (params.headers, as sent on the wire, matched by requestId). DispatchProtocolMessage gets
++//   every header of every request: parse it, keep only the asked header, drop the message, never
++//   log it. AgentHostClosed: nothing more will come.
++// - When to run `done`: once every item has its value, or once nothing more can come (e.g. a
++//   few seconds after the page finished loading without the request). Not running it at all is
++//   allowed: the caller's timeout then answers with what is missing.
++std::unique_ptr<PageReader> ReadFromPage(content::WebContents* tab,
++                                         const url::Origin& origin,
++                                         const std::vector<Item>& items,
++                                         ValuesCallback done);
++
++}  // namespace agens::bridge::session
++
++#endif  // CHROME_BROWSER_AGENS_BRIDGE_SESSION_READ_H_
 diff --git a/chrome/browser/agens/bridge/ui_answer.cc b/chrome/browser/agens/bridge/ui_answer.cc
 new file mode 100644
 index 0000000000..b6c9417226
@@ -8654,7 +9195,7 @@ index be4b9162d1..60b6aca238 100644
      Profile* profile =
          Profile::FromBrowserContext(source_contents_->GetBrowserContext());
 diff --git a/chrome/browser/ui/webui_browser/BUILD.gn b/chrome/browser/ui/webui_browser/BUILD.gn
-index 98ada3ff32..0a79018a65 100644
+index 98ada3ff32..90027da01a 100644
 --- a/chrome/browser/ui/webui_browser/BUILD.gn
 +++ b/chrome/browser/ui/webui_browser/BUILD.gn
 @@ -81,8 +81,11 @@ source_set("impl") {
@@ -8669,7 +9210,7 @@ index 98ada3ff32..0a79018a65 100644
      "//chrome/browser/agens/embed/agens_embed.h",
      "//chrome/browser/agens/embed/agens_window.h",
      "//chrome/browser/agens/embed/native_shell.cc",
-@@ -97,6 +100,24 @@ source_set("impl") {
+@@ -97,6 +100,26 @@ source_set("impl") {
  
    if (is_mac) {
      sources += [
@@ -8685,6 +9226,8 @@ index 98ada3ff32..0a79018a65 100644
 +      "//chrome/browser/agens/bridge/ops.h",
 +      "//chrome/browser/agens/bridge/session_ops.cc",
 +      "//chrome/browser/agens/bridge/session_ops.h",
++      "//chrome/browser/agens/bridge/session_read.cc",
++      "//chrome/browser/agens/bridge/session_read.h",
 +      "//chrome/browser/agens/bridge/ui_ops.cc",
 +      "//chrome/browser/agens/bridge/ui_ops.h",
 +      "//chrome/browser/agens/bridge/view_ops.cc",
@@ -8694,7 +9237,7 @@ index 98ada3ff32..0a79018a65 100644
        "//chrome/browser/agens/embed/native_shell_mac.mm",
        "//chrome/browser/agens/embed/import_chromium_keychain_mac.mm",
        "//chrome/browser/agens/ui/chrome_mac.mm",
-@@ -108,6 +129,7 @@ source_set("impl") {
+@@ -108,6 +131,7 @@ source_set("impl") {
        "LocalAuthentication.framework",
        "Security.framework",  # agens: importing from other browsers reads their Keychain key
      ]  # agens: Touch ID before showing a password
@@ -8702,7 +9245,7 @@ index 98ada3ff32..0a79018a65 100644
    }
  
    deps = [
-@@ -173,6 +195,8 @@ source_set("impl") {
+@@ -173,6 +197,8 @@ source_set("impl") {
      "//components/browser_apis/ui_controllers/toolbar:mojom",
      "//components/guest_contents/browser",
      "//components/input",
@@ -8711,7 +9254,7 @@ index 98ada3ff32..0a79018a65 100644
      "//components/omnibox/browser:vector_icons",
      "//components/sharing_message",
      "//components/surface_embed/browser",
-@@ -192,6 +216,7 @@ source_set("impl") {
+@@ -192,6 +218,7 @@ source_set("impl") {
  
    if (is_mac) {
      deps += [
