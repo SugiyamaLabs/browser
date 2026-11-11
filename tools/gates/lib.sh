@@ -5,7 +5,7 @@ set -uo pipefail
 GATES="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$GATES/../.." && pwd)"
 BROWSER_WORK="${BROWSER_WORK:-$HOME/browser-work}"
-APP="$BROWSER_WORK/ungoogled-chromium-macos/build/src/out/Dev/AgensBrowser.app/Contents/MacOS/AgensBrowser"
+APP="$BROWSER_WORK/ungoogled-chromium-macos/build/src/out/${GATE_OUT:-Dev}/AgensBrowser.app/Contents/MacOS/AgensBrowser"   # GATE_OUT=Default: the official build
 OUT="${OUT:-$(mktemp -d /tmp/agens-gate-out.XXXXXX)}"
 mkdir -p "$OUT"
 [ -x "$GATES/winids" ] || swiftc -O "$GATES/winids.swift" -o "$GATES/winids"
