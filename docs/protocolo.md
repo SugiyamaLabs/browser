@@ -174,7 +174,7 @@ Quem desenha a interface é o app hospedeiro: barra de endereço, abas, atos, o 
 
 **Quem conecta no motor embutido.** O processo que abriu o motor, sempre. Outros apps só se forem assinados com o nosso Team ID e o identificador de assinatura deles estiver na lista que o hospedeiro passa ao abrir o motor (`--agens-allowed-clients=<id>,<id>`). Não há folha de conexão. Em build de desenvolvimento, `--agens-accept-unsigned` deixa entrar cliente sem assinatura.
 
-**O que ainda não chega ao hospedeiro.** Menu de `select`, escolher arquivo, login HTTP, pedido de permissão do site e instalar extensão são cancelados na hora; `alert`, `confirm` e `prompt` de aba sem agente também.
+**O que ainda não chega ao hospedeiro.** Menu de `select`, escolher arquivo, login HTTP, pedido de permissão do site e instalar extensão são cancelados na hora; `alert`, `confirm` e `prompt` de aba sem agente também. Não há menu de botão direito. A proposta para o hospedeiro desenhar tudo isso está em "Passo 5.3", abaixo (ainda não implementada).
 
 ```
 → {"id": 1, "op": "host.attach"}
@@ -194,6 +194,49 @@ Quem desenha a interface é o app hospedeiro: barra de endereço, abas, atos, o 
 - **Aprovações.** Embutido, o motor não mostra folha: manda `approval.ask {ask, title, detail, offer_always}` ao hospedeiro, que desenha e responde `approval.answer {ask, answer}` com `allow`, `always` ou `deny`. Sem hospedeiro ligado, a resposta é `denied`.
 - **Detalhes do formato.** `view.attach`, `view.resize` e `view.detach` vão com `id` e têm resposta; as operações de entrada vão sem `id`. Em `view.key`, só `tab` e `data` são obrigatórios (soltar tecla e mudar modificador não mandam o resto). `width` e `height` são pontos inteiros, até 8192; `scale`, `x` e `y` podem ter decimais; `context` é um número de 32 bits sem sinal. `ask` é texto. `control` ausente ou `null` quer dizer sem agente. Toda aba que aparece num ato gera `view.tab`, inclusive as que o próprio hospedeiro abriu. `hello` continua devolvendo `protocol` 1: um motor sem estas operações responde `unknown_op` a `host.attach`.
 - **Se o motor cair**, a conexão fecha. O app abre o motor de novo, refaz `host.attach` e religa as vistas; os ids `v…` antigos não valem mais.
+
+#### Passo 5.3: o hospedeiro desenha menus, diálogos e pedidos
+
+**Ainda não implementado: proposta.** Nada abaixo existe no motor hoje. São só adições, então o protocolo continua v1: um motor sem isto simplesmente não manda `ui.ask`, e continua cancelando como em "O que ainda não chega ao hospedeiro".
+
+Um mecanismo só, no formato de `approval.ask` / `approval.answer`: o motor manda o evento `ui.ask {ask, kind, tab, ...}` com um `ask` próprio (texto, `"u1"`, `"u2"`...), o hospedeiro desenha e responde com a operação `ui.answer {ask, ...}`. O `kind` diz o que é: `select`, `context_menu`, `dialog`, `file`, `auth`, `permission` ou `extension`. `tab` é o id `v…` da aba que causou o pedido (ausente em `extension`, que não é de uma aba).
+
+```
+← {"event": "ui.ask", "ask": "u4", "kind": "select", "tab": "v3", "x": 120, "y": 340, "width": 180, "items": [{"label": "Brasil"}, {"label": "Chile", "disabled": true}, {"label": "Peru"}], "selected": 0}
+→ {"id": 20, "op": "ui.answer", "ask": "u4", "index": 2}
+← {"id": 20, "ok": true}
+```
+
+**Regras comuns.**
+- **Só o hospedeiro.** `ui.ask` vai só para a conexão do `host.attach`; `ui.answer` de outra conexão dá `unauthorized`. Sem hospedeiro ligado, tudo é cancelado na hora, como hoje.
+- **Resposta.** `ui.answer` leva `id` e tem resposta `{ok: true}`. `ask` que não existe mais (já respondido, cancelado, expirado) dá `not_found`. Campos que não cabem no `kind` dão `bad_request`. Um `ask` só se responde uma vez.
+- **Cancelar.** O hospedeiro cancela com `ui.answer {ask, cancel: true}`. O motor cancela sozinho quando o hospedeiro desconecta, a aba fecha ou navega, ou a página desiste do pedido (o evento `ui.cancel {ask, reason}` avisa o hospedeiro para fechar o que desenhou; `reason` é `"closed"`, `"navigated"` ou `"gone"`). Cancelar tem o mesmo efeito de hoje: `select` sem escolha, diálogo recusado, arquivo nenhum, login sem credencial (a página mostra o 401), permissão negada sem lembrar, extensão não instalada.
+- **Sem prazo.** Como em `approval.ask`, o pedido espera a pessoa o tempo que for; só os cancelamentos acima o encerram.
+- **Fila.** Pedidos da mesma aba e do mesmo `kind` esperam em fila, o mais antigo primeiro; no total, até 16 pedidos abertos, e o que passar disso é cancelado.
+- **Nada sensível em evento, erro ou log.** O motor nunca põe senha, cookie nem conteúdo de arquivo em `ui.ask`, em `ui.cancel`, em erro ou em log. O que a pessoa digitou no hospedeiro (senha, texto do `prompt`) só passa em `ui.answer`, e o motor não registra o corpo dessa operação.
+- **Aba com agente.** Cada item diz quem responde. Valem as regras de "Assumir e devolver": com o agente trabalhando, `select`, `context_menu`, `file` e `auth` da aba não chegam ao hospedeiro (o agente responde pelo que já existe, ou fica cancelado); `permission` e `extension` são exceção, explicadas nos itens 6 e 7. Quando a pessoa toca em **Assumir**, o pedido mais antigo da aba chega ao hospedeiro e os outros são cancelados (a mesma regra da fila de `page.dialog`). Ela toca em **Devolver** e os pedidos novos voltam ao agente.
+
+**1. Menu de `select`** (`kind: "select"`). Campos: `x`, `y` (canto de cima à esquerda do `<select>`, em pontos, contados do canto de cima da vista, como `view.mouse`), `width` (largura do controle), `items: [{label, disabled?, group?}]` (`group: true` é cabeçalho de `<optgroup>`, não se escolhe), `selected` (índice atual ou `-1`). Resposta: `ui.answer {ask, index}` com o índice em `items`, ou `cancel`. Índice de item `disabled` ou de cabeçalho dá `bad_request`. Quem responde: o hospedeiro. Aba com agente: o agente escolhe com `page.click` e o menu não chega ao hospedeiro; só depois do Assumir. Setas e Enter dentro do menu são do hospedeiro; o motor não manda teclas.
+
+**2. Botão direito** (`kind: "context_menu"`). O app não precisa avisar o clique: o motor decide pelo `view.mouse` com o botão direito e manda `ui.ask` com `x`, `y` (ponto do clique) e `context`:
+
+```
+{"link": "https://example.com/a", "image": "https://example.com/i.png", "selection": "texto", "editable": true, "actions": ["open_link_new_tab", "copy_link", "copy_image", "save_image", "copy", "cut", "paste", "select_all", "back", "forward", "reload"]}
+```
+
+`link` e `image` só vêm se o clique foi neles (endereço sem o trecho depois de `#`); `selection` vem cortado em 200 caracteres; `editable` diz que é campo de texto. `actions` é a lista do que vale agora, na ordem em que o motor sugere; o hospedeiro pode desenhar menos, nunca ação fora da lista. Resposta: `ui.answer {ask, action}` com um item de `actions`, ou `cancel`. O motor executa a ação. Ação fora da lista dá `bad_request`. Não há ação que leia o conteúdo para o hospedeiro: copiar vai para a área de transferência do sistema, pelo motor. Aba com agente: o botão direito da pessoa só chega depois do Assumir; o do agente não existe (não há operação para ele). `save_image` cai nas regras de download de hoje.
+
+**3. `alert`, `confirm`, `prompt`, `beforeunload` de aba sem agente** (`kind: "dialog"`). Campos: `type` (`alert`, `confirm`, `prompt`, `beforeunload`), `message` (até 1024 caracteres), `origin` (de quem é o diálogo; o hospedeiro mostra), `default` (só em `prompt`). Resposta: `ui.answer {ask, accept: true|false, text?}`; `text` só em `prompt` aceito. `alert` aceita ou fecha: tanto faz. `beforeunload` aceito deixa a página sair. **Convivência com `page.dialog`:** o mecanismo de `page.dialog` não muda. Aba com agente: o diálogo vai para o agente como hoje (`page.dialog` e `dialog_open`) e `ui.ask` não é usado. Aba sem agente: `ui.ask` para o hospedeiro. Se um agente passa a controlar uma aba com `ui.ask` de diálogo aberto, o pedido é cancelado e o agente recebe `page.dialog` do mesmo diálogo. Se a pessoa assume, vale a regra de Assumir acima: o mais antigo vai ao hospedeiro por `ui.ask`, os outros são cancelados.
+
+**4. Escolher arquivo** (`kind: "file"`). Campos: `mode` (`open`, `open_multiple`, `folder`, `save`), `accept` (lista de extensões e tipos MIME que a página pediu, ex. `[".png", "image/*"]`; é sugestão, o hospedeiro pode filtrar o painel), `suggested` (nome sugerido, só em `save`). Resposta: `ui.answer {ask, paths: ["/abs/a.png"]}`, caminhos absolutos; um só se não for `open_multiple`, até 100 se for; `paths` vazio equivale a cancelar. O motor confere o tipo: caminho que não existe ou que não bate com `mode` dá `bad_request`. Em `save`, o motor grava depois e o hospedeiro só escolhe o destino. O conteúdo do arquivo nunca passa pelo socket, e o motor só lê o caminho no momento em que a página envia. Aba com agente: não existe `page.*` para arquivo; fica cancelado (nenhum arquivo) para o agente, e só a pessoa, depois do Assumir, chega ao painel.
+
+**5. Login HTTP** (`kind: "auth"`). Campos: `origin` (esquema, host e porta de quem pede), `realm` (texto do servidor, até 200 caracteres), `proxy` (`true` se quem pede é um proxy), `retry` (`true` se a credencial anterior foi recusada). Resposta: `ui.answer {ask, username, password}`; o hospedeiro pode pegar do Keychain dele. O motor entrega a credencial ao Chromium e esquece; não guarda nem lembra. `password` nunca aparece em `ui.ask`, em erro nem em log, e o motor tira `username` e `password` do que registra de `ui.answer`. Aba com agente: o agente não recebe nem responde; fica cancelado até a pessoa assumir (ela vê o pedido no hospedeiro). `retry` ajuda o hospedeiro a não repetir a mesma senha.
+
+**6. Permissão do site** (`kind: "permission"`). Campos: `origin`, `permission` (`camera`, `microphone`, `geolocation`, `notifications`; câmera e microfone pedidos juntos chegam como um pedido com `permissions: ["camera", "microphone"]` e `permission` ausente). Resposta: `ui.answer {ask, allow: true|false, remember?}`. `remember: true` guarda a resposta por origem e ato, no perfil do ato; o motor só aceita `remember` com `allow` falso ou verdadeiro, nunca sem `allow`. Sem `remember`, vale só desta vez (a permissão de uma vez do Chromium). Aba com agente: quem responde é a pessoa; o pedido vai ao hospedeiro mesmo com o agente trabalhando, e o agente só vê que a página ficou esperando. O agente nunca concede permissão. Por isso o hospedeiro recebe o pedido sem a pessoa ter tocado em Assumir.
+
+**7. Instalar extensão** (`kind: "extension"`). Campos: `name`, `version`, `permissions` (lista de textos prontos para mostrar, em português quando o motor os tem), `host_permissions` (lista de padrões de endereço), `from` (origem de quem pediu, ou `"store"`/`"file"`). Resposta: `ui.answer {ask, allow: true|false}`. Sem `remember`. Quem responde: só a pessoa, sempre pelo hospedeiro, mesmo com agente controlando alguma aba (como em 6). O agente não instala extensão.
+
+**Erros novos.** Nenhum código novo: `unauthorized` (`ui.answer` de quem não é o hospedeiro), `not_found` (`ask` que não vale mais), `bad_request` (campos errados). **Eventos novos:** `ui.ask` e `ui.cancel`, na tabela de Eventos. **Operação nova:** `ui.answer`.
 
 ## Erros
 
@@ -217,6 +260,9 @@ Quem desenha a interface é o app hospedeiro: barra de endereço, abas, atos, o 
 | `session.lost` | `ato`, `from`, `name` | Um item de sessão vigiado sumiu ou expirou no cookie store do ato. |
 | `control.paused` / `control.resumed` | — | A pessoa tocou em Assumir ou em Devolver. |
 | `page.dialog` | `tab`, `type`, `message` | Uma aba controlada abriu um diálogo e espera resposta. |
+| `approval.ask` | `ask`, `title`, `detail`, `offer_always` | (fase 5, só o hospedeiro) O motor embutido pede uma aprovação; responda com `approval.answer`. |
+| `ui.ask` | `ask`, `kind`, `tab?`, mais os campos do `kind` | (proposta, passo 5.3, só o hospedeiro) O motor pede para o hospedeiro desenhar algo; responda com `ui.answer`. |
+| `ui.cancel` | `ask`, `reason` | (proposta, passo 5.3) O motor desistiu do pedido: `"closed"`, `"navigated"` ou `"gone"`. |
 | `control.stopped` | `reason` | O controle desta conexão acabou: `"user"` (a pessoa tocou na bolha de parar) ou `"sharing_changed"` (mudou o grupo de atos que compartilham cookies com este). |
 
 ## Regras de segurança que o cliente sente
