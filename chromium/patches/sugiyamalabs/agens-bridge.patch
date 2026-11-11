@@ -4621,57 +4621,445 @@ index 0000000000..2a1a874d47
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_SESSION_OPS_H_
 diff --git a/chrome/browser/agens/bridge/session_read.cc b/chrome/browser/agens/bridge/session_read.cc
 new file mode 100644
-index 0000000000..886b6be228
+index 0000000000..59ee012e92
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/session_read.cc
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,438 @@
 +// Copyright 2026 SugiyamaLabs.
-+// STUB: every item is "not found" (session answers not_found, renew needs_login). The real
-+// reading is to be written here by hand, following session_read.h; docs/sessao.md has the brief.
++// Reading the values of session items (session_read.h): cookies from the ato's cookie store, and
++// localStorage keys and request headers from a hidden tab of the ato. A value lives only here and
++// in the `done` call: nothing on this path logs, keeps or returns anything that was not asked, and
++// the cookies, keys and headers filtered out are dropped as they arrive.
 +
 +#include "chrome/browser/agens/bridge/session_read.h"
 +
++#include <map>
++#include <memory>
++#include <optional>
++#include <set>
++#include <string>
++#include <string_view>
 +#include <utility>
++#include <vector>
 +
++#include "base/containers/span.h"
 +#include "base/functional/bind.h"
++#include "base/json/json_reader.h"
++#include "base/json/string_escape.h"
++#include "base/memory/scoped_refptr.h"
 +#include "base/memory/weak_ptr.h"
++#include "base/strings/string_util.h"
++#include "base/strings/utf_string_conversions.h"
 +#include "base/task/sequenced_task_runner.h"
++#include "base/timer/timer.h"
++#include "base/values.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/profiles/keep_alive/profile_keep_alive_types.h"
++#include "chrome/browser/profiles/keep_alive/scoped_profile_keep_alive.h"
++#include "chrome/common/chrome_isolated_world_ids.h"
++#include "content/public/browser/devtools_agent_host.h"
++#include "content/public/browser/devtools_agent_host_client.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/storage_partition.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "net/cookies/canonical_cookie.h"
++#include "net/cookies/cookie_options.h"
++#include "net/cookies/cookie_partition_key_collection.h"
++#include "services/network/public/mojom/cookie_manager.mojom.h"
++#include "url/gurl.h"
++#include "url/origin.h"
 +
 +namespace agens::bridge::session {
 +
 +namespace {
 +
-+void Nothing(size_t count, ValuesCallback done) {
-+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE,
-+                                                           base::BindOnce(std::move(done), Values(count)));
++// How long after the page finished loading we still wait for the request that carries a header:
++// the page may make it a moment later. Past this, what is missing stays missing (the caller's own
++// kPageWait is the backstop).
++constexpr base::TimeDelta kHeaderWait = base::Seconds(3);
++
++// How many requests of other origins we remember headers for while waiting for the request of the
++// asked origin to be reported. A bound, so a busy page cannot grow this.
++constexpr size_t kMaxPendingRequests = 64;
++
++// Runs `done` in a task of its own: never from inside a mojo or DevTools callback, because running
++// it may destroy the caller, the reader and the tab.
++void PostValues(ValuesCallback done, Values values) {
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE,
++      base::BindOnce(
++          [](ValuesCallback done, Values values) { std::move(done).Run(std::move(values)); },
++          std::move(done), std::move(values)));
 +}
 +
-+class StubPageReader : public PageReader {
++// --- Cookies ---
++
++// The replies of one ReadCookies call, filled in by origin; `done` is posted after the last one.
++struct CookieRead {
++  std::vector<Item> items;
++  Values values;
++  size_t pending = 0;
++  ValuesCallback done;
++  // Held until the answer is posted: the ato must not go to sleep mid-read (closing its last
++  // window starts that; the caller wakes it, and this keeps it awake until the values are here).
++  std::unique_ptr<ScopedProfileKeepAlive> keep_alive;
++};
++
++void ReadCookiesFromStore(Profile* profile, const std::vector<Item>& items, ValuesCallback done) {
++  auto read = std::make_shared<CookieRead>();
++  read->items = items;
++  read->values.resize(items.size());
++  read->done = std::move(done);
++  read->keep_alive =
++      ScopedProfileKeepAlive::TryAcquire(profile, ProfileKeepAliveOrigin::kHeadlessCommand);
++
++  // One call per origin: the items may come from several.
++  std::map<std::string, std::vector<size_t>> by_origin;
++  for (size_t i = 0; i < items.size(); ++i) {
++    by_origin[items[i].origin.Serialize()].push_back(i);
++  }
++  if (by_origin.empty()) {
++    PostValues(std::move(read->done), std::move(read->values));
++    return;
++  }
++  read->pending = by_origin.size();
++  network::mojom::CookieManager* cookies =
++      profile->GetDefaultStoragePartition()->GetCookieManagerForBrowserProcess();
++  for (auto& entry : by_origin) {
++    // The first cookie of the list with that name: same order the ato would send it in.
++    const std::vector<size_t>& indices = entry.second;
++    const GURL url = items[indices.front()].origin.GetURL();
++    cookies->GetCookieList(
++        url, net::CookieOptions::MakeAllInclusive(), net::CookiePartitionKeyCollection(),
++        base::BindOnce(
++            [](std::shared_ptr<CookieRead> read, std::vector<size_t> indices,
++               const std::vector<net::CookieWithAccessResult>& cookies,
++               const std::vector<net::CookieWithAccessResult>&) {
++              for (size_t index : indices) {
++                for (const net::CookieWithAccessResult& cookie : cookies) {
++                  if (cookie.cookie.Name() == read->items[index].name) {
++                    read->values[index] = cookie.cookie.Value();
++                    break;
++                  }
++                }
++              }
++              if (--read->pending > 0) {
++                return;
++              }
++              PostValues(std::move(read->done), std::move(read->values));
++            },
++            read, indices));
++  }
++}
++
++// --- localStorage and headers of a hidden tab ---
++
++class PageRead : public PageReader,
++                 public content::WebContentsObserver,
++                 public content::DevToolsAgentHostClient {
 + public:
-+  StubPageReader(size_t count, ValuesCallback done) {
-+    // Through a weak pointer: destroyed first, it never answers (as session_read.h asks).
-+    Nothing(count, base::BindOnce(
-+                       [](base::WeakPtr<StubPageReader> self, ValuesCallback done, Values values) {
-+                         if (self) std::move(done).Run(std::move(values));
-+                       },
-+                       weak_factory_.GetWeakPtr(), std::move(done)));
++  PageRead(content::WebContents* tab,
++           const url::Origin& origin,
++           const std::vector<Item>& items,
++           ValuesCallback done)
++      : content::WebContentsObserver(tab),
++        origin_(origin),
++        items_(items),
++        values_(items.size()),
++        done_(std::move(done)) {
++    // The ato goes to sleep when its last window closes, and the caller may have woken it a
++    // moment before that: hold it until this reader is gone (the release is posted by the
++    // keep-alive itself, after `done`).
++    keep_alive_ = ScopedProfileKeepAlive::TryAcquire(
++        Profile::FromBrowserContext(tab->GetBrowserContext())->GetOriginalProfile(),
++        ProfileKeepAliveOrigin::kHeadlessCommand);
++    StartHeaderCapture();
++  }
++
++  PageRead(const PageRead&) = delete;
++  PageRead& operator=(const PageRead&) = delete;
++  ~PageRead() override {
++    // Destroyed first, the reader never answers: nothing below is reached again.
++    finished_ = true;
++    timer_.Stop();
++    StopHeaderCapture();
++  }
++
++  // content::WebContentsObserver:
++  void DidFinishLoad(content::RenderFrameHost* frame, const GURL&) override {
++    if (finished_ || frame != web_contents()->GetPrimaryMainFrame()) {
++      return;
++    }
++    // The page ended on another origin (a login redirect): nothing of this origin to read.
++    if (frame->GetLastCommittedOrigin() != origin_) {
++      return Finish();
++    }
++    loaded_ = true;
++    ReadStorages();
++    // A request with the header may still come: give it a moment, then answer with what is here.
++    if (HasUnreadHeaders()) {
++      timer_.Start(FROM_HERE, kHeaderWait,
++                   base::BindOnce(&PageRead::Finish, base::Unretained(this)));
++    }
++    MaybeFinish();
++  }
++  void WebContentsDestroyed() override {
++    // The tab is going away, so is its session: stop, keeping what was already read.
++    agent_host_ = nullptr;
++    Finish();
++  }
++
++  // content::DevToolsAgentHostClient:
++  void DispatchProtocolMessage(content::DevToolsAgentHost* agent_host,
++                               base::span<const uint8_t> message) override {
++    if (finished_ || agent_host != agent_host_.get()) {
++      return;
++    }
++    // Every header of every request passes here: keep only the ones asked, drop the rest.
++    std::optional<base::DictValue> notification = base::JSONReader::ReadDict(
++        std::string_view(reinterpret_cast<const char*>(message.data()), message.size()),
++        base::JSON_PARSE_RFC);
++    if (!notification) {
++      return;
++    }
++    const std::string* method = notification->FindString("method");
++    const base::DictValue* params = notification->FindDict("params");
++    if (!method || !params) {
++      return;  // the reply to Network.enable
++    }
++    if (*method == "Network.requestWillBeSent") {
++      OnRequestWillBeSent(*params);
++    } else if (*method == "Network.requestWillBeSentExtraInfo") {
++      OnRequestWillBeSentExtraInfo(*params);
++    }
++  }
++  void AgentHostClosed(content::DevToolsAgentHost* agent_host) override {
++    if (finished_ || agent_host != agent_host_.get()) {
++      return;
++    }
++    agent_host_ = nullptr;
++    // Nothing more will come from the tab's session; a page that already loaded may answer now.
++    if (loaded_) {
++      Finish();
++    }
 +  }
 +
 + private:
-+  base::WeakPtrFactory<StubPageReader> weak_factory_{this};
++  // The tab's internal DevTools session: it sees the requests the page makes, including the first
++  // one (this runs before the caller loads the page).
++  void StartHeaderCapture() {
++    if (!HasHeaderItems()) {
++      return;
++    }
++    agent_host_ = content::DevToolsAgentHost::GetOrCreateFor(web_contents());
++    if (!agent_host_ || !agent_host_->AttachClient(this)) {
++      agent_host_ = nullptr;
++      return;
++    }
++    const std::string enable = R"({"id":1,"method":"Network.enable"})";
++    agent_host_->DispatchProtocolMessage(this, base::as_byte_span(enable));
++  }
++
++  // Detaches without touching this reader again: safe from the destructor only.
++  void StopHeaderCapture() {
++    if (!agent_host_) {
++      return;
++    }
++    agent_host_->DetachClient(this);
++    agent_host_ = nullptr;
++  }
++
++  void ReadStorages() {
++    content::RenderFrameHost* frame = web_contents()->GetPrimaryMainFrame();
++    for (size_t i = 0; i < items_.size(); ++i) {
++      if (items_[i].type != "localStorage") {
++        continue;
++      }
++      ++storage_reads_;
++      // An isolated world reads the key the page sees, but the page cannot see or patch the read.
++      // The name is quoted, so a quote or a backslash in it cannot break out of the string.
++      const std::u16string script =
++          u"localStorage.getItem(" +
++          base::UTF8ToUTF16(base::GetQuotedJSONString(items_[i].name)) + u")";
++      frame->ExecuteJavaScriptInIsolatedWorld(
++          script, base::BindOnce(&PageRead::GotStorage, weak_factory_.GetWeakPtr(), i),
++          ISOLATED_WORLD_ID_CHROME_INTERNAL);
++    }
++  }
++
++  void GotStorage(size_t index, base::Value result) {
++    --storage_reads_;
++    // A missing key is null; an empty string is a value.
++    if (const std::string* value = result.GetIfString()) {
++      values_[index] = *value;
++    }
++    MaybeFinish();
++  }
++
++  void OnRequestWillBeSent(const base::DictValue& params) {
++    const std::string* request_id = params.FindString("requestId");
++    const base::DictValue* request = params.FindDict("request");
++    if (!request_id || !request) {
++      return;
++    }
++    const std::string* url = request->FindString("url");
++    if (!url) {
++      return;
++    }
++    if (url::Origin::Create(GURL(*url)) != origin_) {
++      extra_headers_.erase(*request_id);  // another origin: never kept
++      return;
++    }
++    // Only the requests of the asked origin are followed from here on.
++    if (our_requests_.size() >= kMaxPendingRequests) {
++      our_requests_.clear();
++    }
++    our_requests_.insert(*request_id);
++    if (const base::DictValue* headers = request->FindDict("headers")) {
++      TakeHeaders(*headers);
++    }
++    // Extra info may have been reported before the request itself.
++    if (auto early = extra_headers_.find(*request_id); early != extra_headers_.end()) {
++      TakeHeaders(early->second);
++      extra_headers_.erase(early);
++    }
++  }
++
++  void OnRequestWillBeSentExtraInfo(const base::DictValue& params) {
++    const std::string* request_id = params.FindString("requestId");
++    const base::DictValue* headers = params.FindDict("headers");
++    if (!request_id || !headers) {
++      return;
++    }
++    if (our_requests_.contains(*request_id)) {
++      TakeHeaders(*headers);
++      return;
++    }
++    // The request itself is not known yet: keep only the asked headers until it is, so nothing
++    // else of the wire is ever held.
++    if (extra_headers_.contains(*request_id)) {
++      return;
++    }
++    base::DictValue asked;
++    for (size_t i = 0; i < items_.size(); ++i) {
++      if (items_[i].type != "header" || values_[i]) {
++        continue;
++      }
++      for (const auto [key, value] : *headers) {
++        if (!base::EqualsCaseInsensitiveASCII(key, items_[i].name)) {
++          continue;
++        }
++        if (const std::string* text = value.GetIfString()) {
++          asked.Set(key, *text);
++        }
++        break;
++      }
++    }
++    if (asked.empty()) {
++      return;
++    }
++    if (extra_headers_.size() >= kMaxPendingRequests) {
++      extra_headers_.clear();
++    }
++    extra_headers_[*request_id] = std::move(asked);
++  }
++
++  // Keeps the asked headers of a request of the origin, first one wins.
++  void TakeHeaders(const base::DictValue& headers) {
++    for (size_t i = 0; i < items_.size(); ++i) {
++      if (items_[i].type != "header" || values_[i]) {
++        continue;
++      }
++      for (const auto [key, value] : headers) {
++        if (!base::EqualsCaseInsensitiveASCII(key, items_[i].name)) {
++          continue;
++        }
++        if (const std::string* text = value.GetIfString()) {
++          values_[i] = *text;
++        }
++        break;
++      }
++    }
++    if (!HasUnreadHeaders()) {
++      // Everything asked is here: the identifiers have no more use.
++      our_requests_.clear();
++      extra_headers_.clear();
++    }
++    MaybeFinish();
++  }
++
++  bool HasHeaderItems() const {
++    for (const Item& item : items_) {
++      if (item.type == "header") {
++        return true;
++      }
++    }
++    return false;
++  }
++
++  bool HasUnreadHeaders() const {
++    for (size_t i = 0; i < items_.size(); ++i) {
++      if (items_[i].type == "header" && !values_[i]) {
++        return true;
++      }
++    }
++    return false;
++  }
++
++  void MaybeFinish() {
++    if (finished_ || !loaded_ || storage_reads_ > 0) {
++      return;
++    }
++    // While the session lives, a missing header may still arrive (the timer bounds the wait).
++    if (agent_host_ && HasUnreadHeaders()) {
++      return;
++    }
++    Finish();
++  }
++
++  // Answers once, in a task of its own; after this, nothing here touches the tab or its session.
++  void Finish() {
++    if (finished_) {
++      return;
++    }
++    finished_ = true;
++    timer_.Stop();
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE,
++        base::BindOnce(&PageRead::Deliver, weak_factory_.GetWeakPtr(), std::move(values_)));
++  }
++
++  // Delivers, and the caller may destroy this reader and the tab right here: touch nothing after.
++  void Deliver(Values values) { std::move(done_).Run(std::move(values)); }
++
++  const url::Origin origin_;
++  const std::vector<Item> items_;
++  Values values_;  // one per item, in the order of `items_`; never logged
++  ValuesCallback done_;
++  size_t storage_reads_ = 0;
++  bool loaded_ = false;
++  bool finished_ = false;
++  scoped_refptr<content::DevToolsAgentHost> agent_host_;
++  std::unique_ptr<ScopedProfileKeepAlive> keep_alive_;  // the ato, while this reader lives
++  std::map<std::string, base::DictValue> extra_headers_;  // only the asked headers, by requestId
++  std::set<std::string> our_requests_;                    // requests of the asked origin
++  base::OneShotTimer timer_;
++
++  base::WeakPtrFactory<PageRead> weak_factory_{this};
 +};
 +
 +}  // namespace
 +
 +void ReadCookies(Profile* profile, const std::vector<Item>& items, ValuesCallback done) {
-+  Nothing(items.size(), std::move(done));
++  ReadCookiesFromStore(profile, items, std::move(done));
 +}
 +
 +std::unique_ptr<PageReader> ReadFromPage(content::WebContents* tab,
 +                                         const url::Origin& origin,
 +                                         const std::vector<Item>& items,
 +                                         ValuesCallback done) {
-+  return std::make_unique<StubPageReader>(items.size(), std::move(done));
++  return std::make_unique<PageRead>(tab, origin, items, std::move(done));
 +}
 +
 +}  // namespace agens::bridge::session

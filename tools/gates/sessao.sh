@@ -4,12 +4,11 @@
 # Like embutido.sh: a Python parent starts the engine with --agens-embedded on a throwaway profile
 # and is its host, answering approval.ask itself. No window, no Dock icon, no system input, never
 # captures the screen.
-# The checks marked "[waits for session_read.cc]" need the real values. While session_read.cc is
-# the stub (SESSAO_STUB=1, the default) they are expected to FAIL and do not fail the gate; once it
-# is written, run with SESSAO_STUB=0 and every line must PASS.
+# The checks marked "[waits for session_read.cc]" need the real values. SESSAO_STUB=1 runs the gate
+# against a build whose session_read.cc is a stub: those lines are then expected to FAIL.
 source "$(dirname "$0")/lib.sh"
 export APP OUT GATES REPO
-export SESSAO_STUB="${SESSAO_STUB:-1}"
+export SESSAO_STUB="${SESSAO_STUB:-0}"
 
 SITE_PID=""
 if ! curl -sf -o /dev/null http://127.0.0.1:8765/form; then
@@ -21,7 +20,7 @@ fi
 cat >"$OUT/parent.py" <<'EOF'
 import json, os, select, socket, subprocess, tempfile, time
 APP, OUT = os.environ["APP"], os.environ["OUT"]
-STUB = os.environ.get("SESSAO_STUB", "1") == "1"
+STUB = os.environ.get("SESSAO_STUB", "0") == "1"
 SITE = "http://127.0.0.1:8765"
 # The test site's fake values (tools/sites-teste/README.md).
 FAKE = {"d": "fake-d-cookie-456", "sid": "sid-fake-123", "token": "fake-local-token-789",

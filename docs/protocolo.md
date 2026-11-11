@@ -8,7 +8,7 @@ Referência para quem escreve um cliente (o time do Agens, em Go). O plano e o p
 |---|---|---|
 | 1 | `hello`, `atos.*` | implementado |
 | 2 | `login` | implementado |
-| 2 | `session`, `renew`, evento `session.lost` | implementado, **menos a leitura dos valores** (`session_read.cc`, ver [sessao.md](sessao.md)): hoje todo item volta como inexistente |
+| 2 | `session`, `renew`, evento `session.lost` | implementado |
 | 3 | `control.*`, `tab.*`, `page.*` | implementado |
 | 5 | `host.*`, `view.*`, `ui.*` (a página dentro de outro app), `host.settings`, as partes de `approval.ask` | implementado |
 
