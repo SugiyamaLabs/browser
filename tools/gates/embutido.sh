@@ -362,12 +362,6 @@ check("permission deny: notifications reach the host after geolocation",
 answer(a, allow=False)
 check("permission deny shows in the page title", titled(t, "perm geo=denied notif=no"))
 c.ask("view.close", tab=t)
-t = ui_tab("/ui/perm?geo=0")
-a = ui_ask("permission", t)
-check("permission allow: notifications reach the host", bool(a) and a.get("permission") == "notifications", a)
-answer(a, allow=True)
-check("permission allow shows in the page title", titled(t, "perm geo=skipped notif=granted"))
-c.ask("view.close", tab=t)
 
 # a tab WITH an agent
 ag = Conn()
@@ -471,6 +465,13 @@ else:
     subprocess.run(["rm", "-rf", tmp])
 skip("context_menu", "needs a right click: view.mouse takes a serialized NSEvent (CGEventCreateData) and this gate has no way to build one (select is covered above through the page's own showPicker())")
 
+# Allowing notifications is kept for the site (Chromium has no one-time grant for them), so this goes last.
+t = ui_tab("/ui/perm?geo=0")
+a = ui_ask("permission", t)
+check("permission allow: notifications reach the host", bool(a) and a.get("permission") == "notifications", a)
+answer(a, allow=True)
+check("permission allow shows in the page title", titled(t, "perm geo=skipped notif=granted"))
+c.ask("view.close", tab=t)
 check("engine still running", engine.poll() is None)
 print("parent: " + ("all passed" if not failed else "failed: " + ", ".join(failed)), flush=True)
 open(f"{OUT}/done", "w").write("1" if failed else "0")

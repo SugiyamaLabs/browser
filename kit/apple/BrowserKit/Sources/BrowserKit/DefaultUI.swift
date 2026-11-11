@@ -99,6 +99,8 @@ extension BrowserEngine {
       let alert = NSAlert()
       let wants = permission.permissions.map { Self.permissionTexts[$0] ?? $0 }.joined(separator: " e ")
       alert.messageText = "\(permission.origin) quer \(wants)"
+      // The engine has no one-time grant for notifications: allowing is always kept.
+      if permission.permissions.contains("notifications") { alert.informativeText = "Notificações: permitir fica valendo para este site, com ou sem Lembrar." }
       alert.addButton(withTitle: "Permitir")
       Self.addCancel(alert, "Não permitir")
       alert.showsSuppressionButton = true
