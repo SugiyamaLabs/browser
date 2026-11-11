@@ -78,6 +78,66 @@ import Testing
     #expect(results[2] == .cancelled(tab: "v3"))
   }
 
+  @Test func inspectIsSentAndAnOlderEngineOnlyThrows() async throws {
+    let fake = FakeEngine()
+    defer { fake.stop() }
+    fake.reply = { request in
+      let known = request["tab"] == "v3"  // v9 plays an engine without view.inspect
+      return [known ? ["id": request["id"]?.int ?? 0, "ok": true] : ["id": request["id"]?.int ?? 0, "ok": false, "error": "unknown_op"]]
+    }
+    let engine = try engine(fake)
+    try await engine.inspect("v3")
+    try await engine.inspect("v3", at: CGPoint(x: 40, y: 50.5))
+    do {
+      try await engine.inspect("v9")
+      Issue.record("view.inspect should throw")
+    } catch {
+      #expect(error.code == "unknown_op")
+    }
+    let sent = fake.received("view.inspect").map { var message = $0; message["id"] = nil; return message }
+    #expect(sent == [
+      ["op": "view.inspect", "tab": "v3"], ["op": "view.inspect", "tab": "v3", "x": 40, "y": 50.5],
+      ["op": "view.inspect", "tab": "v9"],
+    ])
+    #expect(engine.connection?.isClosed == false)
+  }
+
+  @Test func theMenusInspectIsAnsweredLikeAnyAction() async throws {
+    let fake = FakeEngine()
+    defer { fake.stop() }
+    let engine = try engine(fake)
+    var offered: [String] = []
+    engine.onUIRequest = { request in
+      guard case .contextMenu(let menu) = request.kind else { return .cancel }
+      offered = menu.actions
+      return .contextMenu(action: "inspect")
+    }
+    fake.send(["event": "ui.ask", "ask": "u1", "kind": "context_menu", "tab": "v3", "x": 10, "y": 20,
+               "context": ["editable": false, "actions": ["reload", "inspect"]]])
+    #expect(await eventually { fake.received("ui.answer").count == 1 })
+    #expect(offered == ["reload", "inspect"])
+    let answer = fake.received("ui.answer").first.map { var message = $0; message["id"] = nil; return message }
+    #expect(answer == ["op": "ui.answer", "ask": "u1", "action": "inspect"])
+  }
+
+  @Test func inspectGoesLastPastASeparator() {
+    let context = ContextMenu(x: 1, y: 2, link: nil, image: nil, selection: nil, editable: false,
+                              actions: ["copy", "reload", "inspect"])
+    let ask = HostMenuItem(id: "ask", title: "Perguntar ao bot")
+    let (menu, choices) = BrowserEngine.contextMenu(context, hostItems: [ask])
+    #expect(menu.items.map(\.title) == ["Copiar", "Recarregar", "", "Perguntar ao bot", "", "Inspecionar"])
+    #expect(menu.items.filter { !$0.isSeparatorItem }.map(\.tag) == [0, 1, 2, 3])
+    #expect(choices == [.action("copy"), .action("reload"), .host(ask), .action("inspect")])
+    let (plain, _) = BrowserEngine.contextMenu(context, hostItems: [])
+    #expect(plain.items.map(\.title) == ["Copiar", "Recarregar", "", "Inspecionar"])
+    // Offered alone (nothing else the kit draws): no separator first.
+    let alone = ContextMenu(x: 0, y: 0, link: nil, image: nil, selection: nil, editable: false, actions: ["inspect"])
+    #expect(BrowserEngine.contextMenu(alone, hostItems: []).0.items.map(\.title) == ["Inspecionar"])
+    // An engine that does not offer it (older, an agent's tab, DevTools turned off): no item.
+    let older = ContextMenu(x: 0, y: 0, link: nil, image: nil, selection: nil, editable: false, actions: ["reload"])
+    #expect(BrowserEngine.contextMenu(older, hostItems: []).0.items.map(\.title) == ["Recarregar"])
+  }
+
   @Test func hostItemsGoAfterTheEngineActions() {
     let context = ContextMenu(x: 1, y: 2, link: nil, image: nil, selection: "texto", editable: false,
                               actions: ["copy", "not_known", "reload"])

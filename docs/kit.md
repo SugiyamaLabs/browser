@@ -155,7 +155,7 @@ engine.onUIRequest = { [weak engine] request in
 - Fora do handler: `connection.answerUI(ask, .select(index: 2))`; `.cancel` cancela.
 - A senha só vai no `ui.answer`. O `description` de `UIAnswer` esconde a senha.
 
-**Itens do app no botão direito.** O menu que `presentDefaultUI` desenha aceita itens do app, depois das ações do motor e de um separador. Escolher um chama `onContextMenuItem` com o item e o pedido (aba, ponto, link, seleção) e responde cancelar ao motor. Sem itens, o menu é o de sempre.
+**Itens do app no botão direito.** O menu que `presentDefaultUI` desenha aceita itens do app, depois das ações do motor e de um separador. Escolher um chama `onContextMenuItem` com o item e o pedido (aba, ponto, link, seleção) e responde cancelar ao motor. Sem itens, o menu é o de sempre. **Inspecionar** vem sempre por último, depois de outro separador, quando o motor oferece (`inspect`; veja "Inspecionar", abaixo).
 
 ```swift
 engine.contextMenuItems = [HostMenuItem(id: "ask", title: "Perguntar ao bot"), HostMenuItem(id: "point", title: "Apontar elemento")]
@@ -192,6 +192,22 @@ let selected = try await engine.connection?.selection(tab)   // o texto selecion
 - `stepPick` sem pai ou filho lança `not_found` e a escolha fica.
 - Motor mais antigo lança `unknown_op` nas três; nada mais muda.
 - Elemento dentro de `iframe` de outra origem não se escolhe nesta versão.
+
+## Inspecionar
+
+O DevTools do Chromium, numa janela própria do motor: a única janela que o motor embutido põe na tela, e só quando a pessoa pede ([protocolo.md](protocolo.md), "Passo 5.5").
+
+```swift
+try await engine.inspect(tab)                                   // abre (ou traz para a frente)
+try await engine.inspect(tab, at: CGPoint(x: 120, y: 80))       // Elements no elemento desse ponto da vista
+```
+
+- No botão direito do `presentDefaultUI`, **Inspecionar** faz o mesmo no elemento do clique. Num menu seu, responda `.contextMenu(action: "inspect")`: o kit cuida do resto.
+- O motor é outro processo, sem ícone no Dock. Antes de mandar `view.inspect` ou a resposta `inspect`, o kit entrega a ativação ao motor (`NSApplication.yieldActivation(to:)`), para a janela do DevTools vir para a frente e pegar o teclado. Por isso só funciona com o motor que o próprio kit abriu (`start()`).
+- Com o agente trabalhando na aba, `inspect` lança `denied` e o botão direito nem chega. Com o DevTools desligado por política, lança `failed` e o menu não traz o item.
+- A janela fecha sozinha quando a aba fecha ou quando o app desconecta do motor (inclusive ao sair).
+- Abrir o DevTools desliga o `pick` daquela aba (chega `.cancelled`): os dois usam o mesmo modo da página.
+- Motor mais antigo lança `unknown_op` e não oferece `inspect` no menu; nada mais muda.
 
 ## O que não está no kit
 

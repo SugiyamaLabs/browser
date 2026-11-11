@@ -7,17 +7,20 @@
 # screen nor show in the Dock, so this gate should not take focus. It never captures the screen and
 # never sends system-wide input. EMBUTIDO_STANDALONE=1 also launches the engine WITHOUT the switch
 # to check unknown_op: that one is a normal Dock app and can take focus, so it is opt-in.
+# EMBUTIDO_INSPECT=1 also opens a real DevTools window (view.inspect) and checks that a page's popup
+# becomes a tab: that window shows on screen and takes the keyboard focus, so it is opt-in too.
 # SITE_PORT=8766 runs (or reuses) the test site on another port, e.g. when an older one holds 8765.
 source "$(dirname "$0")/lib.sh"
 SITE_PORT="${SITE_PORT:-8765}"
-export APP OUT GATES REPO SITE_PORT
+EMBUTIDO_INSPECT="${EMBUTIDO_INSPECT:-0}"
+export APP OUT GATES REPO SITE_PORT EMBUTIDO_INSPECT
 
 SITE_PID=""
-if ! curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/pick"; then   # /pick: the newest page, so an older site is not reused
+if ! curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/popup"; then   # /popup: the newest page, so an older site is not reused
   python3 "$REPO/tools/sites-teste/serve.py" "$SITE_PORT" >"$OUT/site.log" 2>&1 &
   SITE_PID=$!
-  for _ in $(seq 20); do curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/pick" && break; sleep 0.25; done
-  curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/pick" || { echo "FAIL: the test site has no /pick (an older serve.py on port $SITE_PORT? try SITE_PORT=8766)"; exit 1; }
+  for _ in $(seq 20); do curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/popup" && break; sleep 0.25; done
+  curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/popup" || { echo "FAIL: the test site has no /popup (an older serve.py on port $SITE_PORT? try SITE_PORT=8766)"; exit 1; }
 fi
 
 # winids lists every normal window of a pid, also the ones off screen; this one counts only those
@@ -593,9 +596,13 @@ a = ui_ask("context_menu", t, 10)
 actions = ((a or {}).get("context") or {}).get("actions", [])
 check("context_menu: a right click reaches the host (actions, x, y)",
       "reload" in actions and all(isinstance((a or {}).get(k), (int, float)) for k in ("x", "y")), a)
+check("context_menu: inspect (DevTools) is offered, last", actions[-1:] == ["inspect"], actions)
 check("context_menu: an action that was not offered is bad_request", err(answer(a, action="copy_link")) == "bad_request")
 drop(t)
 check("context_menu: ui.answer reload reloads the page", err(answer(a, action="reload")) == "ok" and titled(t, "Form (test)"))
+# view.inspect: only the paths that open nothing (the one that opens DevTools is EMBUTIDO_INSPECT=1, below)
+check("view.inspect on an unknown tab is not_found", err(c.ask("view.inspect", tab="v999999")) == "not_found")
+check("view.inspect with x but no y is bad_request", err(c.ask("view.inspect", tab=t, x=10)) == "bad_request")
 c.ask("view.close", tab=t)
 
 # Step 5.4: the element picker (view.pick, view.picked) and view.selection, on /pick, whose elements sit
@@ -730,8 +737,18 @@ else:
                   and isinstance(e.get("control"), dict), 10) or {}).get("tab")
     c.ask("view.attach", tab=vt, width=800, height=600, scale=1)
     check("view.pick on a tab while its agent works is denied", err(c.ask("view.pick", tab=vt, on=True)) == "denied")
+    check("view.inspect on a tab while its agent works is denied", err(c.ask("view.inspect", tab=vt, x=50, y=50)) == "denied")
+    for data in events("rightdown", "rightup"):
+        c.send_raw({"op": "view.mouse", "tab": vt, "data": data, "x": 300, "y": 300})
+    check("agent tab: a right click reaches no menu, so no inspect", ui_ask("context_menu", vt, 3) is None)
     c.ask("view.control", tab=vt, action="take")
     c.pump(0.5)
+    for data in events("rightdown", "rightup"):
+        c.send_raw({"op": "view.mouse", "tab": vt, "data": data, "x": 300, "y": 300})
+    a = ui_ask("context_menu", vt, 10)
+    check("after Assumir a right click offers inspect, last",
+          ((a or {}).get("context") or {}).get("actions", [])[-1:] == ["inspect"], a)
+    answer(a, cancel=True)
     r = c.ask("view.pick", tab=vt, on=True)
     check("after Assumir the person may pick on that tab", r.get("ok"), r)
     c.ask("view.control", tab=vt, action="give")
@@ -747,7 +764,32 @@ check("permission allow: notifications reach the host", bool(a) and a.get("permi
 answer(a, allow=True)
 check("permission allow shows in the page title", titled(t, "perm geo=skipped notif=granted"))
 c.ask("view.close", tab=t)
+def on_screen(): return subprocess.run([f"{OUT}/onscreen", str(engine.pid)], capture_output=True, text=True).stdout.strip()
+check("engine still has no window on screen at the end", on_screen() == "0", f"on screen: {on_screen()}")
 check("engine still running", engine.poll() is None)
+
+if os.environ.get("EMBUTIDO_INSPECT") == "1":
+    # OPT-IN: this part puts a real DevTools window on screen and it takes the keyboard focus.
+    t = ui_tab("/popup"); titled(t, "Popup (test)")
+    c.events = [x for x in c.events if x["event"] != "view.tab"]   # only tabs that show up from here on
+    click(t, 190, 100)
+    e = c.event(lambda e: e["event"] == "view.tab" and e.get("tab") != t and e.get("url", "").startswith(SITE + "/other"), 10)
+    time.sleep(1)
+    check("a page's popup (window.open with features) becomes a tab of the same ato",
+          bool(e) and e.get("ato") == ato and e.get("tab") != t, e)
+    check("the popup put no window on screen", on_screen() == "0", f"on screen: {on_screen()}")
+    if e: c.ask("view.close", tab=e["tab"])
+    r = c.ask("view.inspect", tab=t, x=190, y=100)
+    check("view.inspect answers ok", r.get("ok"), r)
+    time.sleep(3)
+    check("exactly one window of the engine is on screen (DevTools)", on_screen() == "1", f"on screen: {on_screen()}")
+    check("view.inspect again (already open: comes to the front) answers ok", c.ask("view.inspect", tab=t).get("ok"))
+    c.s.close()   # the host goes away: the DevTools window must go with it
+    time.sleep(3)
+    check("the DevTools window is gone after the host disconnects", on_screen() == "0", f"on screen: {on_screen()}")
+    check("engine still running after the host left", engine.poll() is None)
+else:
+    print("SKIP: view.inspect opening DevTools, and a popup becoming a tab (a real window that takes focus; EMBUTIDO_INSPECT=1 runs it)", flush=True)
 print("parent: " + ("all passed" if not failed else "failed: " + ", ".join(failed)), flush=True)
 open(f"{OUT}/done", "w").write("1" if failed else "0")
 time.sleep(3600)   # the gate kills this process: the engine must follow

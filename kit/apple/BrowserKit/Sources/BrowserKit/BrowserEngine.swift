@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 
@@ -264,6 +265,29 @@ public struct HostSettings: Sendable, Equatable {
       siteRequests: reply["site_requests"]?.bool ?? false, agentExtensions: reply["agent_extensions"]?.bool ?? true)
   }
 
+  /// Opens the inspector (DevTools) for a tab in the engine's own window, the only one it puts on
+  /// screen: Elements on the element at `point` (the view's points, as `view.mouse`), or just
+  /// opened without one. If it is open for that tab already, it comes to the front. `denied` while an
+  /// agent works on the tab, `failed` when developer tools are turned off for the page; an engine
+  /// older than this op throws `unknown_op`. Answering the right-click menu's `inspect` does the same.
+  public func inspect(_ tab: String, at point: CGPoint? = nil) async throws(BrowserError) {
+    guard let connection else { throw BrowserError(code: BrowserError.disconnected) }
+    var params: [String: JSON] = ["tab": .string(tab)]
+    if let point {
+      params["x"] = .number(Double(point.x))
+      params["y"] = .number(Double(point.y))
+    }
+    yieldActivationToEngine()
+    try await connection.send(op: "view.inspect", params: params)
+  }
+
+  /// The engine is another process, with no Dock icon: its DevTools window comes to the front and
+  /// takes the keyboard only if this app hands activation over first (cooperative activation).
+  private func yieldActivationToEngine() {
+    guard let pid = process?.processIdentifier, let engine = NSRunningApplication(processIdentifier: pid) else { return }
+    NSApp.yieldActivation(to: engine)
+  }
+
   /// Wires a connection to the model and the views (also used by the tests, without a process).
   func attach(_ connection: BrowserConnection) {
     self.connection = connection
@@ -320,6 +344,7 @@ public struct HostSettings: Sendable, Equatable {
       let answer = await onUIRequest(request)
       guard !Task.isCancelled else { return }
       uiTasks[ask] = nil
+      if answer == .contextMenu(action: "inspect") { yieldActivationToEngine() }
       try? await connection?.answerUI(ask, answer)
     }
   }

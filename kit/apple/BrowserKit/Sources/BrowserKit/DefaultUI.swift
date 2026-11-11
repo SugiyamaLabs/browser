@@ -133,19 +133,23 @@ extension BrowserEngine {
   }
 
   /// The right-click menu: the engine's actions this kit has a title for, then the host's items
-  /// past a separator.
+  /// past a separator, then "Inspecionar" past another, last, when the engine offers it.
   static func contextMenu(_ context: ContextMenu, hostItems: [HostMenuItem]) -> (NSMenu, [ContextChoice]) {
     let menu = NSMenu()
     var choices: [ContextChoice] = []
-    for action in context.actions {
-      guard let title = contextTitles[action] else { continue }  // the host may draw fewer
+    func add(_ title: String, _ choice: ContextChoice) {
       menu.addItem(withTitle: title, action: nil, keyEquivalent: "").tag = choices.count
-      choices.append(.action(action))
+      choices.append(choice)
     }
-    if !choices.isEmpty && !hostItems.isEmpty { menu.addItem(.separator()) }
-    for item in hostItems {
-      menu.addItem(withTitle: item.title, action: nil, keyEquivalent: "").tag = choices.count
-      choices.append(.host(item))
+    for action in context.actions where action != "inspect" {
+      guard let title = contextTitles[action] else { continue }  // the host may draw fewer
+      add(title, .action(action))
+    }
+    if menu.numberOfItems > 0 && !hostItems.isEmpty { menu.addItem(.separator()) }
+    for item in hostItems { add(item.title, .host(item)) }
+    if context.actions.contains("inspect") {
+      if menu.numberOfItems > 0 { menu.addItem(.separator()) }
+      add("Inspecionar", .action("inspect"))
     }
     return (menu, choices)
   }

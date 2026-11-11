@@ -5368,10 +5368,10 @@ index 0000000000..39be098619
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_UI_ANSWER_H_
 diff --git a/chrome/browser/agens/bridge/ui_answer_selfcheck.cc b/chrome/browser/agens/bridge/ui_answer_selfcheck.cc
 new file mode 100644
-index 0000000000..a0414df133
+index 0000000000..37f42b167a
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ui_answer_selfcheck.cc
-@@ -0,0 +1,184 @@
+@@ -0,0 +1,187 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Assert-based check of ui_answer.h, run by agens_bridge_selfcheck (protocol_selfcheck.cc).
 +
@@ -5449,6 +5449,9 @@ index 0000000000..a0414df133
 +  const std::string menu = R"({"kind":"context_menu","context":{"actions":["copy","reload"]}})";
 +  UI_CHECK(Check(menu, R"({"action":"reload"})") == kOk);
 +  UI_CHECK(Check(menu, R"({"action":"paste"})") == kBad && Check(menu, R"({"action":1})") == kBad);
++  // inspect (view.inspect's twin) only when the engine offered it: DevTools allowed, no agent.
++  UI_CHECK(Check(menu, R"({"action":"inspect"})") == kBad);
++  UI_CHECK(Check(R"({"kind":"context_menu","context":{"actions":["reload","inspect"]}})", R"({"action":"inspect"})") == kOk);
 +  UI_CHECK(Check(menu, R"({})") == kBad && Check(R"({"kind":"context_menu"})", R"({"action":"copy"})") == kBad);
 +
 +  // dialog: accept, and text only for an accepted prompt.
@@ -5558,10 +5561,10 @@ index 0000000000..a0414df133
 +}
 diff --git a/chrome/browser/agens/bridge/ui_ops.cc b/chrome/browser/agens/bridge/ui_ops.cc
 new file mode 100644
-index 0000000000..fe42b66f6c
+index 0000000000..a18a087645
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ui_ops.cc
-@@ -0,0 +1,699 @@
+@@ -0,0 +1,721 @@
 +// Copyright 2026 SugiyamaLabs.
 +// - One queue for every ask, in the order they came; only the oldest of each tab and kind is on
 +//   the host at a time, and at most kMaxOpenUiAsks wait in all.
@@ -5591,6 +5594,7 @@ index 0000000000..fe42b66f6c
 +#include "chrome/browser/agens/bridge/view_ops.h"
 +#include "chrome/browser/agens/embed/agens_controlled.h"
 +#include "chrome/browser/agens/embed/agens_embedded.h"
++#include "chrome/browser/devtools/devtools_window.h"
 +#include "content/public/browser/agens_embed_mac.h"
 +#include "content/public/browser/context_menu_params.h"
 +#include "content/public/browser/javascript_dialog_manager.h"
@@ -5607,6 +5611,7 @@ index 0000000000..fe42b66f6c
 +#include "ui/base/clipboard/scoped_clipboard_writer.h"
 +#include "ui/shell_dialogs/select_file_dialog.h"
 +#include "ui/shell_dialogs/select_file_dialog_factory.h"
++#include "ui/shell_dialogs/select_file_dialog_mac.h"
 +#include "ui/shell_dialogs/select_file_policy.h"
 +#include "ui/shell_dialogs/selected_file_info.h"
 +
@@ -5934,6 +5939,11 @@ index 0000000000..fe42b66f6c
 +    if (controller.CanGoForward()) controller.GoForward();
 +  } else if (*action == "reload") {
 +    controller.Reload(content::ReloadType::NORMAL, /*check_for_repost=*/true);
++  } else if (*action == "inspect") {
++    // Offered when the menu opened; an agent may have started since, or the policy changed.
++    if (!AgentWorking(contents) && view::CanInspect(contents)) {
++      view::Inspect(contents, frame, gfx::Point(clicked.x, clicked.y));
++    }
 +  }
 +}
 +
@@ -5965,6 +5975,7 @@ index 0000000000..fe42b66f6c
 +  if (contents->GetController().CanGoBack()) actions.Append("back");
 +  if (contents->GetController().CanGoForward()) actions.Append("forward");
 +  actions.Append("reload");
++  if (view::CanInspect(contents)) actions.Append("inspect");  // last, as in Chrome's menu
 +  context.Set("actions", std::move(actions));
 +  base::DictValue fields;
 +  fields.Set("x", params.x);
@@ -5983,10 +5994,13 @@ index 0000000000..fe42b66f6c
 +      : SelectFileDialog(listener, std::move(policy)) {}
 +
 +  // ::ui::SelectFileDialog:
-+  bool IsRunning(gfx::NativeWindow) const override { return ask_ != 0; }
++  bool IsRunning(gfx::NativeWindow window) const override {
++    return ask_ != 0 || (native_ && native_->IsRunning(window));
++  }
 +  void ListenerDestroyed() override {
 +    listener_ = nullptr;
 +    if (ask_) Withdraw(std::exchange(ask_, 0));
++    if (native_) native_->ListenerDestroyed();
 +  }
 +
 + protected:
@@ -6001,6 +6015,14 @@ index 0000000000..fe42b66f6c
 +    // Set by ChromeSelectFilePolicy right before this, in the same call.
 +    content::WebContents* contents = FileDialogSource().get();
 +    FileDialogSource() = nullptr;
++    // A DevTools window's own panel (save a HAR, add a workspace folder) is on screen with it: the
++    // standard one, as Chromium shows it. The policy was checked already.
++    if (DevToolsWindow::IsDevToolsWindow(contents)) {
++      native_ = base::MakeRefCounted<::ui::SelectFileDialogImpl>(listener_, nullptr);
++      native_->SelectFile(type, title, default_path, file_types, file_type_index, default_extension, owning_window,
++                          caller);
++      return;
++    }
 +    const char* mode = type == SELECT_OPEN_MULTI_FILE ? "open_multiple"
 +                       : type == SELECT_SAVEAS_FILE   ? "save"
 +                       : type == SELECT_OPEN_FILE     ? "open"
@@ -6047,6 +6069,7 @@ index 0000000000..fe42b66f6c
 +  }
 +
 +  int ask_ = 0;
++  scoped_refptr<::ui::SelectFileDialog> native_;  // a DevTools window's panel
 +};
 +
 +class HostFileDialogFactory : public ::ui::SelectFileDialogFactory {
@@ -6248,6 +6271,8 @@ index 0000000000..fe42b66f6c
 +  started = true;
 +  content::SetAgensEmbedSelectHandler(base::BindRepeating(&Select));
 +  content::SetAgensEmbedContextMenuHandler(base::BindRepeating(&ContextMenu));
++  // A DevTools window is on screen by itself: its menus and lists are Chromium's.
++  content::SetAgensEmbedOwnWindow(base::BindRepeating(&DevToolsWindow::IsDevToolsWindow));
 +  content::SetAgensEmbedCursorCallbacks(base::BindRepeating(&CursorChanged), base::BindRepeating(&CaretChanged));
 +  ::ui::SelectFileDialog::SetFactory(std::make_unique<HostFileDialogFactory>());
 +}
@@ -6794,10 +6819,10 @@ index 0000000000..e98cac0576
 +}
 diff --git a/chrome/browser/agens/bridge/view_ops.cc b/chrome/browser/agens/bridge/view_ops.cc
 new file mode 100644
-index 0000000000..03a938da4b
+index 0000000000..a07668637d
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_ops.cc
-@@ -0,0 +1,996 @@
+@@ -0,0 +1,1053 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The host draws the interface; the engine hands it the pages (docs/protocolo.md, "host e view").
 +// - One host: the connection that sent host.attach (the app that launched the engine).
@@ -6836,6 +6861,9 @@ index 0000000000..03a938da4b
 +#include "chrome/browser/autocomplete/autocomplete_classifier_factory.h"
 +#include "chrome/browser/browser_process.h"
 +#include "chrome/browser/content_settings/host_content_settings_map_factory.h"
++#include "chrome/browser/devtools/devtools_window.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
 +#include "chrome/browser/profiles/profile_manager_observer.h"
 +#include "components/content_settings/core/browser/host_content_settings_map.h"
 +#include "components/prefs/pref_change_registrar.h"
@@ -6855,6 +6883,7 @@ index 0000000000..03a938da4b
 +#include "content/public/browser/web_contents_user_data.h"
 +#include "mojo/public/cpp/bindings/callback_helpers.h"
 +#include "ui/gfx/codec/png_codec.h"
++#include "ui/gfx/geometry/point_conversions.h"
 +#include "ui/gfx/image/image.h"
 +#include "ui/gfx/image/image_skia.h"
 +#include "ui/gfx/image/image_skia_rep.h"
@@ -7548,6 +7577,29 @@ index 0000000000..03a938da4b
 +                                           request.id.Clone(), *to, std::move(reply)));
 +}
 +
++// view.inspect {tab, x?, y?}: DevTools for the tab, on the element at the point when there is one.
++void ViewInspect(content::WebContents* contents, const Request& request, ReplyCallback reply) {
++  double x = 0, y = 0;
++  const bool at = request.body.contains("x") || request.body.contains("y");
++  if (at && !ReadPoint(request.body, x, y)) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "x and y go together, as numbers"));
++    return;
++  }
++  if (AgentWorks(contents)) {
++    std::move(reply).Run(ErrorReply(&request.id, kDenied, "an agent is working on this tab"));
++    return;
++  }
++  if (!CanInspect(contents)) {
++    std::move(reply).Run(ErrorReply(&request.id, kFailed, "developer tools are turned off for this page"));
++    return;
++  }
++  // shortcut: the point goes to the main frame, so over a cross-origin iframe Elements shows the
++  // <iframe>; hit-test the frame under it (as the right click's frame does) if hosts need more.
++  Inspect(contents, contents->GetPrimaryMainFrame(),
++          at ? std::optional<gfx::Point>(gfx::ToRoundedPoint(gfx::PointF(x, y))) : std::nullopt);
++  std::move(reply).Run(OkReply(request.id));
++}
++
 +// What the page has selected, in the frame with the focus, read from an isolated world (the page
 +// cannot see or patch it). Never inside an <input>: that may be a password field, shown or not.
 +constexpr char16_t kSelectionScript[] = uR"((() => {
@@ -7675,6 +7727,9 @@ index 0000000000..03a938da4b
 +  } else if (op == "view.selection") {
 +    ViewSelection(contents, request, std::move(reply));
 +    return;
++  } else if (op == "view.inspect") {
++    ViewInspect(contents, request, std::move(reply));
++    return;
 +  } else {
 +    std::move(reply).Run(ErrorReply(&request.id, kUnknownOp, op));
 +    return;
@@ -7727,9 +7782,36 @@ index 0000000000..03a938da4b
 +  }
 +}
 +
++bool CanInspect(content::WebContents* contents) {
++  // What DevToolsWindow::Create checks: asked when it says no, it would show its policy dialog on
++  // the tab's window, which never goes on screen.
++  return DevToolsWindow::AllowDevToolsFor(Profile::FromBrowserContext(contents->GetBrowserContext()), contents);
++}
++
++void Inspect(content::WebContents* contents, content::RenderFrameHost* frame, std::optional<gfx::Point> at) {
++  // The picker and DevTools both drive the page's inspect mode (Overlay.setInspectMode).
++  for (auto& shown : S().shown) {
++    if (shown->web_contents() == contents && shown->picker) shown->picker->End(true);
++  }
++  // DevTools never docks here (the tabs' windows have no DevTools area): its own window, brought
++  // to the front when it is already open.
++  if (at) {
++    DevToolsWindow::InspectElement(frame, at->x(), at->y());
++  } else {
++    DevToolsWindow::OpenDevToolsWindow(contents, DevToolsToggleAction::Show(), DevToolsOpenedByAction::kUnknown);
++  }
++}
++
 +void OnConnectionClosed(uint64_t connection) {
 +  State& s = S();
 +  if (connection != s.host) return;
++  // Opened for the host's person, so they go with it (the inspected tab closing closes one too).
++  std::vector<BrowserWindowInterface*> devtools;
++  ForEachCurrentBrowserWindowInterfaceOrderedByActivation([&](BrowserWindowInterface* b) {
++    if (b->GetType() == BrowserWindowInterface::TYPE_DEVTOOLS) devtools.push_back(b);
++    return true;
++  });
++  for (BrowserWindowInterface* b : devtools) b->GetWindow()->Close();
 +  s.host = 0;
 +  s.shown.clear();  // the tabs go back to hidden
 +  s.sent.clear();
@@ -7796,10 +7878,10 @@ index 0000000000..03a938da4b
 +}  // namespace agens::bridge::view
 diff --git a/chrome/browser/agens/bridge/view_ops.h b/chrome/browser/agens/bridge/view_ops.h
 new file mode 100644
-index 0000000000..95d20440b7
+index 0000000000..edffd6c570
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_ops.h
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,62 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The page inside another app (docs/protocolo.md, "host e view"): host.attach, view.* and
 +// approval.answer and ui.answer (ui_ops.h). Only when the engine runs embedded (agens_embedded.h); otherwise every op here
@@ -7808,16 +7890,19 @@ index 0000000000..95d20440b7
 +#define CHROME_BROWSER_AGENS_BRIDGE_VIEW_OPS_H_
 +
 +#include <cstdint>
++#include <optional>
 +#include <string>
 +#include <string_view>
 +
 +#include "chrome/browser/agens/bridge/approval.h"
 +#include "chrome/browser/agens/bridge/ops.h"
++#include "ui/gfx/geometry/point.h"
 +
 +struct AgensWindow;
 +namespace content {
++class RenderFrameHost;
 +class WebContents;
-+}
++}  // namespace content
 +
 +namespace agens::bridge::view {
 +
@@ -7835,6 +7920,13 @@ index 0000000000..95d20440b7
 +
 +// The n of a tab the host was told about (view.tab); 0 for any other.
 +int KnownTab(content::WebContents* contents);
++
++// DevTools may open for the tab (policy, kiosk).
++bool CanInspect(content::WebContents* contents);
++// Opens DevTools for the tab in its own window, the one window the embedded engine puts on screen,
++// or brings it to the front: Elements on the element at `at` of `frame` (root DIPs, as a right
++// click's x and y) when given. Ends the tab's picker. Check CanInspect first.
++void Inspect(content::WebContents* contents, content::RenderFrameHost* frame, std::optional<gfx::Point> at);
 +
 +// The shell's windows (native_shell_mac.mm): their tabs are the ones the host sees.
 +void AddWindow(AgensWindow* window);
@@ -8977,15 +9069,16 @@ index 9d0bf4646d..2329299532 100644
  #ifdef __cplusplus
 diff --git a/chrome/browser/agens/embed/agens_embedded.h b/chrome/browser/agens/embed/agens_embedded.h
 new file mode 100644
-index 0000000000..c56aa19aab
+index 0000000000..aef9e1cc9e
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embedded.h
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,46 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The engine as another app's hidden helper (docs/agens.md, "Um código, dois produtos";
 +// docs/protocolo.md, "host e view"). With --agens-embedded the app that launched the engine draws
-+// the whole interface: the engine has no Dock icon, never puts a window on screen, never
-+// activates itself, and quits when that app goes away. macOS only; false everywhere else.
++// the whole interface: the engine has no Dock icon, puts no window on screen except the DevTools
++// window the person asked for (view.inspect, the right click's "inspect"), activates itself only
++// for that one, and quits when that app goes away. macOS only; false everywhere else.
 +#ifndef CHROME_BROWSER_AGENS_EMBED_AGENS_EMBEDDED_H_
 +#define CHROME_BROWSER_AGENS_EMBED_AGENS_EMBEDDED_H_
 +
@@ -9028,10 +9121,10 @@ index 0000000000..c56aa19aab
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EMBEDDED_H_
 diff --git a/chrome/browser/agens/embed/agens_embedded_mac.mm b/chrome/browser/agens/embed/agens_embedded_mac.mm
 new file mode 100644
-index 0000000000..2830b0793f
+index 0000000000..0f8407faae
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embedded_mac.mm
-@@ -0,0 +1,96 @@
+@@ -0,0 +1,97 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/embed/agens_embedded.h"
@@ -9102,7 +9195,8 @@ index 0000000000..2830b0793f
 +  if (g_parent <= 1) _exit(0);  // the app that launched the engine is already gone (now launchd's)
 +
 +  // No window of our own: tabs live in browser windows that never go on screen
-+  // (WebUIBrowserWindow::Show), and the host shows them.
++  // (WebUIBrowserWindow::Show), and the host shows them. Popups open as tabs (browser_navigator.cc);
++  // a DevTools window the person asks for is the one exception.
 +  base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
 +  command_line->AppendSwitch(switches::kNoStartupWindow);  // also no session restore at startup
 +  command_line->AppendSwitch(switches::kNoFirstRun);
@@ -9509,20 +9603,21 @@ index d81488f053..3eef3778eb 100644
  void ConfirmCloseWithDownloads(views::Widget* widget, int count, base::OnceCallback<void(bool)> callback);
  
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
-index 5d7ca90415..c7ad21d119 100644
+index 5d7ca90415..72ce42546a 100644
 --- a/chrome/browser/agens/embed/native_shell_mac.mm
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
-@@ -8,6 +8,9 @@
+@@ -8,6 +8,10 @@
  #import <AppKit/AppKit.h>
  
  #include "chrome/browser/agens/embed/agens_window.h"
 +#include "chrome/browser/agens/bridge/ui_ops.h"
 +#include "chrome/browser/agens/bridge/view_ops.h"
 +#include "chrome/browser/agens/embed/agens_embedded.h"
++#include "chrome/browser/devtools/devtools_window.h"
  #include "components/split_tabs/split_tab_visual_data.h"
  #include "components/tabs/public/split_tab_data.h"
  #include "ui/base/cursor/cursor.h"
-@@ -15,8 +18,15 @@
+@@ -15,8 +19,15 @@
  #include "base/strings/sys_string_conversions.h"
  #include "chrome/browser/extensions/extension_install_prompt_show_params.h"
  #include "extensions/browser/install_prompt_data.h"
@@ -9538,7 +9633,7 @@ index 5d7ca90415..c7ad21d119 100644
  #include "ui/base/metadata/metadata_header_macros.h"
  #include "ui/base/metadata/metadata_impl_macros.h"
  #include "ui/gfx/codec/png_codec.h"
-@@ -122,8 +132,10 @@ explicit NativeShellView(BrowserWindowInterface* browser)
+@@ -122,8 +133,10 @@ explicit NativeShellView(BrowserWindowInterface* browser)
      chrome_ = (__bridge_transfer NSView*)agens_ui_create_chrome(window_.get());
      window_->ui = (__bridge void*)chrome_;
      window_->extensions_anchor = extensions_anchor_;
@@ -9549,7 +9644,7 @@ index 5d7ca90415..c7ad21d119 100644
      agens_ui_destroy_chrome((__bridge void*)chrome_);
      [chrome_ removeFromSuperview];
      contents_->SetWebContents(nullptr);
-@@ -171,6 +183,12 @@ void Layout(PassKey) override {
+@@ -171,6 +184,12 @@ void Layout(PassKey) override {
          split = nullptr;
        }
      }
@@ -9562,7 +9657,7 @@ index 5d7ca90415..c7ad21d119 100644
      // Chromium keeps every tab but the active one hidden (no painting); a split shows two.
      for (views::WebView* pane : {contents_.get(), contents2_.get()}) {
        content::WebContents* was = pane->GetWebContents();
-@@ -328,6 +346,12 @@ void NativeTabStateChanged(views::Widget* widget) {
+@@ -328,6 +347,12 @@ void NativeTabStateChanged(views::Widget* widget) {
  }
  
  void ConfirmCloseWithDownloads(views::Widget* widget, int count, base::OnceCallback<void(bool)> callback) {
@@ -9575,7 +9670,7 @@ index 5d7ca90415..c7ad21d119 100644
    NSAlert* alert = [[NSAlert alloc] init];
    alert.messageText = count == 1 ? @"Há um download em andamento" : [NSString stringWithFormat:@"Há %d downloads em andamento", count];
    alert.informativeText = count == 1 ? @"Se fechar agora, ele é cancelado." : @"Se fechar agora, eles são cancelados.";
-@@ -360,6 +384,34 @@ bool HandleNativeCommand(BrowserWindowInterface* browser, int command_id) {
+@@ -360,6 +385,34 @@ bool HandleNativeCommand(BrowserWindowInterface* browser, int command_id) {
    return shell && shell->Command(*command);
  }
  
@@ -9610,7 +9705,7 @@ index 5d7ca90415..c7ad21d119 100644
  bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
    if (!IsNativeShellEnabled() || !browser->GetWindow()) return false;
    views::Widget* widget = views::Widget::GetWidgetForNativeWindow(browser->GetWindow()->GetNativeWindow());
-@@ -377,6 +429,13 @@ bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
+@@ -377,6 +430,13 @@ bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
   public:
    NativePermissionPrompt(AgensWindow* window, Delegate* delegate) : window_(window->weak.GetWeakPtr()) {
      window->permission_delegate = delegate->GetWeakPtr();
@@ -9624,7 +9719,7 @@ index 5d7ca90415..c7ad21d119 100644
      const GURL origin = delegate->GetRequestingOrigin();
      const std::string site = origin.is_valid() ? std::string(origin.host()) : std::string();
      std::vector<std::string> asks;
-@@ -389,12 +448,15 @@ bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
+@@ -389,12 +449,15 @@ bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
      agens_ui_permission_prompt(window->ui, site.c_str(), pointers.data(), static_cast<int>(pointers.size()));
    }
    ~NativePermissionPrompt() override {
@@ -9642,7 +9737,7 @@ index 5d7ca90415..c7ad21d119 100644
    }
    permissions::PermissionPromptDisposition GetPromptDisposition() const override {
      return permissions::PermissionPromptDisposition::ANCHORED_BUBBLE;
-@@ -407,7 +469,65 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
+@@ -407,7 +470,65 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
    }
  
   private:
@@ -9708,7 +9803,7 @@ index 5d7ca90415..c7ad21d119 100644
  };
  
  std::unique_ptr<permissions::PermissionPrompt> CreateNativePermissionPrompt(
-@@ -428,6 +548,42 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
+@@ -428,6 +549,42 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
  void ShowNativeInstallDialog(std::unique_ptr<ExtensionInstallPromptShowParams> params,
                               ExtensionInstallPrompt::DoneCallback done,
                               std::unique_ptr<extensions::InstallPromptData> prompt) {
@@ -9751,15 +9846,16 @@ index 5d7ca90415..c7ad21d119 100644
    NSAlert* alert = [[NSAlert alloc] init];
    alert.messageText = base::SysUTF16ToNSString(prompt->GetDialogTitle());
    NSMutableArray<NSString*>* asks = [NSMutableArray array];
-@@ -466,6 +622,7 @@ void ShowNativeInstallDialog(std::unique_ptr<ExtensionInstallPromptShowParams> p
+@@ -466,6 +623,8 @@ void ShowNativeInstallDialog(std::unique_ptr<ExtensionInstallPromptShowParams> p
    bool BuildViewImpl(const std::u16string& authority,
                       const std::u16string& explanation,
                       LoginModelData*) override {
-+    if (IsEmbedded()) return AskHost();
++    // Embedded, a DevTools window's own page is on screen by itself: the sheet goes on it.
++    if (IsEmbedded() && !DevToolsWindow::IsDevToolsWindow(web_contents())) return AskHost();
      NSWindow* window = web_contents() ? web_contents()->GetTopLevelNativeWindow().GetNativeNSWindow() : nil;
      if (!window) return false;
      alert_ = [[NSAlert alloc] init];
-@@ -500,13 +657,52 @@ bool BuildViewImpl(const std::u16string& authority,
+@@ -500,13 +659,52 @@ bool BuildViewImpl(const std::u16string& authority,
    void CloseDialog() override {
      if (window_ && alert_.window.sheetParent) [window_ endSheet:alert_.window returnCode:NSModalResponseAbort];
      alert_ = nil;
@@ -9812,7 +9908,7 @@ index 5d7ca90415..c7ad21d119 100644
  };
  
  // Owns itself: deleted when its sheet ends.
-@@ -520,6 +716,13 @@ void CloseDialog() override {
+@@ -520,6 +718,13 @@ void CloseDialog() override {
                   content::JavaScriptDialogManager::DialogClosedCallback callback,
                   base::OnceClosure force_closed)
        : callback_(std::move(callback)), force_closed_(std::move(force_closed)) {
@@ -9826,7 +9922,7 @@ index 5d7ca90415..c7ad21d119 100644
      alert_ = [[NSAlert alloc] init];
      alert_.messageText = base::SysUTF16ToNSString(title);
      alert_.informativeText = base::SysUTF16ToNSString(message);
-@@ -558,6 +761,8 @@ void CloseDialogWithoutCallback() override {
+@@ -558,6 +763,8 @@ void CloseDialogWithoutCallback() override {
  
   private:
    void Finish(bool ok) {
@@ -9835,7 +9931,7 @@ index 5d7ca90415..c7ad21d119 100644
      force_closed_.Reset();
      if (callback_) std::move(callback_).Run(ok, ok ? GetUserInput() : std::u16string());
      base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE, this);
-@@ -567,6 +772,7 @@ void Finish(bool ok) {
+@@ -567,6 +774,7 @@ void Finish(bool ok) {
    NSAlert* __strong alert_;
    NSTextField* __strong field_ = nil;
    NSWindow* __strong window_ = nil;
@@ -9843,7 +9939,7 @@ index 5d7ca90415..c7ad21d119 100644
    base::WeakPtrFactory<NativeJsDialog> weak_{this};
  };
  
-@@ -589,6 +795,10 @@ void Finish(bool ok) {
+@@ -589,6 +797,10 @@ void Finish(bool ok) {
        ->GetWeakPtr();
  }
  
@@ -10600,6 +10696,37 @@ index 9e4154d594..ce89b2bcaa 100644
    return javascript_dialogs::TabModalDialogManager::FromWebContents(source);
  }
  
+diff --git a/chrome/browser/ui/navigator/browser_navigator.cc b/chrome/browser/ui/navigator/browser_navigator.cc
+index b95a279fab..9f039a0242 100644
+--- a/chrome/browser/ui/navigator/browser_navigator.cc
++++ b/chrome/browser/ui/navigator/browser_navigator.cc
+@@ -4,6 +4,11 @@
+ 
+ #include "chrome/browser/ui/navigator/browser_navigator.h"
+ 
++#include "build/build_config.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/agens/embed/agens_embedded.h"  // agens
++#endif
++
+ #include <algorithm>
+ #include <memory>
+ #include <optional>
+@@ -632,6 +637,14 @@ base::WeakPtr<content::NavigationHandle> NavigateImpl(
+   }
+ #endif
+ 
++#if BUILDFLAG(IS_MAC)
++  // agens: embedded (agens_embedded.h), no window may go on screen: a popup opens as a tab of the
++  // same ato, which the host shows like any other (as the Mac does in browser full screen).
++  if (agens::IsEmbedded() && params->disposition == WindowOpenDisposition::NEW_POPUP) {
++    params->disposition = WindowOpenDisposition::NEW_FOREGROUND_TAB;
++  }
++#endif
++
+   if (params->initiating_profile->ShutdownStarted()) {
+     // Don't navigate when the profile is shutting down.
+     return nullptr;
 diff --git a/chrome/browser/ui/select_file_policy/chrome_select_file_policy.cc b/chrome/browser/ui/select_file_policy/chrome_select_file_policy.cc
 index be4b9162d1..60b6aca238 100644
 --- a/chrome/browser/ui/select_file_policy/chrome_select_file_policy.cc
@@ -10857,10 +10984,10 @@ index 0000000000..20f175db82
 +#endif  // CONTENT_BROWSER_RENDERER_HOST_AGENS_EMBED_INTERNAL_MAC_H_
 diff --git a/content/browser/renderer_host/agens_embed_mac.mm b/content/browser/renderer_host/agens_embed_mac.mm
 new file mode 100644
-index 0000000000..e047c110c9
+index 0000000000..7c913a3a06
 --- /dev/null
 +++ b/content/browser/renderer_host/agens_embed_mac.mm
-@@ -0,0 +1,359 @@
+@@ -0,0 +1,369 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "content/public/browser/agens_embed_mac.h"
@@ -10904,6 +11031,13 @@ index 0000000000..e047c110c9
 +AgensEmbedContextMenuHandler& ContextMenuHandler() {
 +  static base::NoDestructor<AgensEmbedContextMenuHandler> handler;
 +  return *handler;
++}
++AgensEmbedOwnWindowCallback& OwnWindowCallback() {
++  static base::NoDestructor<AgensEmbedOwnWindowCallback> callback;
++  return *callback;
++}
++bool InOwnWindow(WebContents* contents) {
++  return OwnWindowCallback() && contents && OwnWindowCallback().Run(contents);
 +}
 +AgensEmbedCursorCallback& CursorCallback() {
 +  static base::NoDestructor<AgensEmbedCursorCallback> callback;
@@ -10979,6 +11113,9 @@ index 0000000000..e047c110c9
 +void SetAgensEmbedContextMenuHandler(AgensEmbedContextMenuHandler handler) {
 +  ContextMenuHandler() = std::move(handler);
 +}
++void SetAgensEmbedOwnWindow(AgensEmbedOwnWindowCallback callback) {
++  OwnWindowCallback() = std::move(callback);
++}
 +void SetAgensEmbedCursorCallbacks(AgensEmbedCursorCallback cursor, AgensEmbedCaretCallback caret) {
 +  CursorCallback() = std::move(cursor);
 +  CaretCallback() = std::move(caret);
@@ -10989,7 +11126,7 @@ index 0000000000..e047c110c9
 +                             const gfx::Rect& bounds,
 +                             int selected,
 +                             const std::vector<blink::mojom::MenuItemPtr>& items) {
-+  if (!SelectHandler()) return false;
++  if (!SelectHandler() || InOwnWindow(contents)) return false;
 +  std::vector<AgensEmbedMenuItem> list;
 +  for (const blink::mojom::MenuItemPtr& item : items) {
 +    list.push_back({item->label.value_or(std::string()),
@@ -11005,7 +11142,7 @@ index 0000000000..e047c110c9
 +}
 +
 +bool AgensEmbedShowContextMenu(RenderFrameHost& frame, const ContextMenuParams& params) {
-+  if (!ContextMenuHandler()) return false;
++  if (!ContextMenuHandler() || InOwnWindow(WebContents::FromRenderFrameHost(&frame))) return false;
 +  ContextMenuHandler().Run(frame, params);
 +  return true;
 +}
@@ -11306,10 +11443,10 @@ index 790d665707..19074293c5 100644
        "native_event_processor_observer_mac.h",
 diff --git a/content/public/browser/agens_embed_mac.h b/content/public/browser/agens_embed_mac.h
 new file mode 100644
-index 0000000000..bf11022b92
+index 0000000000..cc1b4b2304
 --- /dev/null
 +++ b/content/public/browser/agens_embed_mac.h
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,107 @@
 +// Copyright 2026 SugiyamaLabs.
 +// A tab shown by another app (docs/poc/embed.md). The tab is not in any window here: its
 +// compositor draws into a CAContext, the other app hosts that context in a CALayerHost and sends
@@ -11405,6 +11542,10 @@ index 0000000000..bf11022b92
 +// A right click (params.x and y are in the view's DIPs); Chromium shows no menu of its own.
 +using AgensEmbedContextMenuHandler = base::RepeatingCallback<void(RenderFrameHost&, const ContextMenuParams&)>;
 +CONTENT_EXPORT void SetAgensEmbedContextMenuHandler(AgensEmbedContextMenuHandler handler);
++// True for a page the other app does not show (a DevTools window's own): its <select> lists and
++// right clicks stay Chromium's, in that page's real window. Unset: every page goes to the handlers.
++using AgensEmbedOwnWindowCallback = base::RepeatingCallback<bool(WebContents*)>;
++CONTENT_EXPORT void SetAgensEmbedOwnWindow(AgensEmbedOwnWindowCallback callback);
 +// The mouse cursor over the page, and where the text being edited is (in the view, DIPs).
 +using AgensEmbedCursorCallback = base::RepeatingCallback<void(WebContents*, ui::mojom::CursorType)>;
 +using AgensEmbedCaretCallback = base::RepeatingCallback<void(WebContents*, const gfx::Rect&)>;

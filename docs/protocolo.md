@@ -12,6 +12,7 @@ Referência para quem escreve um cliente (o time do Agens, em Go). O plano e o p
 | 3 | `control.*`, `tab.*`, `page.*` | implementado |
 | 5 | `host.*`, `view.*`, `ui.*` (a página dentro de outro app), `host.settings`, as partes de `approval.ask` | implementado |
 | 5.4 | `view.pick`, `view.pick.step`, `view.selection`, evento `view.picked` (apontar um elemento) | implementado |
+| 5.5 | `view.inspect`, ação `inspect` do botão direito (o DevTools) | implementado |
 
 Um navegador de fase 1 responde `unknown_op` às demais. Trate `unknown_op` como "este navegador ainda não faz isso".
 
@@ -181,7 +182,7 @@ O controle vale **para a conexão**: quando o cliente desconecta, o controle aca
 
 ### host e view (fase 5): a página dentro de outro app
 
-Só existem quando o motor roda **embutido** (aberto por outro app com `--agens-embedded`, sem ícone no Dock e sem janela). No AgensBrowser sozinho respondem `unknown_op`.
+Só existem quando o motor roda **embutido** (aberto por outro app com `--agens-embedded`, sem ícone no Dock e sem janela, a não ser a do DevTools que a pessoa pede: veja "Passo 5.5"). No AgensBrowser sozinho respondem `unknown_op`.
 
 Quem desenha a interface é o app hospedeiro: barra de endereço, abas, atos, o aviso do agente. O motor entrega a página e os dados.
 
@@ -222,6 +223,7 @@ Quem desenha a interface é o app hospedeiro: barra de endereço, abas, atos, o 
 - **Configurações do hospedeiro.** `host.settings {site_requests?, agent_extensions?}` → `{site_requests, agent_extensions}`, só da conexão do hospedeiro (de outra, `unauthorized`). Muda as que vierem (booleanos; outro tipo dá `bad_request`) e responde as duas como valem agora; sem campo, só lê. O motor guarda as duas no `Local State` (`agens.bridge.site_requests`, `agens.bridge.agent_extensions`) e elas valem para todos os atos, também os que abrirem depois. Motor mais antigo responde `unknown_op`: ali vale o padrão.
   - `site_requests` (padrão `false`): com `true`, geolocalização e notificações ficam em "perguntar" em todo ato, e o pedido do site chega como `ui.ask` `permission`; com `false`, ficam bloqueadas e o site nem chega a pedir. O motor aplica isso como o padrão do ato a cada início e a cada mudança, por cima do que a pessoa tenha escolhido para o mesmo ato no AgensBrowser sozinho (**Configurações › Permissões**); as exceções por site continuam valendo.
   - `agent_extensions` (padrão `true`, o comportamento de antes): com `false`, as extensões não agem nas abas que um agente controla, enquanto o controle durar: nenhum content script (do manifesto, dinâmico ou `userScripts`) nem `tabs.executeScript`, `tabs.insertCSS` ou `scripting.*` roda ou injeta CSS nelas, em nenhum quadro, nem depois de navegar para outro site; o botão da extensão na barra não faz nada nelas; e as APIs que pegam a aba pelo id (`tabs.get`, `tabs.update`, `tabs.sendMessage`…) não a encontram. Vale na hora, inclusive para abas já controladas (o que já rodou numa página continua nela até a próxima navegação). Quando o controle acaba, a aba volta ao normal na próxima página. **O que não fica de fora:** `tabs.query` e `tabs.onUpdated` ainda mostram a aba; `webRequest` e `declarativeNetRequest` continuam valendo nela (bloqueio de anúncio e de rastreador por extensão segue funcionando); as APIs de cookies e de armazenamento são por ato, não por aba; e uma janela que a aba controlada abre (pop-up) não é controlada, então as extensões agem nela.
+- **Pop-up.** O que a página abre como janela pop-up (`window.open` com `popup`, `width` ou `height`) vira uma aba nova, em primeiro plano, do mesmo ato, e chega ao hospedeiro como qualquer aba (`view.tab`). Nunca vira janela.
 - **Detalhes do formato.** `view.attach`, `view.resize` e `view.detach` vão com `id` e têm resposta; as operações de entrada vão sem `id`. Em `view.key`, só `tab` e `data` são obrigatórios (soltar tecla e mudar modificador não mandam o resto). `width` e `height` são pontos inteiros, até 8192; `scale`, `x` e `y` podem ter decimais; `context` é um número de 32 bits sem sinal. `ask` é texto. `control` ausente ou `null` quer dizer sem agente. Toda aba que aparece num ato gera `view.tab`, inclusive as que o próprio hospedeiro abriu. `hello` continua devolvendo `protocol` 1: um motor sem estas operações responde `unknown_op` a `host.attach`.
 - **Se o motor cair**, a conexão fecha. O app abre o motor de novo, refaz `host.attach` e religa as vistas; os ids `v…` antigos não valem mais.
 
@@ -251,10 +253,10 @@ Um mecanismo só, no formato de `approval.ask` / `approval.answer`: o motor mand
 **2. Botão direito** (`kind: "context_menu"`). O app não precisa avisar o clique: o motor decide pelo `view.mouse` com o botão direito e manda `ui.ask` com `x`, `y` (ponto do clique) e `context`:
 
 ```
-{"link": "https://example.com/a", "image": "https://example.com/i.png", "selection": "texto", "editable": true, "actions": ["open_link_new_tab", "copy_link", "copy_image", "save_image", "copy", "cut", "paste", "select_all", "back", "forward", "reload"]}
+{"link": "https://example.com/a", "image": "https://example.com/i.png", "selection": "texto", "editable": true, "actions": ["open_link_new_tab", "copy_link", "copy_image", "save_image", "copy", "cut", "paste", "select_all", "back", "forward", "reload", "inspect"]}
 ```
 
-`link` e `image` só vêm se o clique foi neles (o endereço inteiro, o mesmo que as ações usam); `selection` vem cortado em 200 caracteres; `editable` diz que é campo de texto. `actions` é a lista do que vale agora (`open_link_new_tab` só para link `http(s)`, e abre em segundo plano), na ordem em que o motor sugere; o hospedeiro pode desenhar menos, nunca ação fora da lista. Resposta: `ui.answer {ask, action}` com um item de `actions`, ou `cancel`. O motor executa a ação. Ação fora da lista dá `bad_request`. Não há ação que leia o conteúdo para o hospedeiro: copiar vai para a área de transferência do sistema, pelo motor. Aba com agente: o botão direito da pessoa só chega depois do Assumir; o do agente não existe (não há operação para ele). `save_image` cai nas regras de download de hoje.
+`link` e `image` só vêm se o clique foi neles (o endereço inteiro, o mesmo que as ações usam); `selection` vem cortado em 200 caracteres; `editable` diz que é campo de texto. `actions` é a lista do que vale agora (`open_link_new_tab` só para link `http(s)`, e abre em segundo plano), na ordem em que o motor sugere; o hospedeiro pode desenhar menos, nunca ação fora da lista. Resposta: `ui.answer {ask, action}` com um item de `actions`, ou `cancel`. O motor executa a ação. Ação fora da lista dá `bad_request`. Não há ação que leia o conteúdo para o hospedeiro: copiar vai para a área de transferência do sistema, pelo motor. Aba com agente: o botão direito da pessoa só chega depois do Assumir; o do agente não existe (não há operação para ele). `save_image` cai nas regras de download de hoje. `inspect` vem por último, quando o DevTools vale para a página (não vem se uma política o desliga): abre o DevTools no elemento do clique, como `view.inspect` (passo 5.5). Motor mais antigo não manda `inspect`.
 
 **3. `alert`, `confirm`, `prompt`, `beforeunload` de aba sem agente** (`kind: "dialog"`). Campos: `type` (`alert`, `confirm`, `prompt`, `beforeunload`), `message` (até 1024 caracteres), `origin` (de quem é o diálogo; o hospedeiro mostra), `default` (só em `prompt`, até 1024 caracteres). Resposta: `ui.answer {ask, accept: true|false, text?}`; `text` só em `prompt` aceito. `alert` aceita ou fecha: tanto faz. `beforeunload` aceito deixa a página sair. **Convivência com `page.dialog`:** o mecanismo de `page.dialog` não muda. Aba com agente: o diálogo vai para o agente como hoje (`page.dialog` e `dialog_open`) e `ui.ask` não é usado. Aba sem agente: `ui.ask` para o hospedeiro. Se um agente passa a controlar uma aba com `ui.ask` de diálogo aberto, o pedido é cancelado e o agente recebe `page.dialog` do mesmo diálogo. Se a pessoa assume, vale a regra de Assumir acima: o mais antigo vai ao hospedeiro por `ui.ask`, os outros são cancelados.
 
@@ -308,6 +310,25 @@ Também só adições à v1. A pessoa aponta um elemento da página, o motor diz
 - **O que fica de fora nesta versão.** Elemento dentro de `iframe` de outra origem não se escolhe: com o modo ligado, o clique sobre ele cai no elemento `<iframe>` da página, não dentro dele, e não escolhe nada. `iframe` da mesma origem funciona. Campo de senha que a página trocou para `type=text` (o "mostrar senha") é tratado como campo comum em `html`; `png` mostra o que está na tela. **Melhoria registrada:** escolher dentro de `iframe` de outra origem pede uma sessão interna de DevTools por quadro (`Target.setAutoAttach` com `flatten`, os mesmos comandos em cada sessão filha e `DOM.getFrameOwner` para somar a posição do quadro).
 
 **Erros novos.** Nenhum: `bad_request`, `not_found`, `denied`, `unauthorized`, `failed` (o motor não conseguiu ligar o modo na página). **Evento novo:** `view.picked`. **Operações novas:** `view.pick`, `view.pick.step`, `view.selection`.
+
+#### Passo 5.5: inspecionar (DevTools)
+
+Também só adição à v1. O DevTools do Chromium abre numa janela própria do motor, não dentro da vista do hospedeiro: é a única janela que o motor embutido põe na tela, e só quando a pessoa pede. Ela usa a janela normalmente (teclado, menus, painéis de arquivo do próprio DevTools); nada disso passa pelo socket nem vira `ui.ask`.
+
+```
+→ {"id": 40, "op": "view.inspect", "tab": "v3", "x": 120, "y": 80}
+← {"id": 40, "ok": true}
+```
+
+- **`view.inspect {tab, x?, y?}`** → `{ok}`. Só da conexão do hospedeiro (de outra, `unauthorized`), com `id`. Abre o DevTools da aba; com `x` e `y` (em pontos, do canto de cima da vista, como `view.mouse`), no painel Elements com o elemento desse ponto escolhido. Sem ponto, só abre. Se já está aberto para a aba, vem para a frente. Vale em qualquer aba que o hospedeiro conhece, ligada ou não. A resposta vem logo; a janela aparece em seguida.
+- **Pelo botão direito.** A ação `inspect` do `context_menu` (passo 5.3, item 2) faz o mesmo no elemento do clique, inclusive dentro de `iframe`.
+- **Trazer para a frente.** O motor é outro processo, sem ícone no Dock: o macOS só deixa a janela dele vir para a frente e pegar o teclado se o hospedeiro entregar a ativação antes de mandar `view.inspect` ou a resposta `inspect` (`NSApplication.yieldActivation(to:)` com o `NSRunningApplication` do motor, macOS 14). O kit faz isso.
+- **Erros.** Aba que não existe: `not_found`. `x` sem `y` (ou o contrário), ou ponto que não é número: `bad_request`. Agente trabalhando na aba: `denied` (depois do Assumir, vale). DevTools desligado por política para a página: `failed`.
+- **Junto com o apontar.** Abrir o DevTools acaba o `view.pick` daquela aba, com `view.picked {tab, cancelled: true}`: os dois usam o mesmo modo de inspeção da página.
+- **Fechar.** A janela fecha quando a aba fecha, quando o hospedeiro desconecta e quando o motor sai. A pessoa também fecha pela própria janela.
+- **O que fica de fora nesta versão.** Com `x` e `y` sobre um `iframe` de outra origem, `view.inspect` escolhe o elemento `<iframe>`, não o de dentro (pelo botão direito, escolhe o de dentro). Se um agente passa a trabalhar na aba com o DevTools aberto, a janela continua aberta.
+
+**Erros novos.** Nenhum. **Operação nova:** `view.inspect`. **Ação nova:** `inspect` em `context_menu`.
 
 ## Erros
 
