@@ -6470,7 +6470,7 @@ index 5d7ca90415..8f83909180 100644
  };
  
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
-index 3c18c4eab1..9bc92c46fc 100644
+index 3c18c4eab1..20512b7de8 100644
 --- a/chrome/browser/agens/ui/chrome_mac.mm
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
 @@ -93,7 +93,8 @@ unsigned solid(NSView* v) const {
@@ -6882,7 +6882,7 @@ index 3c18c4eab1..9bc92c46fc 100644
  - (void)toggleSidebar {
    _collapsed = !_collapsed;
    [NSUserDefaults.standardUserDefaults setBool:_collapsed forKey:kCollapsedKey];
-@@ -5094,6 +5322,86 @@ - (NSRect)roomForBar:(NSRect)page {
+@@ -5094,6 +5322,89 @@ - (NSRect)roomForBar:(NSRect)page {
    page.size.height -= 32;
    return page;
  }
@@ -6924,14 +6924,17 @@ index 3c18c4eab1..9bc92c46fc 100644
 +  const CGFloat fixed = 12 + mark + gap + gap + 6 + btnW + end + 8;
 +  const CGFloat textW = MAX(0, MIN(ceil(MAX(_controlTitle.fittingSize.width, _controlDetail.fittingSize.width)),
 +                                   NSWidth(_page) - 32 - fixed));
-+  const CGFloat w = fixed + textW;
-+  _controlBar.frame = NSMakeRect(round(NSMidX(_page) - w / 2), NSMaxY(_page) - 18 - h, w, h);
++  // A label draws its text 2 pt inside its frame: the gaps are measured to the text, so the labels overhang.
++  const CGFloat inset = 2, inkW = MAX(0, textW - 2 * inset);
++  const CGFloat w = fixed + inkW;
++  // 18 pt above the card's inner edge: `_page` includes its 1 pt border.
++  _controlBar.frame = NSMakeRect(round(NSMidX(_page) - w / 2), NSMaxY(_page) - 1 - 18 - h, w, h);
 +  CGFloat x = 12;
 +  _controlMark.frame = NSMakeRect(x, (h - mark) / 2, mark, mark);
 +  x += mark + gap;
-+  _controlTitle.frame = NSMakeRect(x, 8, textW, 18);
-+  _controlDetail.frame = NSMakeRect(x, 26, textW, 16);
-+  x += textW + gap + 6;
++  _controlTitle.frame = NSMakeRect(x - inset, 8, textW, 18);
++  _controlDetail.frame = NSMakeRect(x - inset, 26, textW, 16);
++  x += inkW + gap + 6;
 +  _controlMain.frame = NSMakeRect(x, (h - btnH) / 2, btnW, btnH);
 +  _controlEnd.frame = NSMakeRect(x + btnW + gap, (h - 26) / 2, 26, 26);
 +  NSString* state = _controlPaused ? @"paused" : @"work";
@@ -6969,7 +6972,7 @@ index 3c18c4eab1..9bc92c46fc 100644
  - (void)toggleBookmarkBar {
    [NSUserDefaults.standardUserDefaults setBool:!_barShown forKey:kBookmarkBarKey];
    [NSNotificationCenter.defaultCenter postNotificationName:kThemeChanged object:nil];  // every window
-@@ -5204,6 +5512,31 @@ - (void)answerPermission:(NSButton*)button {
+@@ -5204,6 +5515,31 @@ - (void)answerPermission:(NSButton*)button {
    if (_window) agens_window_permission_answer(_window, (AgensPermissionAnswer)button.tag);
    [self closeMenu];
  }
@@ -7001,7 +7004,7 @@ index 3c18c4eab1..9bc92c46fc 100644
  - (void)permissionGone {
    if (!_permissionAsked) return;
    _permissionAsked = NO;  // nothing to answer any more
-@@ -5412,6 +5745,9 @@ void agens_ui_permission_prompt(void* chrome, const char* site, const char* cons
+@@ -5412,6 +5748,9 @@ void agens_ui_permission_prompt(void* chrome, const char* site, const char* cons
    for (int i = 0; i < count; ++i) [list addObject:@(asks[i])];
    [(__bridge AgensChrome*)chrome askPermission:@(site) asks:list];
  }
