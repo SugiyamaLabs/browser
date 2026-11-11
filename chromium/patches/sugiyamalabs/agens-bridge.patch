@@ -7946,10 +7946,10 @@ index 0000000000..edffd6c570
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_VIEW_OPS_H_
 diff --git a/chrome/browser/agens/bridge/view_pick.cc b/chrome/browser/agens/bridge/view_pick.cc
 new file mode 100644
-index 0000000000..8e496926bd
+index 0000000000..af1ec61577
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_pick.cc
-@@ -0,0 +1,438 @@
+@@ -0,0 +1,439 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The picker (view_pick.h). How DevTools' inspect mode behaves, and what that asks of us:
 +// - Overlay.setInspectMode answers ok even when Overlay is not enabled, and fails (keeping the
@@ -8063,8 +8063,9 @@ index 0000000000..8e496926bd
 +  };
 +  base::DictValue config;
 +  config.Set("showInfo", true);
-+  config.Set("contentColor", amber(0.14));
-+  config.Set("paddingColor", amber(0.08));
++  config.Set("showAccessibilityInfo", false);  // the label is the tag and the size, nothing more
++  config.Set("contentColor", amber(0.28));     // no outline exists in the overlay: the tint has to read on any background
++  config.Set("paddingColor", amber(0.14));
 +  config.Set("borderColor", amber(0.9));
 +  return config;
 +}
