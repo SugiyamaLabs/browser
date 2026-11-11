@@ -115,14 +115,19 @@ extension BrowserEngine {
     case .extension(let install):
       guard let window else { return .cancel }
       let alert = NSAlert()
-      alert.messageText = "Adicionar \(install.name) \(install.version)?"
-      var lines = ["Pedido por: \(install.from == "store" ? "loja" : install.from == "file" ? "arquivo" : install.from)"]
-      if !install.permissions.isEmpty { lines.append("Pode:\n" + install.permissions.map { "• \($0)" }.joined(separator: "\n")) }
+      alert.messageText = "Instalar \(install.name)?"
+      if let icon = install.icon.flatMap(NSImage.init(data:)) { alert.icon = icon }
+      alert.informativeText = "\(install.version) · \(Self.installSource(install.from))"
+      var lines: [String] = []
+      if !install.permissions.isEmpty { lines.append("O que ela pode fazer:\n" + install.permissions.map { "• \($0)" }.joined(separator: "\n")) }
       if !install.hostPermissions.isEmpty { lines.append("Em:\n" + install.hostPermissions.map { "• \($0)" }.joined(separator: "\n")) }
-      alert.informativeText = lines.joined(separator: "\n\n")
-      alert.addButton(withTitle: "Permitir")
-      Self.addCancel(alert, "Não permitir")
-      return .extension(allow: await sheet(alert, on: window) == .alertFirstButtonReturn)
+      let choice = InstallChoice(install)
+      alert.accessoryView = choice.view(details: lines.joined(separator: "\n\n"))
+      choice.button = alert.addButton(withTitle: "")
+      choice.update()
+      Self.addCancel(alert, "Cancelar")
+      guard await sheet(alert, on: window) == .alertFirstButtonReturn else { return .extension(allow: false) }
+      return .extension(allow: true, atos: choice.chosen)
     }
   }
 
@@ -165,6 +170,23 @@ extension BrowserEngine {
     "notifications": "mostrar notificações",
   ]
 
+  static func installSource(_ from: String) -> String {
+    switch from {
+    case "store": "da Chrome Web Store"
+    case "file": "de um arquivo .crx; não se atualiza sozinha"
+    case "folder": "de uma pasta; fica ligada a ela e não se atualiza sozinha"
+    default: "pedida por \(from)"
+    }
+  }
+
+  /// Shows a popup (`onExtensionPopup`) under `anchor`, its button, in a transient popover with
+  /// the popup's `BrowserTabView`: it follows the size the page wants, and a click elsewhere or
+  /// Escape closes it (the kit tells the engine). Does nothing for a popup it shows already.
+  public func presentExtensionPopup(_ popup: ExtensionPopup, from anchor: NSView) {
+    guard popups[popup.popup] == nil, anchor.window != nil else { return }
+    popups[popup.popup] = ExtensionPopupPresenter(engine: self, popup: popup, anchor: anchor)
+  }
+
   /// A second button that Escape presses.
   private static func addCancel(_ alert: NSAlert, _ title: String) {
     alert.addButton(withTitle: title).keyEquivalent = "\u{1b}"
@@ -197,4 +219,120 @@ extension BrowserEngine {
 private final class MenuPicker: NSObject {
   var picked: Int?
   @objc func pick(_ item: NSMenuItem) { picked = item.tag }
+}
+
+/// The install sheet's "Onde instalar" (prototipos/extensoes.html #instalar): only the asking ato
+/// (the default) or all, with a box per ato (the asking one and those that have it stay checked);
+/// the button says where it goes.
+@MainActor final class InstallChoice: NSObject {
+  let install: ExtensionInstall
+  var button: NSButton?
+  private let only = NSButton(radioButtonWithTitle: "", target: nil, action: nil)
+  private let all = NSButton(radioButtonWithTitle: "Em todos os atos — cada ato continua com os próprios logins", target: nil, action: nil)
+  private var boxes: [(id: String, box: NSButton, locked: Bool)] = []
+
+  init(_ install: ExtensionInstall) {
+    self.install = install
+    super.init()
+  }
+
+  private var askingName: String { install.atos.first { $0.id == install.ato }?.name ?? "" }
+  private var offersChoice: Bool { install.atos.count > 1 && install.ato != nil }
+
+  func view(details: String) -> NSView {
+    let stack = NSStackView()
+    stack.orientation = .vertical
+    stack.alignment = .leading
+    let text = NSTextField(wrappingLabelWithString: details.isEmpty ? "Nada além da própria página." : details)
+    text.preferredMaxLayoutWidth = 300
+    stack.addArrangedSubview(text)
+    if offersChoice {
+      stack.addArrangedSubview(NSTextField(labelWithString: "Onde instalar"))
+      only.title = "Só no ato \(askingName) — os outros atos não veem"
+      only.state = .on
+      for radio in [only, all] {
+        radio.target = self
+        radio.action = #selector(changed)
+        stack.addArrangedSubview(radio)
+      }
+      for ato in install.atos {
+        let mine = ato.id == install.ato
+        let title = ato.name + (mine ? "  (este ato)" : ato.installed ? "  (já tem)" : "")
+        let box = NSButton(checkboxWithTitle: title, target: self, action: #selector(changed))
+        box.state = .on
+        boxes.append((ato.id, box, mine || ato.installed))
+        let row = NSStackView(views: [box])  // indented under "Em todos os atos"
+        row.edgeInsets = NSEdgeInsets(top: 0, left: 22, bottom: 0, right: 0)
+        stack.addArrangedSubview(row)
+      }
+    }
+    stack.frame = NSRect(x: 0, y: 0, width: 320, height: stack.fittingSize.height)
+    return stack
+  }
+
+  @objc func changed() { update() }
+
+  func update() {
+    let everywhere = all.state == .on
+    for entry in boxes { entry.box.isEnabled = everywhere && !entry.locked }
+    let count = boxes.filter { $0.box.state == .on }.count
+    button?.title = offersChoice && everywhere && count > 1 ? "Instalar em \(count) atos"
+      : askingName.isEmpty ? "Instalar" : "Instalar no ato \(askingName)"
+  }
+
+  /// The checked atos (the engine skips the asking one and those that have it), or nil for only
+  /// the asking one.
+  var chosen: [String]? {
+    guard offersChoice, all.state == .on else { return nil }
+    return boxes.filter { $0.box.state == .on }.map(\.id)
+  }
+
+  /// For the tests: the person picks "Em todos os atos" and unchecks these.
+  func pickAll(leaving out: Set<String> = []) {
+    all.state = .on
+    only.state = .off
+    update()
+    for entry in boxes where out.contains(entry.id) && entry.box.isEnabled { entry.box.state = .off }
+    update()
+  }
+}
+
+/// One popup `presentExtensionPopup` shows: a transient popover around its view.
+@MainActor final class ExtensionPopupPresenter: NSObject, NSPopoverDelegate {
+  private weak var engine: BrowserEngine?
+  private let id: String
+  private let popover = NSPopover()
+  private var closing = false
+
+  init(engine: BrowserEngine, popup: ExtensionPopup, anchor: NSView) {
+    self.engine = engine
+    id = popup.popup
+    super.init()
+    let view = BrowserTabView(engine: engine, tab: popup.popup)
+    view.frame = NSRect(origin: .zero, size: popup.size)
+    let controller = NSViewController()
+    controller.view = view
+    popover.contentViewController = controller
+    popover.contentSize = popup.size
+    popover.behavior = .transient  // a click elsewhere closes it: the focus loss the engine waits for
+    popover.delegate = self
+    // Below the button (its bottom edge; a flipped view's bottom is maxY).
+    popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: anchor.isFlipped ? .maxY : .minY)
+    view.window?.makeFirstResponder(view)
+  }
+
+  func resize(to size: CGSize) { popover.contentSize = size }
+
+  /// The engine closed it first: no op goes back.
+  func closed() {
+    closing = true
+    popover.close()
+  }
+
+  func popoverDidClose(_ notification: Notification) {
+    guard !closing else { return }
+    closing = true
+    engine?.popups[id] = nil
+    engine?.connection?.request(op: "extension.popup.close", params: ["popup": .string(id)])
+  }
 }

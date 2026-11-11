@@ -2990,6 +2990,552 @@ index 0000000000..e4b296e266
 +}  // namespace agens::bridge::control
 +
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_CONTROL_PAGE_H_
+diff --git a/chrome/browser/agens/bridge/extension_ops.cc b/chrome/browser/agens/bridge/extension_ops.cc
+new file mode 100644
+index 0000000000..9e8f54aa36
+--- /dev/null
++++ b/chrome/browser/agens/bridge/extension_ops.cc
+@@ -0,0 +1,510 @@
++// Copyright 2026 SugiyamaLabs.
++// - The extension is `extension` in ops and events: a request's own `id` is taken.
++// - Installing always goes through the person: extension.install only starts it, and the prompt
++//   (ui.ask "extension", with the ato choice) is what lets it in, here and into other atos.
++// - A popup is the extension's page in its own WebContents (an ExtensionViewHost, as Chrome's
++//   bubble has), sized by its content (25x25 to 800x600), with an id from the tabs' numbering.
++//   It is never in view.tab and never in a window; the host attaches it like a tab.
++
++#include "chrome/browser/agens/bridge/extension_ops.h"
++
++#include <memory>
++#include <optional>
++#include <utility>
++#include <vector>
++
++#include "base/base64.h"
++#include "base/files/file_path.h"
++#include "base/files/file_util.h"
++#include "base/no_destructor.h"
++#include "base/scoped_observation.h"
++#include "base/strings/stringprintf.h"
++#include "base/task/sequenced_task_runner.h"
++#include "base/task/thread_pool.h"
++#include "chrome/browser/agens/bridge/ui_ops.h"
++#include "chrome/browser/agens/bridge/view_input.h"
++#include "chrome/browser/agens/bridge/view_ops.h"
++#include "chrome/browser/agens/embed/agens_controlled.h"
++#include "chrome/browser/agens/embed/agens_extensions.h"
++#include "chrome/browser/agens/embed/agens_window.h"
++#include "chrome/browser/extensions/extension_action_runner.h"
++#include "chrome/browser/extensions/extension_tab_util.h"
++#include "chrome/browser/extensions/extension_view.h"
++#include "chrome/browser/extensions/extension_view_host.h"
++#include "chrome/browser/extensions/extension_view_host_factory.h"
++#include "chrome/browser/ui/extensions/extension_popup_types.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/render_widget_host_view.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "extensions/browser/disable_reason.h"
++#include "extensions/browser/extension_action.h"
++#include "extensions/browser/extension_action_manager.h"
++#include "extensions/browser/extension_registrar.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/browser/extension_registry_observer.h"
++#include "extensions/common/manifest_handlers/options_page_info.h"
++#include "extensions/common/permissions/permission_message.h"
++#include "extensions/common/permissions/permissions_data.h"
++
++namespace agens::bridge::extension {
++
++namespace {
++
++using extensions::Extension;
++using extensions::ExtensionRegistry;
++
++constexpr char kFailed[] = "failed";
++
++std::string TabName(int n) {
++  return ViewTabName(n);
++}
++
++std::string Color(SkColor color) {
++  if (!SkColorGetA(color)) return std::string();  // not set: the host's default
++  return base::StringPrintf("#%02X%02X%02X", SkColorGetR(color), SkColorGetG(color), SkColorGetB(color));
++}
++
++// What a toolbar shows of the action on `tab_id` (ExtensionAction::kDefaultTabId for every tab).
++void ActionFields(base::DictValue& fields, extensions::ExtensionAction& action, const Extension& e, int tab_id) {
++  std::string title = action.GetTitle(tab_id);
++  fields.Set("title", title.empty() ? e.name() : title);
++  fields.Set("badge", action.GetDisplayBadgeText(tab_id));
++  fields.Set("badge_color", Color(action.GetBadgeBackgroundColor(tab_id)));
++  fields.Set("visible", action.GetIsVisible(tab_id));
++  fields.Set("popup", action.HasPopup(tab_id));
++}
++
++extensions::ExtensionAction* ActionOf(Profile* profile, const Extension& e) {
++  return extensions::ExtensionActionManager::Get(profile)->GetExtensionAction(e);
++}
++
++base::DictValue ExtensionFields(Profile* profile, const Extension& e, int tab_id) {
++  base::DictValue fields;
++  fields.Set("id", e.id());
++  fields.Set("name", e.name());
++  fields.Set("version", e.VersionString());
++  fields.Set("enabled", ExtensionRegistry::Get(profile)->enabled_extensions().Contains(e.id()));
++  fields.Set("from", ext::From(e));
++  extensions::ExtensionAction* action = ActionOf(profile, e);
++  fields.Set("action", !!action);
++  if (action) ActionFields(fields, *action, e, tab_id);
++  fields.Set("pinned", ext::Pinned(profile, e.id()));
++  fields.Set("options", extensions::OptionsPageInfo::HasOptionsPage(&e));
++  base::ListValue permissions;
++  for (const extensions::PermissionMessage& message : e.permissions_data()->GetPermissionMessages()) {
++    permissions.Append(base::UTF16ToUTF8(message.message()));
++  }
++  fields.Set("permissions", std::move(permissions));
++  base::ListValue hosts;
++  for (const std::string& pattern : e.permissions_data()->active_permissions().effective_hosts().ToStringVector()) {
++    hosts.Append(pattern);
++  }
++  fields.Set("host_permissions", std::move(hosts));
++  base::ListValue atos;
++  for (const std::string& ato : ext::AtosWith(e.id())) atos.Append(ato);
++  fields.Set("atos", std::move(atos));
++  return fields;
++}
++
++// --- The popup.
++
++class Popup;
++struct State {
++  std::vector<std::unique_ptr<Popup>> popups;
++  bool started = false;
++};
++State& S() {
++  static base::NoDestructor<State> state;
++  return *state;
++}
++
++class Popup : public extensions::ExtensionView,
++              public content::WebContentsObserver,  // the tab it was opened on
++              public extensions::ExtensionRegistryObserver {
++ public:
++  Popup(std::unique_ptr<extensions::ExtensionViewHost> host, content::WebContents* tab)
++      : content::WebContentsObserver(tab), host_(std::move(host)), tab_(view::TabNumber(tab)) {
++    content::WebContents* contents = host_->host_contents();
++    n_ = view::TabNumber(contents);
++    id_ = host_->extension_id();
++    host_->set_view(this);
++    // window.close() in the popup.
++    host_->SetCloseHandler(base::BindOnce([](Popup* popup, extensions::ExtensionHost*) { popup->Close(); },
++                                          base::Unretained(this)));
++    registry_.Observe(ExtensionRegistry::Get(host_->browser_context()));
++    // Seen as visible from the start (it is in no window): it lays out and sizes itself.
++    capture_ = contents->IncrementCapturerCount(gfx::Size(), /*stay_hidden=*/false, /*stay_awake=*/false,
++                                                /*is_activity=*/false);
++    contents->UpdateWebContentsVisibility(content::Visibility::VISIBLE);
++    contents->Resize(gfx::Rect(extensions::kExtensionPopupMinSize));
++    view::AddView(contents);
++    host_->CreateRendererSoon();
++  }
++  ~Popup() override {
++    if (host_) host_->set_view(nullptr);
++  }
++
++  int n() const { return n_; }
++
++  // Once: tells the host, takes the view away from it and goes (posted: this may run inside the
++  // host's own call).
++  void Close() {
++    if (closing_) return;
++    closing_ = true;
++    Observe(nullptr);
++    registry_.Reset();
++    if (host_) view::RemoveView(host_->host_contents());
++    if (view::Host()) {
++      base::DictValue fields;
++      fields.Set("popup", TabName(n_));
++      SendEventTo(view::Host(), "extension.popup.closed", std::move(fields));
++    }
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE, base::BindOnce(
++                       [](Popup* popup) {
++                         std::erase_if(S().popups, [popup](const auto& p) { return p.get() == popup; });
++                       },
++                       base::Unretained(this)));
++  }
++
++  // extensions::ExtensionView:
++  gfx::NativeView GetNativeView() override { return host_->host_contents()->GetNativeView(); }
++  void ResizeDueToAutoResize(content::WebContents* contents, const gfx::Size& size) override {
++    if (closing_ || size.IsEmpty()) return;
++    size_ = size;
++    contents->Resize(gfx::Rect(size));
++    if (loaded_) SendSize();
++  }
++  void RenderFrameCreated(content::RenderFrameHost* frame) override {
++    // The main frame sizes the popup, as Chrome's bubble does (ExtensionViewViews).
++    if (!frame->GetParent() && frame->GetView()) {
++      frame->GetView()->EnableAutoResize(extensions::kExtensionPopupMinSize, extensions::kExtensionPopupMaxSize);
++    }
++  }
++  bool HandleKeyboardEvent(content::WebContents*, const input::NativeWebKeyboardEvent&) override { return false; }
++  void OnLoaded() override {
++    loaded_ = true;
++    SendSize();
++  }
++
++  // content::WebContentsObserver (the tab):
++  void DidStartNavigation(content::NavigationHandle* handle) override {
++    if (handle->IsInPrimaryMainFrame() && !handle->IsSameDocument()) Close();
++  }
++  void WebContentsDestroyed() override { Close(); }
++
++  // extensions::ExtensionRegistryObserver:
++  void OnExtensionUnloaded(content::BrowserContext*, const Extension* e, extensions::UnloadedExtensionReason) override {
++    if (e->id() == id_) Close();
++  }
++  void OnShutdown(ExtensionRegistry*) override { Close(); }
++
++ private:
++  void SendSize() {
++    if (!view::Host() || size_.IsEmpty()) return;
++    base::DictValue fields;
++    fields.Set("popup", TabName(n_));
++    fields.Set("tab", TabName(tab_));
++    fields.Set("extension", id_);
++    fields.Set("width", size_.width());
++    fields.Set("height", size_.height());
++    SendEventTo(view::Host(), "extension.popup", std::move(fields));
++  }
++
++  std::unique_ptr<extensions::ExtensionViewHost> host_;
++  int n_ = 0;
++  const int tab_;
++  std::string id_;
++  gfx::Size size_;
++  bool loaded_ = false;
++  bool closing_ = false;
++  base::ScopedClosureRunner capture_;
++  base::ScopedObservation<ExtensionRegistry, extensions::ExtensionRegistryObserver> registry_{this};
++};
++
++Popup* FindPopup(int n) {
++  for (auto& p : S().popups) {
++    if (p->n() == n) return p.get();
++  }
++  return nullptr;
++}
++
++// --- Events.
++
++class Events : public ext::Observer {
++ public:
++  void OnExtensionChanged(Profile* ato, const std::string& id, std::string_view change) override {
++    if (!view::Host()) return;
++    base::DictValue fields;
++    fields.Set("ato", ext::AtoId(ato));
++    fields.Set("extension", id);
++    fields.Set("change", change);
++    SendEventTo(view::Host(), "extension.changed", std::move(fields));
++  }
++  void OnExtensionActionChanged(Profile* ato, const std::string& id, content::WebContents* tab) override {
++    const int n = tab ? view::KnownTab(tab) : 0;
++    const Extension* e = ExtensionRegistry::Get(ato)->enabled_extensions().GetByID(id);
++    extensions::ExtensionAction* action = e ? ActionOf(ato, *e) : nullptr;
++    if (!view::Host() || !action || (tab && !n)) return;
++    base::DictValue fields;
++    fields.Set("ato", ext::AtoId(ato));
++    if (n) fields.Set("tab", TabName(n));  // absent: the default, on every tab of the ato
++    fields.Set("extension", id);
++    ActionFields(fields, *action, *e,
++                 tab ? extensions::ExtensionTabUtil::GetTabId(tab) : extensions::ExtensionAction::kDefaultTabId);
++    SendEventTo(view::Host(), "extension.action", std::move(fields));
++  }
++};
++
++// --- Requests.
++
++ProfileAttributesEntry* FindAto(const std::string& id) {
++  for (ProfileAttributesEntry* entry : AgensWindow::Atos()) {
++    if (entry->GetPath().BaseName().AsUTF8Unsafe() == id) return entry;
++  }
++  return nullptr;
++}
++
++// Runs `then(profile)` with the request's ato, loading it when it sleeps; answers the errors.
++void WithAto(Request request, ReplyCallback reply, base::OnceCallback<void(Request, ReplyCallback, Profile*)> then) {
++  std::optional<std::string> ato = StringParam(request.body, "ato");
++  if (!ato) return std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs ato"));
++  ProfileAttributesEntry* entry = FindAto(*ato);
++  if (!entry) return std::move(reply).Run(ErrorReply(&request.id, kNotFound, *ato));
++  ProfileManager* manager = g_browser_process->profile_manager();
++  if (Profile* profile = manager->GetProfileByPath(entry->GetPath())) {
++    return std::move(then).Run(std::move(request), std::move(reply), profile);
++  }
++  manager->LoadProfileByPath(
++      entry->GetPath(), /*incognito=*/false,
++      base::BindOnce(
++          [](Request request, ReplyCallback reply, base::OnceCallback<void(Request, ReplyCallback, Profile*)> then,
++             Profile* profile) {
++            if (!profile) return std::move(reply).Run(ErrorReply(&request.id, kFailed, "could not load the ato"));
++            std::move(then).Run(std::move(request), std::move(reply), profile);
++          },
++          std::move(request), std::move(reply), std::move(then)));
++}
++
++// The request's `tab`, when it has one: nullopt when absent, null contents when not a tab.
++std::optional<content::WebContents*> OptionalTab(const Request& request, bool& bad) {
++  const base::Value* value = request.body.Find("tab");
++  if (!value) return std::nullopt;
++  std::optional<int> n = value->is_string() ? ParseViewTab(value->GetString()) : std::nullopt;
++  bad = !n;
++  return n ? view::FindView(*n) : nullptr;
++}
++
++void ExtensionsList(Request request, ReplyCallback reply, Profile* profile) {
++  bool bad = false;
++  std::optional<content::WebContents*> tab = OptionalTab(request, bad);
++  if (bad) return std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "tab must be a v<n> id"));
++  if (tab && !*tab) return std::move(reply).Run(ErrorReply(&request.id, kNotFound, *request.body.FindString("tab")));
++  const int tab_id = tab ? extensions::ExtensionTabUtil::GetTabId(*tab) : extensions::ExtensionAction::kDefaultTabId;
++  base::ListValue list;
++  for (const auto& e : ExtensionRegistry::Get(profile)->GenerateInstalledExtensionsSet()) {
++    if (ext::Listed(*e)) list.Append(ExtensionFields(profile, *e, tab_id));
++  }
++  base::DictValue result;
++  result.Set("extensions", std::move(list));
++  std::move(reply).Run(OkReply(request.id, std::move(result)));
++}
++
++// The ato's extension `id` (enabled or not), or the reply says why not.
++const Extension* NeedExtension(Profile* profile, const Request& request, ReplyCallback& reply) {
++  std::optional<std::string> id = StringParam(request.body, "extension");
++  if (!id) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs ato and extension"));
++    return nullptr;
++  }
++  const Extension* e = ExtensionRegistry::Get(profile)->GetInstalledExtension(*id);
++  if (!e || !ext::Listed(*e)) {
++    std::move(reply).Run(ErrorReply(&request.id, kNotFound, *id));
++    return nullptr;
++  }
++  return e;
++}
++
++void ExtensionIcon(Request request, ReplyCallback reply, Profile* profile) {
++  const Extension* e = NeedExtension(profile, request, reply);
++  if (!e) return;
++  bool bad = false;
++  std::optional<content::WebContents*> tab = OptionalTab(request, bad);
++  if (bad) return std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "tab must be a v<n> id"));
++  if (tab && !*tab) return std::move(reply).Run(ErrorReply(&request.id, kNotFound, *request.body.FindString("tab")));
++  auto send = base::BindOnce(
++      [](base::Value id, ReplyCallback reply, std::vector<uint8_t> png) {
++        base::DictValue result;
++        result.Set("png", base::Base64Encode(png));  // empty: it has none
++        std::move(reply).Run(OkReply(id, std::move(result)));
++      },
++      request.id.Clone(), std::move(reply));
++  if (tab) {
++    std::vector<uint8_t> set = ext::SetIcon(profile, *e, extensions::ExtensionTabUtil::GetTabId(*tab));
++    if (!set.empty()) return std::move(send).Run(std::move(set));
++  }
++  ext::LoadIcon(profile, *e, /*of_action=*/tab.has_value(), std::move(send));
++}
++
++void ExtensionEnable(Request request, ReplyCallback reply, Profile* profile) {
++  std::optional<bool> on = request.body.FindBool("on");
++  if (!on) return std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs ato, extension and on (a boolean)"));
++  const Extension* e = NeedExtension(profile, request, reply);
++  if (!e) return;
++  auto* registrar = extensions::ExtensionRegistrar::Get(profile);
++  if (*on) {
++    registrar->EnableExtension(e->id());
++  } else {
++    registrar->DisableExtension(e->id(), {extensions::disable_reason::DISABLE_USER_ACTION});
++  }
++  std::move(reply).Run(OkReply(request.id));
++}
++
++void ExtensionPin(Request request, ReplyCallback reply, Profile* profile) {
++  std::optional<bool> on = request.body.FindBool("on");
++  if (!on) return std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs ato, extension and on (a boolean)"));
++  const Extension* e = NeedExtension(profile, request, reply);
++  if (!e) return;
++  ext::SetPinned(profile, e->id(), *on);
++  std::move(reply).Run(OkReply(request.id));
++}
++
++void ExtensionRemove(Request request, ReplyCallback reply, Profile* profile) {
++  const base::Value* all = request.body.Find("all");
++  if (all && !all->is_bool()) return std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "all is a boolean"));
++  const Extension* e = NeedExtension(profile, request, reply);
++  if (!e) return;
++  ext::Remove(profile, e->id(), all && all->GetBool(),
++              base::BindOnce([](base::Value id, ReplyCallback reply) { std::move(reply).Run(OkReply(id)); },
++                             request.id.Clone(), std::move(reply)));
++}
++
++void ExtensionOptions(Request request, ReplyCallback reply, Profile* profile) {
++  const Extension* e = NeedExtension(profile, request, reply);
++  if (!e) return;
++  if (!ExtensionRegistry::Get(profile)->enabled_extensions().Contains(e->id()) ||
++      !extensions::OptionsPageInfo::HasOptionsPage(e)) {
++    return std::move(reply).Run(ErrorReply(&request.id, kNotFound, "no options page (or the extension is off)"));
++  }
++  view::OpenTab(std::move(request), std::move(reply), extensions::OptionsPageInfo::GetOptionsPage(e), profile);
++}
++
++// {crx: "/abs"} or {folder: "/abs"}: checked on disk, then the install, which asks the person.
++void ExtensionInstall(Request request, ReplyCallback reply, Profile* profile) {
++  std::optional<std::string> crx = StringParam(request.body, "crx");
++  std::optional<std::string> folder = StringParam(request.body, "folder");
++  const base::FilePath path(crx ? *crx : folder ? *folder : std::string());
++  const bool one = (request.body.contains("crx") + request.body.contains("folder")) == 1 && (crx || folder);
++  if (!one || !path.IsAbsolute() || path.ReferencesParent() || path.value().find('\0') != std::string::npos) {
++    return std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs ato and crx or folder (an absolute path)"));
++  }
++  base::ThreadPool::PostTaskAndReplyWithResult(
++      FROM_HERE, {base::MayBlock()},
++      base::BindOnce(
++          [](base::FilePath path, bool folder) {
++            if (folder) return base::DirectoryExists(path) && base::PathExists(path.AppendASCII("manifest.json"));
++            return base::PathExists(path) && !base::DirectoryExists(path) && path.MatchesExtension(".crx");
++          },
++          path, !!folder),
++      base::BindOnce(
++          [](Request request, ReplyCallback reply, base::WeakPtr<Profile> profile, base::FilePath path, bool fits) {
++            if (!fits) {
++              return std::move(reply).Run(ErrorReply(
++                  &request.id, kBadRequest, "crx must be a .crx file, folder a folder with a manifest.json"));
++            }
++            if (!profile) return std::move(reply).Run(ErrorReply(&request.id, kFailed, "the ato went away"));
++            ext::InstallFromDisk(profile.get(), path, gfx::NativeWindow(),
++                                 base::BindOnce(
++                                     [](base::Value id, ReplyCallback reply, const std::string& extension,
++                                        const std::string& error) {
++                                       if (!error.empty()) {
++                                         return std::move(reply).Run(ErrorReply(
++                                             &id, error, error == kDenied ? "the person said no" : "could not install"));
++                                       }
++                                       base::DictValue result;
++                                       result.Set("extension", extension);  // "id" is the request's
++                                       std::move(reply).Run(OkReply(id, std::move(result)));
++                                     },
++                                     request.id.Clone(), std::move(reply)));
++          },
++          std::move(request), std::move(reply), profile->GetWeakPtr(), path));
++}
++
++// extension.click {tab, id}: the extension's action on that tab, as a click on its button.
++void ExtensionClick(const Request& request, ReplyCallback reply) {
++  std::optional<int> n = request.body.FindString("tab") ? ParseViewTab(*request.body.FindString("tab")) : std::nullopt;
++  std::optional<std::string> id = StringParam(request.body, "extension");
++  if (!n || !id) return std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs tab and extension"));
++  AgensWindow* window = nullptr;
++  content::WebContents* contents = view::FindView(*n, &window);
++  if (!contents || !window) return std::move(reply).Run(ErrorReply(&request.id, kNotFound, *request.body.FindString("tab")));
++  Profile* profile = window->browser->GetProfile();
++  const Extension* e = ExtensionRegistry::Get(profile)->enabled_extensions().GetByID(*id);
++  extensions::ExtensionAction* action = e ? ActionOf(profile, *e) : nullptr;
++  if (!action) return std::move(reply).Run(ErrorReply(&request.id, kNotFound, *id + " (or it is off, or has no action)"));
++  // As the toolbar button: nothing on a tab an agent uses while agent_extensions is off.
++  if (AgensControlled::BlocksExtensions(contents)) {
++    return std::move(reply).Run(ErrorReply(&request.id, kDenied, "an agent is using this tab"));
++  }
++  auto* runner = extensions::ExtensionActionRunner::GetForWebContents(contents);
++  if (!runner) return std::move(reply).Run(ErrorReply(&request.id, kFailed, "this tab runs no extensions"));
++  if (runner->RunAction(e, /*grant_tab_permissions=*/true) != extensions::ExtensionAction::ShowAction::kShowPopup) {
++    return std::move(reply).Run(OkReply(request.id));  // the extension handled the click itself
++  }
++  // One popup at a time, as Chrome's bubble.
++  for (auto& popup : S().popups) popup->Close();
++  const GURL url = action->GetPopupUrl(extensions::ExtensionTabUtil::GetTabId(contents));
++  S().popups.push_back(std::make_unique<Popup>(
++      extensions::ExtensionViewHostFactory::CreatePopupHost(*e, url, window->browser.get()), contents));
++  base::DictValue result;
++  result.Set("popup", TabName(S().popups.back()->n()));
++  std::move(reply).Run(OkReply(request.id, std::move(result)));
++}
++
++void PopupClose(const Request& request, ReplyCallback reply) {
++  const std::string* popup = request.body.FindString("popup");
++  std::optional<int> n = popup ? ParseViewTab(*popup) : std::nullopt;
++  if (!n) return std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs popup"));
++  Popup* found = FindPopup(*n);
++  if (!found) return std::move(reply).Run(ErrorReply(&request.id, kNotFound, *popup));
++  found->Close();
++  std::move(reply).Run(OkReply(request.id));
++}
++
++}  // namespace
++
++bool Handles(std::string_view op) {
++  return op == "extensions.list" || op.starts_with("extension.");
++}
++
++void HandleOp(const Client& client, Request request, ReplyCallback reply) {
++  const std::string op = request.op;
++  if (op == "extension.click") return ExtensionClick(request, std::move(reply));
++  if (op == "extension.popup.close") return PopupClose(request, std::move(reply));
++  void (*with_ato)(Request, ReplyCallback, Profile*) = op == "extensions.list"     ? &ExtensionsList
++                                                       : op == "extension.icon"    ? &ExtensionIcon
++                                                       : op == "extension.enable"  ? &ExtensionEnable
++                                                       : op == "extension.pin"     ? &ExtensionPin
++                                                       : op == "extension.remove"  ? &ExtensionRemove
++                                                       : op == "extension.options" ? &ExtensionOptions
++                                                       : op == "extension.install" ? &ExtensionInstall
++                                                                                   : nullptr;
++  if (!with_ato) return std::move(reply).Run(ErrorReply(&request.id, kUnknownOp, op));
++  WithAto(std::move(request), std::move(reply), base::BindOnce(with_ato));
++}
++
++void Start() {
++  if (S().started) return;
++  S().started = true;
++  ext::Start();
++  static base::NoDestructor<Events> events;
++  ext::AddObserver(events.get());
++}
++
++void HostGone() {
++  for (auto& popup : S().popups) popup->Close();
++}
++
++}  // namespace agens::bridge::extension
+diff --git a/chrome/browser/agens/bridge/extension_ops.h b/chrome/browser/agens/bridge/extension_ops.h
+new file mode 100644
+index 0000000000..d0ec9ca169
+--- /dev/null
++++ b/chrome/browser/agens/bridge/extension_ops.h
+@@ -0,0 +1,24 @@
++// Copyright 2026 SugiyamaLabs.
++// Extensions for the host (docs/protocolo.md, "Passo 5.6"): extensions.list, extension.* and the
++// extension popup as a view the host attaches like a tab. Embedded and host-only: view_ops.cc
++// checks both before handing an op here. UI thread.
++#ifndef CHROME_BROWSER_AGENS_BRIDGE_EXTENSION_OPS_H_
++#define CHROME_BROWSER_AGENS_BRIDGE_EXTENSION_OPS_H_
++
++#include <string_view>
++
++#include "chrome/browser/agens/bridge/ops.h"
++
++namespace agens::bridge::extension {
++
++bool Handles(std::string_view op);
++void HandleOp(const Client& client, Request request, ReplyCallback reply);
++
++// Embedded, once: extension.changed and extension.action go to the host from here on.
++void Start();
++// The host went away: its popups close.
++void HostGone();
++
++}  // namespace agens::bridge::extension
++
++#endif  // CHROME_BROWSER_AGENS_BRIDGE_EXTENSION_OPS_H_
 diff --git a/chrome/browser/agens/bridge/ops.cc b/chrome/browser/agens/bridge/ops.cc
 new file mode 100644
 index 0000000000..6251c6e72c
@@ -5166,15 +5712,17 @@ index 0000000000..ef8bfc467e
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_SESSION_READ_H_
 diff --git a/chrome/browser/agens/bridge/ui_answer.cc b/chrome/browser/agens/bridge/ui_answer.cc
 new file mode 100644
-index 0000000000..b6c9417226
+index 0000000000..b59be54247
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ui_answer.cc
-@@ -0,0 +1,146 @@
+@@ -0,0 +1,166 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/ui_answer.h"
 +
++#include <algorithm>
 +#include <initializer_list>
++#include <vector>
 +
 +#include "base/files/file_path.h"
 +#include "base/files/file_util.h"
@@ -5262,7 +5810,25 @@ index 0000000000..b6c9417226
 +    const base::Value* remember = body.Find("remember");
 +    return Pick(OnlyKeys(body, {"allow", "remember"}) && body.FindBool("allow") && (!remember || remember->is_bool()));
 +  }
-+  if (*kind == "extension") return Pick(OnlyKeys(body, {"allow"}) && body.FindBool("allow"));
++  if (*kind == "extension") {
++    if (!OnlyKeys(body, {"allow", "atos"}) || !body.FindBool("allow")) return UiAnswer::kBadRequest;
++    const base::Value* atos = body.Find("atos");
++    if (!atos) return UiAnswer::kAnswer;
++    // Only with allow, only atos the ask offered, each once.
++    const base::ListValue* offered = asked.FindList("atos");
++    if (!*body.FindBool("allow") || !atos->is_list() || !offered) return UiAnswer::kBadRequest;
++    std::vector<std::string_view> seen;
++    for (const base::Value& ato : atos->GetList()) {
++      if (!ato.is_string() || std::ranges::contains(seen, ato.GetString())) return UiAnswer::kBadRequest;
++      const bool known = std::ranges::any_of(*offered, [&](const base::Value& o) {
++        const std::string* id = o.is_dict() ? o.GetDict().FindString("id") : nullptr;
++        return id && *id == ato.GetString();
++      });
++      if (!known) return UiAnswer::kBadRequest;
++      seen.push_back(ato.GetString());
++    }
++    return UiAnswer::kAnswer;
++  }
 +  return UiAnswer::kBadRequest;
 +}
 +
@@ -5368,10 +5934,10 @@ index 0000000000..39be098619
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_UI_ANSWER_H_
 diff --git a/chrome/browser/agens/bridge/ui_answer_selfcheck.cc b/chrome/browser/agens/bridge/ui_answer_selfcheck.cc
 new file mode 100644
-index 0000000000..37f42b167a
+index 0000000000..2883a685d3
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ui_answer_selfcheck.cc
-@@ -0,0 +1,187 @@
+@@ -0,0 +1,196 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Assert-based check of ui_answer.h, run by agens_bridge_selfcheck (protocol_selfcheck.cc).
 +
@@ -5496,6 +6062,15 @@ index 0000000000..37f42b167a
 +  UI_CHECK(Check(R"({"kind":"extension"})", R"({"allow":false})") == kOk);
 +  UI_CHECK(Check(R"({"kind":"extension"})", R"({"allow":true,"remember":true})") == kBad);
 +  UI_CHECK(Check(R"({"kind":"extension"})", R"({})") == kBad);
++  // extension: atos, only with allow and only those the ask offered, each once.
++  const std::string atos = R"({"kind":"extension","ato":"Default","atos":[{"id":"Default"},{"id":"Profile 1"}]})";
++  UI_CHECK(Check(atos, R"({"allow":true})") == kOk && Check(atos, R"({"allow":true,"atos":[]})") == kOk);
++  UI_CHECK(Check(atos, R"({"allow":true,"atos":["Default","Profile 1"]})") == kOk);
++  UI_CHECK(Check(atos, R"({"allow":true,"atos":["Profile 9"]})") == kBad);
++  UI_CHECK(Check(atos, R"({"allow":true,"atos":["Profile 1","Profile 1"]})") == kBad);
++  UI_CHECK(Check(atos, R"({"allow":true,"atos":"Profile 1"})") == kBad && Check(atos, R"({"allow":true,"atos":[1]})") == kBad);
++  UI_CHECK(Check(atos, R"({"allow":false,"atos":["Profile 1"]})") == kBad);
++  UI_CHECK(Check(R"({"kind":"extension"})", R"({"allow":true,"atos":["Default"]})") == kBad);  // none offered
 +
 +  // What the page controls, cut before it goes out.
 +  {
@@ -6819,10 +7394,10 @@ index 0000000000..e98cac0576
 +}
 diff --git a/chrome/browser/agens/bridge/view_ops.cc b/chrome/browser/agens/bridge/view_ops.cc
 new file mode 100644
-index 0000000000..a07668637d
+index 0000000000..cbf0722182
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_ops.cc
-@@ -0,0 +1,1053 @@
+@@ -0,0 +1,1087 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The host draws the interface; the engine hands it the pages (docs/protocolo.md, "host e view").
 +// - One host: the connection that sent host.attach (the app that launched the engine).
@@ -6852,6 +7427,7 @@ index 0000000000..a07668637d
 +#include "base/scoped_observation.h"
 +#include "base/task/sequenced_task_runner.h"
 +#include "chrome/browser/agens/bridge/bridge.h"
++#include "chrome/browser/agens/bridge/extension_ops.h"
 +#include "chrome/browser/agens/bridge/ui_ops.h"
 +#include "chrome/browser/agens/bridge/view_input.h"
 +#include "chrome/browser/agens/bridge/view_pick.h"
@@ -6970,6 +7546,7 @@ index 0000000000..a07668637d
 +  uint64_t host = 0;
 +  std::vector<raw_ptr<AgensWindow>> windows;
 +  std::vector<std::unique_ptr<Shown>> shown;
++  std::vector<raw_ptr<content::WebContents>> views;  // AddView: extension popups
 +  std::map<int, base::DictValue> sent;  // the last view.tab of each tab the host knows
 +  std::map<int, gfx::Image> icons;      // the favicon it was told about
 +  std::map<int, base::DictValue> agent_cursors;  // the last view.agent_cursor; none sent: no cursor
@@ -7001,7 +7578,8 @@ index 0000000000..a07668637d
 +// Its number if the host was told about it (view.tab), else 0.
 +int KnownNumber(content::WebContents* contents) {
 +  const TabNumber* number = TabNumber::FromWebContents(contents);
-+  return number && S().sent.contains(number->n) ? number->n : 0;
++  if (!number) return 0;
++  return S().sent.contains(number->n) || std::ranges::contains(S().views, contents) ? number->n : 0;
 +}
 +
 +// An agent works on the tab, and the person has not taken over.
@@ -7046,8 +7624,10 @@ index 0000000000..a07668637d
 +  }
 +}
 +
++// A tab, or a view of AddView (with no window).
 +content::WebContents* FindTab(int n, AgensWindow** in = nullptr) {
 +  content::WebContents* found = nullptr;
++  if (in) *in = nullptr;
 +  ForEachTab([&](AgensWindow* window, content::WebContents* contents) {
 +    const TabNumber* number = TabNumber::FromWebContents(contents);
 +    if (!found && number && number->n == n) {
@@ -7055,6 +7635,10 @@ index 0000000000..a07668637d
 +      if (in) *in = window;
 +    }
 +  });
++  for (content::WebContents* view : S().views) {
++    const TabNumber* number = TabNumber::FromWebContents(view);
++    if (!found && number && number->n == n) found = view;
++  }
 +  return found;
 +}
 +
@@ -7740,7 +8324,8 @@ index 0000000000..a07668637d
 +}  // namespace
 +
 +bool Handles(std::string_view op) {
-+  return op.starts_with("host.") || op.starts_with("view.") || op == "approval.answer" || op == "ui.answer";
++  return op.starts_with("host.") || op.starts_with("view.") || op == "approval.answer" || op == "ui.answer" ||
++         extension::Handles(op);
 +}
 +
 +void HandleOp(const Client& client, Request request, ReplyCallback reply) {
@@ -7777,6 +8362,8 @@ index 0000000000..a07668637d
 +    ViewTabs(request, std::move(reply));
 +  } else if (op == "view.open") {
 +    ViewOpen(std::move(request), std::move(reply));
++  } else if (extension::Handles(op)) {
++    extension::HandleOp(client, std::move(request), std::move(reply));
 +  } else {
 +    TabOp(request, std::move(reply));
 +  }
@@ -7819,6 +8406,7 @@ index 0000000000..a07668637d
 +  s.agent_cursors.clear();
 +  if (ApprovalCallback done = std::move(s.answer)) std::move(done).Run(kAgensApprovalDeny);
 +  ui_ask::HostGone();
++  extension::HostGone();
 +}
 +
 +void HostGone() {
@@ -7829,6 +8417,7 @@ index 0000000000..a07668637d
 +  if (!IsEmbedded()) return;
 +  WatchLayers();  // from the first window: every tab's last layer is known when it is attached
 +  ui_ask::Start();
++  extension::Start();
 +  TheSiteRequests().Start();
 +  S().windows.push_back(window);
 +  window->model()->AddObserver(&S());
@@ -7844,6 +8433,26 @@ index 0000000000..a07668637d
 +
 +uint64_t Host() {
 +  return S().host;
++}
++
++void AddView(content::WebContents* contents) {
++  NumberOf(contents);
++  S().views.push_back(contents);
++}
++
++void RemoveView(content::WebContents* contents) {
++  State& s = S();
++  if (!std::erase(s.views, contents)) return;
++  std::erase_if(s.shown, [contents](const std::unique_ptr<Shown>& shown) { return shown->web_contents() == contents; });
++  ui_ask::TabClosing(contents);
++}
++
++content::WebContents* FindView(int n, AgensWindow** window) {
++  return FindTab(n, window);
++}
++
++void OpenTab(Request request, ReplyCallback reply, GURL url, Profile* profile) {
++  OpenIn(std::move(request), std::move(reply), std::move(url), profile);
 +}
 +
 +int TabNumber(content::WebContents* contents) {
@@ -7878,10 +8487,10 @@ index 0000000000..a07668637d
 +}  // namespace agens::bridge::view
 diff --git a/chrome/browser/agens/bridge/view_ops.h b/chrome/browser/agens/bridge/view_ops.h
 new file mode 100644
-index 0000000000..edffd6c570
+index 0000000000..dc86ad42dd
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_ops.h
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,74 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The page inside another app (docs/protocolo.md, "host e view"): host.attach, view.* and
 +// approval.answer and ui.answer (ui_ops.h). Only when the engine runs embedded (agens_embedded.h); otherwise every op here
@@ -7899,6 +8508,8 @@ index 0000000000..edffd6c570
 +#include "ui/gfx/geometry/point.h"
 +
 +struct AgensWindow;
++class GURL;
++class Profile;
 +namespace content {
 +class RenderFrameHost;
 +class WebContents;
@@ -7927,6 +8538,16 @@ index 0000000000..edffd6c570
 +// or brings it to the front: Elements on the element at `at` of `frame` (root DIPs, as a right
 +// click's x and y) when given. Ends the tab's picker. Check CanInspect first.
 +void Inspect(content::WebContents* contents, content::RenderFrameHost* frame, std::optional<gfx::Point> at);
++
++// Extension popups (extension_ops.cc): views the host attaches, gives input to and answers the
++// ui.ask of like tabs, outside any tab strip and never in view.tab. RemoveView detaches it and
++// ends its asks.
++void AddView(content::WebContents* contents);
++void RemoveView(content::WebContents* contents);
++// A tab or such a view by its "v<n>"; `window` gets a tab's window (null for a view).
++content::WebContents* FindView(int n, AgensWindow** window = nullptr);
++// view.open's ending: a new foreground tab of `url` in the ato's window, replied as {tab}.
++void OpenTab(Request request, ReplyCallback reply, GURL url, Profile* profile);
 +
 +// The shell's windows (native_shell_mac.mm): their tabs are the ones the host sees.
 +void AddWindow(AgensWindow* window);
@@ -9020,7 +9641,7 @@ index 0000000000..48063dd9a1
 +
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_COOKIE_POOL_H_
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
-index 9d0bf4646d..2329299532 100644
+index 9d0bf4646d..7741b308bf 100644
 --- a/chrome/browser/agens/embed/agens_embed.h
 +++ b/chrome/browser/agens/embed/agens_embed.h
 @@ -36,6 +36,11 @@ typedef struct {
@@ -9063,7 +9684,33 @@ index 9d0bf4646d..2329299532 100644
  // Opens that ato's window over this one (each ato keeps its own window and tabs).
  void agens_window_switch_ato(AgensWindow* window, int index);
  void agens_window_new_ato(AgensWindow* window);
-@@ -279,6 +295,16 @@ typedef enum {
+@@ -219,11 +235,24 @@ typedef struct {
+   const char* name;
+   const char* version;
+   int enabled;
++  const char* from;  // "store", "file" (a .crx: no updates) or "folder" (unpacked, linked to it)
++  int options;       // it has an options page (agens_extension_options)
++  const char* const* atos;  // the ids of the atos that have it, this one included
++  int atos_count;
+ } AgensExtension;
+ typedef void (*AgensExtensionsFn)(void* context, const AgensExtension* extensions, int count);
+ void agens_extensions(AgensWindow* window, AgensExtensionsFn fn, void* context);  // calls now
+ void agens_extension_set_enabled(AgensWindow* window, const char* id, int enabled);
+-void agens_extension_remove(AgensWindow* window, const char* id);
++// From this ato, or (`all`) from every ato that has it, waking the sleeping ones.
++void agens_extension_remove(AgensWindow* window, const char* id, int all);
++// Its options page, in a new tab of this window.
++void agens_extension_options(AgensWindow* window, const char* id);
++// In the bar (1) or only in the extensions menu (0); kept per ato.
++void agens_extension_set_pinned(AgensWindow* window, const char* id, int pinned);
++// "Adicionar de um arquivo": a .crx or an unpacked folder (absolute path). The install sheet asks
++// first, with the atos to install into, on `parent` (the platform window the person is in; null:
++// this window's).
++void agens_extension_add_file(AgensWindow* window, const char* path, void* parent);
+ 
+ // Senhas salvas. The list carries no passwords; agens_password_get copies one (the UI asks for
+ // Touch ID first). Indexes refer to the last list delivered.
+@@ -279,6 +308,16 @@ typedef enum {
  } AgensPermissionAnswer;
  void agens_window_permission_answer(AgensWindow* window, AgensPermissionAnswer answer);
  
@@ -9080,7 +9727,31 @@ index 9d0bf4646d..2329299532 100644
  // The site of the active page, for the panel behind the site icon. `pattern` is what
  // agens_site_exception_set takes for this site. Strings valid until the next call.
  typedef struct {
-@@ -358,6 +384,9 @@ float agens_ui_card_radius(void* chrome);
+@@ -291,13 +330,20 @@ AgensPermission agens_site_permission(AgensWindow* window, const char* kind);  /
+ // Cookies and storage of the active page's site only.
+ void agens_site_clear_data(AgensWindow* window, AgensDoneFn done, void* context);
+ 
+-// The extensions button (toolbar): this ato's enabled extensions, with their icons. Called now
+-// and on every change; `installed` is the id of one that was just installed, else "".
++// The extensions button (toolbar): this ato's enabled extensions, with their icons, as their
++// actions show on the active tab. Called now and on every change (an action's badge, the active
++// tab, a pin); `installed` is the id of one that was just installed, else "".
+ typedef struct {
+   const char* id;
+   const char* name;
+-  const unsigned char* icon_png;  // 32x32, null until loaded
++  const unsigned char* icon_png;  // 32x32: the action's for the active tab, else the extension's; null until loaded
+   int icon_png_size;
++  int pinned;            // in the bar; the others only in the menu
++  const char* title;     // the action's title on the active tab (its tooltip)
++  const char* badge;     // "" for none
++  unsigned badge_color;  // 0xAARRGGBB; 0 for the default
++  int visible;           // the action is on for the active tab (else greyed, as Chrome shows it)
++  int blocked;          // an agent uses the active tab with agent_extensions off: dimmed, does nothing
+ } AgensExtensionButton;
+ typedef void (*AgensExtensionButtonsChanged)(void* context, const AgensExtensionButton* list, int count,
+                                              const char* installed);
+@@ -358,6 +404,9 @@ float agens_ui_card_radius(void* chrome);
  float agens_ui_titlebar_height(void* chrome);
  void agens_ui_permission_prompt(void* chrome, const char* site, const char* const* asks, int count);
  void agens_ui_permission_prompt_close(void* chrome);
@@ -9245,21 +9916,619 @@ index 0000000000..0f8407faae
 +}
 +
 +}  // namespace agens
+diff --git a/chrome/browser/agens/embed/agens_extensions.cc b/chrome/browser/agens/embed/agens_extensions.cc
+new file mode 100644
+index 0000000000..3315a0867d
+--- /dev/null
++++ b/chrome/browser/agens/embed/agens_extensions.cc
+@@ -0,0 +1,489 @@
++// Copyright 2026 SugiyamaLabs.
++// - Into another ato, an extension goes as the first ato has it, without the network: a copy of
++//   its installed folder through CrxInstaller (store and .crx), or the same unpacked folder.
++// - What a sleeping ato has is kept in Local State with the ato's extras ("extensions"), written
++//   each time it is awake and its list changes.
++
++#include "chrome/browser/agens/embed/agens_extensions.h"
++
++#include <algorithm>
++#include <map>
++#include <memory>
++#include <utility>
++
++#include "base/barrier_closure.h"
++#include "base/files/file_util.h"
++#include "base/no_destructor.h"
++#include "base/observer_list.h"
++#include "base/one_shot_event.h"
++#include "base/scoped_observation.h"
++#include "base/task/thread_pool.h"
++#include "chrome/browser/agens/embed/agens_window.h"
++#include "chrome/browser/extensions/extension_action_dispatcher.h"
++#include "chrome/browser/extensions/extension_install_prompt.h"
++#include "chrome/browser/profiles/keep_alive/profile_keep_alive_types.h"
++#include "chrome/browser/profiles/keep_alive/scoped_profile_keep_alive.h"
++#include "chrome/browser/profiles/profile_manager_observer.h"
++#include "chrome/browser/profiles/profile_observer.h"
++#include "chrome/common/pref_names.h"
++#include "extensions/browser/crx_installer.h"
++#include "extensions/browser/extension_action.h"
++#include "extensions/browser/extension_action_manager.h"
++#include "extensions/browser/extension_prefs.h"
++#include "extensions/browser/extension_registrar.h"
++#include "extensions/browser/extension_system.h"
++#include "extensions/browser/install/crx_install_error.h"
++#include "extensions/browser/install_prompt_data.h"
++#include "extensions/browser/ui_util.h"
++#include "extensions/browser/uninstall_reason.h"
++#include "extensions/browser/unpacked_installer.h"
++#include "extensions/common/file_util.h"
++#include "extensions/common/manifest_handlers/icons_handler.h"
++
++namespace agens::ext {
++
++namespace {
++
++using extensions::Extension;
++using extensions::ExtensionRegistry;
++
++constexpr char kWhereKey[] = "extensions";  // in the ato's extras (AgensWindow::kAtosPref)
++
++base::ObserverList<Observer>& Observers() {
++  static base::NoDestructor<base::ObserverList<Observer>> observers;
++  return *observers;
++}
++
++void Tell(Profile* profile, const std::string& id, std::string_view change) {
++  for (ext::Observer& o : Observers()) o.OnExtensionChanged(profile, id, change);
++}
++
++ProfileAttributesEntry* FindAto(const std::string& id) {
++  for (ProfileAttributesEntry* entry : AgensWindow::Atos()) {
++    if (entry->GetPath().BaseName().AsUTF8Unsafe() == id) return entry;
++  }
++  return nullptr;
++}
++
++// The ato's extensions as last written (a sleeping ato's only source).
++const base::ListValue* Recorded(const std::string& ato) {
++  const base::DictValue* extras = g_browser_process->local_state()->GetDict(AgensWindow::kAtosPref).FindDict(ato);
++  return extras ? extras->FindList(kWhereKey) : nullptr;
++}
++
++void Record(Profile* profile) {
++  base::ListValue ids;
++  for (const auto& e : ExtensionRegistry::Get(profile)->GenerateInstalledExtensionsSet()) {
++    if (Listed(*e)) ids.Append(e->id());
++  }
++  const std::string ato = AtoId(profile);
++  if (const base::ListValue* old = Recorded(ato); old && *old == ids) return;
++  if (!FindAto(ato)) return;  // an ato being deleted keeps no extras
++  ScopedDictPrefUpdate update(g_browser_process->local_state(), AgensWindow::kAtosPref);
++  update->EnsureDict(ato)->Set(kWhereKey, std::move(ids));
++}
++
++struct FanOut {
++  base::FilePath from;  // the asking ato's folder
++  std::string id;
++  std::vector<std::string> atos;
++};
++std::vector<FanOut>& FanOuts() {
++  static base::NoDestructor<std::vector<FanOut>> fan_outs;
++  return *fan_outs;
++}
++
++// Into an ato that may be asleep: loads it, then `then(profile)` (null when it could not load).
++void WithAto(const std::string& ato, base::OnceCallback<void(Profile*)> then) {
++  ProfileAttributesEntry* entry = FindAto(ato);
++  if (!entry) return std::move(then).Run(nullptr);
++  ProfileManager* manager = g_browser_process->profile_manager();
++  if (Profile* loaded = manager->GetProfileByPath(entry->GetPath())) return std::move(then).Run(loaded);
++  // The callback runs once in every case, with null when loading fails.
++  manager->LoadProfileByPath(entry->GetPath(), /*incognito=*/false, std::move(then));
++}
++
++// Unpacked extensions are disabled unless the ato is in developer mode
++// (ExtensionManagement::IsAllowedByUnpackedDeveloperModePolicy): adding a folder turns it on.
++void LoadUnpacked(Profile* profile, const base::FilePath& dir, extensions::UnpackedInstaller::CompletionCallback done) {
++  profile->GetPrefs()->SetBoolean(prefs::kExtensionsUIDeveloperMode, true);
++  scoped_refptr<extensions::UnpackedInstaller> installer = extensions::UnpackedInstaller::Create(profile);
++  installer->set_be_noisy_on_failure(false);  // no error dialog: the caller says what happened
++  installer->set_completion_callback(std::move(done));
++  installer->Load(dir);
++}
++
++// `e` as `from` has it, into `profile` (an ato that does not have it yet).
++void InstallCopy(scoped_refptr<const Extension> e, Profile* profile) {
++  if (!profile || ExtensionRegistry::Get(profile)->GetInstalledExtension(e->id())) return;
++  std::unique_ptr<ScopedProfileKeepAlive> keep =
++      ScopedProfileKeepAlive::TryAcquire(profile, ProfileKeepAliveOrigin::kCrxInstaller);
++  if (!keep) return;
++  if (e->location() == extensions::mojom::ManifestLocation::kUnpacked) {
++    LoadUnpacked(profile, e->path(),
++                 base::BindOnce([](std::unique_ptr<ScopedProfileKeepAlive>, const Extension*, const base::FilePath&,
++                                   const std::u16string&) {},
++                                std::move(keep)));
++    return;
++  }
++  // The installed folder, copied: the installer moves what it gets into the ato's own folder.
++  base::ThreadPool::PostTaskAndReplyWithResult(
++      FROM_HERE, {base::MayBlock()},
++      base::BindOnce(
++          [](base::FilePath source) {
++            base::FilePath temp;
++            if (!base::CreateNewTempDirectory("agens-ext", &temp)) return base::FilePath();
++            const base::FilePath copy = temp.AppendASCII("x");
++            return base::CopyDirectory(source, copy, /*recursive=*/true) ? copy : base::FilePath();
++          },
++          e->path()),
++      base::BindOnce(
++          [](scoped_refptr<const Extension> e, Profile* profile, std::unique_ptr<ScopedProfileKeepAlive>,
++             base::FilePath copy) {
++            if (copy.empty()) return;
++            scoped_refptr<extensions::CrxInstaller> installer = extensions::CrxInstaller::CreateSilent(profile);
++            installer->set_install_source(e->location());
++            installer->set_creation_flags(e->creation_flags());
++            installer->set_off_store_install_allow_reason(
++                extensions::CrxInstaller::OffStoreInstallAllowedFromSettingsPage);
++            installer->set_delete_source(true);
++            installer->InstallUnpackedCrx(e->id(), e->public_key(), copy);
++          },
++          e, profile, std::move(keep)));
++}
++
++// One loaded ato's extensions and actions, until it goes.
++class AtoWatch : public extensions::ExtensionRegistryObserver,
++                 public extensions::ExtensionActionDispatcher::Observer,
++                 public ProfileObserver {
++ public:
++  explicit AtoWatch(Profile* profile) : profile_(profile) {
++    registry_.Observe(ExtensionRegistry::Get(profile));
++    dispatcher_ = extensions::ExtensionActionDispatcher::Get(profile);
++    if (dispatcher_) dispatcher_->AddObserver(this);
++    profile_observation_.Observe(profile);
++    // An ato just loading has none loaded yet: its record is rewritten only once they are.
++    extensions::ExtensionSystem::Get(profile)->ready().Post(
++        FROM_HERE, base::BindOnce([](base::WeakPtr<AtoWatch> self) {
++          if (self) Record(self->profile_);
++        }, weak_.GetWeakPtr()));
++  }
++  ~AtoWatch() override {
++    if (dispatcher_) dispatcher_->RemoveObserver(this);
++  }
++  Profile* profile() const { return profile_; }
++
++  // extensions::ExtensionRegistryObserver:
++  void OnExtensionInstalled(content::BrowserContext*, const Extension* e, bool is_update) override {
++    if (!Listed(*e)) return;
++    Record(profile_);
++    Tell(profile_, e->id(), is_update ? "updated" : "installed");
++    if (is_update) return;
++    const base::FilePath from = profile_->GetPath();
++    auto& fan_outs = FanOuts();
++    for (auto it = fan_outs.begin(); it != fan_outs.end();) {
++      if (it->from != from || it->id != e->id()) {
++        ++it;
++        continue;
++      }
++      for (const std::string& ato : it->atos) {
++        WithAto(ato, base::BindOnce(&InstallCopy, base::WrapRefCounted(e)));
++      }
++      it = fan_outs.erase(it);
++    }
++  }
++  void OnExtensionUninstalled(content::BrowserContext*, const Extension* e, extensions::UninstallReason) override {
++    if (!Listed(*e)) return;
++    Record(profile_);
++    // Unpinned with it: installed again later, it starts in the menu.
++    SetPinned(profile_, e->id(), false);
++    Tell(profile_, e->id(), "removed");
++  }
++  void OnExtensionLoaded(content::BrowserContext*, const Extension* e) override {
++    if (Listed(*e) && extensions::ExtensionSystem::Get(profile_)->ready().is_signaled()) Record(profile_);
++  }
++  void OnExtensionEnabled(content::BrowserContext*, const Extension* e) override {
++    if (Listed(*e)) Tell(profile_, e->id(), "enabled");
++  }
++  void OnExtensionUnloaded(content::BrowserContext*, const Extension* e, extensions::UnloadedExtensionReason reason) override {
++    if (Listed(*e) && reason == extensions::UnloadedExtensionReason::DISABLE) Tell(profile_, e->id(), "disabled");
++  }
++  void OnShutdown(ExtensionRegistry*) override { registry_.Reset(); }
++
++  // extensions::ExtensionActionDispatcher::Observer:
++  void OnExtensionActionUpdated(extensions::ExtensionAction* action,
++                                content::WebContents* contents,
++                                content::BrowserContext* context) override {
++    if (context != profile_) return;  // its incognito twin shares the dispatcher
++    for (ext::Observer& o : Observers()) o.OnExtensionActionChanged(profile_, action->extension_id(), contents);
++  }
++  void OnShuttingDown() override {
++    dispatcher_->RemoveObserver(this);
++    dispatcher_ = nullptr;
++  }
++
++  // ProfileObserver:
++  void OnProfileWillBeDestroyed(Profile*) override;
++
++ private:
++  raw_ptr<Profile> profile_;
++  raw_ptr<extensions::ExtensionActionDispatcher> dispatcher_ = nullptr;
++  base::ScopedObservation<ExtensionRegistry, extensions::ExtensionRegistryObserver> registry_{this};
++  base::ScopedObservation<Profile, ProfileObserver> profile_observation_{this};
++  base::WeakPtrFactory<AtoWatch> weak_{this};
++};
++
++class Hub : public ProfileManagerObserver {
++ public:
++  void Start() {
++    ProfileManager* manager = g_browser_process->profile_manager();
++    if (started_ || !manager) return;
++    started_ = true;
++    manager_observation_.Observe(manager);
++    for (Profile* profile : manager->GetLoadedProfiles()) Watch(profile);
++  }
++  void Forget(AtoWatch* watch) {
++    std::erase_if(watches_, [watch](const std::unique_ptr<AtoWatch>& w) { return w.get() == watch; });
++  }
++
++ private:
++  void Watch(Profile* profile) {
++    if (profile->IsOffTheRecord() || profile->IsSystemProfile()) return;
++    if (std::ranges::any_of(watches_, [profile](const auto& w) { return w->profile() == profile; })) return;
++    watches_.push_back(std::make_unique<AtoWatch>(profile));
++  }
++  // ProfileManagerObserver:
++  void OnProfileAdded(Profile* profile) override { Watch(profile); }
++  void OnProfileManagerDestroying() override { manager_observation_.Reset(); }
++
++  bool started_ = false;
++  std::vector<std::unique_ptr<AtoWatch>> watches_;
++  base::ScopedObservation<ProfileManager, ProfileManagerObserver> manager_observation_{this};
++};
++Hub& TheHub() {
++  static base::NoDestructor<Hub> hub;
++  return *hub;
++}
++
++void AtoWatch::OnProfileWillBeDestroyed(Profile*) {
++  profile_observation_.Reset();
++  registry_.Reset();
++  TheHub().Forget(this);  // deletes this
++}
++
++const Extension* Installed(Profile* profile, const std::string& id) {
++  return ExtensionRegistry::Get(profile)->GetInstalledExtension(id);
++}
++
++// "denied" when the person said no, else "failed".
++std::string ErrorFor(const extensions::CrxInstallError& error) {
++  using Detail = extensions::CrxInstallErrorDetail;
++  return error.detail() == Detail::USER_CANCELED || error.detail() == Detail::USER_ABORTED ? "denied" : "failed";
++}
++
++// A folder: read it here (off the UI thread), ask the person, then load it.
++void InstallFolder(Profile* profile, const base::FilePath& dir, gfx::NativeWindow parent, InstallDone done) {
++  base::ThreadPool::PostTaskAndReplyWithResult(
++      FROM_HERE, {base::MayBlock()},
++      base::BindOnce(
++          [](base::FilePath dir) -> scoped_refptr<Extension> {
++            std::u16string error;
++            return extensions::file_util::LoadExtension(dir, extensions::mojom::ManifestLocation::kUnpacked,
++                                                        Extension::FOLLOW_SYMLINKS_ANYWHERE, &error);
++          },
++          dir),
++      base::BindOnce(
++          [](base::WeakPtr<Profile> profile, base::FilePath dir, gfx::NativeWindow parent, InstallDone done,
++             scoped_refptr<Extension> extension) {
++            if (!profile || !extension || !Listed(*extension)) return std::move(done).Run(std::string(), "failed");
++            auto prompt = std::make_unique<ExtensionInstallPrompt>(
++                profile.get(), parent,
++                std::make_unique<extensions::InstallPromptData>(extensions::InstallPromptData::INSTALL_PROMPT));
++            ExtensionInstallPrompt* raw = prompt.get();
++            raw->ShowDialog(
++                base::BindOnce(
++                    [](std::unique_ptr<ExtensionInstallPrompt>, base::WeakPtr<Profile> profile, base::FilePath dir,
++                       InstallDone done, ExtensionInstallPrompt::DoneCallbackPayload payload) {
++                      if (payload.result != ExtensionInstallPrompt::Result::ACCEPTED) {
++                        return std::move(done).Run(std::string(), "denied");
++                      }
++                      if (!profile) return std::move(done).Run(std::string(), "failed");
++                      LoadUnpacked(profile.get(), dir,
++                                   base::BindOnce(
++                                       [](InstallDone done, const Extension* e, const base::FilePath&,
++                                          const std::u16string&) {
++                                         std::move(done).Run(e ? e->id() : std::string(), e ? "" : "failed");
++                                       },
++                                       std::move(done)));
++                    },
++                    std::move(prompt), profile, dir, std::move(done)),
++                extension.get(), /*icon=*/nullptr, ExtensionInstallPrompt::GetDefaultShowDialogCallback());
++          },
++          profile->GetWeakPtr(), dir, parent, std::move(done)));
++}
++
++}  // namespace
++
++void Start() {
++  TheHub().Start();
++}
++
++void AddObserver(Observer* observer) {
++  Observers().AddObserver(observer);
++}
++void RemoveObserver(Observer* observer) {
++  Observers().RemoveObserver(observer);
++}
++
++std::string AtoId(Profile* profile) {
++  return profile->GetOriginalProfile()->GetPath().BaseName().AsUTF8Unsafe();
++}
++
++bool Listed(const Extension& extension) {
++  return extensions::ui_util::ShouldDisplayInExtensionSettings(extension);
++}
++
++std::string From(const Extension& extension) {
++  if (extension.location() == extensions::mojom::ManifestLocation::kUnpacked) return "folder";
++  return extension.from_webstore() ? "store" : "file";
++}
++
++std::vector<std::string> AtosWith(const std::string& id) {
++  std::vector<std::string> atos;
++  ProfileManager* manager = g_browser_process->profile_manager();
++  for (ProfileAttributesEntry* entry : AgensWindow::Atos()) {
++    const std::string ato = entry->GetPath().BaseName().AsUTF8Unsafe();
++    const base::ListValue* recorded = Recorded(ato);
++    Profile* loaded = manager->GetProfileByPath(entry->GetPath());
++    if (loaded ? !!Installed(loaded, id) : recorded && recorded->contains(id)) atos.push_back(ato);
++  }
++  return atos;
++}
++
++base::ListValue AtoChoices(const std::string& id) {
++  const std::vector<std::string> with = AtosWith(id);
++  const std::vector<ProfileAttributesEntry*> entries = AgensWindow::Atos();
++  base::ListValue atos;
++  for (size_t i = 0; i < entries.size(); ++i) {
++    base::DictValue ato;
++    const std::string ato_id = entries[i]->GetPath().BaseName().AsUTF8Unsafe();
++    ato.Set("id", ato_id);
++    ato.Set("name", AgensWindow::AtoName(entries[i]));
++    ato.Set("color", AgensWindow::kAtoColors[AgensWindow::AtoColor(entries[i], static_cast<int>(i))]);
++    ato.Set("installed", std::ranges::contains(with, ato_id));
++    atos.Append(std::move(ato));
++  }
++  return atos;
++}
++
++void AlsoInstallInto(Profile* asking, const std::string& id, std::vector<std::string> atos) {
++  const std::string self = AtoId(asking);
++  std::erase_if(atos, [&](const std::string& ato) { return ato == self || !FindAto(ato); });
++  if (atos.empty()) return;
++  auto& fan_outs = FanOuts();
++  std::erase_if(fan_outs, [&](const FanOut& f) { return f.from == asking->GetPath() && f.id == id; });
++  // shortcut: a prompt allowed whose install then fails leaves its entry here until the next try
++  // of the same extension in that ato; the list stays tiny.
++  fan_outs.push_back({asking->GetOriginalProfile()->GetPath(), id, std::move(atos)});
++}
++
++void InstallFromDisk(Profile* profile, const base::FilePath& path, gfx::NativeWindow parent, InstallDone done) {
++  base::ThreadPool::PostTaskAndReplyWithResult(
++      FROM_HERE, {base::MayBlock()}, base::BindOnce(&base::DirectoryExists, path),
++      base::BindOnce(
++          [](base::WeakPtr<Profile> profile, base::FilePath path, gfx::NativeWindow parent, InstallDone done,
++             bool folder) {
++            if (!profile) return std::move(done).Run(std::string(), "failed");
++            if (folder) return InstallFolder(profile.get(), path, parent, std::move(done));
++            // CrxInstaller sets the prompt's type itself.
++            auto prompt = std::make_unique<ExtensionInstallPrompt>(
++                profile.get(), parent,
++                std::make_unique<extensions::InstallPromptData>(extensions::InstallPromptData::UNSET_PROMPT_TYPE));
++            prompt->SetSkipPostInstallUI(true);  // no Views error bubble or infobar: `done` says it
++            scoped_refptr<extensions::CrxInstaller> installer =
++                extensions::CrxInstaller::Create(profile.get(), std::move(prompt));
++            // The person picked the file, as on chrome://extensions: allowed off the store.
++            installer->set_off_store_install_allow_reason(
++                extensions::CrxInstaller::OffStoreInstallAllowedFromSettingsPage);
++            installer->AddInstallerCallback(base::BindOnce(
++                [](scoped_refptr<extensions::CrxInstaller> installer, InstallDone done,
++                   const std::optional<extensions::CrxInstallError>& error) {
++                  if (error) return std::move(done).Run(std::string(), ErrorFor(*error));
++                  const Extension* e = installer->extension();
++                  std::move(done).Run(e ? e->id() : std::string(), e ? "" : "failed");
++                },
++                installer, std::move(done)));
++            installer->InstallCrx(path);
++          },
++          profile->GetWeakPtr(), path, parent, std::move(done)));
++}
++
++// `id` by value: uninstalling from this ato frees the extension the caller's reference may point into.
++void Remove(Profile* profile, std::string id, bool all, base::OnceClosure done) {
++  auto uninstall = [](std::string id, base::OnceClosure done, Profile* profile) {
++    if (profile && Installed(profile, id)) {
++      std::u16string error;
++      extensions::ExtensionRegistrar::Get(profile)->UninstallExtension(
++          id, extensions::UNINSTALL_REASON_USER_INITIATED, &error);
++    }
++    std::move(done).Run();
++  };
++  if (!all) return uninstall(id, std::move(done), profile);
++  const std::vector<std::string> atos = AtosWith(id);
++  base::RepeatingClosure each = base::BarrierClosure(atos.size(), std::move(done));
++  for (const std::string& ato : atos) WithAto(ato, base::BindOnce(uninstall, id, each));
++}
++
++bool Pinned(Profile* profile, const std::string& id) {
++  return std::ranges::contains(extensions::ExtensionPrefs::Get(profile)->GetPinnedExtensions(), id);
++}
++
++void SetPinned(Profile* profile, const std::string& id, bool pinned) {
++  extensions::ExtensionPrefs* prefs = extensions::ExtensionPrefs::Get(profile);
++  extensions::ExtensionIdList ids = prefs->GetPinnedExtensions();
++  if (std::ranges::contains(ids, id) == pinned) return;
++  if (pinned) {
++    ids.push_back(id);
++  } else {
++    std::erase(ids, id);
++  }
++  prefs->SetPinnedExtensions(ids);
++  Tell(profile, id, "pinned");
++}
++
++std::vector<uint8_t> EncodePng(const gfx::Image& image, float scale) {
++  if (image.IsEmpty()) return {};
++  const SkBitmap& bitmap = image.AsImageSkia().GetRepresentation(scale).GetBitmap();
++  return gfx::PNGCodec::EncodeBGRASkBitmap(bitmap, false).value_or(std::vector<uint8_t>());
++}
++
++std::vector<uint8_t> SetIcon(Profile* profile, const Extension& extension, int tab_id) {
++  extensions::ExtensionAction* action = extensions::ExtensionActionManager::Get(profile)->GetExtensionAction(extension);
++  if (!action) return {};
++  for (const gfx::Image& set : {action->GetExplicitlySetIcon(tab_id), action->GetDeclarativeIcon(tab_id)}) {
++    if (std::vector<uint8_t> png = EncodePng(set); !png.empty()) return png;
++  }
++  return {};
++}
++
++void LoadIcon(Profile* profile,
++              const Extension& extension,
++              bool of_action,
++              base::OnceCallback<void(std::vector<uint8_t> png)> done) {
++  extensions::ExtensionAction* action =
++      of_action ? extensions::ExtensionActionManager::Get(profile)->GetExtensionAction(extension) : nullptr;
++  // The action's default icon file, else the extension's own; read from its folder.
++  extensions::ExtensionResource resource;
++  if (action && action->default_icon()) {
++    const std::string& path = action->default_icon()->Get(32, ExtensionIconSet::Match::kBigger);
++    if (!path.empty()) resource = extension.GetResource(path);
++  }
++  if (resource.empty()) resource = extensions::IconsInfo::GetIconResource(&extension, 32, ExtensionIconSet::Match::kBigger);
++  extensions::ImageLoader::Get(profile)->LoadImageAsync(
++      &extension, resource, gfx::Size(32, 32),
++      base::BindOnce([](base::OnceCallback<void(std::vector<uint8_t>)> done,
++                        const gfx::Image& image) { std::move(done).Run(EncodePng(image, 1)); },
++                     std::move(done)));
++}
++
++}  // namespace agens::ext
+diff --git a/chrome/browser/agens/embed/agens_extensions.h b/chrome/browser/agens/embed/agens_extensions.h
+new file mode 100644
+index 0000000000..9787b1d770
+--- /dev/null
++++ b/chrome/browser/agens/embed/agens_extensions.h
+@@ -0,0 +1,93 @@
++// Copyright 2026 SugiyamaLabs.
++// Extensions across atos (docs/extensoes.md): which atos have one, installing it into more atos
++// after the person chose them on the install prompt, adding one from a .crx or a folder, removing
++// it from every ato, the toolbar pins, the icons, and one place to hear about changes. Both shells
++// use it: the casca (agens_window.h, native_shell_mac.mm) and the embedded engine's host ops
++// (bridge/extension_ops.cc). Platform-neutral; UI thread.
++#ifndef CHROME_BROWSER_AGENS_EMBED_AGENS_EXTENSIONS_H_
++#define CHROME_BROWSER_AGENS_EMBED_AGENS_EXTENSIONS_H_
++
++#include <optional>
++#include <string>
++#include <string_view>
++#include <vector>
++
++#include "base/files/file_path.h"
++#include "base/functional/callback.h"
++#include "base/observer_list_types.h"
++#include "base/values.h"
++#include "ui/gfx/image/image.h"
++#include "ui/gfx/native_ui_types.h"
++
++class Profile;
++namespace content {
++class WebContents;
++}
++namespace extensions {
++class Extension;
++class ExtensionAction;
++}  // namespace extensions
++
++namespace agens::ext {
++
++// Starts watching every ato that loads (once; both shells call it with their first window).
++void Start();
++
++class Observer : public base::CheckedObserver {
++ public:
++  // `change`: installed, updated, enabled, disabled, removed or pinned.
++  virtual void OnExtensionChanged(Profile* ato, const std::string& id, std::string_view change) {}
++  // The action's icon, badge, title, visibility or popup changed: on `tab`, or on every tab of
++  // the ato when null.
++  virtual void OnExtensionActionChanged(Profile* ato, const std::string& id, content::WebContents* tab) {}
++};
++void AddObserver(Observer* observer);
++void RemoveObserver(Observer* observer);
++
++// The ato's id (its profile folder's name).
++std::string AtoId(Profile* profile);
++// An extension the person installed (not a component or one built in).
++bool Listed(const extensions::Extension& extension);
++// "store", "file" (a .crx) or "folder" (unpacked, linked to its folder).
++std::string From(const extensions::Extension& extension);
++// The ids of the atos that have it, in the atos' order: a loaded ato says so itself; a sleeping
++// one by what it had the last time it was awake.
++std::vector<std::string> AtosWith(const std::string& id);
++
++// For the install prompt (ui.ask "extension", the casca's sheet): every ato,
++// [{id, name, color, installed}].
++base::ListValue AtoChoices(const std::string& id);
++// The person allowed the install in `asking` and chose `atos` as well (ids; the asking one and
++// unknown ones are skipped): once `asking` has it, it goes into each of them, waking the sleeping
++// ones. Only the prompt calls this: the person's choice is what lets it into other atos.
++void AlsoInstallInto(Profile* asking, const std::string& id, std::vector<std::string> atos);
++
++// "Adicionar de um arquivo": a .crx file or an unpacked folder (absolute paths). The person is
++// asked first, with the same prompt as the store's (and its ato choice). `done` runs once with
++// the id, or an error: "denied" (the person said no) or "failed".
++using InstallDone = base::OnceCallback<void(const std::string& id, const std::string& error)>;
++void InstallFromDisk(Profile* profile, const base::FilePath& path, gfx::NativeWindow parent, InstallDone done);
++
++// Uninstalls it from `profile`, or from every ato that has it (sleeping ones are woken). `done`
++// runs once, when all are done.
++void Remove(Profile* profile, std::string id, bool all, base::OnceClosure done);
++
++// Kept in the bar (the rest are only in the puzzle menu). Per ato, saved with it.
++bool Pinned(Profile* profile, const std::string& id);
++void SetPinned(Profile* profile, const std::string& id, bool pinned);
++
++// The icon the extension's action set for the tab (action.setIcon, declarative content), as a
++// 32 px PNG; empty when it set none.
++std::vector<uint8_t> SetIcon(Profile* profile, const extensions::Extension& extension, int tab_id);
++// The icon file: the action's default (`of_action`) or, without one, the extension's own. `done`
++// gets a 32 px PNG (empty when there is none), later.
++void LoadIcon(Profile* profile,
++              const extensions::Extension& extension,
++              bool of_action,
++              base::OnceCallback<void(std::vector<uint8_t> png)> done);
++// A PNG of `image` at `scale` (2 for the toolbar's 16 pt), or empty.
++std::vector<uint8_t> EncodePng(const gfx::Image& image, float scale = 2);
++
++}  // namespace agens::ext
++
++#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EXTENSIONS_H_
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
-index 268d4dc7bd..2722c451ef 100644
+index 268d4dc7bd..dbddb92dcf 100644
 --- a/chrome/browser/agens/embed/agens_window.h
 +++ b/chrome/browser/agens/embed/agens_window.h
-@@ -15,7 +15,9 @@
+@@ -15,7 +15,13 @@
  #include "base/task/sequenced_task_runner.h"
  #include "base/strings/utf_string_conversions.h"
  #include "chrome/app/chrome_command_ids.h"
 +#include "chrome/browser/agens/embed/agens_controlled.h"
  #include "chrome/browser/agens/embed/agens_embed.h"
 +#include "chrome/browser/agens/embed/agens_cookie_pool.h"
++#include "chrome/browser/agens/embed/agens_extensions.h"
++#include "chrome/browser/extensions/extension_tab_util.h"
++#include "extensions/browser/extension_action.h"
++#include "extensions/browser/extension_action_manager.h"
  #include "chrome/browser/autocomplete/autocomplete_classifier_factory.h"
  #include "chrome/browser/autocomplete/chrome_autocomplete_provider_client.h"
  #include "chrome/browser/autocomplete/chrome_autocomplete_scheme_classifier.h"
-@@ -48,7 +50,9 @@
+@@ -48,7 +54,9 @@
  #include "chrome/browser/profiles/profile_manager.h"
  #include "chrome/browser/profiles/profile_window.h"
  #include "chrome/browser/search_engines/template_url_service_factory.h"
@@ -9269,17 +10538,25 @@ index 268d4dc7bd..2722c451ef 100644
  #include "components/search_engines/default_search_manager.h"
  #include "components/search_engines/template_url.h"
  #include "components/search_engines/template_url_data_util.h"
-@@ -193,6 +197,9 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -189,10 +197,16 @@ struct AgensWindow : public TabStripModelObserver,
+                      public download::DownloadItem::Observer,
+                      public bookmarks::BaseBookmarkModelObserver,
+                      public find_in_page::FindResultObserver,
+-                     public extensions::ExtensionRegistryObserver {
++                     public extensions::ExtensionRegistryObserver,
++                     public agens::ext::Observer {
    explicit AgensWindow(BrowserWindowInterface* browser) : browser(browser) {
      browser->GetTabStripModel()->AddObserver(this);
      Storage().AddObserver(this);
 +    ato_prefs.Init(g_browser_process->local_state());
 +    ato_prefs.Add(kAtosPref, base::BindRepeating(&AgensWindow::NotifyAtos, base::Unretained(this)));
 +    agens::StartCookiePool();  // once, with the first window
++    agens::ext::Start();
++    agens::ext::AddObserver(this);
      PreferDuckDuckGo();
      if (content::DownloadManager* manager = browser->GetProfile()->GetDownloadManager()) {
        downloads_manager = manager;
-@@ -230,6 +237,11 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -230,7 +244,13 @@ struct AgensWindow : public TabStripModelObserver,
      }
    }
    ~AgensWindow() override {
@@ -9289,9 +10566,11 @@ index 268d4dc7bd..2722c451ef 100644
 +          FROM_HERE, base::BindOnce(std::move(approval_answer), kAgensApprovalDeny));
 +    }
      if (bookmark_model) bookmark_model->RemoveObserver(this);
++    agens::ext::RemoveObserver(this);
      Storage().RemoveObserver(this);
      for (download::DownloadItem* item : downloads) item->RemoveObserver(this);
-@@ -284,7 +296,81 @@ struct AgensWindow : public TabStripModelObserver,
+     if (downloads_manager) downloads_manager->RemoveObserver(this);
+@@ -284,7 +304,81 @@ struct AgensWindow : public TabStripModelObserver,
      return g_browser_process->profile_manager()->GetProfileAttributesStorage();
    }
  
@@ -9374,7 +10653,7 @@ index 268d4dc7bd..2722c451ef 100644
      // Creation order, so an ato keeps its place and color: Chromium names profile folders
      // "Default", then "Profile 1", "Profile 2"…
      std::vector<ProfileAttributesEntry*> atos;
-@@ -304,19 +390,18 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -304,19 +398,18 @@ struct AgensWindow : public TabStripModelObserver,
    void NotifyAtos() {
      if (!atos_observer) return;
      std::vector<ProfileAttributesEntry*> entries = Atos();
@@ -9400,7 +10679,7 @@ index 268d4dc7bd..2722c451ef 100644
      }
      atos_observer(atos_context, atos.data(), static_cast<int>(atos.size()));
    }
-@@ -330,14 +415,9 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -330,14 +423,9 @@ struct AgensWindow : public TabStripModelObserver,
    }
  
    void NewAto() {
@@ -9417,7 +10696,7 @@ index 268d4dc7bd..2722c451ef 100644
      const gfx::Rect bounds = browser->GetWindow()->GetBounds();
      const std::u16string name = base::UTF8ToUTF16(base::StringPrintf("Ato %zu", Atos().size() + 1));
      manager->CreateProfileAsync(
-@@ -362,7 +442,10 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -362,7 +450,10 @@ struct AgensWindow : public TabStripModelObserver,
  
    // ProfileAttributesStorage::Observer:
    void OnProfileAdded(const base::FilePath&) override { NotifyAtos(); }
@@ -9429,7 +10708,15 @@ index 268d4dc7bd..2722c451ef 100644
    void OnProfileNameChanged(const base::FilePath&, const std::u16string&) override { NotifyAtos(); }
  
    TabStripModel* model() { return browser->GetTabStripModel(); }
-@@ -406,7 +489,8 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -370,6 +461,7 @@ struct AgensWindow : public TabStripModelObserver,
+   // Loading pages change a tab many times a frame (title, URL, favicon, loading); the UI gets one
+   // update per run of the message loop instead of one per change.
+   void Notify() {
++    ScheduleExtensionButtons();  // the active tab, or its agent mark, may have changed
+     if (notify_pending) return;
+     notify_pending = true;
+     base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+@@ -406,7 +498,8 @@ struct AgensWindow : public TabStripModelObserver,
      const int count = model()->count();
      bookmarks::BookmarkModel* bookmarks =
          BookmarkModelFactory::GetForBrowserContextIfExists(browser->GetProfile());
@@ -9439,7 +10726,7 @@ index 268d4dc7bd..2722c451ef 100644
      std::vector<std::vector<uint8_t>> icons(count);
      std::vector<AgensTab> tabs(count);
      struct Split { int layout = 0, first = 0; double ratio = 0.5; };
-@@ -455,6 +539,18 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -455,6 +548,18 @@ struct AgensWindow : public TabStripModelObserver,
                   zoom::ZoomController::FromWebContents(contents)
                       ? zoom::ZoomController::FromWebContents(contents)->GetZoomPercent()
                       : 100};
@@ -9458,7 +10745,7 @@ index 268d4dc7bd..2722c451ef 100644
      }
      observer(context, tabs.data(), static_cast<int>(tabs.size()));
    }
-@@ -582,6 +678,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -582,6 +687,7 @@ struct AgensWindow : public TabStripModelObserver,
    raw_ptr<void> downloads_context = nullptr;
    base::CallbackListSubscription search_loaded_;
    base::CancelableTaskTracker history_tracker;
@@ -9466,9 +10753,119 @@ index 268d4dc7bd..2722c451ef 100644
    raw_ptr<void> ui = nullptr;  // the chrome (agens_ui_*), set by the platform shell
    raw_ptr<views::View> extensions_anchor = nullptr;  // under the UI's extensions button
    AgensExtensionButtonsChanged extension_buttons_observer = nullptr;
-@@ -647,6 +744,8 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -591,62 +697,99 @@ struct AgensWindow : public TabStripModelObserver,
+   base::ScopedObservation<extensions::ExtensionRegistry, extensions::ExtensionRegistryObserver>
+       extensions_observation{this};
+ 
++  bool extension_buttons_pending = false;
++
+   void WatchExtensions() {
+     if (!extensions_observation.IsObserving()) {
+       extensions_observation.Observe(extensions::ExtensionRegistry::Get(browser->GetProfile()));
      }
    }
++  // Badges and titles change many times a second on some pages: one update per run of the loop.
++  void ScheduleExtensionButtons() {
++    if (!extension_buttons_observer || extension_buttons_pending) return;
++    extension_buttons_pending = true;
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE, base::BindOnce(&AgensWindow::NotifyExtensionButtons, weak.GetWeakPtr(), std::string()));
++  }
+   void NotifyExtensionButtons(const std::string& installed = std::string()) {
++    extension_buttons_pending = false;
+     if (!extension_buttons_observer) return;
++    Profile* profile = browser->GetProfile();
++    content::WebContents* active = model()->GetActiveWebContents();
++    const int tab = active ? extensions::ExtensionTabUtil::GetTabId(active) : extensions::ExtensionAction::kDefaultTabId;
++    const bool blocked = AgensControlled::BlocksExtensions(active);
+     std::vector<scoped_refptr<const extensions::Extension>> shown;
+-    for (const auto& e : extensions::ExtensionRegistry::Get(browser->GetProfile())->enabled_extensions()) {
++    for (const auto& e : extensions::ExtensionRegistry::Get(profile)->enabled_extensions()) {
+       if (e->is_extension() && !extensions::Manifest::IsComponentLocation(e->location())) shown.push_back(e);
+     }
++    struct Strings { std::vector<uint8_t> icon; std::string title, badge; };
++    std::vector<Strings> strings(shown.size());
+     std::vector<AgensExtensionButton> out;
+-    for (const auto& e : shown) {
+-      auto icon = extension_icons.find(e->id());
+-      if (icon == extension_icons.end()) LoadExtensionIcon(e.get());
+-      const bool has = icon != extension_icons.end() && !icon->second.empty();
+-      out.push_back({e->id().c_str(), e->name().c_str(), has ? icon->second.data() : nullptr,
+-                     has ? static_cast<int>(icon->second.size()) : 0});
++    for (size_t i = 0; i < shown.size(); ++i) {
++      const extensions::Extension* e = shown[i].get();
++      extensions::ExtensionAction* action =
++          extensions::ExtensionActionManager::Get(profile)->GetExtensionAction(*e);
++      strings[i].icon = agens::ext::SetIcon(profile, *e, tab);
++      if (strings[i].icon.empty()) {
++        auto icon = extension_icons.find(e->id());
++        if (icon == extension_icons.end()) {
++          LoadExtensionIcon(e);
++        } else {
++          strings[i].icon = icon->second;
++        }
++      }
++      strings[i].title = action ? action->GetTitle(tab) : std::string();
++      if (strings[i].title.empty()) strings[i].title = e->name();
++      strings[i].badge = action ? action->GetDisplayBadgeText(tab) : std::string();
++      const std::vector<uint8_t>& png = strings[i].icon;
++      out.push_back({e->id().c_str(), e->name().c_str(), png.empty() ? nullptr : png.data(),
++                     static_cast<int>(png.size()), agens::ext::Pinned(profile, e->id()),
++                     strings[i].title.c_str(), strings[i].badge.c_str(),
++                     action ? static_cast<unsigned>(action->GetBadgeBackgroundColor(tab)) : 0u,
++                     !action || action->GetIsVisible(tab), blocked});
+     }
+     extension_buttons_observer(extension_buttons_context, out.data(), static_cast<int>(out.size()),
+                                installed.c_str());
+   }
++  // The action's default icon (else the extension's), read once from its folder.
+   void LoadExtensionIcon(const extensions::Extension* e) {
+     if (!extension_icons_loading.insert(e->id()).second) return;
+-    extensions::ImageLoader::Get(browser->GetProfile())
+-        ->LoadImageAsync(e, extensions::IconsInfo::GetIconResource(e, 32, ExtensionIconSet::Match::kBigger),
+-                         gfx::Size(32, 32),
++    agens::ext::LoadIcon(browser->GetProfile(), *e, /*of_action=*/true,
+                          base::BindOnce(
+-                             [](base::WeakPtr<AgensWindow> self, std::string id, const gfx::Image& image) {
++                             [](base::WeakPtr<AgensWindow> self, std::string id, std::vector<uint8_t> png) {
+                                if (!self) return;
+-                               std::vector<uint8_t> png;
+-                               if (!image.IsEmpty()) {
+-                                 png = gfx::PNGCodec::EncodeBGRASkBitmap(*image.ToSkBitmap(), false)
+-                                           .value_or(std::vector<uint8_t>());
+-                               }
+                                self->extension_icons[id] = std::move(png);
+-                               self->NotifyExtensionButtons();
++                               self->extension_icons_loading.erase(id);
++                               self->ScheduleExtensionButtons();
+                              },
+                              weak.GetWeakPtr(), e->id()));
+   }
+   // extensions::ExtensionRegistryObserver:
+   void OnExtensionLoaded(content::BrowserContext*, const extensions::Extension*) override {
+-    NotifyExtensionButtons();
++    ScheduleExtensionButtons();
+   }
+   void OnExtensionUnloaded(content::BrowserContext*, const extensions::Extension*,
+                            extensions::UnloadedExtensionReason) override {
+-    NotifyExtensionButtons();
++    ScheduleExtensionButtons();
+   }
+   void OnExtensionInstalled(content::BrowserContext*, const extensions::Extension* e, bool is_update) override {
++    extension_icons.erase(e->id());  // an update may bring other icons
+     if (!is_update && e->is_extension()) {
+       // Loaded right after this; tell the UI once it's in the list.
+       base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+           FROM_HERE, base::BindOnce(&AgensWindow::NotifyExtensionButtons, weak.GetWeakPtr(), e->id()));
+     }
+   }
++  // agens::ext::Observer (every ato's; only this one's matter here):
++  void OnExtensionChanged(Profile* ato, const std::string&, std::string_view) override {
++    if (ato == browser->GetProfile()) ScheduleExtensionButtons();
++  }
++  void OnExtensionActionChanged(Profile* ato, const std::string&, content::WebContents* tab) override {
++    if (ato == browser->GetProfile() && (!tab || tab == model()->GetActiveWebContents())) ScheduleExtensionButtons();
++  }
    base::WeakPtr<permissions::PermissionPrompt::Delegate> permission_delegate;
 +  // A local app waiting for the person's answer (agens_ui_client_prompt).
 +  base::OnceCallback<void(AgensApprovalAnswer)> approval_answer;
@@ -9508,10 +10905,19 @@ index 4eb24ab895..436be6abd7 100644
      progress_.Run(0, created ? "Criando o ato " + ato + "…" : "Usando o ato " + ato + "…");
      manager->CreateProfileAsync(
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
-index cfdc014cf4..f31d68a7fc 100644
+index cfdc014cf4..72aaddb458 100644
 --- a/chrome/browser/agens/embed/native_shell.cc
 +++ b/chrome/browser/agens/embed/native_shell.cc
-@@ -61,6 +61,7 @@
+@@ -52,6 +52,8 @@
+ #include "extensions/browser/ui_util.h"
+ #include "extensions/browser/uninstall_reason.h"
+ #include "extensions/common/extension.h"
++#include "extensions/common/manifest_handlers/options_page_info.h"
++#include "chrome/browser/agens/embed/agens_extensions.h"
+ #include "chrome/browser/themes/theme_service.h"
+ #include "chrome/browser/themes/theme_service_factory.h"
+ #include "ui/base/window_open_disposition.h"
+@@ -61,6 +63,7 @@
  #include "base/no_destructor.h"
  
  WEB_CONTENTS_USER_DATA_KEY_IMPL(AgensPageError);
@@ -9519,7 +10925,7 @@ index cfdc014cf4..f31d68a7fc 100644
  
  namespace {
  base::flat_set<const StatusBubble*>& NativeBubbles() {
-@@ -93,6 +94,13 @@ void agens_window_set_atos_observer(AgensWindow* w, AgensAtosChanged observer, v
+@@ -93,6 +96,13 @@ void agens_window_set_atos_observer(AgensWindow* w, AgensAtosChanged observer, v
    w->atos_context = context;
    w->NotifyAtos();
  }
@@ -9533,7 +10939,61 @@ index cfdc014cf4..f31d68a7fc 100644
  void agens_window_switch_ato(AgensWindow* w, int index) {
    w->SwitchAto(index);
  }
-@@ -473,6 +481,9 @@ void agens_password_remove(AgensWindow* w, int index) {
+@@ -370,12 +380,23 @@ void agens_extensions(AgensWindow* w, AgensExtensionsFn fn, void* context) {
+   extensions::ExtensionRegistry* registry = extensions::ExtensionRegistry::Get(profile);
+   std::vector<scoped_refptr<const extensions::Extension>> shown;
+   for (const auto& e : registry->GenerateInstalledExtensionsSet()) {
+-    if (extensions::ui_util::ShouldDisplayInExtensionSettings(*e)) shown.push_back(e);
++    if (agens::ext::Listed(*e)) shown.push_back(e);
+   }
+-  std::vector<AgensExtension> out;
++  std::vector<std::string> froms;
++  std::vector<std::vector<std::string>> atos;
+   for (const auto& e : shown) {
+-    out.push_back({e->id().c_str(), e->name().c_str(), e->VersionString().c_str(),
+-                   registry->enabled_extensions().Contains(e->id())});
++    froms.push_back(agens::ext::From(*e));
++    atos.push_back(agens::ext::AtosWith(e->id()));
++  }
++  std::vector<std::vector<const char*>> ato_pointers(shown.size());
++  std::vector<AgensExtension> out;
++  for (size_t i = 0; i < shown.size(); ++i) {
++    for (const std::string& ato : atos[i]) ato_pointers[i].push_back(ato.c_str());
++    const extensions::Extension& e = *shown[i];
++    out.push_back({e.id().c_str(), e.name().c_str(), e.VersionString().c_str(),
++                   registry->enabled_extensions().Contains(e.id()), froms[i].c_str(),
++                   extensions::OptionsPageInfo::HasOptionsPage(&e), ato_pointers[i].data(),
++                   static_cast<int>(ato_pointers[i].size())});
+   }
+   fn(context, out.data(), static_cast<int>(out.size()));
+ }
+@@ -388,11 +409,21 @@ void agens_extension_set_enabled(AgensWindow* w, const char* id, int enabled) {
+     registrar->DisableExtension(id, {extensions::disable_reason::DISABLE_USER_ACTION});
+   }
+ }
+-void agens_extension_remove(AgensWindow* w, const char* id) {
++void agens_extension_remove(AgensWindow* w, const char* id, int all) {
+   if (!id || !extensions::ExtensionRegistry::Get(w->browser->GetProfile())->GetInstalledExtension(id)) return;
+-  std::u16string error;
+-  extensions::ExtensionRegistrar::Get(w->browser->GetProfile())
+-      ->UninstallExtension(id, extensions::UNINSTALL_REASON_USER_INITIATED, &error);
++  agens::ext::Remove(w->browser->GetProfile(), id, all != 0, base::DoNothing());
++}
++void agens_extension_options(AgensWindow* w, const char* id) {
++  const extensions::Extension* e =
++      extensions::ExtensionRegistry::Get(w->browser->GetProfile())->enabled_extensions().GetByID(id ? id : "");
++  if (!e || !extensions::OptionsPageInfo::HasOptionsPage(e)) return;
++  // A tab of its own: there is no chrome://extensions to embed the page in.
++  w->browser->OpenGURL(extensions::OptionsPageInfo::GetOptionsPage(e), WindowOpenDisposition::NEW_FOREGROUND_TAB);
++}
++void agens_extension_set_pinned(AgensWindow* w, const char* id, int pinned) {
++  if (id && extensions::ExtensionRegistry::Get(w->browser->GetProfile())->GetInstalledExtension(id)) {
++    agens::ext::SetPinned(w->browser->GetProfile(), id, pinned != 0);
++  }
+ }
+ 
+ namespace {
+@@ -473,6 +504,9 @@ void agens_password_remove(AgensWindow* w, int index) {
    saved->logins.erase(saved->logins.begin() + index);
  }
  
@@ -9543,7 +11003,7 @@ index cfdc014cf4..f31d68a7fc 100644
  void agens_window_permission_answer(AgensWindow* w, AgensPermissionAnswer answer) {
    base::WeakPtr<permissions::PermissionPrompt::Delegate> delegate = std::move(w->permission_delegate);
    if (!delegate) return;
-@@ -535,6 +546,7 @@ void agens_extension_click(AgensWindow* w, const char* id) {
+@@ -535,6 +569,7 @@ void agens_extension_click(AgensWindow* w, const char* id) {
    const extensions::Extension* extension =
        extensions::ExtensionRegistry::Get(profile)->enabled_extensions().GetByID(id ? id : "");
    content::WebContents* active = w->model()->GetActiveWebContents();
@@ -9551,7 +11011,7 @@ index cfdc014cf4..f31d68a7fc 100644
    auto* runner = active ? extensions::ExtensionActionRunner::GetForWebContents(active) : nullptr;
    if (!extension || !runner) return;
    if (runner->RunAction(extension, /*grant_tab_permissions=*/true) != extensions::ExtensionAction::ShowAction::kShowPopup) {
-@@ -707,6 +719,32 @@ void agens_window_unsplit(AgensWindow* w, int index) {
+@@ -707,6 +742,32 @@ void agens_window_unsplit(AgensWindow* w, int index) {
  void agens_window_set_pinned(AgensWindow* w, int index, int pinned) {
    if (w->model()->ContainsIndex(index)) w->model()->SetTabPinned(index, pinned);
  }
@@ -9584,7 +11044,7 @@ index cfdc014cf4..f31d68a7fc 100644
  void agens_window_toggle_mute(AgensWindow* w, int index) {
    if (!w->model()->ContainsIndex(index)) return;
    content::WebContents* contents = w->model()->GetWebContentsAt(index);
-@@ -814,6 +852,12 @@ void NativeTabStateChanged(views::Widget*) {}
+@@ -814,6 +875,12 @@ void NativeTabStateChanged(views::Widget*) {}
  void ConfirmCloseWithDownloads(views::Widget*, int, base::OnceCallback<void(bool)> callback) {
    std::move(callback).Run(true);
  }
@@ -9626,21 +11086,27 @@ index d81488f053..3eef3778eb 100644
  void ConfirmCloseWithDownloads(views::Widget* widget, int count, base::OnceCallback<void(bool)> callback);
  
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
-index 5d7ca90415..72ce42546a 100644
+index 5d7ca90415..3aeb1b5d13 100644
 --- a/chrome/browser/agens/embed/native_shell_mac.mm
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
-@@ -8,6 +8,10 @@
+@@ -7,7 +7,16 @@
+ 
  #import <AppKit/AppKit.h>
  
++#include "base/base64.h"
++#include "chrome/browser/agens/embed/agens_extensions.h"
  #include "chrome/browser/agens/embed/agens_window.h"
++#include "chrome/browser/agens/bridge/bridge.h"
 +#include "chrome/browser/agens/bridge/ui_ops.h"
++#include "skia/ext/image_operations.h"
++#include "ui/gfx/image/image_skia_operations.h"
 +#include "chrome/browser/agens/bridge/view_ops.h"
 +#include "chrome/browser/agens/embed/agens_embedded.h"
 +#include "chrome/browser/devtools/devtools_window.h"
  #include "components/split_tabs/split_tab_visual_data.h"
  #include "components/tabs/public/split_tab_data.h"
  #include "ui/base/cursor/cursor.h"
-@@ -15,8 +19,15 @@
+@@ -15,8 +24,15 @@
  #include "base/strings/sys_string_conversions.h"
  #include "chrome/browser/extensions/extension_install_prompt_show_params.h"
  #include "extensions/browser/install_prompt_data.h"
@@ -9656,7 +11122,7 @@ index 5d7ca90415..72ce42546a 100644
  #include "ui/base/metadata/metadata_header_macros.h"
  #include "ui/base/metadata/metadata_impl_macros.h"
  #include "ui/gfx/codec/png_codec.h"
-@@ -122,8 +133,10 @@ explicit NativeShellView(BrowserWindowInterface* browser)
+@@ -122,8 +138,10 @@ explicit NativeShellView(BrowserWindowInterface* browser)
      chrome_ = (__bridge_transfer NSView*)agens_ui_create_chrome(window_.get());
      window_->ui = (__bridge void*)chrome_;
      window_->extensions_anchor = extensions_anchor_;
@@ -9667,7 +11133,7 @@ index 5d7ca90415..72ce42546a 100644
      agens_ui_destroy_chrome((__bridge void*)chrome_);
      [chrome_ removeFromSuperview];
      contents_->SetWebContents(nullptr);
-@@ -171,6 +184,12 @@ void Layout(PassKey) override {
+@@ -171,6 +189,12 @@ void Layout(PassKey) override {
          split = nullptr;
        }
      }
@@ -9680,7 +11146,7 @@ index 5d7ca90415..72ce42546a 100644
      // Chromium keeps every tab but the active one hidden (no painting); a split shows two.
      for (views::WebView* pane : {contents_.get(), contents2_.get()}) {
        content::WebContents* was = pane->GetWebContents();
-@@ -328,6 +347,12 @@ void NativeTabStateChanged(views::Widget* widget) {
+@@ -328,6 +352,12 @@ void NativeTabStateChanged(views::Widget* widget) {
  }
  
  void ConfirmCloseWithDownloads(views::Widget* widget, int count, base::OnceCallback<void(bool)> callback) {
@@ -9693,7 +11159,7 @@ index 5d7ca90415..72ce42546a 100644
    NSAlert* alert = [[NSAlert alloc] init];
    alert.messageText = count == 1 ? @"Há um download em andamento" : [NSString stringWithFormat:@"Há %d downloads em andamento", count];
    alert.informativeText = count == 1 ? @"Se fechar agora, ele é cancelado." : @"Se fechar agora, eles são cancelados.";
-@@ -360,6 +385,34 @@ bool HandleNativeCommand(BrowserWindowInterface* browser, int command_id) {
+@@ -360,6 +390,34 @@ bool HandleNativeCommand(BrowserWindowInterface* browser, int command_id) {
    return shell && shell->Command(*command);
  }
  
@@ -9728,7 +11194,7 @@ index 5d7ca90415..72ce42546a 100644
  bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
    if (!IsNativeShellEnabled() || !browser->GetWindow()) return false;
    views::Widget* widget = views::Widget::GetWidgetForNativeWindow(browser->GetWindow()->GetNativeWindow());
-@@ -377,6 +430,13 @@ bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
+@@ -377,6 +435,13 @@ bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
   public:
    NativePermissionPrompt(AgensWindow* window, Delegate* delegate) : window_(window->weak.GetWeakPtr()) {
      window->permission_delegate = delegate->GetWeakPtr();
@@ -9742,7 +11208,7 @@ index 5d7ca90415..72ce42546a 100644
      const GURL origin = delegate->GetRequestingOrigin();
      const std::string site = origin.is_valid() ? std::string(origin.host()) : std::string();
      std::vector<std::string> asks;
-@@ -389,12 +449,15 @@ bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
+@@ -389,12 +454,15 @@ bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
      agens_ui_permission_prompt(window->ui, site.c_str(), pointers.data(), static_cast<int>(pointers.size()));
    }
    ~NativePermissionPrompt() override {
@@ -9760,7 +11226,7 @@ index 5d7ca90415..72ce42546a 100644
    }
    permissions::PermissionPromptDisposition GetPromptDisposition() const override {
      return permissions::PermissionPromptDisposition::ANCHORED_BUBBLE;
-@@ -407,7 +470,65 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
+@@ -407,7 +475,65 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
    }
  
   private:
@@ -9826,13 +11292,207 @@ index 5d7ca90415..72ce42546a 100644
  };
  
  std::unique_ptr<permissions::PermissionPrompt> CreateNativePermissionPrompt(
-@@ -428,6 +549,42 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
- void ShowNativeInstallDialog(std::unique_ptr<ExtensionInstallPromptShowParams> params,
-                              ExtensionInstallPrompt::DoneCallback done,
-                              std::unique_ptr<extensions::InstallPromptData> prompt) {
+@@ -424,34 +550,230 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
+   return std::make_unique<NativePermissionPrompt>(shell->window(), delegate);
+ }
+ 
++}  // namespace agens
++
++// The install sheet's "Onde instalar" (prototipos/extensoes.html #instalar): the radios turn the
++// ato list on and off, and the button says where it goes.
++@interface AgensInstallChoice : NSObject
++@property(nonatomic, strong) NSButton* only;
++@property(nonatomic, strong) NSButton* all;
++@property(nonatomic, strong) NSArray<NSButton*>* atos;  // identifier: the ato's id
++@property(nonatomic, strong) NSButton* install;
++@property(nonatomic, copy) NSString* atoName;
++- (void)changed:(id)sender;
++@end
++@implementation AgensInstallChoice
++@synthesize only = _only;
++@synthesize all = _all;
++@synthesize atos = _atos;
++@synthesize install = _install;
++@synthesize atoName = _atoName;
++- (void)changed:(id)sender {
++  const BOOL all = _all.state == NSControlStateValueOn;
++  int count = 0;
++  for (NSButton* ato in _atos) {
++    // The asking ato (and those that have it already) stay checked and locked.
++    if (ato.tag == 0) ato.enabled = all;
++    count += ato.state == NSControlStateValueOn;
++  }
++  _install.title = all && count > 1 ? [NSString stringWithFormat:@"Instalar em %d atos", count]
++                                    : [NSString stringWithFormat:@"Instalar no ato %@", _atoName];
++}
++// The ids the person chose: the checked ones under "Em todos os atos", else none (only this ato).
++- (std::vector<std::string>)chosen {
++  std::vector<std::string> ids;
++  if (_all.state != NSControlStateValueOn) return ids;
++  for (NSButton* ato in _atos) {
++    if (ato.state == NSControlStateValueOn && ato.tag != 2) ids.push_back(ato.identifier.UTF8String);
++  }
++  return ids;
++}
++@end
++
++namespace agens {
++
+ namespace {
+-void ShowNativeInstallDialog(std::unique_ptr<ExtensionInstallPromptShowParams> params,
+-                             ExtensionInstallPrompt::DoneCallback done,
+-                             std::unique_ptr<extensions::InstallPromptData> prompt) {
++NSTextField* SheetLabel(NSString* text, CGFloat size, NSFontWeight weight, NSColor* color) {
++  NSTextField* label = [NSTextField wrappingLabelWithString:text];
++  label.font = [NSFont systemFontOfSize:size weight:weight];
++  label.textColor = color;
++  label.preferredMaxLayoutWidth = 300;
++  return label;
++}
++
++// The standalone sheet: what it can do, and where to install it (when there is more than one ato).
++// `done` gets the answer and the chosen atos (ids; empty for only this ato).
++void AskInstallSheet(NSWindow* parent,
++                     const extensions::InstallPromptData& prompt,
++                     const std::string& from,
++                     const std::string& asking,
++                     const base::ListValue* atos,
++                     base::OnceCallback<void(bool, std::vector<std::string>)> done) {
++  const extensions::Extension* extension = prompt.extension();
+   NSAlert* alert = [[NSAlert alloc] init];
+-  alert.messageText = base::SysUTF16ToNSString(prompt->GetDialogTitle());
+-  NSMutableArray<NSString*>* asks = [NSMutableArray array];
+-  for (size_t i = 0; i < prompt->GetPermissionCount(); ++i) {
+-    [asks addObject:[@"·  " stringByAppendingString:base::SysUTF16ToNSString(prompt->GetPermission(i))]];
+-  }
+-  alert.informativeText = asks.count ? [@"Ela pode:\n" stringByAppendingString:[asks componentsJoinedByString:@"\n"]]
+-                                     : @"Ela não pede acesso especial.";
+-  NSString* accept = base::SysUTF16ToNSString(prompt->GetAcceptButtonLabel());
+-  [alert addButtonWithTitle:accept.length ? accept : @"Adicionar extensão"];
+-  [alert addButtonWithTitle:@"Cancelar"];
+-  __block ExtensionInstallPrompt::DoneCallback answer = std::move(done);
++  alert.messageText = extension ? base::SysUTF8ToNSString(extension->name()) : @"Instalar uma extensão";
++  if (!prompt.icon().IsEmpty()) alert.icon = prompt.icon().ToNSImage();
++  NSString* origin = from == "store"    ? @"da Chrome Web Store"
++                     : from == "file"   ? @"de um arquivo .crx; não se atualiza sozinha"
++                     : from == "folder" ? @"de uma pasta; fica ligada a ela e não se atualiza sozinha"
++                                        : [@"pedida por " stringByAppendingString:base::SysUTF8ToNSString(from)];
++  alert.informativeText = extension ? [NSString stringWithFormat:@"%s · %@", extension->VersionString().c_str(), origin]
++                                    : origin;
++  NSStackView* body = [NSStackView stackViewWithViews:@[]];
++  body.orientation = NSUserInterfaceLayoutOrientationVertical;
++  body.alignment = NSLayoutAttributeLeading;
++  body.spacing = 4;
++  const std::string* description =
++      extension ? extension->manifest()->available_values().FindString("description") : nullptr;
++  if (description && !description->empty()) {
++    [body addArrangedSubview:SheetLabel(base::SysUTF8ToNSString(*description), 13, NSFontWeightRegular,
++                                        NSColor.secondaryLabelColor)];
++    [body setCustomSpacing:12 afterView:body.arrangedSubviews.lastObject];
++  }
++  [body addArrangedSubview:SheetLabel(@"O que ela pode fazer", 12, NSFontWeightMedium, NSColor.tertiaryLabelColor)];
++  if (!prompt.GetPermissionCount()) {
++    [body addArrangedSubview:SheetLabel(@"Nada além da própria página", 13, NSFontWeightRegular, NSColor.labelColor)];
++  }
++  for (size_t i = 0; i < prompt.GetPermissionCount(); ++i) {
++    [body addArrangedSubview:SheetLabel([@"·  " stringByAppendingString:base::SysUTF16ToNSString(prompt.GetPermission(i))],
++                                        13, NSFontWeightRegular, NSColor.labelColor)];
++  }
++  AgensInstallChoice* choice = [[AgensInstallChoice alloc] init];
++  std::string asking_name;
++  if (atos) {
++    for (const base::Value& ato : *atos) {
++      if (*ato.GetDict().FindString("id") == asking) asking_name = *ato.GetDict().FindString("name");
++    }
++  }
++  choice.atoName = base::SysUTF8ToNSString(asking_name);
++  if (atos && atos->size() > 1) {
++    [body setCustomSpacing:12 afterView:body.arrangedSubviews.lastObject];
++    [body addArrangedSubview:SheetLabel(@"Onde instalar", 12, NSFontWeightMedium, NSColor.tertiaryLabelColor)];
++    choice.only = [NSButton radioButtonWithTitle:[NSString stringWithFormat:@"Só no ato %@ — os outros atos não veem",
++                                                                            choice.atoName]
++                                          target:choice
++                                          action:@selector(changed:)];
++    choice.only.state = NSControlStateValueOn;
++    choice.all = [NSButton radioButtonWithTitle:@"Em todos os atos — cada ato continua com os próprios logins"
++                                         target:choice
++                                         action:@selector(changed:)];
++    [body addArrangedSubview:choice.only];
++    [body addArrangedSubview:choice.all];
++    NSMutableArray<NSButton*>* boxes = [NSMutableArray array];
++    for (const base::Value& value : *atos) {
++      const base::DictValue& ato = value.GetDict();
++      const bool self = *ato.FindString("id") == asking;
++      const bool has = ato.FindBool("installed").value_or(false);
++      NSString* title = base::SysUTF8ToNSString(*ato.FindString("name"));
++      if (self) title = [title stringByAppendingString:@"  (este ato)"];
++      if (has && !self) title = [title stringByAppendingString:@"  (já tem)"];
++      NSButton* box = [NSButton checkboxWithTitle:title target:choice action:@selector(changed:)];
++      box.identifier = base::SysUTF8ToNSString(*ato.FindString("id"));
++      box.state = NSControlStateValueOn;  // all of them, as the prototype: uncheck to leave one out
++      box.tag = self ? 1 : has ? 2 : 0;   // 1, 2: locked
++      box.enabled = NO;
++      [boxes addObject:box];
++      // Indented under "Em todos os atos".
++      NSStackView* row = [NSStackView stackViewWithViews:@[ box ]];
++      row.edgeInsets = NSEdgeInsetsMake(0, 22, 0, 0);
++      [body addArrangedSubview:row];
++    }
++    choice.atos = boxes;
++  }
++  const bool agents = g_browser_process->local_state()->GetBoolean(bridge::kAgentExtensionsPref);
++  [body setCustomSpacing:12 afterView:body.arrangedSubviews.lastObject];
++  [body addArrangedSubview:SheetLabel(agents ? @"Os agentes também usam as extensões; dá para desligar em Configurações › Extensões."
++                                             : @"Os agentes só usam extensões se você ligar em Configurações › Extensões.",
++                                      11.5, NSFontWeightRegular, NSColor.tertiaryLabelColor)];
++  body.frame = NSMakeRect(0, 0, 320, body.fittingSize.height);
++  alert.accessoryView = body;
++  choice.install = [alert addButtonWithTitle:@""];
++  [alert addButtonWithTitle:@"Cancelar"].keyEquivalent = @"\033";
++  [choice changed:nil];
++  __block base::OnceCallback<void(bool, std::vector<std::string>)> answer = std::move(done);
+   void (^finish)(NSModalResponse) = ^(NSModalResponse response) {
+-    std::move(answer).Run(ExtensionInstallPrompt::DoneCallbackPayload(
+-        response == NSAlertFirstButtonReturn ? ExtensionInstallPrompt::Result::ACCEPTED
+-                                             : ExtensionInstallPrompt::Result::USER_CANCELED));
++    const bool allow = response == NSAlertFirstButtonReturn;
++    std::move(answer).Run(allow, allow ? [choice chosen] : std::vector<std::string>());
+   };
+-  NSWindow* parent = params->GetParentWindow().GetNativeNSWindow();
+   if (parent) {
+     [alert beginSheetModalForWindow:parent completionHandler:finish];
+   } else {
+     finish([alert runModal]);
+   }
+ }
++
++void ShowNativeInstallDialog(std::unique_ptr<ExtensionInstallPromptShowParams> params,
++                             ExtensionInstallPrompt::DoneCallback done,
++                             std::unique_ptr<extensions::InstallPromptData> prompt) {
++  const extensions::Extension* extension = prompt->extension();
++  Profile* profile = params->profile() ? params->profile()->GetOriginalProfile() : nullptr;
++  content::WebContents* from_tab = params->GetParentWebContents();
++  const GURL from_url = from_tab ? from_tab->GetLastCommittedURL() : GURL();
++  const std::string from =
++      prompt->has_webstore_data() ? "store"
++      : extension && extension->location() == extensions::mojom::ManifestLocation::kUnpacked ? "folder"
++      : from_url.SchemeIsHTTPOrHTTPS() ? url::Origin::Create(from_url).Serialize()
++                                       : "file";
++  // Only a new install picks atos: a re-enable or a permissions prompt is about this ato's copy.
++  const bool choose = extension && profile && prompt->type() == extensions::InstallPromptData::INSTALL_PROMPT;
++  const std::string id = extension ? extension->id() : std::string();
++  // The person's answer: the prompt goes on, and the atos they chose get it once this one has it.
++  auto answered = base::BindOnce(
++      [](ExtensionInstallPrompt::DoneCallback done, base::WeakPtr<Profile> profile, std::string id, bool allow,
++         std::vector<std::string> atos) {
++        if (allow && profile && !atos.empty()) ext::AlsoInstallInto(profile.get(), id, std::move(atos));
++        std::move(done).Run(ExtensionInstallPrompt::DoneCallbackPayload(
++            allow ? ExtensionInstallPrompt::Result::ACCEPTED : ExtensionInstallPrompt::Result::USER_CANCELED));
++      },
++      std::move(done), profile ? profile->GetWeakPtr() : base::WeakPtr<Profile>(), id);
++  base::ListValue atos = choose ? ext::AtoChoices(id) : base::ListValue();
 +  if (IsEmbedded()) {
 +    // The host asks the person, whoever drives the tabs; the agent never installs.
-+    const extensions::Extension* extension = prompt->extension();
 +    base::DictValue fields;
 +    fields.Set("name", extension ? extension->name() : std::string());
 +    fields.Set("version", extension ? extension->VersionString() : std::string());
@@ -9849,27 +11509,39 @@ index 5d7ca90415..72ce42546a 100644
 +      }
 +    }
 +    fields.Set("host_permissions", std::move(hosts));
-+    content::WebContents* from = params->GetParentWebContents();
-+    const GURL from_url = from ? from->GetLastCommittedURL() : GURL();
-+    fields.Set("from", prompt->has_webstore_data()      ? "store"
-+                       : from_url.SchemeIsHTTPOrHTTPS() ? url::Origin::Create(from_url).Serialize()
-+                                                        : "file");
++    fields.Set("from", from);
++    if (profile) fields.Set("ato", ext::AtoId(profile));
++    if (extension) fields.Set("id", id);
++    if (!prompt->icon().IsEmpty()) {
++      // Small: a 32 px picture, whatever size the prompt loaded.
++      const gfx::ImageSkia small = gfx::ImageSkiaOperations::CreateResizedImage(
++          prompt->icon().AsImageSkia(), skia::ImageOperations::RESIZE_BEST, gfx::Size(32, 32));
++      if (std::vector<uint8_t> png = ext::EncodePng(gfx::Image(small), 1); !png.empty()) {
++        fields.Set("icon", base::Base64Encode(png));
++      }
++    }
++    if (choose) fields.Set("atos", std::move(atos));
 +    bridge::ui_ask::Ask(nullptr, "extension", std::move(fields),
 +                        base::BindOnce(
-+                            [](ExtensionInstallPrompt::DoneCallback done, std::unique_ptr<extensions::InstallPromptData>,
-+                               const base::DictValue* answer) {
++                            [](base::OnceCallback<void(bool, std::vector<std::string>)> answered,
++                               std::unique_ptr<extensions::InstallPromptData>, const base::DictValue* answer) {
 +                              const bool allow = answer && answer->FindBool("allow").value_or(false);
-+                              std::move(done).Run(ExtensionInstallPrompt::DoneCallbackPayload(
-+                                  allow ? ExtensionInstallPrompt::Result::ACCEPTED
-+                                        : ExtensionInstallPrompt::Result::USER_CANCELED));
++                              std::vector<std::string> chosen;
++                              if (const base::ListValue* list = allow ? answer->FindList("atos") : nullptr) {
++                                for (const base::Value& ato : *list) chosen.push_back(ato.GetString());
++                              }
++                              std::move(answered).Run(allow, std::move(chosen));
 +                            },
-+                            std::move(done), std::move(prompt)));
++                            std::move(answered), std::move(prompt)));
 +    return;
 +  }
-   NSAlert* alert = [[NSAlert alloc] init];
-   alert.messageText = base::SysUTF16ToNSString(prompt->GetDialogTitle());
-   NSMutableArray<NSString*>* asks = [NSMutableArray array];
-@@ -466,6 +623,8 @@ void ShowNativeInstallDialog(std::unique_ptr<ExtensionInstallPromptShowParams> p
++  AskInstallSheet(params->GetParentWindow().GetNativeNSWindow(), *prompt, from,
++                  profile ? ext::AtoId(profile) : std::string(), choose ? &atos : nullptr, std::move(answered));
++}
+ }  // namespace
+ 
+ class NativeLoginHandler : public LoginHandler {
+@@ -466,6 +788,8 @@ void ShowNativeInstallDialog(std::unique_ptr<ExtensionInstallPromptShowParams> p
    bool BuildViewImpl(const std::u16string& authority,
                       const std::u16string& explanation,
                       LoginModelData*) override {
@@ -9878,7 +11550,7 @@ index 5d7ca90415..72ce42546a 100644
      NSWindow* window = web_contents() ? web_contents()->GetTopLevelNativeWindow().GetNativeNSWindow() : nil;
      if (!window) return false;
      alert_ = [[NSAlert alloc] init];
-@@ -500,13 +659,52 @@ bool BuildViewImpl(const std::u16string& authority,
+@@ -500,13 +824,52 @@ bool BuildViewImpl(const std::u16string& authority,
    void CloseDialog() override {
      if (window_ && alert_.window.sheetParent) [window_ endSheet:alert_.window returnCode:NSModalResponseAbort];
      alert_ = nil;
@@ -9931,7 +11603,7 @@ index 5d7ca90415..72ce42546a 100644
  };
  
  // Owns itself: deleted when its sheet ends.
-@@ -520,6 +718,13 @@ void CloseDialog() override {
+@@ -520,6 +883,13 @@ void CloseDialog() override {
                   content::JavaScriptDialogManager::DialogClosedCallback callback,
                   base::OnceClosure force_closed)
        : callback_(std::move(callback)), force_closed_(std::move(force_closed)) {
@@ -9945,7 +11617,7 @@ index 5d7ca90415..72ce42546a 100644
      alert_ = [[NSAlert alloc] init];
      alert_.messageText = base::SysUTF16ToNSString(title);
      alert_.informativeText = base::SysUTF16ToNSString(message);
-@@ -558,6 +763,8 @@ void CloseDialogWithoutCallback() override {
+@@ -558,6 +928,8 @@ void CloseDialogWithoutCallback() override {
  
   private:
    void Finish(bool ok) {
@@ -9954,7 +11626,7 @@ index 5d7ca90415..72ce42546a 100644
      force_closed_.Reset();
      if (callback_) std::move(callback_).Run(ok, ok ? GetUserInput() : std::u16string());
      base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE, this);
-@@ -567,6 +774,7 @@ void Finish(bool ok) {
+@@ -567,6 +939,7 @@ void Finish(bool ok) {
    NSAlert* __strong alert_;
    NSTextField* __strong field_ = nil;
    NSWindow* __strong window_ = nil;
@@ -9962,7 +11634,7 @@ index 5d7ca90415..72ce42546a 100644
    base::WeakPtrFactory<NativeJsDialog> weak_{this};
  };
  
-@@ -589,6 +797,10 @@ void Finish(bool ok) {
+@@ -589,10 +962,28 @@ void Finish(bool ok) {
        ->GetWeakPtr();
  }
  
@@ -9973,8 +11645,26 @@ index 5d7ca90415..72ce42546a 100644
  ExtensionInstallPrompt::ShowDialogCallback NativeInstallDialogCallback() {
    return base::BindRepeating(&ShowNativeInstallDialog);
  }
+ 
++}  // namespace agens
++
++void agens_extension_add_file(AgensWindow* w, const char* path, void* parent) {
++  const base::FilePath file(path ? path : "");
++  if (!file.IsAbsolute()) return;
++  NSWindow* window = (__bridge NSWindow*)parent;
++  if (!window && w->browser->GetWindow()) window = w->browser->GetWindow()->GetNativeWindow().GetNativeNSWindow();
++  // The sheet is the only answer the person needs: a file that fails just installs nothing.
++  // shortcut: tell the person why a file failed (the CrxInstallError text) if people trip on it.
++  agens::ext::InstallFromDisk(w->browser->GetProfile(), file, gfx::NativeWindow(window), base::DoNothing());
++}
++
++namespace agens {
++
+ float NativeTitlebarHeight(views::Widget* widget) {
+   auto* shell = widget && widget->GetRootView()
+                     ? views::AsViewClass<NativeShellView>(
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
-index 3c18c4eab1..20512b7de8 100644
+index 3c18c4eab1..03a19667a2 100644
 --- a/chrome/browser/agens/ui/chrome_mac.mm
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
 @@ -93,7 +93,8 @@ unsigned solid(NSView* v) const {
@@ -9987,7 +11677,17 @@ index 3c18c4eab1..20512b7de8 100644
  static NSString* const kThemeChanged = @"AgensThemeChanged";
  // Only the window color (Seu's tint and transparency): the engine repaints, nothing is rebuilt.
  // Sliders send it on every step while dragged.
-@@ -525,6 +526,7 @@ @implementation AgensTabRow {
+@@ -199,7 +200,8 @@ static void SyncGlass(NSView* panel, CGFloat radius) {
+ static NSString* const kIconPasswords = @"<rect x='3' y='6.5' width='14' height='7' rx='2.5'/><path d='M6.5 10h.01M9 10h.01M11.5 10h.01M14 10h.01'/>";
+ static NSString* const kIconLanguages = @"<circle cx='10' cy='10' r='6.5'/><path d='M3.5 10h13M10 3.5c2 2 2.8 4.2 2.8 6.5s-.8 4.5-2.8 6.5c-2-2-2.8-4.2-2.8-6.5s.8-4.5 2.8-6.5z'/>";
+ static NSString* const kIconAccessibility = @"<circle cx='10' cy='10' r='6.5'/><path d='M10 6.8h.01M7.2 8.6h5.6M10 8.6v2.4l-1.8 3M10 11l1.8 3'/>";
+-static NSString* const kIconExtensions = @"<rect x='3.5' y='3.5' width='13' height='13' rx='3.5'/><path d='M10 7v6M7 10h6'/>";
++// A puzzle piece, as Chrome, Brave and Arc show extensions: knobs on top and on the right.
++static NSString* const kIconExtensions = @"<path d='M3.3 7.2h3.4a2.1 2.1 0 1 1 3.2 0h3.4v2.9a2.1 2.1 0 1 1 0 3.2v2.9H3.3z'/>";
+ static NSString* const kIconInicio = @"<rect x='3' y='4.5' width='14' height='11' rx='3'/><path d='M8.6 7.8l3.4 2.2-3.4 2.2z'/>";
+ static NSString* const kIconMoon = @"<path d='M15.5 12.5A6.5 6.5 0 0 1 7.5 4.5a6.5 6.5 0 1 0 8 8z'/>";
+ static NSString* const kIconWifiOff = @"<path d='M3 8.2a10 10 0 0 1 14 0 M5.6 11a6.3 6.3 0 0 1 8.8 0 M8.3 13.8a2.4 2.4 0 0 1 3.4 0 M10 16.4h.01 M3.5 3.5l13 13'/>";
+@@ -525,6 +527,7 @@ @implementation AgensTabRow {
    NSTextField* _title;
    NSButton* _sound;
    NSButton* _close;
@@ -9995,7 +11695,7 @@ index 3c18c4eab1..20512b7de8 100644
  }
  @synthesize index = _index;
  @synthesize look = _look;
-@@ -611,6 +613,12 @@ - (void)updateWith:(const AgensTab&)tab {
+@@ -611,6 +614,12 @@ - (void)updateWith:(const AgensTab&)tab {
    _title.stringValue = title;
    self.toolTip = title;
    self.accessibilityLabel = tab.sleeping ? [title stringByAppendingString:@", dormindo"] : title;
@@ -10008,7 +11708,7 @@ index 3c18c4eab1..20512b7de8 100644
    NSImage* icon = nil;
    if (tab.favicon_png) {
      icon = [[NSImage alloc] initWithData:[NSData dataWithBytes:tab.favicon_png
-@@ -654,6 +662,10 @@ - (void)refresh {
+@@ -654,6 +663,10 @@ - (void)refresh {
    const BOOL border = _look == kLookPin || (_look == kLookTop && self.selected);
    self.layer.borderWidth = border ? 1 : 0;
    self.layer.borderColor = CG(kLine, self);
@@ -10019,7 +11719,7 @@ index 3c18c4eab1..20512b7de8 100644
  }
  - (NSMenu*)menuForEvent:(NSEvent*)event {
    NSMenu* menu = [[NSMenu alloc] initWithTitle:@"Aba"];
-@@ -766,9 +778,10 @@ - (void)layout {
+@@ -766,9 +779,10 @@ - (void)layout {
  - (void)updateWith:(const AgensAto&)ato index:(int)index {
    NSString* name = @(ato.name);
    _tile.stringValue = Monogram(name);
@@ -10031,16 +11731,17 @@ index 3c18c4eab1..20512b7de8 100644
    self.accessibilityLabel = self.toolTip;
    self.selected = ato.active;
  }
-@@ -1015,6 +1028,8 @@ - (void)toggleSidebar;
+@@ -1015,6 +1029,9 @@ - (void)toggleSidebar;
  - (BOOL)tabsOnTop;
  - (void)toggleTabsPosition;
  - (NSArray<NSString*>*)atoNamesForSettings;
 +- (NSArray<NSNumber*>*)atoSharedForSettings;  // "Compartilhar cookies", per ato, same order
 +- (NSArray<NSString*>*)atoIdsForSettings;      // the profile folders, same order
++- (NSString*)currentAtoNameForSettings;         // this window's ato
  - (NSImage*)extensionIcon:(NSString*)extensionId;
  @end
  
-@@ -1032,6 +1047,92 @@ - (BOOL)isFlipped {
+@@ -1032,6 +1049,92 @@ - (BOOL)isFlipped {
  }
  @end
  
@@ -10133,7 +11834,33 @@ index 3c18c4eab1..20512b7de8 100644
  static AgensSettings* g_settings;
  
  @implementation AgensSettings {
-@@ -1432,6 +1533,7 @@ - (void)showSection:(NSString*)key {
+@@ -1052,6 +1155,7 @@ @implementation AgensSettings {
+   // Exceções por site and extensions, as last listed (rows address them by tag)
+   std::vector<std::pair<std::string, std::string>> _exceptions;  // site, kind
+   std::vector<std::string> _extensionIds, _extensionNames;
++  std::vector<size_t> _extensionAtos;  // how many atos have each
+   // Senhas salvas
+   std::vector<std::pair<std::string, std::string>> _logins;  // site, username
+   BOOL _loginsFresh;
+@@ -1421,8 +1525,15 @@ - (void)showSection:(NSString*)key {
+   } else if ([key isEqualToString:@"extensoes"]) {
+     y = [self fillExtensions:y];
+     // Like Brave: installs and updates come from Google's store (the only Google service we use).
+-    y = [self option:@"Chrome Web Store" detail:@"Instalar abre a loja do Google; o download vem de lá."
+-             control:[self linkButton:@"Abrir a loja…" url:@"https://chromewebstore.google.com/category/extensions"]
++    y = [self option:@"Instalar da Chrome Web Store" detail:@"Abra a página dela e clique em “Instalar no AgensBrowser”."
++             control:[self linkButton:@"Abrir loja" url:@"https://chromewebstore.google.com/category/extensions"]
++                   y:y];
++    y = [self option:@"Adicionar de um arquivo"
++              detail:@"Um .crx ou uma pasta descompactada; pergunta os atos como na instalação. Não se atualizam sozinhas."
++             control:[self small:@"Escolher…" action:@selector(addExtensionFile:) tag:0]
++                   y:y];
++    y = [self option:@"Extensões funcionam nas abas dos agentes" detail:@"Desligado, elas param na aba que um agente está usando."
++             control:[self prefSwitch:"agens.bridge.agent_extensions"]
+                    y:y];
+     y = [self option:@"Atualizar extensões sozinhas" detail:@"Pergunta à loja do Google por versões novas de tempos em tempos."
+              control:[self prefSwitch:"agens.extensions.auto_update"]
+@@ -1432,6 +1543,7 @@ - (void)showSection:(NSString*)key {
      NSButton* proxy = [NSButton buttonWithTitle:@"Abrir…" target:self action:@selector(openProxy:)];
      y = [self option:@"Configurações de proxy" detail:@"Usa as do macOS." control:proxy y:y];
      y = [self option:@"Restaurar as configurações originais" detail:nil control:[self subButton:@"Restaurar…" key:@"restaurar"] y:y];
@@ -10141,7 +11868,7 @@ index 3c18c4eab1..20512b7de8 100644
    } else if ([key isEqualToString:@"sobre"]) {
      NSString* version = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"";
      y = [self info:product detail:[NSString stringWithFormat:@"Versão %@ · SugiyamaLabs", version] note:@"" y:y];
-@@ -1602,7 +1704,10 @@ static void EnginesListed(void* context, const AgensSearchEngine* engines, int c
+@@ -1602,7 +1714,10 @@ static void EnginesListed(void* context, const AgensSearchEngine* engines, int c
  - (CGFloat)fillAtos:(CGFloat)y {
    // The atos list comes from the chrome (it already observes them); rename in place.
    NSArray<NSString*>* names = [_chrome atoNamesForSettings];
@@ -10153,7 +11880,7 @@ index 3c18c4eab1..20512b7de8 100644
      NSTextField* field = [NSTextField textFieldWithString:names[i]];
      field.tag = i;
      field.delegate = self;
-@@ -1610,12 +1715,18 @@ - (CGFloat)fillAtos:(CGFloat)y {
+@@ -1610,12 +1725,18 @@ - (CGFloat)fillAtos:(CGFloat)y {
      field.action = @selector(renameAto:);
      field.frame = NSMakeRect(0, 0, 220, 24);
      y = [self option:[NSString stringWithFormat:@"Ato %lu", (unsigned long)i + 1] detail:nil control:field y:y];
@@ -10173,7 +11900,7 @@ index 3c18c4eab1..20512b7de8 100644
    note.frame = NSMakeRect(32, y + 44, NSWidth(_pane.bounds) - 64, 16);
    [_pane addSubview:note];
    return y + 70;
-@@ -1818,6 +1929,48 @@ - (void)setEngine:(NSPopUpButton*)popup {
+@@ -1818,6 +1939,48 @@ - (void)setEngine:(NSPopUpButton*)popup {
  - (void)renameAto:(NSTextField*)field {
    if (_browser && field.stringValue.length) agens_window_rename_ato(_browser, (int)field.tag, field.stringValue.UTF8String);
  }
@@ -10222,7 +11949,156 @@ index 3c18c4eab1..20512b7de8 100644
  - (void)newAto:(id)sender {
    if (_browser) agens_window_new_ato(_browser);
  }
-@@ -2634,7 +2787,7 @@ - (void)showStep:(int)step {
+@@ -2265,39 +2428,68 @@ - (void)removeException:(NSButton*)button {
+   [self showSection:@"excecoes"];
+ }
+ 
+-// Extensões: the ato's extensions, each with on/off and "Remover".
++// Extensões: the ato's extensions (prototype #gerenciar), each with its version, the atos that
++// have it, Opções, Remover (from this ato or all) and on/off.
++struct ExtensionEntry {
++  std::string id, name, version, from;
++  int enabled = 0, options = 0;
++  std::vector<std::string> atos;
++};
+ static void ExtensionsListed(void* context, const AgensExtension* list, int count) {
+-  auto* out = static_cast<std::vector<std::tuple<std::string, std::string, std::string, int>>*>(context);
+-  for (int i = 0; i < count; ++i) out->emplace_back(list[i].id, list[i].name, list[i].version, list[i].enabled);
++  auto* out = static_cast<std::vector<ExtensionEntry>*>(context);
++  for (int i = 0; i < count; ++i) {
++    ExtensionEntry e{list[i].id, list[i].name, list[i].version, list[i].from, list[i].enabled, list[i].options};
++    for (int a = 0; a < list[i].atos_count; ++a) e.atos.push_back(list[i].atos[a]);
++    out->push_back(std::move(e));
++  }
++}
++- (NSString*)atoNameFor:(const std::string&)ato {
++  NSArray<NSString*>* ids = [_chrome atoIdsForSettings];
++  NSArray<NSString*>* names = [_chrome atoNamesForSettings];
++  const NSUInteger i = [ids indexOfObject:@(ato.c_str())];
++  return i != NSNotFound && i < names.count ? names[i] : @(ato.c_str());
++}
++- (NSString*)currentAtoName {
++  return [_chrome currentAtoNameForSettings];
+ }
+ - (CGFloat)fillExtensions:(CGFloat)y {
+-  std::vector<std::tuple<std::string, std::string, std::string, int>> list;
++  std::vector<ExtensionEntry> list;
+   if (_browser) agens_extensions(_browser, ExtensionsListed, &list);
+   _extensionIds.clear();
+   _extensionNames.clear();
++  _extensionAtos.clear();
+   if (list.empty()) {
+     return [self info:@"Nenhuma extensão neste ato" detail:@"Cada ato tem as suas." note:@"" y:y];
+   }
+-  for (const auto& [id, name, version, enabled] : list) {
++  for (const ExtensionEntry& e : list) {
+     const NSInteger tag = _extensionIds.size();
+-    _extensionIds.push_back(id);
+-    _extensionNames.push_back(name);
++    _extensionIds.push_back(e.id);
++    _extensionNames.push_back(e.name);
++    _extensionAtos.push_back(e.atos.size());
+     NSSwitch* sw = [[NSSwitch alloc] init];
+     sw.controlSize = NSControlSizeSmall;
+-    sw.state = enabled ? NSControlStateValueOn : NSControlStateValueOff;
++    sw.state = e.enabled ? NSControlStateValueOn : NSControlStateValueOff;
+     sw.tag = tag;
+     sw.target = self;
+     sw.action = @selector(toggleExtension:);
+-    sw.accessibilityLabel = [@"Ligar " stringByAppendingString:@(name.c_str())];
++    sw.accessibilityLabel = [@"Ligar " stringByAppendingString:@(e.name.c_str())];
+     [sw sizeToFit];
+-    NSView* box = [self buttons:@[ [self small:@"Remover…" action:@selector(confirmRemoveExtension:) tag:tag] ]];
++    NSMutableArray<NSButton*>* actions = [NSMutableArray array];
++    if (e.options && e.enabled) [actions addObject:[self small:@"Opções" action:@selector(extensionOptions:) tag:tag]];
++    [actions addObject:[self small:@"Remover…" action:@selector(confirmRemoveExtension:) tag:tag]];
++    NSView* box = [self buttons:actions];
+     NSView* both = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, NSWidth(box.frame) + 10 + NSWidth(sw.frame), MAX(NSHeight(sw.frame), NSHeight(box.frame)))];
+     box.frame = NSMakeRect(0, (NSHeight(both.frame) - NSHeight(box.frame)) / 2, NSWidth(box.frame), NSHeight(box.frame));
+     sw.frame = NSMakeRect(NSMaxX(box.frame) + 10, (NSHeight(both.frame) - NSHeight(sw.frame)) / 2, NSWidth(sw.frame), NSHeight(sw.frame));
+     [both addSubview:box];
+     [both addSubview:sw];
+-    y = [self option:@(name.c_str()) detail:[@"Versão " stringByAppendingString:@(version.c_str())] control:both
+-                icon:[_chrome extensionIcon:@(id.c_str())] y:y];
++    // The atos that have it (the prototype's chips), and where it came from when not the store.
++    NSMutableArray<NSString*>* atos = [NSMutableArray array];
++    for (const std::string& ato : e.atos) [atos addObject:[self atoNameFor:ato]];
++    NSString* detail = [NSString stringWithFormat:@"%s · %@", e.version.c_str(), [atos componentsJoinedByString:@", "]];
++    if (e.from == "file") detail = [detail stringByAppendingString:@" · de um .crx, sem atualizações"];
++    if (e.from == "folder") detail = [detail stringByAppendingString:@" · de uma pasta, ligada a ela"];
++    y = [self option:@(e.name.c_str()) detail:detail control:both icon:[_chrome extensionIcon:@(e.id.c_str())] y:y];
+   }
+   return y;
+ }
+@@ -2305,11 +2497,34 @@ - (void)toggleExtension:(NSSwitch*)sw {
+   const size_t i = sw.tag;
+   if (_browser && i < _extensionIds.size()) {
+     agens_extension_set_enabled(_browser, _extensionIds[i].c_str(), sw.state == NSControlStateValueOn);
++    [self showSection:@"extensoes"];  // Opções comes and goes with it
+   }
+ }
++- (void)extensionOptions:(NSButton*)button {
++  const size_t i = button.tag;
++  if (_browser && i < _extensionIds.size()) agens_extension_options(_browser, _extensionIds[i].c_str());
++}
++// In more than one ato: a menu, from this ato or from all of them (prototype .rmm); in this ato
++// only: the question as before.
+ - (void)confirmRemoveExtension:(NSButton*)button {
+   const size_t i = button.tag;
+   if (i >= _extensionIds.size()) return;
++  if (_extensionAtos[i] > 1) {
++    NSMenu* menu = [[NSMenu alloc] init];
++    NSMenuItem* one = [menu addItemWithTitle:[@"Remover do ato " stringByAppendingString:[self currentAtoName]]
++                                      action:@selector(removeExtensionFromMenu:)
++                               keyEquivalent:@""];
++    NSMenuItem* all = [menu addItemWithTitle:[NSString stringWithFormat:@"Remover de todos os atos (%zu)", _extensionAtos[i]]
++                                      action:@selector(removeExtensionFromMenu:)
++                               keyEquivalent:@""];
++    for (NSMenuItem* item in @[ one, all ]) {
++      item.target = self;
++      item.representedObject = @(_extensionIds[i].c_str());
++    }
++    all.tag = 1;
++    [menu popUpMenuPositioningItem:nil atLocation:NSMakePoint(0, NSHeight(button.bounds) + 4) inView:button];
++    return;
++  }
+   NSAlert* alert = [[NSAlert alloc] init];
+   alert.messageText = [NSString stringWithFormat:@"Remover %@?", @(_extensionNames[i].c_str())];
+   alert.informativeText = @"Sai deste ato junto com os dados dela.";
+@@ -2320,10 +2535,31 @@ - (void)confirmRemoveExtension:(NSButton*)button {
+   [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
+     AgensSettings* strong = weak;
+     if (r != NSAlertFirstButtonReturn || !strong || !strong->_browser) return;
+-    agens_extension_remove(strong->_browser, id.c_str());
++    agens_extension_remove(strong->_browser, id.c_str(), 0);
+     [strong showSection:@"extensoes"];
+   }];
+ }
++- (void)removeExtensionFromMenu:(NSMenuItem*)item {
++  if (!_browser) return;
++  agens_extension_remove(_browser, [item.representedObject UTF8String], item.tag == 1);
++  // Waking the other atos takes a moment: the list comes back with the next change.
++  [self showSection:@"extensoes"];
++}
++// "Adicionar de um arquivo": a .crx or an unpacked folder; the install sheet asks which atos.
++- (void)addExtensionFile:(id)sender {
++  NSOpenPanel* panel = [NSOpenPanel openPanel];
++  panel.canChooseFiles = YES;
++  panel.canChooseDirectories = YES;
++  panel.allowsMultipleSelection = NO;
++  panel.message = @"Um arquivo .crx, ou a pasta de uma extensão descompactada (com o manifest.json).";
++  panel.prompt = @"Adicionar";
++  __weak AgensSettings* weak = self;
++  [panel beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
++    AgensSettings* strong = weak;
++    if (r != NSModalResponseOK || !strong || !strong->_browser || !panel.URL) return;
++    agens_extension_add_file(strong->_browser, panel.URL.path.UTF8String, (__bridge void*)strong.window);
++  }];
++}
+ 
+ // Senhas salvas: search, then one row per login. Seeing or copying a password asks for Touch ID
+ // (or the Mac's password), good for a minute.
+@@ -2634,7 +2870,7 @@ - (void)showStep:(int)step {
        _atoName = [NSTextField textFieldWithString:@"Pessoal"];
        _atoName.frame = NSMakeRect(170, y + 30, 300, 26);
        NSTextField* cookies = Label(12, NSFontWeightRegular, kDim);
@@ -10231,7 +12107,7 @@ index 3c18c4eab1..20512b7de8 100644
        cookies.frame = NSMakeRect(90, y + 76, 460, 16);
        cookies.alignment = NSTextAlignmentCenter;
        for (NSView* v in @[ label, _atoName, cookies ]) [_body addSubview:v];
-@@ -3625,6 +3778,8 @@ @implementation AgensChrome {
+@@ -3625,6 +3861,8 @@ @implementation AgensChrome {
    AgensDragView* _tabsDoc;
    AgensToolButton* _moreAtos;  // "⋯" when the atos don't fit
    NSMutableArray<NSString*>* _atoNames;
@@ -10240,7 +12116,23 @@ index 3c18c4eab1..20512b7de8 100644
    int _activeAto;
    NSView* _atosLine;
    NSMutableArray<AgensAtoButton*>* _atoButtons;
-@@ -3691,6 +3846,20 @@ @implementation AgensChrome {
+@@ -3673,8 +3911,13 @@ @implementation AgensChrome {
+   std::vector<BookmarkItem> _bookmarks;
+   long long _barId;
+   AgensFindBar* _find;
+-  AgensToolButton* _extButton;  // extensions, before downloads and the menu
+-  NSMutableArray<NSDictionary*>* _extensions;  // id, name, icon (NSImage, optional)
++  AgensToolButton* _extButton;  // extensions (the puzzle), before downloads and the menu
++  // id, name, icon (NSImage, optional), pinned, title, badge, badge_color, visible, blocked
++  NSMutableArray<NSDictionary*>* _extensions;
++  NSMutableArray<AgensToolButton*>* _extPinned;  // the pinned ones, before the puzzle, in order
++  NSString* _extClicked;  // the extension whose popup is opening: it hangs from its own button
++  BOOL _installedCard;    // the open panel is the "instalada" card, not the menu
++  NSString* _extMenuKey;  // what the menu showed last
+   AgensErrorView* _error;
+   BOOL _stopPage;  // the active tab shows a security stop page
+   int _split;            // the active tab's split (0 none, 1 side by side, 2 stacked)
+@@ -3691,6 +3934,20 @@ @implementation AgensChrome {
    NSString* _url;
    BOOL _loading;
    NSRect _page;
@@ -10261,7 +12153,15 @@ index 3c18c4eab1..20512b7de8 100644
  }
  
  - (instancetype)initWithWindow:(AgensWindow*)window {
-@@ -3859,6 +4028,8 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3786,6 +4043,7 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+     _siteButton.onPress = ^{ [weak showSiteInfo]; };
+     [_omni addSubview:_siteButton positioned:NSWindowBelow relativeTo:_omniIcon];
+     _extensions = [NSMutableArray array];
++    _extPinned = [NSMutableArray array];
+     _extButton = [[AgensToolButton alloc] initWithSymbol:@"puzzlepiece" label:@"Extensões"];
+     [_extButton setImage:AgensIcon(kIconExtensions)];
+     _extButton.hidden = YES;
+@@ -3859,6 +4117,8 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
      _tabsDoc = [[AgensDragView alloc] init];
      _tabsScroll.documentView = _tabsDoc;
      _atoNames = [NSMutableArray array];
@@ -10270,7 +12170,7 @@ index 3c18c4eab1..20512b7de8 100644
      _moreAtos = [[AgensToolButton alloc] initWithSymbol:@"ellipsis" label:@"Todos os atos" size:13];
      _moreAtos.onPress = ^{ [weak showAtosMenu]; };
      _addAto = [[AgensToolButton alloc] initWithSymbol:@"plus" label:@"Novo ato"];
-@@ -3969,6 +4140,44 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3969,6 +4229,44 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
                           _atosLine, _addAto, _atoDot, _strip, _bar, _history, _bookmarksPage, _ntp2, _ntp2Click, _ntp, _error, _find, _loadbar, _statusPill, _suggest ]) {
        [self addSubview:v];
      }
@@ -10315,7 +12215,7 @@ index 3c18c4eab1..20512b7de8 100644
      [self refreshTheme];
      ApplyAppearance(agens_window_color_mode(_window));  // the saved choice, from the first window on
      agens_window_set_tabs_observer(_window, TabsChanged, (__bridge void*)self);
-@@ -4009,6 +4218,10 @@ - (void)refreshTheme {
+@@ -4009,6 +4307,10 @@ - (void)refreshTheme {
    _atoDot.layer.backgroundColor = CG(kLight3, self);
    _statusPill.layer.backgroundColor = CG(kFloat, self);
    _statusPill.layer.borderColor = CG(kLine, self);
@@ -10326,7 +12226,19 @@ index 3c18c4eab1..20512b7de8 100644
    SyncGlass(_suggest, 12 * Round());
    [self runLoadbar];  // the glow's color
  }
-@@ -4367,6 +4580,7 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4167,6 +4469,11 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+   if (!_extButton.hidden) {
+     _extButton.frame = NSMakeRect(omniEnd + 4 - 30, btnY, 28, 28);
+     omniEnd = NSMinX(_extButton.frame) - 4;
++    // The pinned ones right before it (prototype #barra), last pinned nearest.
++    for (AgensToolButton* b in _extPinned.reverseObjectEnumerator) {
++      b.frame = NSMakeRect(omniEnd + 4 - 30, btnY, 28, 28);
++      omniEnd = NSMinX(b.frame) - 4;
++    }
+   }
+ 
+   // Atos: only what fits (6 in the open column, 5 collapsed, 4 on the bar); past that the last
+@@ -4367,6 +4674,7 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
      _ntp2.frame = NSInsetRect(other, 1, 1);
      _ntp2Click.frame = _ntp2.frame;
    }
@@ -10334,7 +12246,17 @@ index 3c18c4eab1..20512b7de8 100644
    _history.frame = _ntp.frame;
    _bookmarksPage.frame = _ntp.frame;
    _error.frame = _ntp.frame;
-@@ -4431,6 +4645,7 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+@@ -4388,6 +4696,9 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+ }
+ - (AgensRect)extensionsAnchor {
+   NSRect r = _extButton.hidden ? _menu.frame : _extButton.frame;
++  for (AgensToolButton* b in _extPinned) {
++    if ([b.identifier isEqualToString:_extClicked]) r = b.frame;
++  }
+   return {(int)NSMinX(r), (int)NSMinY(r), (int)NSWidth(r), (int)NSHeight(r)};
+ }
+ - (AgensRect)siteIconRect {
+@@ -4431,6 +4742,7 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
      [_rows removeLastObject];
    }
    int activeTab = -1;
@@ -10342,7 +12264,7 @@ index 3c18c4eab1..20512b7de8 100644
    _pinnedCount = 0;
    _partner = -1;
    BOOL partnerIsNewTab = NO;
-@@ -4480,7 +4695,10 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+@@ -4480,7 +4792,10 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
      _bookmarked = tabs[i].bookmarked;
      _back.enabled = tabs[i].can_go_back;
      _forward.enabled = tabs[i].can_go_forward;
@@ -10353,7 +12275,7 @@ index 3c18c4eab1..20512b7de8 100644
    if (_loadbar.hidden == _loading) {
      _loadbar.hidden = !_loading;
      [self runLoadbar];
-@@ -4539,14 +4757,18 @@ - (void)setAtos:(const AgensAto*)atos count:(int)count {
+@@ -4539,14 +4854,18 @@ - (void)setAtos:(const AgensAto*)atos count:(int)count {
      [_atoButtons removeLastObject];
    }
    [_atoNames removeAllObjects];
@@ -10373,7 +12295,7 @@ index 3c18c4eab1..20512b7de8 100644
    }
    [self relayout];
  }
-@@ -4854,6 +5076,12 @@ - (BOOL)collapsed {
+@@ -4854,6 +5173,15 @@ - (BOOL)collapsed {
  - (NSArray<NSString*>*)atoNamesForSettings {
    return [_atoNames copy];
  }
@@ -10383,10 +12305,264 @@ index 3c18c4eab1..20512b7de8 100644
 +- (NSArray<NSString*>*)atoIdsForSettings {
 +  return [_atoIds copy];
 +}
++- (NSString*)currentAtoNameForSettings {
++  return _atoName.stringValue;
++}
  - (void)toggleSidebar {
    _collapsed = !_collapsed;
    [NSUserDefaults.standardUserDefaults setBool:_collapsed forKey:kCollapsedKey];
-@@ -5094,6 +5322,89 @@ - (NSRect)roomForBar:(NSRect)page {
+@@ -4975,22 +5303,36 @@ - (void)detach {
+ // popup hangs from the button), and the "installed" notice.
+ - (void)setExtensions:(const AgensExtensionButton*)list count:(int)count installed:(const char*)installed {
+   [_extensions removeAllObjects];
+-  NSString* installedName = nil;
++  NSDictionary* installedOne = nil;
+   for (int i = 0; i < count; ++i) {
+-    NSMutableDictionary* e = [@{@"id" : @(list[i].id), @"name" : @(list[i].name)} mutableCopy];
++    NSMutableDictionary* e = [@{
++      @"id" : @(list[i].id), @"name" : @(list[i].name), @"pinned" : @(list[i].pinned != 0),
++      @"title" : @(list[i].title), @"badge" : @(list[i].badge), @"badge_color" : @(list[i].badge_color),
++      @"visible" : @(list[i].visible != 0), @"blocked" : @(list[i].blocked != 0)
++    } mutableCopy];
+     if (list[i].icon_png) {
+       NSImage* icon = [[NSImage alloc] initWithData:[NSData dataWithBytes:list[i].icon_png length:list[i].icon_png_size]];
+       icon.size = NSMakeSize(16, 16);
+       if (icon) e[@"icon"] = icon;
+     }
+-    if (installed && !strcmp(installed, list[i].id)) installedName = e[@"name"];
++    if (installed && !strcmp(installed, list[i].id)) installedOne = e;
+     [_extensions addObject:e];
+   }
+   _extButton.hidden = count == 0;
++  [self fillPinned];
+   [self relayout];
+-  if (_window) agens_window_relayout(_window);  // the popup anchor moves with the button
+-  if (installedName) {
+-    [self showExtensions:[installedName stringByAppendingString:@" foi instalada"]];
++  if (_window) agens_window_relayout(_window);  // the popup anchor moves with the buttons
++  // What the menu shows: an open menu follows a pin or a new icon, not every badge tick.
++  NSMutableString* key = [NSMutableString string];
++  for (NSDictionary* e in _extensions) {
++    [key appendFormat:@"%@%@%@%d|", e[@"id"], e[@"pinned"], e[@"icon"] ? @"i" : @"", [self extensionDimmed:e]];
++  }
++  const BOOL menuChanged = ![key isEqualToString:_extMenuKey];
++  _extMenuKey = key;
++  if (installedOne) {
++    [self showInstalled:installedOne];
++  } else if (menuChanged && _menuView && _popoverAnchor == _extButton && !_installedCard) {
++    [self showExtensions];
+   }
+ }
+ - (NSImage*)extensionIcon:(NSString*)extensionId {
+@@ -4999,43 +5341,128 @@ - (NSImage*)extensionIcon:(NSString*)extensionId {
+   }
+   return nil;
+ }
++// Off on this tab (an agent uses it with "Extensões funcionam nas abas dos agentes" off), or the
++// action is hidden here: greyed, as in Chrome.
++- (BOOL)extensionDimmed:(NSDictionary*)e {
++  return [e[@"blocked"] boolValue] || ![e[@"visible"] boolValue];
++}
++- (NSString*)extensionTip:(NSDictionary*)e {
++  if ([e[@"blocked"] boolValue]) {
++    return [NSString stringWithFormat:@"Desligada nesta aba\no %@ está usando; Configurações › Extensões", _controller ?: @"agente"];
++  }
++  return e[@"title"];
++}
++- (void)runExtension:(NSDictionary*)e {
++  [self closeMenu];
++  if (!_window || [e[@"blocked"] boolValue]) return;  // the engine refuses it too
++  _extClicked = e[@"id"];
++  [self relayout];
++  agens_window_relayout(_window);
++  agens_extension_click(_window, [e[@"id"] UTF8String]);
++}
++// The pinned extensions' buttons: the action's icon for the tab, its badge, its title as the tip.
++- (void)fillPinned {
++  NSMutableArray<NSDictionary*>* pinned = [NSMutableArray array];
++  for (NSDictionary* e in _extensions) {
++    if ([e[@"pinned"] boolValue]) [pinned addObject:e];
++  }
++  __weak AgensChrome* weak = self;
++  while (_extPinned.count < pinned.count) {
++    AgensToolButton* b = [[AgensToolButton alloc] initWithSymbol:@"puzzlepiece" label:@""];
++    NSTextField* badge = [NSTextField labelWithString:@""];
++    badge.identifier = @"badge";
++    badge.font = [NSFont systemFontOfSize:9 weight:NSFontWeightBold];
++    badge.alignment = NSTextAlignmentCenter;
++    badge.wantsLayer = YES;
++    badge.layer.cornerRadius = 6.5;
++    [b addSubview:badge];
++    [self addSubview:b];
++    [_extPinned addObject:b];
++  }
++  while (_extPinned.count > pinned.count) {
++    [_extPinned.lastObject removeFromSuperview];
++    [_extPinned removeLastObject];
++  }
++  for (NSUInteger i = 0; i < pinned.count; ++i) {
++    NSDictionary* e = pinned[i];
++    AgensToolButton* b = _extPinned[i];
++    b.identifier = e[@"id"];
++    [b setImage:e[@"icon"] ?: AgensIcon(kIconExtensions)];
++    b.alphaValue = [self extensionDimmed:e] ? 0.35 : 1;
++    b.toolTip = [self extensionTip:e];
++    NSString* badgeText = e[@"badge"];
++    b.accessibilityLabel = badgeText.length ? [NSString stringWithFormat:@"%@, %@", e[@"name"], badgeText] : e[@"name"];
++    b.onPress = ^{ [weak runExtension:e]; };
++    NSTextField* badge = nil;
++    for (NSView* v in b.subviews) {
++      if ([v.identifier isEqualToString:@"badge"]) badge = (NSTextField*)v;
++    }
++    badge.hidden = badgeText.length == 0;
++    badge.stringValue = badgeText;
++    // The extension's color when it set one; else the prototype's .badge (light on the dark bar).
++    const unsigned color = [e[@"badge_color"] unsignedIntValue];
++    badge.layer.backgroundColor = color ? HexA(color).CGColor : CG(kInk, self);
++    badge.textColor = color ? NSColor.whiteColor : kBg.color();
++    const CGFloat w = MAX(14, ceil(badge.fittingSize.width) + 4);
++    badge.frame = NSMakeRect(28 - w, 0, w, 13);  // bottom right; the button is not flipped
++  }
++}
+ - (void)toggleExtensions:(id)sender {
+   if (_menuView && _popoverAnchor == _extButton) {
+     [self closeMenu];
+   } else {
+-    [self showExtensions:nil];
++    [self showExtensions];
+   }
+ }
+-- (void)showExtensions:(NSString*)notice {
+-  const CGFloat w = 280, rowH = 32, noticeH = notice ? 30 : 0;
+-  const CGFloat h = 5 + noticeH + (_extensions.count + 1) * rowH + 5;
++// The puzzle's menu (prototype #barra .menu): every extension of the ato, each with fixar/fixada,
++// then Gerenciar extensões. A row runs the extension, as its pinned button does.
++- (void)showExtensions {
++  const CGFloat w = 270, rowH = 32, headH = 24;
++  const CGFloat h = 5 + headH + _extensions.count * rowH + 11 + rowH + 5;
+   NSView* panel = [self popoverWidth:w height:h under:_extButton];
+   panel.accessibilityRole = NSAccessibilityMenuRole;
+   panel.accessibilityLabel = @"Extensões";
+   CGFloat y = h - 5;
+-  if (notice) {
+-    NSTextField* note = Label(12.5, NSFontWeightSemibold, kInk);
+-    note.stringValue = notice;
+-    note.frame = NSMakeRect(14, y - 24, w - 28, 18);
+-    [panel addSubview:note];
+-    y -= noticeH;
+-  }
++  NSTextField* head = Label(11.5, NSFontWeightRegular, kDim);
++  head.stringValue = [@"Extensões do ato " stringByAppendingString:_atoName.stringValue ?: @""];
++  head.frame = NSMakeRect(15, y - headH + 3, w - 30, 16);
++  [panel addSubview:head];
++  y -= headH;
+   __weak AgensChrome* weak = self;
+   for (NSDictionary* e in _extensions) {
+     y -= rowH;
+     AgensMenuRow* row = [[AgensMenuRow alloc] initWithIcon:kIconExtensions title:e[@"name"] key:@""];
+     if (e[@"icon"]) [row setIconImage:e[@"icon"]];
+     row.frame = NSMakeRect(5, y, w - 10, rowH);
++    row.alphaValue = [self extensionDimmed:e] ? 0.5 : 1;
++    row.toolTip = [self extensionTip:e];
++    row.onPress = ^{ [weak runExtension:e]; };
++    // fixar / fixada, its own target on the row's right (prototype .st, .st.on).
++    const BOOL pinned = [e[@"pinned"] boolValue];
++    AgensHoverView* pin = [[AgensHoverView alloc] initWithFrame:NSMakeRect(w - 10 - 8 - 56, 5, 56, 22)];
++    pin.radius = 5;
++    NSTextField* label = Label(12, NSFontWeightRegular, pinned ? kLight3 : kDim);
++    label.stringValue = pinned ? @"fixada" : @"fixar";
++    label.alignment = NSTextAlignmentRight;
++    label.frame = NSMakeRect(0, 3, 50, 16);
++    [pin addSubview:label];
++    pin.accessibilityLabel = pinned ? [@"Tirar da barra: " stringByAppendingString:e[@"name"]]
++                                    : [@"Fixar na barra: " stringByAppendingString:e[@"name"]];
+     NSString* extensionId = e[@"id"];
+-    row.onPress = ^{
++    pin.onPress = ^{
+       AgensChrome* strong = weak;
+-      [strong closeMenu];
+-      if (strong && strong->_window) agens_extension_click(strong->_window, extensionId.UTF8String);
++      if (strong && strong->_window) agens_extension_set_pinned(strong->_window, extensionId.UTF8String, !pinned);
+     };
++    [row addSubview:pin];
+     [panel addSubview:row];
+   }
++  y -= 11;
++  NSView* line = [[NSView alloc] initWithFrame:NSMakeRect(9, y + 5, w - 18, 1)];
++  line.wantsLayer = YES;
++  line.layer.backgroundColor = CG(kLine, self);
++  [panel addSubview:line];
+   y -= rowH;
+-  AgensMenuRow* manage = [[AgensMenuRow alloc] initWithIcon:kIconSettings title:@"Gerenciar extensões" key:@""];
++  AgensMenuRow* manage = [[AgensMenuRow alloc] initWithIcon:kIconExtensions title:@"Gerenciar extensões…" key:@""];
+   manage.frame = NSMakeRect(5, y, w - 10, rowH);
+   manage.onPress = ^{
+     AgensChrome* strong = weak;
+@@ -5044,8 +5471,63 @@ - (void)showExtensions:(NSString*)notice {
+     [g_settings showSection:@"extensoes"];
+   };
+   [panel addSubview:manage];
++  _installedCard = NO;
+   [self presentPopover:panel anchor:_extButton];
+ }
++// Just installed (prototype #instalada): a calm card under the bar that says where it went and
++// offers to pin it; it goes by itself.
++- (void)showInstalled:(NSDictionary*)e {
++  const CGFloat w = 320, h = 128;
++  NSView* panel = [self popoverWidth:w height:h under:_extButton];
++  panel.accessibilityRole = NSAccessibilityGroupRole;
++  NSImageView* icon = [NSImageView imageViewWithImage:e[@"icon"] ?: AgensIcon(kIconExtensions)];
++  icon.frame = NSMakeRect(16, h - 14 - 18, 18, 18);
++  [panel addSubview:icon];
++  NSTextField* title = Label(13, NSFontWeightSemibold, kInk);
++  title.stringValue = [e[@"name"] stringByAppendingString:@" instalada"];
++  title.lineBreakMode = NSLineBreakByTruncatingTail;
++  title.frame = NSMakeRect(44, h - 14 - 18, w - 44 - 64, 18);
++  [panel addSubview:title];
++  NSTextField* ready = Label(12.5, NSFontWeightRegular, kDim);
++  ready.stringValue = @"pronta";
++  ready.textColor = Hex(0x7FD1A8, 1);  // prototype --ok
++  ready.alignment = NSTextAlignmentRight;
++  ready.frame = NSMakeRect(w - 16 - 56, h - 14 - 17, 56, 16);
++  [panel addSubview:ready];
++  NSTextField* text = [NSTextField wrappingLabelWithString:
++      [NSString stringWithFormat:@"No ato %@. Está no menu de extensões, no fim da barra. Fixe para deixar o ícone sempre à vista.",
++                                 _atoName.stringValue ?: @""]];
++  text.font = [NSFont systemFontOfSize:13];
++  text.textColor = kMute.color();
++  text.frame = NSMakeRect(14, 46, w - 28, 44);
++  [panel addSubview:text];
++  NSButton* pin = [NSButton buttonWithTitle:@"Fixar na barra" target:self action:@selector(pinInstalled:)];
++  pin.identifier = e[@"id"];
++  pin.keyEquivalent = @"\r";
++  NSButton* later = [NSButton buttonWithTitle:@"Agora não" target:self action:@selector(dismissInstalled:)];
++  CGFloat x = 14;
++  for (NSButton* b in @[ pin, later ]) {
++    [b sizeToFit];
++    b.frame = NSMakeRect(x, 12, NSWidth(b.frame), NSHeight(b.frame));
++    x += NSWidth(b.frame) + 8;
++    [panel addSubview:b];
++  }
++  [self presentPopover:panel anchor:_extButton];
++  _installedCard = YES;
++  __weak NSView* weakPanel = panel;
++  __weak AgensChrome* weak = self;
++  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
++    AgensChrome* strong = weak;
++    if (strong && weakPanel && strong->_menuView == weakPanel) [strong closeMenu];
++  });
++}
++- (void)dismissInstalled:(id)sender {
++  [self closeMenu];
++}
++- (void)pinInstalled:(NSButton*)button {
++  if (_window && button.identifier) agens_extension_set_pinned(_window, button.identifier.UTF8String, 1);
++  [self closeMenu];
++}
+ 
+ // --- Favoritos: the page, the bar and its menus.
+ - (void)setBookmarks:(const AgensBookmark*)bookmarks count:(int)count bar:(long long)bar {
+@@ -5094,6 +5576,89 @@ - (NSRect)roomForBar:(NSRect)page {
    page.size.height -= 32;
    return page;
  }
@@ -10476,7 +12652,7 @@ index 3c18c4eab1..20512b7de8 100644
  - (void)toggleBookmarkBar {
    [NSUserDefaults.standardUserDefaults setBool:!_barShown forKey:kBookmarkBarKey];
    [NSNotificationCenter.defaultCenter postNotificationName:kThemeChanged object:nil];  // every window
-@@ -5204,6 +5515,31 @@ - (void)answerPermission:(NSButton*)button {
+@@ -5204,6 +5769,31 @@ - (void)answerPermission:(NSButton*)button {
    if (_window) agens_window_permission_answer(_window, (AgensPermissionAnswer)button.tag);
    [self closeMenu];
  }
@@ -10508,7 +12684,7 @@ index 3c18c4eab1..20512b7de8 100644
  - (void)permissionGone {
    if (!_permissionAsked) return;
    _permissionAsked = NO;  // nothing to answer any more
-@@ -5412,6 +5748,9 @@ void agens_ui_permission_prompt(void* chrome, const char* site, const char* cons
+@@ -5412,6 +6002,9 @@ void agens_ui_permission_prompt(void* chrome, const char* site, const char* cons
    for (int i = 0; i < count; ++i) [list addObject:@(asks[i])];
    [(__bridge AgensChrome*)chrome askPermission:@(site) asks:list];
  }
@@ -10624,18 +12800,29 @@ index 2c467f4524..2aee2739bd 100644
    if (tab_groups::RestrictDownloadOnSyncedTabs() &&
        TabGroupSyncTabState::FromWebContents(web_contents)) {
 diff --git a/chrome/browser/extensions/extension_tab_util.cc b/chrome/browser/extensions/extension_tab_util.cc
-index dd919b9675..6e5a9ed8cc 100644
+index dd919b9675..fb3ec73d91 100644
 --- a/chrome/browser/extensions/extension_tab_util.cc
 +++ b/chrome/browser/extensions/extension_tab_util.cc
-@@ -3,6 +3,7 @@
+@@ -3,6 +3,8 @@
  // found in the LICENSE file.
  
  #include "chrome/browser/extensions/extension_tab_util.h"
 +#include "chrome/browser/agens/embed/agens_controlled.h"  // agens
++#include "chrome/browser/agens/embed/native_shell.h"  // agens
  
  #include <stddef.h>
  
-@@ -658,6 +659,11 @@ bool ExtensionTabUtil::GetTabById(int tab_id,
+@@ -223,7 +225,8 @@ bool ShouldOpenInTab(const Extension* extension) {
+ #if BUILDFLAG(IS_ANDROID)
+   return true;
+ #else
+-  return OptionsPageInfo::ShouldOpenInTab(extension);
++  // agens: the native shell has no chrome://extensions to embed the page in.
++  return OptionsPageInfo::ShouldOpenInTab(extension) || agens::IsNativeShellEnabled();
+ #endif
+ }
+ 
+@@ -658,6 +661,11 @@ bool ExtensionTabUtil::GetTabById(int tab_id,
        WebContents* target_contents = window->GetWebContentsAt(i);
        if (sessions::SessionTabHelper::IdForTab(target_contents).id() ==
            tab_id) {
@@ -10647,6 +12834,48 @@ index dd919b9675..6e5a9ed8cc 100644
          if (out_window) {
            *out_window = window;
          }
+diff --git a/chrome/browser/extensions/extension_view_host.cc b/chrome/browser/extensions/extension_view_host.cc
+index 725a484352..cb3927c5f3 100644
+--- a/chrome/browser/extensions/extension_view_host.cc
++++ b/chrome/browser/extensions/extension_view_host.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/extensions/extension_view_host.h"
++#include "chrome/browser/agens/embed/native_shell.h"  // agens
+ 
+ #include "chrome/browser/extensions/extension_view.h"
+ #include "chrome/browser/file_select_helper.h"
+@@ -192,6 +193,15 @@ void ExtensionViewHost::ResizeDueToAutoResize(content::WebContents* source,
+   view_->ResizeDueToAutoResize(source, new_size);
+ }
+ 
++content::JavaScriptDialogManager*
++ExtensionViewHost::GetJavaScriptDialogManager(content::WebContents* source) {
++  // agens: the embedded engine puts no window on screen; the host draws them.
++  if (content::JavaScriptDialogManager* host = agens::EmbeddedDialogManager()) {
++    return host;
++  }
++  return ExtensionHost::GetJavaScriptDialogManager(source);
++}
++
+ void ExtensionViewHost::RenderFrameCreated(
+     content::RenderFrameHost* frame_host) {
+   ExtensionHost::RenderFrameCreated(frame_host);
+diff --git a/chrome/browser/extensions/extension_view_host.h b/chrome/browser/extensions/extension_view_host.h
+index e21d9c7cee..e736c68919 100644
+--- a/chrome/browser/extensions/extension_view_host.h
++++ b/chrome/browser/extensions/extension_view_host.h
+@@ -112,6 +112,9 @@ class ExtensionViewHost
+       content::EyeDropperListener* listener) override;
+   void ResizeDueToAutoResize(content::WebContents* source,
+                              const gfx::Size& new_size) override;
++  // agens: embedded, a popup's dialogs go to the host app like a tab's.
++  content::JavaScriptDialogManager* GetJavaScriptDialogManager(
++      content::WebContents* source) override;
+ 
+   // content::WebContentsObserver
+   void RenderFrameCreated(content::RenderFrameHost* frame_host) override;
 diff --git a/chrome/browser/password_manager/chrome_password_manager_client.cc b/chrome/browser/password_manager/chrome_password_manager_client.cc
 index f7819e353a..f4194c180c 100644
 --- a/chrome/browser/password_manager/chrome_password_manager_client.cc
@@ -10776,10 +13005,10 @@ index be4b9162d1..60b6aca238 100644
      Profile* profile =
          Profile::FromBrowserContext(source_contents_->GetBrowserContext());
 diff --git a/chrome/browser/ui/webui_browser/BUILD.gn b/chrome/browser/ui/webui_browser/BUILD.gn
-index 98ada3ff32..4e4107a9a7 100644
+index 98ada3ff32..700ed64f5c 100644
 --- a/chrome/browser/ui/webui_browser/BUILD.gn
 +++ b/chrome/browser/ui/webui_browser/BUILD.gn
-@@ -81,8 +81,11 @@ source_set("impl") {
+@@ -81,9 +81,14 @@ source_set("impl") {
      # agens: the embed API and its platform-neutral side (docs/casca.md).
      "//chrome/browser/agens/embed/agens_adblock.cc",
      "//chrome/browser/agens/embed/agens_adblock.h",
@@ -10789,9 +13018,12 @@ index 98ada3ff32..4e4107a9a7 100644
 +    "//chrome/browser/agens/embed/agens_cookie_pool.cc",
 +    "//chrome/browser/agens/embed/agens_cookie_pool.h",
      "//chrome/browser/agens/embed/agens_embed.h",
++    "//chrome/browser/agens/embed/agens_extensions.cc",
++    "//chrome/browser/agens/embed/agens_extensions.h",
      "//chrome/browser/agens/embed/agens_window.h",
      "//chrome/browser/agens/embed/native_shell.cc",
-@@ -97,6 +100,28 @@ source_set("impl") {
+     "//chrome/browser/agens/embed/agens_import.cc",
+@@ -97,6 +102,30 @@ source_set("impl") {
  
    if (is_mac) {
      sources += [
@@ -10803,6 +13035,8 @@ index 98ada3ff32..4e4107a9a7 100644
 +      "//chrome/browser/agens/bridge/control_ops.h",
 +      "//chrome/browser/agens/bridge/control_page.cc",
 +      "//chrome/browser/agens/bridge/control_page.h",
++      "//chrome/browser/agens/bridge/extension_ops.cc",
++      "//chrome/browser/agens/bridge/extension_ops.h",
 +      "//chrome/browser/agens/bridge/ops.cc",
 +      "//chrome/browser/agens/bridge/ops.h",
 +      "//chrome/browser/agens/bridge/session_ops.cc",
@@ -10820,7 +13054,7 @@ index 98ada3ff32..4e4107a9a7 100644
        "//chrome/browser/agens/embed/native_shell_mac.mm",
        "//chrome/browser/agens/embed/import_chromium_keychain_mac.mm",
        "//chrome/browser/agens/ui/chrome_mac.mm",
-@@ -108,6 +133,7 @@ source_set("impl") {
+@@ -108,6 +137,7 @@ source_set("impl") {
        "LocalAuthentication.framework",
        "Security.framework",  # agens: importing from other browsers reads their Keychain key
      ]  # agens: Touch ID before showing a password
@@ -10828,7 +13062,7 @@ index 98ada3ff32..4e4107a9a7 100644
    }
  
    deps = [
-@@ -173,6 +199,8 @@ source_set("impl") {
+@@ -173,6 +203,8 @@ source_set("impl") {
      "//components/browser_apis/ui_controllers/toolbar:mojom",
      "//components/guest_contents/browser",
      "//components/input",
@@ -10837,7 +13071,7 @@ index 98ada3ff32..4e4107a9a7 100644
      "//components/omnibox/browser:vector_icons",
      "//components/sharing_message",
      "//components/surface_embed/browser",
-@@ -192,6 +220,7 @@ source_set("impl") {
+@@ -192,6 +224,7 @@ source_set("impl") {
  
    if (is_mac) {
      deps += [

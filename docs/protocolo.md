@@ -330,6 +330,37 @@ Também só adição à v1. O DevTools do Chromium abre numa janela própria do 
 
 **Erros novos.** Nenhum. **Operação nova:** `view.inspect`. **Ação nova:** `inspect` em `context_menu`.
 
+#### Passo 5.6: extensões
+
+Também só adições à v1. O hospedeiro lista as extensões de cada ato, desenha os botões delas (ícone, selo, título) por aba, mostra o popup de uma extensão como mais uma vista e instala de um arquivo. Tudo só da conexão do hospedeiro (de outra, `unauthorized`), com `id` e resposta. Motor mais antigo responde `unknown_op`.
+
+**O nome do campo.** Nas operações e nos eventos, a extensão vai em `extension` (o id dela, 32 letras de `a` a `p`). `id` já é o número do pedido: um `{"id": 7, ..., "id": "abc"}` perderia um dos dois. Dentro da lista de `extensions.list` e em `ui.ask` ela continua `id`.
+
+```
+→ {"id": 50, "op": "extensions.list", "ato": "Profile 1", "tab": "v3"}
+← {"id": 50, "ok": true, "extensions": [{"id": "iebb…", "name": "1Password", "version": "8.10.48", "enabled": true, "from": "store",
+     "action": true, "title": "1Password", "badge": "", "badge_color": "", "visible": true, "popup": true, "pinned": true, "options": true,
+     "permissions": ["Ler e mudar os dados de todos os sites"], "host_permissions": ["<all_urls>"], "atos": ["Profile 1", "Default"]}]}
+→ {"id": 51, "op": "extension.click", "tab": "v3", "extension": "iebb…"}
+← {"id": 51, "ok": true, "popup": "v12"}
+← {"event": "extension.popup", "popup": "v12", "tab": "v3", "extension": "iebb…", "width": 300, "height": 420}
+→ {"id": 52, "op": "view.attach", "tab": "v12", "width": 300, "height": 420, "scale": 2}
+```
+
+- **`extensions.list {ato, tab?}`** → `{extensions: [...]}`. As extensões que a pessoa instalou no ato (não as internas), cada uma com `id`, `name`, `version`, `enabled`, `from` (`"store"`, `"file"` para um `.crx`, `"folder"` para uma pasta descompactada), `action` (tem botão), `pinned` (fixada na barra; vale por ato e fica salvo), `options` (tem página de opções), `permissions` (textos prontos para mostrar), `host_permissions` (padrões de endereço) e `atos` (os ids dos atos que têm a extensão, este incluído). Com `action`, vêm também `title`, `badge` (`""` sem selo), `badge_color` (`"#RRGGBB"`, ou `""` para a cor do hospedeiro), `visible` (desligada nesta aba: desenhe apagada) e `popup` (o clique abre popup), como a aba `tab` mostra; sem `tab`, o padrão de todas as abas. Ato dormindo é acordado para a lista. Ato que não existe: `not_found`; `tab` que não existe: `not_found`.
+- **`extension.icon {ato, extension, tab?}`** → `{png}`. PNG de 32 px em base64: com `tab`, o ícone do botão naquela aba (o que a extensão mudou com `action.setIcon`, senão o do botão); sem `tab`, o da extensão. `""` quando não tem.
+- **`extension.enable {ato, extension, on}`**, **`extension.pin {ato, extension, on}`**: liga ou desliga; fixa na barra ou tira. `on` não booleano: `bad_request`.
+- **`extension.remove {ato, extension, all?}`**: tira do ato; com `all: true`, de todos os atos que a têm (os que dormem são acordados). Responde quando terminou.
+- **`extension.options {ato, extension}`** → `{tab}`: abre a página de opções numa aba nova do ato, como `view.open` (`chrome-extension://…/options.html`). Sem página de opções, ou extensão desligada: `not_found`.
+- **`extension.install {ato, crx}`** ou **`{ato, folder}`** → `{extension}` (o id) depois que ela entrou. Caminho absoluto de um arquivo `.crx` ou de uma pasta com `manifest.json` ("Adicionar de um arquivo"). Quem decide é a pessoa: o motor manda o `ui.ask` `extension` de sempre (com a escolha de atos, abaixo) e só instala com `allow`. Erros: `denied` (a pessoa disse não), `failed` (não instalou: arquivo estragado, manifesto inválido), `bad_request` (caminho relativo, que não existe, `.crx` que é pasta, pasta sem manifesto, os dois campos juntos). `.crx` e pasta não se atualizam sozinhos; a pasta fica ligada ao lugar onde está (mudou a pasta, mudou a extensão ao recarregar), e adicionar uma pasta liga o modo de desenvolvedor do ato (sem ele o Chromium desliga extensão descompactada). A resposta só vem depois da pessoa: pode demorar.
+- **`extension.click {tab, extension}`** → `{popup?}`: o mesmo que clicar no botão da extensão naquela aba. Quando a extensão abre popup, vem o id dele (`v<n>`, da mesma numeração das abas); senão a extensão tratou o clique sozinha e não vem nada. Extensão desligada ou sem botão: `not_found`. Aba que um agente está usando com `agent_extensions` desligado (`host.settings`): `denied`, como o botão da casca, que não faz nada ali.
+- **O popup.** É a página da extensão numa vista própria, que nunca aparece em `view.tab` nem em `view.tabs`. O hospedeiro faz com ela o que faz com uma aba ligada: `view.attach`, `view.resize`, `view.detach`, a entrada (`view.mouse`, `view.key`…) e os `ui.ask` dela (`select`, escolher arquivo, `alert`). O tamanho é o que a página pede, entre 25 × 25 e 800 × 600: vem em `extension.popup {popup, tab, extension, width, height}` quando ela carrega e de novo a cada mudança; ligue a vista nesse tamanho. Um popup por vez: abrir outro fecha o anterior. Fecha com `window.close()` da página, quando a aba dele navega para outro documento ou fecha, quando a extensão é desligada ou removida, quando o hospedeiro desconecta e com **`extension.popup.close {popup}`**, que o hospedeiro manda quando a pessoa clica fora ou aperta Esc fora dele (o motor não vê o foco do hospedeiro). Em todos os casos vem `extension.popup.closed {popup}` e o id deixa de valer (`not_found`). `view.close` no popup também fecha.
+- **Instalar com escolha de atos.** O `ui.ask` `extension` (passo 5.3, item 7) ganha `ato` (onde está sendo instalada), `id` (da extensão), `icon` (PNG pequeno, 32 px, base64) e, quando é uma instalação nova, `atos: [{id, name, color, installed}]` (todos os atos; `installed` diz quem já tem). O `from` pode vir também `"folder"`. A resposta `ui.answer {ask, allow: true, atos: ["Default", "Profile 3"]}` instala também nesses atos (sem `atos`, ou vazio, só no ato que pediu). O motor confere: `atos` só com `allow: true`, só ids que vieram no pedido, sem repetir; fora disso, `bad_request`. Depois que o ato que pediu tem a extensão, ela entra nos outros sem perguntar de novo (a escolha da pessoa já autorizou) e sem rede: uma cópia do que foi instalado (da loja ou de um `.crx`) ou a mesma pasta. Ato dormindo é acordado na hora para receber. Ato que já tem é pulado. Só esse pedido da pessoa espalha uma extensão por atos; nenhuma operação de agente faz isso. Uma extensão que abre uma aba de boas-vindas sozinha pode abrir essa aba fora do controle de um agente.
+- **Eventos.** `extension.changed {ato, extension, change}`, com `change` `installed`, `updated`, `enabled`, `disabled`, `removed` ou `pinned`, para qualquer ato acordado. `extension.action {ato, tab?, extension, title, badge, badge_color, visible, popup}` quando o botão muda (selo, título, ícone, visível); sem `tab`, mudou o padrão de todas as abas do ato; o ícone novo se pede com `extension.icon`. `extension.popup` e `extension.popup.closed`, acima.
+- **O que fica de fora nesta versão.** Instalar da loja pelo id, sem a página: depois. Instalar pela página da Chrome Web Store funciona como antes (o botão "Instalar no AgensBrowser" chega como `ui.ask`), agora com a escolha de atos. `alert` de uma página de fundo de extensão (não do popup) não chega ao hospedeiro.
+
+**Erros novos.** Nenhum. **Operações novas:** `extensions.list`, `extension.icon`, `extension.enable`, `extension.remove`, `extension.pin`, `extension.options`, `extension.install`, `extension.click`, `extension.popup.close`. **Eventos novos:** `extension.changed`, `extension.action`, `extension.popup`, `extension.popup.closed`. **Campos novos:** `ato`, `id`, `icon`, `atos` no `ui.ask` `extension`; `atos` no `ui.answer` dele.
+
 ## Erros
 
 | Código | Quando |
@@ -358,6 +389,9 @@ Também só adição à v1. O DevTools do Chromium abre numa janela própria do 
 | `view.agent_cursor` | `tab`, `x?`, `y?` | (passo 5.3, só o hospedeiro) Onde está o ponteiro do agente na página; sem `x` e `y`, não há o que desenhar. |
 | `ui.cancel` | `ask`, `reason` | (passo 5.3) O motor desistiu do pedido: `"closed"`, `"navigated"` ou `"gone"`. |
 | `view.picked` | `tab`, `selector`, `html`, `truncated?`, `text`, `text_truncated?`, `x`, `y`, `width`, `height`, `styles`, `png?`, `png_skipped?` / `tab`, `cancelled` | (passo 5.4, só o hospedeiro) A pessoa escolheu um elemento com `view.pick` (ou `view.pick.step` mudou a escolha) / o modo acabou sem escolha, ou o destaque da escolha sumiu. |
+| `extension.changed` | `ato`, `extension`, `change` | (passo 5.6, só o hospedeiro) Uma extensão foi instalada, atualizada, ligada, desligada, removida ou fixada/desafixada num ato acordado. |
+| `extension.action` | `ato`, `tab?`, `extension`, `title`, `badge`, `badge_color`, `visible`, `popup` | (passo 5.6, só o hospedeiro) O botão da extensão mudou naquela aba (sem `tab`: em todas as abas do ato). |
+| `extension.popup` / `extension.popup.closed` | `popup`, `tab`, `extension`, `width`, `height` / `popup` | (passo 5.6, só o hospedeiro) O popup tem (ou mudou) de tamanho / fechou. |
 | `control.stopped` | `reason` | O controle desta conexão acabou: `"user"` (a pessoa tocou na bolha de parar) ou `"sharing_changed"` (mudou o grupo de atos que compartilham cookies com este). |
 
 ## Regras de segurança que o cliente sente

@@ -65,7 +65,13 @@ public struct UIRequest: Sendable, Equatable {
       guard let name = message["name"]?.string else { return nil }
       kind = .extension(ExtensionInstall(
         name: name, version: string("version"), permissions: strings("permissions"),
-        hostPermissions: strings("host_permissions"), from: string("from")))
+        hostPermissions: strings("host_permissions"), from: string("from"), ato: message["ato"]?.string,
+        id: message["id"]?.string, icon: message["icon"]?.string.flatMap { Data(base64Encoded: $0) },
+        atos: (message["atos"]?.array ?? []).compactMap { item in
+          guard let item = item.object, let id = item["id"]?.string else { return nil }
+          return ExtensionInstall.Ato(
+            id: id, name: item["name"]?.string ?? id, color: item["color"]?.string, installed: item["installed"]?.bool ?? false)
+        }))
     default:
       return nil
     }
@@ -156,14 +162,32 @@ public struct PermissionRequest: Sendable, Equatable {
 
 /// An extension to install (`kind: "extension"`).
 public struct ExtensionInstall: Sendable, Equatable {
+  /// An ato it may go into as well (the prompt's "Onde instalar").
+  public struct Ato: Sendable, Equatable {
+    public let id: String
+    public let name: String
+    public let color: String?
+    /// It has the extension already.
+    public let installed: Bool
+  }
   public let name: String
   public let version: String
   /// Ready to show.
   public let permissions: [String]
   /// Address patterns.
   public let hostPermissions: [String]
-  /// The origin that asked, or `"store"` / `"file"`.
+  /// The origin that asked, or `"store"` / `"file"` (a .crx) / `"folder"` (unpacked).
   public let from: String
+  /// The ato it installs into first (nil from an older engine).
+  public var ato: String? = nil
+  /// The extension's id.
+  public var id: String? = nil
+  /// A small PNG of its icon.
+  public var icon: Data? = nil
+  /// Every ato, for the choice "only this ato" (the default) or "all", with a box per ato; empty
+  /// when there is no choice (an older engine, or a prompt that is not a new install). Answer
+  /// with `.extension(allow: true, atos:)`.
+  public var atos: [Ato] = []
 }
 
 /// The answer to a `UIRequest`, one case per kind, or `cancel` for any of them (no choice, dialog
@@ -180,7 +204,9 @@ public enum UIAnswer: Sendable, Equatable {
   case file(paths: [String])
   case auth(username: String, password: String)
   case permission(allow: Bool, remember: Bool = false)
-  case `extension`(allow: Bool)
+  /// `atos`: the ids of `ExtensionInstall.atos` it goes into as well (nil or empty: only the
+  /// asking ato); only with `allow`.
+  case `extension`(allow: Bool, atos: [String]? = nil)
   case cancel
 
   /// The fields of `ui.answer`, besides `ask`.
@@ -192,7 +218,8 @@ public enum UIAnswer: Sendable, Equatable {
     case .file(let paths): ["paths": .array(paths.map(JSON.string))]
     case .auth(let username, let password): ["username": .string(username), "password": .string(password)]
     case .permission(let allow, let remember): remember ? ["allow": .bool(allow), "remember": true] : ["allow": .bool(allow)]
-    case .extension(let allow): ["allow": .bool(allow)]
+    case .extension(let allow, let atos):
+      if allow, let atos, !atos.isEmpty { ["allow": true, "atos": .array(atos.map(JSON.string))] } else { ["allow": .bool(allow)] }
     case .cancel: ["cancel": true]
     }
   }

@@ -79,6 +79,12 @@ def launch(profile, *extra):
         time.sleep(0.5)
     print("FAIL: no socket after 30 s"); open(f"{OUT}/done", "w").write("1"); time.sleep(3600)
 
+# A second ato that sleeps from the start (listed in Local State, never loaded): step 5.6 installs
+# into it and must wake it.
+SLEEPER = "Profile 9"
+os.makedirs(f"{profile}/{SLEEPER}")
+json.dump({"profile": {"info_cache": {SLEEPER: {"name": "Gate dormindo", "is_using_default_name": False}}}},
+          open(f"{profile}/Local State", "w"))
 engine = launch(profile)
 open(f"{OUT}/engine.pid", "w").write(str(engine.pid))
 open(f"{OUT}/profile", "w").write(profile)
@@ -767,6 +773,173 @@ else:
     check("the agent working again ends the picker: view.picked cancelled", p.get("cancelled") is True, p)
     ap.ask("control.stop")
     c.ask("view.close", tab=vt)
+
+# Step 5.6: extensions for the host. The test extension has an action with a popup, a badge its
+# background script sets, and an options page; it goes in from its folder and from a .crx packed
+# here (CRX3, signed with a throwaway key by openssl: Chromium's own packer is the browser binary).
+EXT2 = os.environ["REPO"] + "/tools/sites-teste/extensao-acao"
+def varint(n):
+    out = b""
+    while True:
+        out += bytes([(n & 0x7F) | (0x80 if n > 0x7F else 0)]); n >>= 7
+        if not n: return out
+def field(num, data): return varint((num << 3) | 2) + varint(len(data)) + data
+def pack_crx(folder, out):
+    import hashlib, io, zipfile
+    key = f"{OUT}/crx-key.pem"
+    subprocess.run(["openssl", "genrsa", "-out", key, "2048"], check=True, capture_output=True)
+    der = subprocess.run(["openssl", "rsa", "-in", key, "-pubout", "-outform", "DER"], check=True, capture_output=True).stdout
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for name in sorted(os.listdir(folder)): z.write(os.path.join(folder, name), name)
+    archive, crx_id = buf.getvalue(), hashlib.sha256(der).digest()[:16]
+    signed = field(1, crx_id)                                         # SignedData.crx_id
+    message = b"CRX3 SignedData\x00" + struct.pack("<I", len(signed)) + signed + archive
+    signature = subprocess.run(["openssl", "dgst", "-sha256", "-sign", key], input=message, check=True, capture_output=True).stdout
+    header = field(2, field(1, der) + field(2, signature)) + field(10000, signed)  # sha256_with_rsa, signed_header_data
+    open(out, "wb").write(b"Cr24" + struct.pack("<II", 3, len(header)) + header + archive)
+    return "".join(chr(97 + (b >> 4)) + chr(97 + (b & 15)) for b in crx_id)
+def is_png(b64):
+    try: return base64.b64decode(b64 or "")[:8] == b"\x89PNG\r\n\x1a\n"
+    except Exception: return False
+def changed(ato_id, ext, change, timeout=30):
+    return c.event(lambda e: e["event"] == "extension.changed" and e.get("ato") == ato_id and e.get("extension") == ext
+                   and e.get("change") == change, timeout)
+def listed(ato_id, ext, **params):
+    r = c.ask("extensions.list", ato=ato_id, **params)
+    return next((x for x in r.get("extensions", []) if x.get("id") == ext), None)
+
+before = {x["id"]: x for x in c.ask("atos.list").get("atos", [])}
+sleeper_ok = SLEEPER in before and before[SLEEPER].get("asleep") is True
+check("step 5.6: the second ato is there and asleep before the install", sleeper_ok, before.get(SLEEPER))
+check("extensions.list from a connection that is not the host is unauthorized",
+      err(c2.ask("extensions.list", ato=ato)) == "unauthorized")
+check("extension.install with a relative path is bad_request", err(c.ask("extension.install", ato=ato, folder="tools/x")) == "bad_request")
+check("extension.install with a folder that does not exist is bad_request",
+      err(c.ask("extension.install", ato=ato, folder="/tmp/agens-no-such-extension")) == "bad_request")
+check("extension.install crx pointing at a folder is bad_request", err(c.ask("extension.install", ato=ato, crx=EXT2)) == "bad_request")
+check("extension.install with both crx and folder is bad_request",
+      err(c.ask("extension.install", ato=ato, crx="/tmp/a.crx", folder=EXT2)) == "bad_request")
+check("extension.install in an unknown ato is not_found", err(c.ask("extension.install", ato="Profile 404", folder=EXT2)) == "not_found")
+
+rid = c.send("extension.install", ato=ato, folder=EXT2)
+a = ui_ask("extension", None, 30)
+ext_id = (a or {}).get("id", "")
+offered = [x.get("id") for x in (a or {}).get("atos", [])]
+check("install from a folder asks the host: ui.ask extension with ato, id, icon, from folder",
+      bool(a) and a.get("ato") == ato and bool(re.fullmatch(r"[a-p]{32}", ext_id)) and is_png(a.get("icon"))
+      and a.get("from") == "folder", {k: v for k, v in (a or {}).items() if k != "icon"})
+check("the ask offers every ato (atos with id, name, color, installed)",
+      ato in offered and SLEEPER in offered and all({"id", "name", "color", "installed"} <= set(x) for x in a.get("atos", [])),
+      (a or {}).get("atos"))
+check("ui.answer with an ato the ask did not offer is bad_request", err(answer(a, allow=True, atos=["Profile 404"])) == "bad_request")
+check("ui.answer with atos and allow false is bad_request", err(answer(a, allow=False, atos=[SLEEPER])) == "bad_request")
+check("ui.answer allow with two atos", err(answer(a, allow=True, atos=[ato, SLEEPER])) == "ok")
+r = c.wait(rid, 60)
+check("extension.install answers the extension once it is in", r.get("ok") and r.get("extension") == ext_id, r)
+check("extension.changed installed in the asking ato", bool(changed(ato, ext_id, "installed")))
+check("extension.changed installed in the sleeping ato (woken for it)", bool(changed(SLEEPER, ext_id, "installed", 60)))
+mine, theirs = listed(ato, ext_id), listed(SLEEPER, ext_id)
+check("extensions.list shows it in the asking ato with both atos, from folder, action and options",
+      bool(mine) and set(mine.get("atos", [])) == {ato, SLEEPER} and mine.get("from") == "folder"
+      and mine.get("action") is True and mine.get("options") is True and mine.get("enabled") is True, mine)
+check("extensions.list shows it in the other ato too", bool(theirs) and set(theirs.get("atos", [])) == {ato, SLEEPER}, theirs)
+r = c.ask("extension.icon", ato=ato, extension=ext_id)
+check("extension.icon gives a PNG", r.get("ok") and is_png(r.get("png")), {k: v for k, v in r.items() if k != "png"})
+x = c.event(lambda e: e["event"] == "extension.action" and e.get("extension") == ext_id and e.get("ato") == ato and e.get("badge") == "7"
+              and e.get("badge_color"), 20)
+check("extension.action with the badge the background script set (and its color)",
+      bool(x) and x.get("badge_color") == "#D93025" and x.get("popup") is True and x.get("visible") is True, x)
+
+t = ui_tab("/form"); titled(t, "Form (test)")
+r = c.ask("extension.icon", ato=ato, extension=ext_id, tab=t)
+check("extension.icon with a tab gives the action's PNG", r.get("ok") and is_png(r.get("png")))
+mine = listed(ato, ext_id, tab=t)
+check("extensions.list with a tab carries the action as that tab shows it (title, badge)",
+      bool(mine) and mine.get("title") == "Gate action" and mine.get("badge") == "7", mine)
+r = c.ask("extension.click", tab=t, extension=ext_id)
+pop = r.get("popup", "")
+check("extension.click gives a popup id", r.get("ok") and bool(re.fullmatch(r"v[1-9][0-9]*", pop)) and pop != t, r)
+size = c.event(lambda e: e["event"] == "extension.popup" and e.get("popup") == pop, 20)
+check("extension.popup with its tab, extension and a size from its page",
+      bool(size) and size.get("tab") == t and size.get("extension") == ext_id and 25 <= size.get("width", 0) <= 800
+      and 25 <= size.get("height", 0) <= 600, size)
+w, h = (size or {}).get("width", 240), (size or {}).get("height", 120)
+r = c.ask("view.attach", tab=pop, width=w, height=h, scale=1)
+lp = c.event(lambda e: e["event"] == "view.layer" and e.get("tab") == pop, 20)
+check("view.attach on the popup gives it a layer", r.get("ok") and bool(lp) and lp.get("context", 0) > 0, lp or r)
+check("the popup is not a tab (no view.tab for it)", not any(e["event"] == "view.tab" and e.get("tab") == pop for e in c.events))
+check("extension.popup.close closes it", err(c.ask("extension.popup.close", popup=pop)) == "ok"
+      and bool(c.event(lambda e: e["event"] == "extension.popup.closed" and e.get("popup") == pop, 10)))
+check("extension.popup.close again is not_found", err(c.ask("extension.popup.close", popup=pop)) == "not_found")
+check("view.attach on the closed popup is not_found", err(c.ask("view.attach", tab=pop, width=w, height=h, scale=1)) == "not_found")
+r = c.ask("extension.click", tab=t, extension=ext_id)
+pop2 = r.get("popup", "")
+c.ask("view.navigate", tab=t, text=SITE + "/other")
+check("the tab navigating closes its popup", bool(pop2) and bool(c.event(lambda e: e["event"] == "extension.popup.closed" and e.get("popup") == pop2, 15)))
+
+check("extension.pin on", err(c.ask("extension.pin", ato=ato, extension=ext_id, on=True)) == "ok" and bool(changed(ato, ext_id, "pinned", 10)))
+check("extensions.list says pinned", (listed(ato, ext_id) or {}).get("pinned") is True)
+check("extension.pin without on is bad_request", err(c.ask("extension.pin", ato=ato, extension=ext_id)) == "bad_request")
+c.ask("extension.pin", ato=ato, extension=ext_id, on=False)
+check("extension.enable off: extension.changed disabled",
+      err(c.ask("extension.enable", ato=ato, extension=ext_id, on=False)) == "ok" and bool(changed(ato, ext_id, "disabled", 10)))
+check("extensions.list says off", (listed(ato, ext_id) or {}).get("enabled") is False)
+check("extension.click on an extension that is off is not_found", err(c.ask("extension.click", tab=t, extension=ext_id)) == "not_found")
+check("extension.enable on: extension.changed enabled",
+      err(c.ask("extension.enable", ato=ato, extension=ext_id, on=True)) == "ok" and bool(changed(ato, ext_id, "enabled", 10)))
+r = c.ask("extension.options", ato=ato, extension=ext_id)
+ot = r.get("tab", "")
+e = tab_event(ot, lambda e: e.get("url", "").startswith(f"chrome-extension://{ext_id}/options.html"), 15) if ot else None
+check("extension.options opens a tab at the extension's options page", r.get("ok") and bool(e), e or r)
+if ot: c.ask("view.close", tab=ot)
+check("extension.icon of an unknown extension is not_found", err(c.ask("extension.icon", ato=ato, extension="a" * 32)) == "not_found")
+
+ax = Conn()
+rid = ax.send("control.start", ato=ato, reason="gate ext click")
+x = c.event(lambda e: e["event"] == "approval.ask", 20)
+if x: c.ask("approval.answer", ask=x["ask"], answer="allow")
+if not (x and ax.wait(rid).get("ok")):
+    skip("extension.click on an agent's tab", "control.start did not go through")
+else:
+    c.pump(0.5)
+    c.events = [e for e in c.events if e["event"] != "view.tab"]   # an earlier agent's /form tab is gone
+    ax.ask("tab.open", ato=ato, url=SITE + "/form")
+    vt = (c.event(lambda e: e["event"] == "view.tab" and e.get("url", "").startswith(SITE + "/form")
+                  and isinstance(e.get("control"), dict), 10) or {}).get("tab")
+    c.ask("host.settings", agent_extensions=False)
+    r = c.ask("extension.click", tab=vt, extension=ext_id) if vt else {}
+    check("extension.click on an agent's tab with agent_extensions off is denied", err(r) == "denied", f"{vt}: {r}")
+    c.ask("host.settings", agent_extensions=True)
+    ax.ask("control.stop")
+c.ask("view.close", tab=t)
+
+rid = c.send("extension.install", ato=ato, folder=EXT2)
+a = ui_ask("extension", None, 30)
+check("install again, the ask says which atos have it", bool(a) and all(x.get("installed") for x in a.get("atos", []) if x.get("id") in (ato, SLEEPER)), (a or {}).get("atos"))
+answer(a, allow=False)
+check("the person saying no answers extension.install denied", err(c.wait(rid, 30)) == "denied")
+r = c.ask("extension.remove", ato=ato, extension=ext_id, all=True)
+check("extension.remove all removes it from both atos", r.get("ok") and bool(changed(ato, ext_id, "removed", 20))
+      and bool(changed(SLEEPER, ext_id, "removed", 30)) and not listed(ato, ext_id) and not listed(SLEEPER, ext_id), r)
+
+crx = f"{OUT}/acao.crx"
+try: crx_id = pack_crx(EXT2, crx)
+except Exception as ex: crx_id = ""; print(f"could not pack: {ex}")
+if not crx_id:
+    skip("installing from a .crx", "the packer did not run")
+else:
+    rid = c.send("extension.install", ato=ato, crx=crx)
+    a = ui_ask("extension", None, 30)
+    check("install from a .crx asks the host (from file, the crx's id)", bool(a) and a.get("from") == "file" and a.get("id") == crx_id,
+          {k: v for k, v in (a or {}).items() if k != "icon"})
+    answer(a, allow=True)
+    r = c.wait(rid, 60)
+    mine = listed(ato, crx_id)
+    check("the .crx installs in the asking ato only, from file", r.get("extension") == crx_id and bool(mine)
+          and mine.get("from") == "file" and mine.get("atos") == [ato], mine or r)
+    c.ask("extension.remove", ato=ato, extension=crx_id)
+    check("extension.remove (this ato) removes the .crx's", bool(changed(ato, crx_id, "removed", 20)) and not listed(ato, crx_id))
 
 # Allowing notifications is kept for the site (Chromium has no one-time grant for them), so this goes last.
 t = ui_tab("/ui/perm?geo=0")

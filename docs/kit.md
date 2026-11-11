@@ -136,7 +136,7 @@ engine.onUIRequest = { [weak engine] in await engine?.presentDefaultUI($0) ?? .c
 ```
 
 - `select` e botão direito: `NSMenu` no ponto da página.
-- Diálogo, login, permissão e extensão: folha na janela da vista. Login tem usuário e senha; permissão tem **Permitir**, **Não permitir** e **Lembrar**.
+- Diálogo, login, permissão e extensão: folha na janela da vista. Login tem usuário e senha; permissão tem **Permitir**, **Não permitir** e **Lembrar**; extensão tem a escolha de atos (veja "Extensões", abaixo).
 - Arquivo: `NSOpenPanel` ou `NSSavePanel`. Não filtra pelo `accept`.
 - Sem a vista da aba (ou sem janela, nas folhas), a resposta é cancelar.
 
@@ -208,6 +208,29 @@ try await engine.inspect(tab, at: CGPoint(x: 120, y: 80))       // Elements no e
 - A janela fecha sozinha quando a aba fecha ou quando o app desconecta do motor (inclusive ao sair).
 - Abrir o DevTools desliga o `pick` daquela aba (chega `.cancelled`): os dois usam o mesmo modo da página.
 - Motor mais antigo lança `unknown_op` e não oferece `inspect` no menu; nada mais muda.
+
+## Extensões
+
+As extensões de cada ato, os botões delas por aba, o popup e instalar de um arquivo ([protocolo.md](protocolo.md), "Passo 5.6").
+
+```swift
+let list = try await connection.extensions(in: ato, tab: tab)        // [BrowserExtension]
+for e in list where e.pinned { drawButton(e.id, e.action) }           // action: título, selo, cor, visível
+let png = try await connection.extensionIcon(e.id, ato: ato, tab: tab)   // Data? (PNG 32 px)
+engine.onExtensionAction = { update in redraw(update.id, update.tab, update.state) }   // tab nil: todas as abas
+engine.onExtensionChange = { change in reload(change.ato) }           // installed, removed, pinned…
+
+if let popup = try await connection.clickExtension(e.id, tab: tab) { opened(popup) }
+engine.onExtensionPopup = { [weak engine] popup in engine?.presentExtensionPopup(popup, from: button) }
+```
+
+- `BrowserExtension`: `id`, `name`, `version`, `enabled`, `source` (`.store`, `.file`, `.folder`), `pinned`, `hasOptions`, `permissions`, `hostPermissions`, `atos` (os ids dos atos que têm) e `action` (`ExtensionActionState`: `title`, `badge`, `badgeColor`, `visible`, `hasPopup`; `nil` sem botão).
+- `setExtension(_:ato:enabled:)`, `pinExtension(_:ato:pinned:)`, `removeExtension(_:ato:everywhere:)` (`everywhere`: de todos os atos que têm), `openExtensionOptions(_:ato:)` (devolve a aba nova).
+- **Popup.** `clickExtension` devolve o id do popup (ou `nil`, quando a extensão tratou o clique sozinha); o tamanho que a página quer chega em `onExtensionPopup`, de novo a cada mudança. `presentExtensionPopup(_:from:)` mostra num `NSPopover` transitório sob o botão, com a vista do popup (`BrowserTabView(engine:tab:)`, a mesma das abas): segue o tamanho, e clicar fora ou Esc fecha e avisa o motor (`closeExtensionPopup`). Fechado pelo motor (`window.close()`, a aba navegou, extensão desligada), chega `onExtensionPopupClosed` e o popover fecha sozinho. Para desenhar o seu, ponha a `BrowserTabView` do popup onde quiser e chame `closeExtensionPopup` quando a pessoa clicar fora.
+- **Instalar de um arquivo.** `installExtension(ato:from:)` com a URL de um `.crx` ou de uma pasta descompactada: o motor pergunta à pessoa (o `ui.ask` de extensão, abaixo) e só volta depois que ela respondeu e a extensão entrou, com o id. `denied` se ela disse não, `failed` se não instalou, `bad_request` para um caminho que não serve.
+- **A pergunta de instalar** (`UIRequest.Kind.extension`) traz agora `ato`, `id`, `icon` (PNG) e `atos` (`[ExtensionInstall.Ato]`: `id`, `name`, `color`, `installed`). Responda `.extension(allow: true, atos: [...])` para instalar também nesses atos; sem `atos`, só no ato que pediu. O `presentDefaultUI` já desenha a escolha: "Só no ato X" (padrão) ou "Em todos os atos", com uma caixa por ato (o atual e os que já têm ficam marcados e travados), e o botão diz para onde vai ("Instalar no ato X", "Instalar em 3 atos").
+- Na aba que um agente está usando com `agentExtensions` desligado, `clickExtension` lança `denied`.
+- Motor mais antigo lança `unknown_op` nas operações e manda a pergunta de instalar sem `atos`: a folha fica sem a escolha e a resposta vai sem `atos`.
 
 ## O que não está no kit
 

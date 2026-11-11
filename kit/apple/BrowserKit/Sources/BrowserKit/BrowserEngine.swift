@@ -150,6 +150,16 @@ public struct HostSettings: Sendable, Equatable {
   @ObservationIgnored public var contextMenuItems: [HostMenuItem] = []
   /// Which of `contextMenuItems` was chosen, with the menu's request (tab, point, link, selection).
   @ObservationIgnored public var onContextMenuItem: ((HostMenuItem, UIRequest) -> Void)?
+  /// An extension was installed, updated, turned on or off, removed or pinned in an ato.
+  @ObservationIgnored public var onExtensionChange: ((ExtensionChange) -> Void)?
+  /// An action's badge, title, icon or visibility changed (redraw that button).
+  @ObservationIgnored public var onExtensionAction: ((ExtensionActionUpdate) -> Void)?
+  /// A popup's size, first after `clickExtension`, then on every change. `presentExtensionPopup`
+  /// shows it under its button; a popup it shows follows the new size by itself.
+  @ObservationIgnored public var onExtensionPopup: ((ExtensionPopup) -> Void)?
+  /// A popup closed (`window.close()`, its tab navigated or closed, the extension went off, or
+  /// `closeExtensionPopup`). One `presentExtensionPopup` showed closes by itself.
+  @ObservationIgnored public var onExtensionPopupClosed: ((String) -> Void)?
   /// Every event, after the kit has handled the ones it knows.
   @ObservationIgnored public var onEvent: ((String, [String: JSON]) -> Void)?
 
@@ -158,6 +168,8 @@ public struct HostSettings: Sendable, Equatable {
   @ObservationIgnored private var views: [String: WeakView] = [:]
   /// The handlers of the `ui.ask`s still open, by `ask`.
   @ObservationIgnored private var uiTasks: [String: Task<Void, Never>] = [:]
+  /// The popups `presentExtensionPopup` shows, by popup id.
+  @ObservationIgnored var popups: [String: ExtensionPopupPresenter] = [:]
 
   /// - Parameters:
   ///   - executable: the engine binary, e.g. `Contents/Helpers/AgensBrowser.app/Contents/MacOS/AgensBrowser`.
@@ -326,6 +338,25 @@ public struct HostSettings: Sendable, Equatable {
         if let ask = message["ask"]?.string { uiTasks.removeValue(forKey: ask)?.cancel() }
       case "view.picked":
         if let result = PickResult(message: message) { onPick?(result) }
+      case "extension.changed":
+        if let ato = message["ato"]?.string, let id = message["extension"]?.string, let change = message["change"]?.string {
+          onExtensionChange?(ExtensionChange(ato: ato, id: id, kind: ExtensionChange.Kind(change)))
+        }
+      case "extension.action":
+        if let ato = message["ato"]?.string, let id = message["extension"]?.string {
+          onExtensionAction?(ExtensionActionUpdate(
+            ato: ato, tab: message["tab"]?.string, id: id, state: ExtensionActionState(message: message, name: id)))
+        }
+      case "extension.popup":
+        if let popup = ExtensionPopup(message: message) {
+          popups[popup.popup]?.resize(to: popup.size)
+          onExtensionPopup?(popup)
+        }
+      case "extension.popup.closed":
+        if let popup = message["popup"]?.string {
+          popups.removeValue(forKey: popup)?.closed()
+          onExtensionPopupClosed?(popup)
+        }
       default:
         break
       }
@@ -396,6 +427,8 @@ public struct HostSettings: Sendable, Equatable {
     views = [:]
     uiTasks.values.forEach { $0.cancel() }
     uiTasks = [:]
+    popups.values.forEach { $0.closed() }
+    popups = [:]
     if let process, process.isRunning { process.terminate() }
     process = nil
   }
