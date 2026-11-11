@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Local test sites for the AgensBrowser socket phases. Binds 127.0.0.1 only. Usage: serve.py [PORT]"""
-import http.server, json, sys, urllib.parse
+import base64, http.server, json, sys, urllib.parse
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-PAGES = {"/login": "login.html", "/app/": "app.html", "/form": "form.html", "/other": "other.html", "/agent": "agent.html", "/post": "post.html"}
+PAGES = {"/login": "login.html", "/app/": "app.html", "/form": "form.html", "/other": "other.html", "/agent": "agent.html", "/post": "post.html",
+         "/ui/dialog": "ui-dialog.html", "/ui/perm": "ui-perm.html", "/ui/pick": "ui-pick.html"}
 SID = "sid-fake-123"  # fake test values only
 SEEN = {}  # /whoami tag -> whether that request carried the login cookie (in memory only)
 
@@ -47,11 +48,21 @@ class H(http.server.BaseHTTPRequestHandler):
             auth = self.headers.get("Authorization", "")
             return self.reply(200, ('{"ok": true, "bearer": %s}' % str(auth == "Bearer test-bearer-123").lower()).encode(),
                               ctype="application/json")
+        if path == "/auth" or path.startswith("/auth/"):
+            return self.basic_auth(path)
         if self.path == "/login?auto=1":  # logs in by itself, for gates that cannot type
             return self.login()
         if path in PAGES:
             return self.reply(200, (HERE / PAGES[path]).read_bytes())
         self.reply(404, b"not found")
+
+    def basic_auth(self, path):
+        # One realm per path: Chromium answers a repeated realm from its auth cache without asking again.
+        realm = "teste" if path == "/auth" else "teste-" + path[len("/auth/"):]
+        if self.headers.get("Authorization") == "Basic " + base64.b64encode(b"test-user:fake-password").decode():
+            return self.reply(200, b'<!doctype html><meta charset="utf-8"><title>Auth ok</title><h1>Auth ok</h1>')
+        self.reply(401, b'<!doctype html><meta charset="utf-8"><title>Auth 401</title><h1>Auth 401</h1>',
+                   [("WWW-Authenticate", 'Basic realm="%s"' % realm.replace('"', ""))])
 
     def login(self):
         self.redirect("/app/", [f"sid={SID}; Path=/; Max-Age=3600; HttpOnly", "d=fake-d-cookie-456; Path=/; Max-Age=3600"])  # persistent: they survive a browser restart

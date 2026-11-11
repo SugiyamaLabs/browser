@@ -38,6 +38,11 @@ def check(name, ok, detail=""):
     if not ok: failed.append(name)
 
 profile = tempfile.mkdtemp(prefix="agens-e.", dir="/tmp")   # short: a socket path is limited to 104 bytes
+# The browser blocks geolocation and notifications by default, so a site never gets to ask. The
+# permission checks need "ask" (3) on this throwaway ato.
+os.makedirs(f"{profile}/Default")
+with open(f"{profile}/Default/Preferences", "w") as f:
+    json.dump({"profile": {"default_content_setting_values": {"geolocation": 3, "notifications": 3}}}, f)
 SOCK = profile + "/agens.sock"
 def launch(profile, *extra):
     log = open(f"{OUT}/engine{'-' + extra[0].strip('-') if extra else ''}.log", "w")
@@ -256,6 +261,215 @@ if e:
 c.ask("view.close", tab=t2)
 check("view.close sends view.closed", bool(c.event(lambda e: e["event"] == "view.closed" and e.get("tab") == t2)))
 c.ask("view.detach", tab=t1)
+
+# Step 5.3: the host draws menus, dialogs and requests (ui.ask / ui.answer). Every result is read from
+# the tab's title, the only thing this host sees of a page. Nothing here clicks or types on the system.
+def skip(name, why): print(f"SKIP: {name} ({why})", flush=True)
+def ui_ask(kind, tab=None, timeout=20):
+    return c.event(lambda e: e["event"] == "ui.ask" and e.get("kind") == kind and (tab is None or e.get("tab") == tab), timeout)
+def ui_tab(path):  # a fresh attached tab, so no title or permission of an earlier check carries over
+    t = c.ask("view.open", ato=ato, url=SITE + path).get("tab", "")
+    c.ask("view.attach", tab=t, width=600, height=400, scale=1)
+    return t
+def titled(tab, title, timeout=10):
+    return bool(tab_event(tab, lambda e: e.get("title") == title, timeout))
+def answer(a, **fields): return c.ask("ui.answer", ask=(a or {}).get("ask", "none"), **fields)
+
+# dialog on a tab without an agent
+t = ui_tab("/ui/dialog?auto=confirm")
+a = ui_ask("dialog", t)
+check("ui.ask dialog reaches the host for a tab without an agent (type, message, origin)",
+      bool(a) and a.get("type") == "confirm" and a.get("message") == "Proceed?" and a.get("origin") == SITE, a)
+check("ui.answer from a connection that is not the host is unauthorized",
+      err(c2.ask("ui.answer", ask=(a or {}).get("ask", "none"), accept=True)) == "unauthorized")
+check("ui.answer without ask is bad_request", err(c.ask("ui.answer", accept=True)) == "bad_request")
+check("ui.answer with a field of another kind (index) is bad_request", err(answer(a, index=0)) == "bad_request")
+check("ui.answer with text on a confirm is bad_request", err(answer(a, text="x")) == "bad_request")
+check("ui.answer with a non-boolean accept is bad_request", err(answer(a, accept="yes")) == "bad_request")
+check("ui.answer accept on a dialog", err(answer(a, accept=True)) == "ok")
+check("the page got confirm() == true", titled(t, "confirm:true"))
+check("ui.answer for an ask already answered is not_found", err(answer(a, accept=True)) == "not_found")
+check("ui.answer for an unknown ask is not_found", err(c.ask("ui.answer", ask="u999999", accept=True)) == "not_found")
+c.ask("view.close", tab=t)
+for kind, label, fields, want in [
+        ("confirm", "refuse", dict(accept=False), "confirm:false"),
+        ("confirm", "cancel", dict(cancel=True), "confirm:false"),
+        ("alert", "accept", dict(accept=True), "alert:done"),
+        ("prompt", "accept with text", dict(accept=True, text="gate-text"), "prompt:gate-text"),
+        ("prompt", "refuse", dict(accept=False), "prompt:null"),
+        ("prompt", "cancel", dict(cancel=True), "prompt:null")]:
+    t = ui_tab("/ui/dialog?auto=" + kind)
+    a = ui_ask("dialog", t)
+    check(f"dialog {kind}: ui.ask has the type" + (" and the default" if kind == "prompt" else ""),
+          bool(a) and a.get("type") == kind and (kind != "prompt" or a.get("default") == "anon"), a)
+    check(f"dialog {kind}: ui.answer {label} gives {want} in the page", err(answer(a, **fields)) == "ok" and titled(t, want))
+    c.ask("view.close", tab=t)
+skip("dialog beforeunload", "needs a click or a key on the page first (sticky user activation); the gate has no input")
+
+# the page or the tab ends a request: ui.cancel
+t = ui_tab("/ui/dialog?auto=confirm"); a = ui_ask("dialog", t)
+c.ask("view.close", tab=t)
+x = c.event(lambda e: e["event"] == "ui.cancel" and e.get("ask") == (a or {}).get("ask"), 10)
+check("ui.cancel (closed) when the tab closes with a dialog open", bool(x) and x.get("reason") == "closed", x)
+check("answering a request cancelled by the tab closing is not_found", err(answer(a, accept=True)) == "not_found")
+t = ui_tab("/ui/dialog?auto=confirm"); a = ui_ask("dialog", t)
+c.ask("view.navigate", tab=t, text=SITE + "/other")
+x = c.event(lambda e: e["event"] == "ui.cancel" and e.get("ask") == (a or {}).get("ask"), 10)
+check("ui.cancel (navigated) when the tab navigates with a dialog open", bool(x) and x.get("reason") == "navigated", x)
+check("answering a request cancelled by navigation is not_found", err(answer(a, accept=True)) == "not_found")
+c.ask("view.close", tab=t)
+skip("ui.cancel with reason gone", "the page has to give up on its own request; no test page does that")
+
+# HTTP login
+AUTH_USER, AUTH_PW = "test-user", "fake-password"   # the test site's fake values
+# the cancel check goes first: once a credential is accepted Chromium sends it to the other paths by itself
+t = ui_tab("/auth/cancel"); a = ui_ask("auth", t)
+check("auth realm of another path", bool(a) and a.get("realm") == "teste-cancel", a)
+check("auth ui.answer cancel shows the 401 page", err(answer(a, cancel=True)) == "ok" and titled(t, "Auth 401"))
+c.ask("view.close", tab=t)
+t = ui_tab("/auth")
+a = ui_ask("auth", t)
+check("ui.ask auth reaches the host (origin, realm, no proxy, no retry)",
+      bool(a) and a.get("origin") == SITE and a.get("realm") == "teste" and a.get("proxy") is False and not a.get("retry"), a)
+check("the auth ask carries no username or password", bool(a) and not {"username", "password"} & set(a), sorted(a or {}))
+check("auth ui.answer without a password is bad_request", err(answer(a, username=AUTH_USER)) == "bad_request")
+check("auth ui.answer with a dialog field (accept) is bad_request", err(answer(a, accept=True)) == "bad_request")
+check("auth ui.answer with a wrong password", err(answer(a, username=AUTH_USER, password="wrong-password")) == "ok")
+a2 = ui_ask("auth", t)
+check("a refused credential asks again, with retry", bool(a2) and a2.get("retry") is True, a2)
+check("auth ui.answer with the right credential", err(answer(a2, username=AUTH_USER, password=AUTH_PW)) == "ok")
+check("the right credential loads the page", titled(t, "Auth ok"))
+c.ask("view.close", tab=t)
+c.pump(0.5)
+engine_log = open(f"{OUT}/engine.log", errors="replace").read()
+leaks = sum(s in engine_log or s in json.dumps([a, a2]) for s in ("wrong-password", AUTH_PW))   # a count: never print them
+check("the engine log and the auth asks have none of the passwords", leaks == 0, f"{leaks} found")
+
+# permission: no remember, and a fresh tab each time (an allowed-once permission lives as long as its tab)
+# deny: geolocation then notifications. allow: notifications only, because allowing geolocation can make
+# macOS ask for Location Services on the real screen.
+t = ui_tab("/ui/perm")
+a = ui_ask("permission", t)
+check("permission deny: geolocation reaches the host (origin, permission)",
+      bool(a) and a.get("permission") == "geolocation" and a.get("origin") == SITE, a)
+check("permission ui.answer with allow not a boolean is bad_request", err(answer(a, allow="yes")) == "bad_request")
+check("permission ui.answer with index is bad_request", err(answer(a, index=0)) == "bad_request")
+check("permission ui.answer with remember and no allow is bad_request", err(answer(a, remember=True)) == "bad_request")
+answer(a, allow=False)
+a = ui_ask("permission", t)
+check("permission deny: notifications reach the host after geolocation",
+      bool(a) and a.get("permission") == "notifications" and a.get("origin") == SITE, a)
+answer(a, allow=False)
+check("permission deny shows in the page title", titled(t, "perm geo=denied notif=no"))
+c.ask("view.close", tab=t)
+t = ui_tab("/ui/perm?geo=0")
+a = ui_ask("permission", t)
+check("permission allow: notifications reach the host", bool(a) and a.get("permission") == "notifications", a)
+answer(a, allow=True)
+check("permission allow shows in the page title", titled(t, "perm geo=skipped notif=granted"))
+c.ask("view.close", tab=t)
+
+# a tab WITH an agent
+ag = Conn()
+rid = ag.send("control.start", ato=ato, reason="gate")
+x = c.event(lambda e: e["event"] == "approval.ask", 20)
+if x: c.ask("approval.answer", ask=x["ask"], answer="allow")
+agent_ok = bool(x) and ag.wait(rid).get("ok")
+check("agent: control.start for the ui checks", agent_ok)
+if not agent_ok:
+    skip("ui checks on tabs with an agent", "control.start did not go through")
+else:
+    def host_tab(path, timeout=10):  # the host's v<n> id of a tab the agent opened
+        e = c.event(lambda e: e["event"] == "view.tab" and e.get("url", "").startswith(SITE + path) and isinstance(e.get("control"), dict), timeout)
+        return (e or {}).get("tab")
+    r = ag.ask("tab.open", ato=ato, url=SITE + "/ui/perm")
+    a = ui_ask("permission")
+    vt = (a or {}).get("tab")
+    check("agent tab: permission reaches the host while the agent is working",
+          bool(a) and a.get("permission") == "geolocation" and bool(vt), a)
+    check("agent tab: the host sees that tab with the agent working",
+          bool(vt) and bool(tab_event(vt, lambda e: (e.get("control") or {}).get("state") == "working", 5)))
+    answer(a, allow=False)
+    a = ui_ask("permission", vt)
+    check("agent tab: notifications also reach the host", bool(a) and a.get("permission") == "notifications", a)
+    answer(a, allow=False)
+    check("agent tab: the host's answers reach the page", titled(vt, "perm geo=denied notif=no"))
+
+    r = ag.ask("tab.open", ato=ato, url=SITE + "/ui/dialog?auto=confirm")
+    pd = ag.event(lambda e: e["event"] == "page.dialog", 10)
+    vt = host_tab("/ui/dialog")
+    check("agent tab: the dialog goes to the agent as page.dialog",
+          bool(pd) and pd.get("type") == "confirm" and pd.get("tab") == r.get("tab"), pd)
+    check("agent tab: the dialog does not reach the host as ui.ask",
+          c.event(lambda e: e["event"] == "ui.ask" and e.get("kind") == "dialog", 2) is None)
+    ag.ask("page.dialog", tab=r.get("tab"), action="accept")
+    check("agent tab: page.dialog accept reaches the page", bool(vt) and titled(vt, "confirm:true"))
+
+    ag.ask("tab.open", ato=ato, url=SITE + "/auth/agent")
+    check("agent tab: HTTP login does not reach the host while the agent works", ui_ask("auth", None, 3) is None)
+
+    r = ag.ask("tab.open", ato=ato, url=SITE + "/ui/pick")
+    at = r.get("tab")
+    vt = host_tab("/ui/pick")
+    c.ask("view.attach", tab=vt, width=800, height=600, scale=1)
+    def node(role, name):
+        return next((n for n in ag.ask("page.snapshot", tab=at).get("nodes", []) if n.get("role") == role and n.get("name") == name), None)
+    def ref(role, name): return (node(role, name) or {}).get("ref", "none")
+
+    # the cursor and the caret, provoked by the agent's own hover and click (no system input)
+    ag.ask("page.hover", tab=at, ref=ref("link", "Other page"))
+    x = c.event(lambda e: e["event"] == "view.cursor" and e.get("tab") == vt and e.get("cursor") == "pointer", 5)
+    check("view.cursor pointer when the agent hovers a link", bool(x), x)
+    ag.ask("page.click", tab=at, ref=ref("textField", "Text"))
+    x = c.event(lambda e: e["event"] == "view.caret" and e.get("tab") == vt, 5)
+    check("view.caret (x, y, width, height) when the agent focuses a text field",
+          bool(x) and all(isinstance(x.get(k), (int, float)) for k in ("x", "y", "width", "height")), x)
+
+    # file and select open only on a page's own timer, after a click: the agent clicks, the person takes over
+    ag.ask("page.click", tab=at, ref=ref("button", "Open file later"))
+    check("agent tab: a file chooser does not reach the host while the agent works", ui_ask("file", vt, 4) is None)
+    ag.ask("page.click", tab=at, ref=ref("button", "Open select later"))
+    check("agent tab: a select menu does not reach the host while the agent works", ui_ask("select", vt, 4) is None)
+    def pick(button):  # the agent clicks, then Assumir before the page's timer fires
+        c.ask("view.control", tab=vt, action="give")
+        ag.ask("page.click", tab=at, ref=ref("button", button))
+        c.ask("view.control", tab=vt, action="take")
+
+    tmp = tempfile.mkdtemp(prefix="agens-f.", dir="/tmp")
+    f1, f2 = tmp + "/gate-a.txt", tmp + "/gate-b.txt"
+    for f in (f1, f2): open(f, "w").write("fake")
+    pick("Open file later")
+    a = ui_ask("file", vt, 10)
+    check("file: ui.ask reaches the host after Assumir (mode open, accept)",
+          bool(a) and a.get("mode") == "open" and ".txt" in (a.get("accept") or []), a)
+    check("file: a path that does not exist is bad_request", err(answer(a, paths=[tmp + "/missing.txt"])) == "bad_request")
+    check("file: a directory in mode open is bad_request", err(answer(a, paths=[tmp])) == "bad_request")
+    check("file: two paths in mode open is bad_request", err(answer(a, paths=[f1, f2])) == "bad_request")
+    check("file: ui.answer with a dialog field (accept) is bad_request", err(answer(a, accept=True)) == "bad_request")
+    check("file: ui.answer with one temp file", err(answer(a, paths=[f1])) == "ok")
+    check("the page got the chosen file name", titled(vt, "file:gate-a.txt"))
+    pick("Open files later")
+    a = ui_ask("file", vt, 10)
+    check("file: ui.ask for a multiple input is open_multiple", bool(a) and a.get("mode") == "open_multiple", a)
+    check("file: ui.answer with two temp files", err(answer(a, paths=[f1, f2])) == "ok")
+    check("the page got both file names", titled(vt, "files:gate-a.txt,gate-b.txt"))
+    pick("Open file later")
+    a = ui_ask("file", vt, 10)
+    check("file: ui.answer cancel", bool(a) and err(answer(a, cancel=True)) == "ok", a)
+
+    pick("Open select later")
+    a = ui_ask("select", vt, 10)
+    check("select: ui.ask reaches the host after Assumir (items, selected, x, y, width)",
+          bool(a) and [i.get("label") for i in a.get("items", [])] == ["Brasil", "Chile", "Peru"] and a.get("selected") == 0
+          and all(isinstance(a.get(k), (int, float)) for k in ("x", "y", "width")), a)
+    check("select: the disabled item is bad_request", err(answer(a, index=1)) == "bad_request")
+    check("select: an index past the list is bad_request", err(answer(a, index=3)) == "bad_request")
+    check("select: ui.answer with a dialog field (accept) is bad_request", err(answer(a, accept=True)) == "bad_request")
+    check("select: ui.answer with the third item", err(answer(a, index=2)) == "ok")
+    check("the page got the chosen option", titled(vt, "select:pe"))
+    ag.ask("control.stop")
+    subprocess.run(["rm", "-rf", tmp])
+skip("context_menu", "needs a right click: view.mouse takes a serialized NSEvent (CGEventCreateData) and this gate has no way to build one (select is covered above through the page's own showPicker())")
 
 check("engine still running", engine.poll() is None)
 print("parent: " + ("all passed" if not failed else "failed: " + ", ".join(failed)), flush=True)

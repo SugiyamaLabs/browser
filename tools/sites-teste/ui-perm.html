@@ -1,0 +1,16 @@
+<!doctype html><meta charset="utf-8"><title>Perm (test)</title>
+<h1>Permissions</h1>
+<script>
+// Asks for geolocation, then notifications, and writes both results to the title.
+let geo = "?", notif = "?";
+const show = () => { document.title = `perm geo=${geo} notif=${notif}`; };
+const next = () => {
+  show();
+  Notification.requestPermission().then(p => { notif = p === "granted" ? "granted" : "no"; show(); });
+};
+show();
+// ?geo=0 skips geolocation: allowing it can make macOS ask for Location Services on the real screen
+if (new URLSearchParams(location.search).get("geo") === "0") { geo = "skipped"; next(); } else
+// only code 1 is a refusal: no position (code 2 or 3) still means the permission was given
+navigator.geolocation.getCurrentPosition(() => { geo = "allowed"; next(); }, e => { geo = e.code === 1 ? "denied" : "allowed"; next(); }, {timeout: 3000});
+</script>
