@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Manual test of what only a person can check: the cookie switch and its sheets, the control sheet,
-# the strip and "Parar". Run it in your own terminal and follow the steps it prints.
+# the pill with Assumir, Devolver and the stop bubble. Saved passwords filling in are not covered. Run it in your own terminal and follow the steps it prints.
 # Usage: BROWSER_WORK=~/browser-work-2 tools/gates/manual.sh
 source "$(dirname "$0")/lib.sh"
 unset AGENS_BRIDGE_TEST_ANSWER   # the sheets must show

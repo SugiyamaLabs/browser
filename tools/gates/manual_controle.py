@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The part of the manual test that needs a client on the socket: asks for control, acts on a page,
-and waits for the person to press "Parar". Started by manual.sh; talks to the person in Portuguese."""
+and waits for the person to press Assumir, Devolver and the stop bubble. Started by manual.sh; talks to the person in Portuguese."""
 import json, os, socket, sys
 
 SOCK, SITE = os.environ["AGENS_SOCK"], "http://127.0.0.1:8765"
@@ -12,6 +12,7 @@ class Conn:  # one connection: control belongs to it
         self.s.connect(SOCK)
         self.f = self.s.makefile("r")
         self.n = 0
+        self.events = []  # events that came while waiting for a reply
 
     def read(self):  # the next message, reply or event; waits as long as the person takes
         line = self.f.readline()
@@ -26,8 +27,12 @@ class Conn:  # one connection: control belongs to it
             msg = self.read()
             if msg.get("id") == self.n:
                 return msg
+            if "event" in msg:
+                self.events.append(msg)
 
     def event(self, seconds=180):  # None when the person took too long, so the script never hangs
+        if self.events:
+            return self.events.pop(0)
         self.s.settimeout(seconds)
         try:
             while True:
@@ -91,7 +96,14 @@ while True:
     if certo or input("  Acerte os interruptores e aperte Enter, ou digite s para seguir assim mesmo: ").strip() == "s":
         break
 
-passo("2. A folha do controle e a faixa",
+def espera(c, nome, **campos):  # the next event must be this one
+    ev = c.event()
+    ok = bool(ev) and ev.get("event") == nome and all(ev.get(k) == v for k, v in campos.items())
+    resultado(ok, f"evento recebido: {json.dumps(ev)}" if ev else f"nenhum evento em 3 minutos (esperava {nome})")
+    return ok
+
+
+passo("2. A folha do controle e o aviso",
       "Vou pedir controle do Time B. Deve aparecer a folha:",
       "  \"O Python quer usar abas do ato Time B\"",
       "  o motivo \"Teste manual do controle\" e, num parágrafo separado,",
@@ -105,19 +117,48 @@ if c:
     campo = next((n for n in nos if n["role"] == "textField" and n["name"] == "Text"), None)
     r = c.ask("page.type", tab=tab, ref=campo["ref"], text="digitado pelo agente") if campo else {}
     resultado(bool(r.get("ok")), "o agente digitou \"digitado pelo agente\" no campo Text")
-    passo("3. Parar",
-          "Na janela do Time B: a aba Form tem uma marca na lista, a página tem borda, e acima dela",
-          "a faixa \"Controlado pelo Python  ·  Parar\".",
-          "Toque em Parar.")
-    ev = c.event()
-    resultado(bool(ev) and ev.get("event") == "control.stopped" and ev.get("reason") == "user",
-              f"evento recebido: {json.dumps(ev)}" if ev else "nenhum evento em 3 minutos")
+    print("  Confira na janela do Time B: a aba Form tem uma marca na lista, a página tem borda, e embaixo")
+    print("  dela a pílula \"Python está usando esta aba / Teste manual do controle\" com o botão Assumir.")
+
+    passo("3. Assumir", "Toque em Assumir.")
+    espera(c, "control.paused", by="user")
     r = c.ask("page.snapshot", tab=tab)
-    resultado(r.get("error") == "unauthorized", f"depois do Parar o agente não age mais ({r.get('error')})")
-    print("  Confira: a faixa e a borda sumiram, e a aba continua aberta.")
+    resultado(r.get("error") == "paused", f"enquanto você está no controle o agente não age ({r.get('error')})")
+    print("  Confira: a pílula diz \"Você está no controle / o Python pausou e espera você\", com")
+    print("  \"Devolver ao Python\" e, por último, a bolha com o quadrado de parar. O cursor do agente sumiu.")
+
+    passo("4. Devolver", "Toque em Devolver ao Python.")
+    espera(c, "control.resumed")
+    r = c.ask("page.snapshot", tab=tab)
+    resultado(bool(r.get("ok")), "depois de devolver o agente age de novo")
+
+    passo("5. Assumir com um diálogo esperando",
+          "O agente vai abrir uma página e tocar num botão que pergunta \"Proceed?\".",
+          "Nada deve aparecer para você ainda: a pergunta fica esperando o agente.")
+    c.ask("tab.navigate", tab=tab, url=f"{SITE}/agent")
+    nos = c.ask("page.snapshot", tab=tab).get("nodes", [])
+    botao = next((n for n in nos if n["role"] == "button" and n["name"] == "Ask"), None)
+    if botao:
+        c.ask("page.click", tab=tab, ref=botao["ref"])
+        espera(c, "page.dialog", type="confirm", message="Proceed?")
+        print("  Agora toque em Assumir: a pergunta \"Proceed?\" deve aparecer para você. Toque em OK.")
+        espera(c, "control.paused", by="user")
+        print("  Depois de responder, toque em Devolver ao Python.")
+        espera(c, "control.resumed")
+        nos = c.ask("page.snapshot", tab=tab).get("nodes", [])
+        resultado(any("Answer: true" in n.get("name", "") for n in nos), "a página recebeu a sua resposta (Answer: true)")
+    else:
+        resultado(False, "não achei o botão Ask na página de teste")
+
+    passo("6. Encerrar pela bolha", "Toque em Assumir e depois na bolha com o quadrado de parar.")
+    espera(c, "control.paused", by="user")
+    espera(c, "control.stopped", reason="user")
+    r = c.ask("page.snapshot", tab=tab)
+    resultado(r.get("error") == "unauthorized", f"depois de encerrar o agente não age mais ({r.get('error')})")
+    print("  Confira: a pílula e a borda sumiram, e a aba continua aberta.")
     c.s.close()
 
-    passo("4. O grupo de cookies muda no meio do controle",
+    passo("7. O grupo de cookies muda no meio do controle",
           "Vou pedir controle de novo. Toque em Permitir.")
     if not atos(c0)["Time B"]["shared"]:
         print("  Pulado: o Time B não está compartilhando cookies, então o grupo dele não tem como mudar.")
@@ -126,12 +167,10 @@ if c:
         c, tab = comecar_controle(lista["Time B"]["id"], "Segundo teste")
         if c:
             print("  Agora, em Configurações › Atos, desligue \"Compartilhar cookies\" do Time C.")
-            ev = c.event()
-            resultado(bool(ev) and ev.get("event") == "control.stopped" and ev.get("reason") == "sharing_changed",
-                      f"evento recebido: {json.dumps(ev)}" if ev else "nenhum evento em 3 minutos")
+            espera(c, "control.stopped", reason="sharing_changed")
             c.s.close()
 
-passo("5. Os cookies, à mão (opcional)",
+passo("8. Os cookies, à mão (opcional)",
       "Ligue de novo o interruptor do Time C.",
       f"No Time B abra {SITE}/login?auto=1 (cai em \"logged in\").",
       f"No Time C abra {SITE}/app/ : deve mostrar \"logged in\" sem pedir login.",
