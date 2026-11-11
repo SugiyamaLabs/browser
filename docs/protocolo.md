@@ -10,7 +10,7 @@ Referência para quem escreve um cliente (o time do Agens, em Go). O plano e o p
 | 2 | `login` | implementado |
 | 2 | `session`, `renew`, evento `session.lost` | especificado, **não implementado** |
 | 3 | `control.*`, `tab.*`, `page.*` | implementado |
-| 5 | `host.*`, `view.*` (a página dentro de outro app) | especificado, **não implementado** |
+| 5 | `host.*`, `view.*`, `ui.*` (a página dentro de outro app) | implementado |
 
 Um navegador de fase 1 responde `unknown_op` às demais. Trate `unknown_op` como "este navegador ainda não faz isso".
 

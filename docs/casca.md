@@ -44,6 +44,9 @@ janela do Chromium            WebUIBrowserWindow (Webium), sem a página HTML
 - **Som:** aba tocando mostra o alto-falante na aba e no endereço; clicar silencia (fica laranja e cortado) ou devolve o som. Também pelo botão direito na aba.
 - **Telas nossas no lugar das do Chromium:** ⌘, e o item Ajustes do menu do Mac abrem as nossas Configurações; Favoritos (página e barra, ⌘⇧B); busca na página (⌘F, ⌘G, ⌘⇧G); página de erro (sem internet, site não encontrado, não respondeu, bloqueado); pergunta de salvar ou atualizar senha; pedidos de permissão dos sites; e o painel do cadeado (conexão, permissões do site, apagar dados do site). Imprimir e os alertas das páginas (`alert`, login HTTP) continuam do Chromium.
 - **Cantos e densidade:** os cantos seguem o tema (Grafite e Seu 1×, Vidro 1,3× e Brasa 1,45× com abas em pílula em cima). Densidade compacta (Configurações › Aparência) baixa a barra para 44 pt, a faixa de abas para 40 pt e as abas para 28 pt; os semáforos acompanham.
+- **Cookies por ato:** Configurações › Atos tem, em cada ato, o interruptor **Compartilhar cookies** (vem desligado: "Os logins valem nos outros atos que também ligaram"). Os atos com ele ligado dividem os cookies entre si; os outros seguem isolados. O ladrilho do ato ganha "· cookies compartilhados" na dica. Só a pessoa liga ou desliga, aqui; o socket não muda isso. Ligar não desliga `login` nem o controle por agente (a folha de aprovação diz com quais atos o ato divide os cookies). Detalhes em [protocolo.md](protocolo.md).
+- **Folha de aprovação:** quando o socket precisa do OK da pessoa (um app conectando, `control.start`), a casca abre uma folha na janela com **Permitir**, **Permitir sempre** (só quando vale) e **Não permitir**. O Return responde **Não permitir**, porque a folha pode subir enquanto a pessoa digita em outro lugar. Fechar a janela com a folha aberta conta como **Não permitir**. É a folha simples do sistema; a folha desenhada fica para depois.
+- **Pílula do agente:** quando um agente controla a aba mostrada no cartão (ativa ou do par da divisão), uma pílula aparece sobre a parte de baixo do cartão: a marca do agente na cor do ato, duas linhas ("<agente> está usando esta aba" e o motivo, ou o que o agente disse com `control.status`) e **Assumir**. Ao assumir, ela vira "Você está no controle", o botão vira **Devolver ao <agente>** e aparece a bolha de parar, que encerra o controle. Também desenha o ponteiro do agente (nome e último clique) sobre a página. Segue "Reduzir movimento" do sistema. As regras do que o agente pode fazer e o que acontece com as operações dele estão em [protocolo.md](protocolo.md), "Assumir e devolver".
 - **Sem o seletor de perfis do Chromium:** com mais de um ato, o navegador abre direto no último usado; trocar de ato é pela coluna.
 - **Muitas abas e atos:** a lista de abas rola entre "Nova aba" e o pé, com uma barra fina (some na lateral recolhida). O pé mostra até 6 atos (5 recolhida); além disso, "⋯" abre a lista completa, e o ato atual nunca sai do pé.
 - **Barra:** estrela de favoritar dentro do endereço e menu "⋯" (Nova aba, Favoritos, Histórico, Configurações). Favoritos ainda abre a página do Chromium.
@@ -52,7 +55,11 @@ janela do Chromium            WebUIBrowserWindow (Webium), sem a página HTML
 
 ## O que o Agens embute (e o que não)
 
-O instalador do Agens instala o navegador junto, como app próprio, e o Agens o usa por fora (issues #58, #59). O kit cobre só o miolo: **abas, a página e os atos**. Configurações, temas, menu, nova aba, primeira instalação e bloqueador são do navegador e não entram no kit.
+O motor do navegador vai dentro do `Agens.app`, em `Contents/Helpers/`, e o Agens o abre como processo auxiliar (issues #58, #59). Esse modo se chama **embutido** (`--agens-embedded`) e é descrito em [agens.md](agens.md); o `BrowserKit` é o lado Swift, guiado em [kit.md](kit.md).
+
+No modo embutido **a casca não desenha nada**: o motor roda sem ícone no Dock e sem janela na tela. A janela da Webium continua existindo por baixo (as abas moram nela), mas nunca aparece (nem mostrar, ativar, maximizar, restaurar ou tela cheia). Barra de endereço, abas, atos, a pílula do agente e as folhas de aprovação são desenhados pelo Agens, que recebe os dados e os pedidos pelo socket: `approval.ask` no lugar da folha, `ui.ask` no lugar dos menus, diálogos, escolher arquivo, login HTTP, permissão do site e instalar extensão, e `view.tab` com o `control` da aba no lugar da pílula. A aba é mostrada pelo `context` da camada dela (`view.layer`), não por `remote_cocoa`, e a entrada volta pelo socket. Tudo isso está em [protocolo.md](protocolo.md), "host e view". A casca nativa descrita acima é só do AgensBrowser sozinho.
+
+O kit cobre o miolo: **a página, as abas e os atos**. Configurações, temas, menu, nova aba, primeira instalação e bloqueador são do navegador e não entram no kit.
 
 ## Windows (issue #61)
 
@@ -82,7 +89,7 @@ No Mac, a área de conteúdo de uma janela do Chromium é *layer-hosting* e não
 
 ## Próximos passos
 
-1. Testar o embed fora do processo: um app Swift de exemplo mostrando uma aba do navegador via `remote_cocoa`. É o caminho para o Agens.
+1. ~~Testar o embed fora do processo.~~ Feito, sem `remote_cocoa`: o motor embutido entrega o `context` da camada e o app de exemplo (`kit/apple/exemplo/`) mostra a aba e devolve a entrada pelo socket.
 2. Atualizar a ADR 0014 do Agens com esta casca e o caminho do embed.
-3. Continuar o protótipo: recolher a lateral, temas (Vidro, Seu), escolher claro/escuro/sistema nas configurações, atalhos na nova aba, favoritos, menu, configurar e apagar ato, e cookies compartilhados entre atos (desligado).
+3. Continuar o protótipo: recolher a lateral, temas (Vidro, Seu), escolher claro/escuro/sistema nas configurações, atalhos na nova aba, favoritos, menu, configurar e apagar ato.
 4. A nova aba de verdade ainda carrega a do Chromium por baixo da nossa (um renderer a mais). Trocar por uma página vazia é um ganho de memória fácil.

@@ -106,7 +106,7 @@ engine.onApproval = { request in
 
 ## Menus, diálogos e pedidos da página
 
-O que a página abre por conta própria chega como `ui.ask` ([protocolo.md](protocolo.md), "Passo 5.3"): lista de `select`, botão direito, `alert`/`confirm`/`prompt`/`beforeunload`, escolher arquivo, login HTTP, permissão do site e instalar extensão. O motor de hoje ainda não manda nada disso.
+O que a página abre por conta própria chega como `ui.ask` ([protocolo.md](protocolo.md), "Passo 5.3"): lista de `select`, botão direito, `alert`/`confirm`/`prompt`/`beforeunload`, escolher arquivo, login HTTP, permissão do site e instalar extensão.
 
 O kit já desenha tudo em AppKit, em português. Ligue com uma linha:
 
