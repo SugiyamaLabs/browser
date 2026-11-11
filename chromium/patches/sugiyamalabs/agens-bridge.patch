@@ -5603,10 +5603,10 @@ index 0000000000..7d67567ae2
 +}
 diff --git a/chrome/browser/agens/bridge/view_ops.cc b/chrome/browser/agens/bridge/view_ops.cc
 new file mode 100644
-index 0000000000..0763c34e1f
+index 0000000000..d51a953000
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_ops.cc
-@@ -0,0 +1,767 @@
+@@ -0,0 +1,788 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The host draws the interface; the engine hands it the pages (docs/protocolo.md, "host e view").
 +// - One host: the connection that sent host.attach (the app that launched the engine).
@@ -5739,6 +5739,7 @@ index 0000000000..0763c34e1f
 +  std::vector<std::unique_ptr<Shown>> shown;
 +  std::map<int, base::DictValue> sent;  // the last view.tab of each tab the host knows
 +  std::map<int, gfx::Image> icons;      // the favicon it was told about
++  std::map<int, base::DictValue> agent_cursors;  // the last view.agent_cursor; none sent: no cursor
 +  bool flush_pending = false;
 +  // The approval on the host (one at a time, approval.cc keeps the queue).
 +  int next_ask = 0;
@@ -5867,6 +5868,17 @@ index 0000000000..0763c34e1f
 +  return fields;
 +}
 +
++// The agent's cursor as the shell draws it: where it last clicked or hovered, while it works.
++base::DictValue AgentCursorFields(int n, content::WebContents* contents) {
++  base::DictValue fields = TabOnly(n);
++  const AgensControlled* controlled = AgensControlled::FromWebContents(contents);
++  if (controlled && !controlled->paused && controlled->cursor_x >= 0) {
++    fields.Set("x", static_cast<double>(controlled->cursor_x));
++    fields.Set("y", static_cast<double>(controlled->cursor_y));
++  }
++  return fields;
++}
++
 +// Tells the host what changed since the last time: once per run of the message loop.
 +void Flush() {
 +  State& s = S();
@@ -5888,6 +5900,13 @@ index 0000000000..0763c34e1f
 +      known = icon;
 +      SendEventTo(s.host, "view.favicon", TabOnly(n));
 +    }
++    base::DictValue cursor = AgentCursorFields(n, contents);
++    auto last = s.agent_cursors.find(n);
++    const bool changed = last == s.agent_cursors.end() ? cursor.Find("x") != nullptr : !(last->second == cursor);
++    if (changed) {
++      SendEventTo(s.host, "view.agent_cursor", cursor.Clone());
++      s.agent_cursors[n] = std::move(cursor);
++    }
 +  });
 +  for (auto it = s.sent.begin(); it != s.sent.end();) {
 +    if (seen.contains(it->first)) {
@@ -5896,6 +5915,7 @@ index 0000000000..0763c34e1f
 +    }
 +    SendEventTo(s.host, "view.closed", TabOnly(it->first));
 +    s.icons.erase(it->first);
++    s.agent_cursors.erase(it->first);
 +    it = s.sent.erase(it);
 +  }
 +}
@@ -6320,6 +6340,7 @@ index 0000000000..0763c34e1f
 +  s.shown.clear();  // the tabs go back to hidden
 +  s.sent.clear();
 +  s.icons.clear();
++  s.agent_cursors.clear();
 +  if (ApprovalCallback done = std::move(s.answer)) std::move(done).Run(kAgensApprovalDeny);
 +  ui_ask::HostGone();
 +}

@@ -126,6 +126,15 @@ import Testing
     #expect(await eventually { engine.tabs["v3"]?.title == "B" })
     #expect(engine.tabs["v3"]?.favicon == png && engine.tabs["v3"]?.control == nil && engine.tabs["v3"]?.loading == true)
 
+    // The agent's pointer: a point, kept across a tab update, gone when the event has no point.
+    fake.send(["event": "view.agent_cursor", "tab": "v3", "x": 12.5, "y": 40])
+    #expect(await eventually { engine.tabs["v3"]?.agentCursor == CGPoint(x: 12.5, y: 40) })
+    fake.send(["event": "view.tab", "tab": "v3", "ato": "Profile 1", "title": "C", "url": "https://example.com/c"])
+    #expect(await eventually { engine.tabs["v3"]?.title == "C" })
+    #expect(engine.tabs["v3"]?.agentCursor == CGPoint(x: 12.5, y: 40))
+    fake.send(["event": "view.agent_cursor", "tab": "v3"])
+    #expect(await eventually { engine.tabs["v3"]?.agentCursor == nil })
+
     fake.send(["event": "view.closed", "tab": "v3"])
     #expect(await eventually { engine.tabs["v3"] == nil })
     #expect(engine.tabs.all.map(\.id) == ["v1"])

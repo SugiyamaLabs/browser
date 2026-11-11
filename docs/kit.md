@@ -81,7 +81,7 @@ Navegação: `navigate(tab, to: texto)` (endereço ou busca, como na barra), `ba
 
 ## As abas e os dados delas
 
-`engine.tabs` é um modelo observável com as abas de cada ato: título, URL, carregando, áudio, se dá para voltar e avançar, ícone (PNG) e `control` quando um agente está usando a aba.
+`engine.tabs` é um modelo observável com as abas de cada ato: título, URL, carregando, áudio, se dá para voltar e avançar, ícone (PNG) e `control` quando um agente está usando a aba e `agentCursor`, o ponto onde está o ponteiro dele (o app desenha).
 
 ```swift
 try await engine.tabs.load(ato: ato)        // as abas que já existem (inclui as do agente)

@@ -418,6 +418,14 @@ else:
     x = c.event(lambda e: e["event"] == "view.caret" and e.get("tab") == vt, 5)
     check("view.caret (x, y, width, height) when the agent focuses a text field",
           bool(x) and all(isinstance(x.get(k), (int, float)) for k in ("x", "y", "width", "height")), x)
+    # the agent's own cursor, for the host to draw (the attached view is 800 x 600)
+    x = c.event(lambda e: e["event"] == "view.agent_cursor" and e.get("tab") == vt and "x" in e, 5)
+    check("view.agent_cursor (x, y inside the view) after the agent's hover and click",
+          bool(x) and 0 <= x.get("x", -1) <= 800 and 0 <= x.get("y", -1) <= 600, x)
+    c.ask("view.control", tab=vt, action="take")
+    x = c.event(lambda e: e["event"] == "view.agent_cursor" and e.get("tab") == vt and "x" not in e, 5)
+    check("view.agent_cursor without x, y after Assumir", bool(x), x)
+    c.ask("view.control", tab=vt, action="give")  # the checks below start with the agent working
 
     # file and select open only on a page's own timer, after a click: the agent clicks, the person takes over
     ag.ask("page.click", tab=at, ref=ref("button", "Open file later"))

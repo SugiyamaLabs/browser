@@ -23,6 +23,9 @@ public struct BrowserTab: Sendable, Equatable, Identifiable {
   public var control: AgentControl?
   /// PNG data, fetched when the engine says the icon changed.
   public var favicon: Data?
+  /// Where the agent's pointer is on the page (`view.agent_cursor`), in points from the view's top left;
+  /// nil when there is none to draw (no agent, it has not pointed yet, or the person took over).
+  public var agentCursor: CGPoint?
 
   init?(message: [String: JSON]) {
     guard let id = message["tab"]?.string, let ato = message["ato"]?.string else { return nil }
@@ -74,6 +77,10 @@ public struct BrowserTab: Sendable, Equatable, Identifiable {
       all.removeAll { $0.id == message["tab"]?.string }
     case "view.favicon":
       if let id = message["tab"]?.string { fetchFavicon(id) }
+    case "view.agent_cursor":
+      if let index = all.firstIndex(where: { $0.id == message["tab"]?.string }) {
+        all[index].agentCursor = message["x"]?.double.flatMap { x in message["y"]?.double.map { CGPoint(x: x, y: $0) } }
+      }
     default:
       return false
     }
@@ -86,6 +93,7 @@ public struct BrowserTab: Sendable, Equatable, Identifiable {
     if let index = all.firstIndex(where: { $0.id == tab.id }) {
       var tab = tab
       tab.favicon = all[index].favicon
+      tab.agentCursor = all[index].agentCursor
       all[index] = tab
     } else {
       all.append(tab)
