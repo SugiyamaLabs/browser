@@ -248,10 +248,10 @@ index 0000000000..1184ce2d94
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_BRIDGE_H_
 diff --git a/chrome/browser/agens/bridge/bridge_mac.mm b/chrome/browser/agens/bridge/bridge_mac.mm
 new file mode 100644
-index 0000000000..c3e6f478e6
+index 0000000000..915c24eb88
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/bridge_mac.mm
-@@ -0,0 +1,554 @@
+@@ -0,0 +1,576 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The socket server on macOS: a Unix socket in the user data dir, the peer's code signature read
 +// from its audit token, and the approval of the person before a signed client gets in.
@@ -311,10 +311,30 @@ index 0000000000..c3e6f478e6
 +
 +namespace {
 +
-+// PLACEHOLDER: our Apple Team ID (10 characters, from the Developer account). Not known yet: no
-+// signing identity on the build machine. Until it is set no client passes the signature check, so
-+// only "Aceitar apps sem assinatura" lets clients in.
-+constexpr char kTeamId[] = "TEAM_ID_PLACEHOLDER";
++// Our Apple Team ID, read from the engine's own signature (chromium/sign.sh), so the build carries
++// no constant: a client is ours when the same Developer ID team signed it. Empty on unsigned or ad
++// hoc builds, and then no client passes the check, so only "Aceitar apps sem assinatura" lets
++// clients in. Thread pool only (the Security calls may block).
++const std::string& TeamId() {
++  static const base::NoDestructor<std::string> team([] {
++    SecCodeRef raw_self = nullptr;
++    if (SecCodeCopySelf(kSecCSDefaultFlags, &raw_self) != errSecSuccess || !raw_self) {
++      return std::string();
++    }
++    base::apple::ScopedCFTypeRef<SecCodeRef> self(raw_self);
++    CFDictionaryRef raw_info = nullptr;
++    if (SecCodeCopySigningInformation(self.get(), kSecCSSigningInformation, &raw_info) !=
++            errSecSuccess ||
++        !raw_info) {
++      return std::string();
++    }
++    base::apple::ScopedCFTypeRef<CFDictionaryRef> info(raw_info);
++    CFStringRef id = base::apple::GetValueFromDictionary<CFStringRef>(info.get(),
++                                                                      kSecCodeInfoTeamIdentifier);
++    return id ? base::SysCFStringRefToUTF8(id) : std::string();
++  }());
++  return *team;
++}
 +
 +constexpr char kSocketName[] = "agens.sock";
 +
@@ -327,7 +347,7 @@ index 0000000000..c3e6f478e6
 +// --- Who is on the other side (thread pool: the Security calls may block).
 +
 +struct Peer {
-+  bool ours = false;     // signed with kTeamId
++  bool ours = false;     // signed with TeamId()
 +  std::string identity;  // "<team id>/<signing identifier>", only when ours
 +  std::string identifier;  // the signing identifier, only when ours
 +  pid_t pid = 0;           // from the audit token (Connection::Checked)
@@ -377,8 +397,10 @@ index 0000000000..c3e6f478e6
 +  }
 +  peer.name = AppName(code.get(), identifier.empty() ? peer.name : identifier);
 +
++  const std::string& team = TeamId();
++  if (team.empty()) return peer;
 +  const std::string requirement_text =
-+      std::string("anchor apple generic and certificate leaf[subject.OU] = \"") + kTeamId + "\"";
++      "anchor apple generic and certificate leaf[subject.OU] = \"" + team + "\"";
 +  SecRequirementRef raw_requirement = nullptr;
 +  if (SecRequirementCreateWithString(base::SysUTF8ToCFStringRef(requirement_text).get(),
 +                                     kSecCSDefaultFlags, &raw_requirement) != errSecSuccess ||
@@ -390,7 +412,7 @@ index 0000000000..c3e6f478e6
 +  if (SecCodeCheckValidity(code.get(), kSecCSDefaultFlags, requirement.get()) == errSecSuccess &&
 +      !identifier.empty()) {
 +    peer.ours = true;
-+    peer.identity = std::string(kTeamId) + "/" + identifier;
++    peer.identity = team + "/" + identifier;
 +    peer.identifier = identifier;
 +  }
 +  return peer;

@@ -28,7 +28,7 @@ Os dois produtos têm dados e sockets separados.
 O navegador lê o processo do outro lado (`LOCAL_PEERTOKEN`) e confere a assinatura de código.
 
 - Dentro do Agens: só o próprio Agens (mesmo Team ID e bundle id).
-- AgensBrowser sozinho: apps assinados com o nosso Team ID, depois da folha "O Agens quer usar o AgensBrowser" (**Permitir**, **Permitir sempre**, **Não permitir**).
+- AgensBrowser sozinho: apps assinados com o nosso Team ID (o mesmo da assinatura do próprio motor), depois da folha "O Agens quer usar o AgensBrowser" (**Permitir**, **Permitir sempre**, **Não permitir**).
 - Desenvolvimento: **Configurações › Sistema › Aceitar apps sem assinatura**. Vem desligado. O `agensctl` precisa dele enquanto não estiver assinado.
 
 ## Formato

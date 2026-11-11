@@ -58,6 +58,39 @@ Component build ficou de fora: com o toolchain Rust pronto do ungoogled, as `.dy
 | `cannot execute tool 'metal' due to missing Metal Toolchain` | Xcode novo não traz o Metal toolchain | `setup-mac.sh` roda `xcodebuild -downloadComponent MetalToolchain` |
 | a página não carrega e o macOS pede a senha do Keychain para "Chromium Safe Storage" | cada build sem assinatura é um app novo para o Keychain, e a rede espera a chave dos cookies | `run.sh` e `tools/measure.py` passam `--use-mock-keychain` |
 
+## Assinatura e notarização (fase 6)
+
+```sh
+export AGENS_SIGN_IDENTITY="Developer ID Application: <nome> (<Team ID>)" AGENS_NOTARY_PROFILE=agens-notary
+export AGENS_APP=~/browser-work/ungoogled-chromium-macos/build/src/out/Default/AgensBrowser.app
+./chromium/sign.sh       # assina de dentro para fora
+./chromium/notarize.sh   # envia, grampeia e confere
+```
+
+- `sign.sh` segue a ordem e as opções do próprio Chromium (`chrome/installer/mac/signing/parts.py`, as mesmas do `sign_and_package_app.sh` do ungoogled): bibliotecas, ferramentas, helpers, framework e, por último, o app. Tudo com hardened runtime. Os entitlements são os da árvore (`chrome/app/*.plist`): Renderer e GPU com `allow-jit`, o app com câmera, microfone, localização, Bluetooth, USB, impressão e fotos. Cada helper assina com o próprio bundle id.
+- `AGENS_SIGN_IDENTITY=-` assina ad hoc, só para testar o script: sem Team ID, sem carimbo de tempo, não notariza.
+- `notarize.sh` serve para qualquer `.app` assinado com Developer ID, inclusive o `Agens.app`. Ele manda um zip; o ticket fica grampeado no `.app`.
+- Testado (11/11/2026): `sign.sh` ad hoc num clone do `out/Dev/AgensBrowser.app` passa em `codesign --verify --deep --strict`. Com certificado de verdade e notarização, ainda não.
+
+### O que só você faz, uma vez
+
+1. Em developer.apple.com › Certificates, crie um **Developer ID Application** (o pedido CSR sai do Acesso às Chaves) e abra o `.cer` para instalar no Keychain de login.
+2. Confira com `security find-identity -v -p codesigning`. O nome entre aspas é o `AGENS_SIGN_IDENTITY`; o código entre parênteses é o Team ID.
+3. Em account.apple.com › Senhas de app, crie uma senha de app.
+4. Rode `xcrun notarytool store-credentials agens-notary --apple-id <seu e-mail> --team-id <Team ID>`. Ele pede a senha de app e guarda no Keychain. Não use `--password` na linha de comando: fica no histórico.
+5. Exporte `AGENS_SIGN_IDENTITY` e `AGENS_NOTARY_PROFILE` (só os nomes; os segredos ficam no Keychain) e rode os dois scripts.
+
+### O motor dentro do Agens
+
+- Assine o motor com `sign.sh` **antes** de copiar para `Agens.app/Contents/Helpers/AgensBrowser.app`. Copie com `ditto`, que mantém a assinatura.
+- Depois assine o `Agens.app` por fora, **sem `--deep`**: o `--deep` reassina o motor e tira os entitlements de cada helper. Testado com ad hoc: assinar o app de fora não muda o CDHash do motor, e `codesign --verify --deep --strict` passa no conjunto.
+- Mesmo certificado nos dois. O motor só reconhece como "nosso" um cliente assinado pela mesma equipe (o app que abriu o motor entra pelo pid). O motor lê o Team ID da própria assinatura: build sem assinatura (ou ad hoc) não tem equipe, e nele nenhum cliente passa como "nosso". Isso ainda não foi testado com certificado de verdade.
+- O `Agens.app` também precisa de hardened runtime e carimbo de tempo, ou a notarização recusa.
+- Notarize o `Agens.app` inteiro: uma submissão cobre o motor de dentro, e o ticket vai no `Agens.app`. O AgensBrowser sozinho tem a submissão dele.
+- Entitlements no Agens por causa do motor: nenhum para abrir o motor, que roda com a própria assinatura (nada de `allow-jit` nem `disable-library-validation` no Agens). Duas condições:
+  - o Agens não pode usar App Sandbox: o filho herda a sandbox, e o Chromium não roda nela;
+  - câmera, microfone e localização são pedidos em nome do app que abriu o motor. Se as abas forem usar isso, o Agens precisa de `com.apple.security.device.camera`, `com.apple.security.device.audio-input` (e `personal-information.location`) e das frases `NSCameraUsageDescription`, `NSMicrophoneUsageDescription` e `NSLocationUsageDescription` no `Info.plist` dele. Sem isso, a página recebe "negado". Ainda não testado.
+
 ## Rede durante o build
 
 O `fetch.sh` baixa o código de `chromium.googlesource.com` e o perfil de PGO do armazenamento do Google, e o `build.sh` baixa crates do crates.io para o bindgen. Isso acontece só no build. O navegador compilado não fala com o Google (é a base do ungoogled).
@@ -71,4 +104,4 @@ O `fetch.sh` baixa o código de `chromium.googlesource.com` e o perfil de PGO do
 
 - Windows: issue #3.
 - CI no runner self-hosted: issue #2.
-- Assinatura e notarização: M7. O app local roda sem assinatura.
+- Assinatura e notarização de verdade: falta o certificado (veja "O que só você faz"). O app local roda sem assinatura.
