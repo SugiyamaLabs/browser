@@ -84,6 +84,16 @@ public struct ApprovalRequest: Sendable, Equatable {
   }
 }
 
+/// An item the host adds to the right-click menu (`BrowserEngine.contextMenuItems`).
+public struct HostMenuItem: Sendable, Equatable, Identifiable {
+  public let id: String
+  public let title: String
+  public init(id: String, title: String) {
+    self.id = id
+    self.title = title
+  }
+}
+
 /// The two options the host switches (`host.settings`), as the engine has them now.
 public struct HostSettings: Sendable, Equatable {
   /// Sites may ask for location and notifications (the host's `ui.ask`); off, they are blocked.
@@ -131,6 +141,14 @@ public struct HostSettings: Sendable, Equatable {
   /// cancels the handler's task, so close what you drew in `withTaskCancellationHandler`, and
   /// sends nothing; the reason comes in `onEvent`.
   @ObservationIgnored public var onUIRequest: ((UIRequest) async -> UIAnswer)?
+  /// Picks of the element picker (`connection.pick`), and its ending without one.
+  @ObservationIgnored public var onPick: ((PickResult) -> Void)?
+  /// The host's own items in the right-click menu `presentDefaultUI` draws: after the engine's
+  /// actions, past a separator. Choosing one calls `onContextMenuItem` and answers the engine
+  /// with cancel.
+  @ObservationIgnored public var contextMenuItems: [HostMenuItem] = []
+  /// Which of `contextMenuItems` was chosen, with the menu's request (tab, point, link, selection).
+  @ObservationIgnored public var onContextMenuItem: ((HostMenuItem, UIRequest) -> Void)?
   /// Every event, after the kit has handled the ones it knows.
   @ObservationIgnored public var onEvent: ((String, [String: JSON]) -> Void)?
 
@@ -282,6 +300,8 @@ public struct HostSettings: Sendable, Equatable {
         ask(message)
       case "ui.cancel":
         if let ask = message["ask"]?.string { uiTasks.removeValue(forKey: ask)?.cancel() }
+      case "view.picked":
+        if let result = PickResult(message: message) { onPick?(result) }
       default:
         break
       }

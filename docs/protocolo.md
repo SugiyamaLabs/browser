@@ -11,6 +11,7 @@ Referência para quem escreve um cliente (o time do Agens, em Go). O plano e o p
 | 2 | `session`, `renew`, evento `session.lost` | implementado |
 | 3 | `control.*`, `tab.*`, `page.*` | implementado |
 | 5 | `host.*`, `view.*`, `ui.*` (a página dentro de outro app), `host.settings`, as partes de `approval.ask` | implementado |
+| 5.4 | `view.pick`, `view.pick.step`, `view.selection`, evento `view.picked` (apontar um elemento) | implementado |
 
 Um navegador de fase 1 responde `unknown_op` às demais. Trate `unknown_op` como "este navegador ainda não faz isso".
 
@@ -273,6 +274,41 @@ Um mecanismo só, no formato de `approval.ask` / `approval.answer`: o motor mand
 
 **Erros novos.** Nenhum código novo: `unauthorized` (`ui.answer` de quem não é o hospedeiro), `not_found` (`ask` que não vale mais), `bad_request` (campos errados). **Eventos novos:** `ui.ask` e `ui.cancel`, na tabela de Eventos. **Operação nova:** `ui.answer`.
 
+#### Passo 5.4: apontar um elemento e ler a seleção
+
+Também só adições à v1. A pessoa aponta um elemento da página, o motor diz ao hospedeiro o que é, e o hospedeiro deixa a pessoa escrever um pedido sobre ele para um bot. Tudo só da conexão do hospedeiro (de outra, `unauthorized`), com `id` e resposta. Motor mais antigo responde `unknown_op` às três operações.
+
+```
+→ {"id": 30, "op": "view.pick", "tab": "v3", "on": true}
+← {"id": 30, "ok": true}
+   (a pessoa passa o mouse: o elemento embaixo fica destacado; ela clica)
+← {"event": "view.picked", "tab": "v3", "selector": "#card > p:nth-of-type(2)", "html": "<p class=\"preco\">R$ 10</p>", "text": "R$ 10",
+   "x": 48, "y": 120.5, "width": 300, "height": 24, "styles": {"display": "block", "font-size": "16px", "color": "rgb(17, 17, 17)", ...}, "png": "iVBORw0KGgo..."}
+→ {"id": 31, "op": "view.pick.step", "tab": "v3", "to": "parent"}
+← {"id": 31, "ok": true}
+← {"event": "view.picked", "tab": "v3", "selector": "#card", ...}
+→ {"id": 32, "op": "view.pick", "tab": "v3", "on": false}
+← {"id": 32, "ok": true}
+```
+
+- **`view.pick {tab, on}`.** Só em aba ligada (`view.attach`; senão `not_found`). `on: true` liga o modo: o mouse sobre a página destaca o elemento embaixo (o destaque do próprio motor, âmbar claro, com a etiqueta de tag e tamanho, desenhado dentro da página, então o hospedeiro não desenha nada) e o próximo clique, de qualquer botão, escolhe o elemento em vez de clicar na página. Responde depois que o modo está valendo. Mandar `on: true` de novo, inclusive depois de escolher, liga para outra escolha. `on: false` desliga e tira o destaque; a resposta vem quando a página já saiu do modo, então um clique mandado depois dela já age na página. Sem `on` booleano: `bad_request`.
+- **Aba com agente.** Com o agente trabalhando (`control.state` `"working"`), `view.pick on:true` dá `denied`. Depois do Assumir, vale. Se o agente volta a trabalhar na aba (Devolver), o modo acaba sozinho com `view.picked {tab, cancelled: true}`.
+- **Evento `view.picked`.** Uma escolha traz:
+  - `selector`: caminho CSS que acha o elemento de novo (para num `#id` único; senão `tag:nth-of-type(n)` separados por ` > `), até 1024 caracteres.
+  - `html`: o `outerHTML`, até 16 KiB, com `truncated: true` quando foi cortado. Campo de senha nunca leva o valor: o atributo `value` sai da cópia (vale para `type=password` e para campo com `autocomplete` de senha).
+  - `text`: o texto visível (`innerText`), até 2000 caracteres, com `text_truncated: true` quando cortado; vazio num campo de senha.
+  - `x`, `y`, `width`, `height`: a caixa do elemento em pontos, do canto de cima da vista, o mesmo espaço de `view.mouse` (já com o zoom da página). Pode passar da vista.
+  - `styles`: 14 valores calculados (`display`, `position`, `width`, `height`, `margin`, `padding`, `font-family`, `font-size`, `font-weight`, `line-height`, `color`, `background-color`, `border`, `border-radius`), cada um até 40 caracteres.
+  - `png`: base64 do recorte do elemento como está na tela, sem o destaque, na escala da tela, só da parte visível. Até uns 600 KB de base64: se passar, vai com metade do tamanho; se ainda passar, ou se nada do elemento estiver na vista, `png` não vem e vem `png_skipped: true`.
+
+  O motor corta tudo de novo do lado dele: esses textos vêm da página. Quando o modo acaba sem escolha, vem `{tab, cancelled: true}`: Escape dentro da página, navegação (outro documento), o processo da página caiu, ou um agente voltou a trabalhar na aba. Também vem depois de uma escolha, se o destaque dela some por um desses motivos. `view.pick on:false`, um novo `on:true`, `view.detach`, `view.close` e o hospedeiro desconectar não mandam nada.
+- **Depois da escolha.** O elemento escolhido continua destacado (rola junto com a página) até `view.pick on:false`, um novo `on:true`, navegação, Escape ou a aba fechar. Enquanto isso, o motor não passa à página o movimento do mouse sem botão sobre aquela aba (o destaque sumiria no primeiro movimento); clique, roda e teclado passam normalmente. Arrastar sobre a página tira o destaque, sem evento.
+- **`view.pick.step {tab, to}`.** `to` é `"parent"` ou `"child"`. Só depois de uma escolha: passa ao elemento pai ou ao primeiro filho elemento, destaca e manda um `view.picked` novo. Sem escolha, ou sem pai ou filho elemento, `not_found` (a escolha fica como está). `to` de outro valor: `bad_request`.
+- **`view.selection {tab}`** → `{text, truncated?}`: o texto selecionado agora na página (no quadro com o foco), até 16 KiB, com `truncated: true` quando cortado. O `selection` do `ui.ask` `context_menu` só leva 200 caracteres; este é para quando o hospedeiro precisa do texto todo. Vazio quando nada está selecionado. Seleção dentro de `<textarea>` vem; dentro de `<input>` nunca (pode ser um campo de senha, mesmo mostrando o texto). Vale em qualquer aba que o hospedeiro conhece, ligada ou não.
+- **O que fica de fora nesta versão.** Elemento dentro de `iframe` de outra origem não se escolhe: com o modo ligado, o clique sobre ele cai no elemento `<iframe>` da página, não dentro dele, e não escolhe nada. `iframe` da mesma origem funciona. Campo de senha que a página trocou para `type=text` (o "mostrar senha") é tratado como campo comum em `html`; `png` mostra o que está na tela.
+
+**Erros novos.** Nenhum: `bad_request`, `not_found`, `denied`, `unauthorized`, `failed` (o motor não conseguiu ligar o modo na página). **Evento novo:** `view.picked`. **Operações novas:** `view.pick`, `view.pick.step`, `view.selection`.
+
 ## Erros
 
 | Código | Quando |
@@ -300,6 +336,7 @@ Um mecanismo só, no formato de `approval.ask` / `approval.answer`: o motor mand
 | `view.cursor` / `view.caret` | `tab`, `cursor` / `tab`, `x`, `y`, `width`, `height` | (passo 5.3, só o hospedeiro) O cursor sobre a página mudou / o texto em edição mudou de lugar. |
 | `view.agent_cursor` | `tab`, `x?`, `y?` | (passo 5.3, só o hospedeiro) Onde está o ponteiro do agente na página; sem `x` e `y`, não há o que desenhar. |
 | `ui.cancel` | `ask`, `reason` | (passo 5.3) O motor desistiu do pedido: `"closed"`, `"navigated"` ou `"gone"`. |
+| `view.picked` | `tab`, `selector`, `html`, `truncated?`, `text`, `text_truncated?`, `x`, `y`, `width`, `height`, `styles`, `png?`, `png_skipped?` / `tab`, `cancelled` | (passo 5.4, só o hospedeiro) A pessoa escolheu um elemento com `view.pick` (ou `view.pick.step` mudou a escolha) / o modo acabou sem escolha, ou o destaque da escolha sumiu. |
 | `control.stopped` | `reason` | O controle desta conexão acabou: `"user"` (a pessoa tocou na bolha de parar) ou `"sharing_changed"` (mudou o grupo de atos que compartilham cookies com este). |
 
 ## Regras de segurança que o cliente sente

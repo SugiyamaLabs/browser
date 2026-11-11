@@ -6326,10 +6326,10 @@ index 0000000000..90a1a8c6ce
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_UI_OPS_H_
 diff --git a/chrome/browser/agens/bridge/view_input.cc b/chrome/browser/agens/bridge/view_input.cc
 new file mode 100644
-index 0000000000..52311ab789
+index 0000000000..7975b6be4a
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_input.cc
-@@ -0,0 +1,137 @@
+@@ -0,0 +1,180 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/view_input.h"
@@ -6339,6 +6339,9 @@ index 0000000000..52311ab789
 +
 +#include "base/base64.h"
 +#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_util.h"
++#include "chrome/browser/agens/bridge/control_keys.h"
++#include "chrome/browser/agens/bridge/protocol.h"
 +
 +namespace agens::bridge {
 +
@@ -6466,13 +6469,53 @@ index 0000000000..52311ab789
 +  return std::nullopt;
 +}
 +
++std::string ClipBytes(std::string_view text, size_t max, bool& truncated) {
++  truncated = text.size() > max;
++  return std::string(truncated ? base::TruncateUTF8ToByteSize(text, max) : text);
++}
++
++std::optional<base::DictValue> ClipPicked(const base::DictValue& page, PickedBox& box) {
++  const std::string* selector = page.FindString("selector");
++  if (!selector) return std::nullopt;
++  for (auto [name, field] : {std::pair{"x", &box.x}, std::pair{"y", &box.y}, std::pair{"width", &box.width},
++                             std::pair{"height", &box.height}, std::pair{"ratio", &box.ratio}}) {
++    const std::optional<double> value = page.FindDouble(name);
++    if (!value || !std::isfinite(*value) || std::abs(*value) > 1e7) return std::nullopt;
++    *field = *value;
++  }
++  if (box.width < 0 || box.height < 0 || box.ratio <= 0 || box.ratio > 16) return std::nullopt;
++
++  base::DictValue out;
++  out.Set("selector", ClipChars(*selector, kMaxPickedSelectorChars));
++  const std::string* html = page.FindString("html");
++  bool cut = false;
++  out.Set("html", ClipBytes(html ? std::string_view(*html) : std::string_view(), kMaxPickedHtmlBytes, cut));
++  if (cut || page.FindBool("truncated").value_or(false)) out.Set("truncated", true);
++  const std::string* text = page.FindString("text");
++  std::string clipped = ClipChars(text ? *text : std::string(), kMaxPickedTextChars);
++  if ((text && clipped.size() < text->size()) || page.FindBool("text_truncated").value_or(false)) {
++    out.Set("text_truncated", true);
++  }
++  out.Set("text", std::move(clipped));
++  base::DictValue styles;
++  if (const base::DictValue* given = page.FindDict("styles")) {
++    for (const auto [name, value] : *given) {
++      if (styles.size() == kMaxPickedStyles) break;
++      if (name.empty() || !AtMostChars(name, kMaxPickedStyleChars) || !value.is_string()) continue;
++      styles.Set(name, ClipChars(value.GetString(), kMaxPickedStyleChars));
++    }
++  }
++  out.Set("styles", std::move(styles));
++  return out;
++}
++
 +}  // namespace agens::bridge
 diff --git a/chrome/browser/agens/bridge/view_input.h b/chrome/browser/agens/bridge/view_input.h
 new file mode 100644
-index 0000000000..b7c2381fc0
+index 0000000000..1dc82f09e0
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_input.h
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,95 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The params of view.* (docs/protocolo.md, "host e view") that need checking before they reach
 +// the page. Pure logic, so view_input_selfcheck.cc runs it with only //base. The input ops come
@@ -6539,15 +6582,41 @@ index 0000000000..b7c2381fc0
 +// approval.answer: allow, always, deny → 0, 1, 2 (AgensApprovalAnswer's order); nullopt otherwise.
 +std::optional<int> ParseApprovalAnswer(std::string_view answer);
 +
++// view.picked and view.selection (docs/protocolo.md, "Passo 5.4"): what the page gives is cut here
++// again, whatever the page's own script did.
++inline constexpr size_t kMaxPickedSelectorChars = 1024;
++inline constexpr size_t kMaxPickedHtmlBytes = 16 * 1024;
++inline constexpr size_t kMaxPickedTextChars = 2000;
++inline constexpr size_t kMaxPickedStyles = 16;
++inline constexpr size_t kMaxPickedStyleChars = 40;  // a value, and a property's name
++inline constexpr size_t kMaxPickedPngBase64 = 600 * 1024;
++inline constexpr size_t kMaxSelectionBytes = 16 * 1024;
++
++// The element's box as the page measured it: CSS pixels from the top left of the main frame's
++// viewport, and the page's devicePixelRatio.
++struct PickedBox {
++  double x = 0, y = 0, width = 0, height = 0;
++  double ratio = 1;
++};
++
++// The pick script's result (view_pick.cc) → view.picked's selector, html (+ truncated), text
++// (+ text_truncated) and styles, and its box. nullopt when it isn't an object with a string
++// selector and a finite box (width and height ≥ 0, ratio in (0, 16]). Styles keep only string
++// values, the first kMaxPickedStyles of them.
++std::optional<base::DictValue> ClipPicked(const base::DictValue& page, PickedBox& box);
++
++// At most `max` bytes of UTF-8, cut on a character; `truncated` set when it was cut.
++std::string ClipBytes(std::string_view text, size_t max, bool& truncated);
++
 +}  // namespace agens::bridge
 +
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_VIEW_INPUT_H_
 diff --git a/chrome/browser/agens/bridge/view_input_selfcheck.cc b/chrome/browser/agens/bridge/view_input_selfcheck.cc
 new file mode 100644
-index 0000000000..7d67567ae2
+index 0000000000..e98cac0576
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_input_selfcheck.cc
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,175 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Assert-based check of view_input.h, run by agens_bridge_selfcheck (protocol_selfcheck.cc).
 +
@@ -6556,6 +6625,7 @@ index 0000000000..7d67567ae2
 +#include <string>
 +
 +#include "base/json/json_reader.h"
++#include "chrome/browser/agens/bridge/protocol.h"
 +#include "chrome/browser/agens/bridge/view_input.h"
 +
 +using namespace agens::bridge;
@@ -6676,14 +6746,58 @@ index 0000000000..7d67567ae2
 +  VIEW_CHECK(ParseApprovalAnswer("allow") == 0 && ParseApprovalAnswer("always") == 1 && ParseApprovalAnswer("deny") == 2);
 +  VIEW_CHECK(!ParseApprovalAnswer("yes") && !ParseApprovalAnswer(""));
 +
++  // view.picked: the page's strings cut again, its box checked.
++  {
++    bool cut = true;
++    VIEW_CHECK(ClipBytes("abc", 3, cut) == "abc" && !cut);
++    VIEW_CHECK(ClipBytes("ab\xC3\xA7", 3, cut) == "ab" && cut);  // never half a character
++    PickedBox box;
++    const std::string ok_box = R"("x":1.5,"y":-20,"width":10,"height":0,"ratio":2)";
++    std::optional<base::DictValue> out = ClipPicked(Body(R"({"selector":"#a",)" + ok_box + "}"), box);
++    VIEW_CHECK(out && *out->FindString("selector") == "#a" && out->FindString("html")->empty() &&
++               out->FindString("text")->empty() && out->FindDict("styles")->empty());
++    VIEW_CHECK(!out->Find("truncated") && !out->Find("text_truncated"));
++    VIEW_CHECK(box.x == 1.5 && box.y == -20 && box.width == 10 && box.height == 0 && box.ratio == 2);
++    VIEW_CHECK(!ClipPicked(Body("{" + ok_box + "}"), box));                       // no selector
++    VIEW_CHECK(!ClipPicked(Body(R"({"selector":1,)" + ok_box + "}"), box));
++    VIEW_CHECK(!ClipPicked(Body(R"({"selector":"a","x":1,"y":1,"width":1,"height":1})"), box));  // no ratio
++    VIEW_CHECK(!ClipPicked(Body(R"({"selector":"a","x":1,"y":1,"width":-1,"height":1,"ratio":1})"), box));
++    VIEW_CHECK(!ClipPicked(Body(R"({"selector":"a","x":"1","y":1,"width":1,"height":1,"ratio":1})"), box));
++    VIEW_CHECK(!ClipPicked(Body(R"({"selector":"a","x":1,"y":1,"width":1,"height":1,"ratio":0})"), box));
++    VIEW_CHECK(!ClipPicked(Body(R"({"selector":"a","x":1e300,"y":1,"width":1,"height":1,"ratio":1})"), box));
++
++    base::DictValue page = Body("{" + ok_box + "}");
++    page.Set("selector", std::string(5000, 's'));
++    page.Set("html", std::string(kMaxPickedHtmlBytes + 1, 'h'));
++    page.Set("text", std::string(kMaxPickedTextChars - 1, 't') + "\xC3\xA7\xC3\xA7");
++    base::DictValue styles;
++    styles.Set("color", std::string(100, 'c'));
++    styles.Set("width", 12);                          // not a string: dropped
++    styles.Set(std::string(41, 'n'), "too long a name");
++    for (int i = 0; i < 30; ++i) styles.Set("p" + std::to_string(i), "v");
++    page.Set("styles", std::move(styles));
++    out = ClipPicked(page, box);
++    VIEW_CHECK(out && out->FindString("selector")->size() == kMaxPickedSelectorChars);
++    VIEW_CHECK(out->FindString("html")->size() == kMaxPickedHtmlBytes && out->FindBool("truncated") == true);
++    VIEW_CHECK(AtMostChars(*out->FindString("text"), kMaxPickedTextChars) &&
++               !AtMostChars(*out->FindString("text"), kMaxPickedTextChars - 1) && out->FindBool("text_truncated") == true);
++    const base::DictValue& kept = *out->FindDict("styles");
++    VIEW_CHECK(kept.size() == kMaxPickedStyles && kept.FindString("color")->size() == kMaxPickedStyleChars);
++    VIEW_CHECK(!kept.Find("width") && !kept.Find(std::string(41, 'n')));
++    // The page's own flags are kept: it cut before sending.
++    page = Body(R"({"selector":"a","html":"<p>","truncated":true,"text":"x","text_truncated":true,)" + ok_box + "}");
++    out = ClipPicked(page, box);
++    VIEW_CHECK(out && out->FindBool("truncated") == true && out->FindBool("text_truncated") == true);
++  }
++
 +  std::printf("agens bridge view input: ok\n");
 +}
 diff --git a/chrome/browser/agens/bridge/view_ops.cc b/chrome/browser/agens/bridge/view_ops.cc
 new file mode 100644
-index 0000000000..f1232e47ed
+index 0000000000..03a938da4b
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_ops.cc
-@@ -0,0 +1,860 @@
+@@ -0,0 +1,996 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The host draws the interface; the engine hands it the pages (docs/protocolo.md, "host e view").
 +// - One host: the connection that sent host.attach (the app that launched the engine).
@@ -6715,6 +6829,7 @@ index 0000000000..f1232e47ed
 +#include "chrome/browser/agens/bridge/bridge.h"
 +#include "chrome/browser/agens/bridge/ui_ops.h"
 +#include "chrome/browser/agens/bridge/view_input.h"
++#include "chrome/browser/agens/bridge/view_pick.h"
 +#include "chrome/browser/agens/embed/agens_controlled.h"
 +#include "chrome/browser/agens/embed/agens_embedded.h"
 +#include "chrome/browser/agens/embed/agens_window.h"
@@ -6730,12 +6845,15 @@ index 0000000000..f1232e47ed
 +#include "chrome/browser/ui/browser_window/public/create_browser_window.h"
 +#include "chrome/browser/ui/navigator/browser_navigator.h"
 +#include "chrome/browser/ui/navigator/browser_navigator_params.h"
++#include "chrome/common/chrome_isolated_world_ids.h"
 +#include "chrome/common/webui_url_constants.h"
 +#include "components/favicon/content/content_favicon_driver.h"
 +#include "content/public/browser/agens_embed_mac.h"
++#include "content/public/browser/render_frame_host.h"
 +#include "content/public/browser/web_contents.h"
 +#include "content/public/browser/web_contents_observer.h"
 +#include "content/public/browser/web_contents_user_data.h"
++#include "mojo/public/cpp/bindings/callback_helpers.h"
 +#include "ui/gfx/codec/png_codec.h"
 +#include "ui/gfx/image/image.h"
 +#include "ui/gfx/image/image_skia.h"
@@ -6813,6 +6931,7 @@ index 0000000000..f1232e47ed
 +  uint32_t context = 0;  // the last view.layer sent
 +  gfx::Size pixels;
 +  float scale = 1;
++  std::unique_ptr<Picker> picker;  // view.pick; goes with the tab's attachment
 +
 + private:
 +  base::ScopedClosureRunner capture_;
@@ -6838,7 +6957,12 @@ index 0000000000..f1232e47ed
 +  void OnTabStripModelChanged(TabStripModel*, const TabStripModelChange&, const TabStripSelectionChange&) override {
 +    Schedule();
 +  }
-+  void OnTabChangedAt(tabs::TabInterface*, TabChangeType) override { Schedule(); }
++  void OnTabChangedAt(tabs::TabInterface*, TabChangeType) override {
++    EndAgentPicks();
++    Schedule();
++  }
++  // A tab's marks change through here too (control_ops.cc): an agent at work ends its picker.
++  void EndAgentPicks();
 +};
 +State& S() {
 +  static base::NoDestructor<State> state;
@@ -6849,6 +6973,18 @@ index 0000000000..f1232e47ed
 +int KnownNumber(content::WebContents* contents) {
 +  const TabNumber* number = TabNumber::FromWebContents(contents);
 +  return number && S().sent.contains(number->n) ? number->n : 0;
++}
++
++// An agent works on the tab, and the person has not taken over.
++bool AgentWorks(content::WebContents* contents) {
++  const AgensControlled* controlled = AgensControlled::FromWebContents(contents);
++  return controlled && !controlled->paused;
++}
++
++void State::EndAgentPicks() {
++  for (auto& s : shown) {
++    if (s->picker && s->web_contents() && AgentWorks(s->web_contents())) s->picker->End(true);
++  }
 +}
 +
 +void Shown::WebContentsDestroyed() {
@@ -7081,6 +7217,13 @@ index 0000000000..f1232e47ed
 +    if (!ReadEventData(request.body, s.event_data) || !ReadPoint(request.body, x, y)) return;
 +    const gfx::PointF point(x, y);
 +    if (op == "view.mouse") {
++      if (Picker* picker = shown->picker.get()) {
++        const content::AgensEmbedMouseKind kind = content::AgensEmbedMouseKindOf(base::as_byte_span(s.event_data));
++        // A move would take a held pick's highlight away (view_pick.cc).
++        if (kind == content::AgensEmbedMouseKind::kMove && picker->held()) return;
++        // The element under the press, even after a scroll forgot it: the press then picks it.
++        if (kind == content::AgensEmbedMouseKind::kPress && picker->armed()) content::AgensEmbedMouseHover(contents, point);
++      }
 +      content::AgensEmbedMouse(contents, base::as_byte_span(s.event_data), point);
 +    } else {
 +      content::AgensEmbedWheel(contents, base::as_byte_span(s.event_data), point);
@@ -7346,6 +7489,104 @@ index 0000000000..f1232e47ed
 +  std::move(reply).Run(OkReply(request.id, std::move(result)));
 +}
 +
++// view.pick {on}: arms the picker on an attached tab (again, after a pick) or ends it.
++void ViewPick(content::WebContents* contents, Shown* shown, const Request& request, ReplyCallback reply) {
++  const std::optional<bool> on = request.body.FindBool("on");
++  if (!on) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs tab and on (a boolean)"));
++    return;
++  }
++  if (!shown) {
++    std::move(reply).Run(ErrorReply(&request.id, kNotFound, "the tab is not attached"));
++    return;
++  }
++  if (!*on) {
++    if (!shown->picker) {
++      std::move(reply).Run(OkReply(request.id));
++      return;
++    }
++    shown->picker->Stop(base::BindOnce([](base::Value id, ReplyCallback reply, std::string) { std::move(reply).Run(OkReply(id)); },
++                                       request.id.Clone(), std::move(reply)));
++    return;
++  }
++  if (AgentWorks(contents)) {
++    std::move(reply).Run(ErrorReply(&request.id, kDenied, "an agent is working on this tab"));
++    return;
++  }
++  if (!shown->picker) {
++    shown->picker = std::make_unique<Picker>(contents, base::BindRepeating(
++                                                           [](int n, base::DictValue fields) {
++                                                             if (!S().host) return;
++                                                             fields.Set("tab", ViewTabName(n));
++                                                             SendEventTo(S().host, "view.picked", std::move(fields));
++                                                           },
++                                                           shown->n));
++  }
++  shown->picker->Arm(base::BindOnce(
++      [](base::Value id, ReplyCallback reply, std::string code) {
++        std::move(reply).Run(code.empty() ? OkReply(id) : ErrorReply(&id, code, "could not start picking on this page"));
++      },
++      request.id.Clone(), std::move(reply)));
++}
++
++// view.pick.step {to}: the pick moves to its parent or first child.
++void ViewPickStep(Shown* shown, const Request& request, ReplyCallback reply) {
++  std::optional<std::string> to = StringParam(request.body, "to");
++  if (!to || (*to != "parent" && *to != "child")) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs tab and to: parent or child"));
++    return;
++  }
++  if (!shown || !shown->picker || !shown->picker->held()) {
++    std::move(reply).Run(ErrorReply(&request.id, kNotFound, "nothing is picked on this tab"));
++    return;
++  }
++  shown->picker->Step(*to == "parent", base::BindOnce(
++                                           [](base::Value id, std::string to, ReplyCallback reply, std::string code) {
++                                             std::move(reply).Run(code.empty() ? OkReply(id)
++                                                                               : ErrorReply(&id, code, "no " + to));
++                                           },
++                                           request.id.Clone(), *to, std::move(reply)));
++}
++
++// What the page has selected, in the frame with the focus, read from an isolated world (the page
++// cannot see or patch it). Never inside an <input>: that may be a password field, shown or not.
++constexpr char16_t kSelectionScript[] = uR"((() => {
++  const e = document.activeElement, max = 16384;
++  let t = '';
++  if (e && e.localName === 'textarea') t = e.value.slice(e.selectionStart, e.selectionEnd);
++  else if (!(e && e.localName === 'input')) t = String(getSelection());
++  return {t: t.slice(0, max), cut: t.length > max};
++})())";
++
++void ViewSelection(content::WebContents* contents, const Request& request, ReplyCallback reply) {
++  content::RenderFrameHost* frame = contents->GetFocusedFrame();
++  if (!frame) frame = contents->GetPrimaryMainFrame();
++  if (!frame->IsRenderFrameLive()) {
++    std::move(reply).Run(ErrorReply(&request.id, kFailed, "the page is not running"));
++    return;
++  }
++  frame->ExecuteJavaScriptInIsolatedWorld(
++      kSelectionScript,
++      mojo::WrapCallbackWithDefaultInvokeIfNotRun(
++          base::BindOnce(
++              [](base::Value id, ReplyCallback reply, base::Value result) {
++                const base::DictValue* got = result.GetIfDict();
++                const std::string* text = got ? got->FindString("t") : nullptr;
++                if (!text) {
++                  std::move(reply).Run(ErrorReply(&id, kFailed, "could not read the page"));
++                  return;
++                }
++                bool cut = false;
++                base::DictValue out;
++                out.Set("text", ClipBytes(*text, kMaxSelectionBytes, cut));
++                if (cut || got->FindBool("cut").value_or(false)) out.Set("truncated", true);
++                std::move(reply).Run(OkReply(id, std::move(out)));
++              },
++              request.id.Clone(), std::move(reply)),
++          base::Value()),
++      ISOLATED_WORLD_ID_CHROME_INTERNAL);
++}
++
 +void ApprovalAnswer(const Request& request, ReplyCallback reply) {
 +  State& s = S();
 +  std::optional<std::string> ask = StringParam(request.body, "ask");
@@ -7424,6 +7665,15 @@ index 0000000000..f1232e47ed
 +    return;
 +  } else if (op == "view.control") {
 +    ViewControl(contents, request, std::move(reply));
++    return;
++  } else if (op == "view.pick") {
++    ViewPick(contents, FindShown(*n), request, std::move(reply));
++    return;
++  } else if (op == "view.pick.step") {
++    ViewPickStep(FindShown(*n), request, std::move(reply));
++    return;
++  } else if (op == "view.selection") {
++    ViewSelection(contents, request, std::move(reply));
 +    return;
 +  } else {
 +    std::move(reply).Run(ErrorReply(&request.id, kUnknownOp, op));
@@ -7602,6 +7852,557 @@ index 0000000000..95d20440b7
 +}  // namespace agens::bridge::view
 +
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_VIEW_OPS_H_
+diff --git a/chrome/browser/agens/bridge/view_pick.cc b/chrome/browser/agens/bridge/view_pick.cc
+new file mode 100644
+index 0000000000..8e496926bd
+--- /dev/null
++++ b/chrome/browser/agens/bridge/view_pick.cc
+@@ -0,0 +1,438 @@
++// Copyright 2026 SugiyamaLabs.
++// The picker (view_pick.h). How DevTools' inspect mode behaves, and what that asks of us:
++// - Overlay.setInspectMode answers ok even when Overlay is not enabled, and fails (keeping the
++//   mode) without a highlightConfig: DOM.enable and Overlay.enable go first, and a config always
++//   goes along. Detaching the session clears mode, tool and highlight in the renderer.
++// - A press with no element under the mouse passes to the page, and scrolling or leaving the view
++//   forgets that element: view_ops.cc sends a plain move at the press's point right before it.
++// - The highlight of Overlay.highlightNode goes away at the next mouse move over the page: while
++//   a pick is held, view_ops.cc keeps plain moves from the page.
++// - Escape in the page only says inspectModeCanceled; ending the mode is ours.
++// What the page returns goes through ClipPicked (view_input.h), whatever the script did.
++
++#include "chrome/browser/agens/bridge/view_pick.h"
++
++#include <algorithm>
++#include <optional>
++#include <utility>
++#include <vector>
++
++#include "base/base64.h"
++#include "base/functional/bind.h"
++#include "base/json/json_reader.h"
++#include "base/json/json_writer.h"
++#include "chrome/browser/agens/bridge/protocol.h"
++#include "chrome/browser/agens/bridge/view_input.h"
++#include "components/viz/common/frame_sinks/copy_output_result.h"
++#include "content/public/browser/agens_embed_mac.h"
++#include "content/public/browser/devtools_agent_host.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/render_widget_host_view.h"
++#include "content/public/browser/web_contents.h"
++#include "skia/ext/image_operations.h"
++#include "ui/gfx/codec/png_codec.h"
++#include "ui/gfx/geometry/rect_conversions.h"
++#include "ui/gfx/geometry/rect_f.h"
++#include "ui/gfx/geometry/size_conversions.h"
++
++namespace agens::bridge::view {
++
++namespace {
++
++constexpr char kFailed[] = "failed";
++constexpr char kObjectGroup[] = "agens-pick";
++constexpr base::TimeDelta kCopyWait = base::Seconds(3);
++
++// Runs in the page, in our isolated world when it can, on the picked node: everything view.picked
++// carries, cut before it leaves the renderer. A password field's value never goes in the html (its
++// `value` attribute is dropped from a copy) and its text is empty. The reply waits for a frame, so
++// the picture taken next no longer has the hover highlight.
++constexpr char kDescribe[] = R"(async function(maxHtml, maxText, maxStyle) {
++  const el = this.nodeType === 9 ? this.documentElement : this;
++  const secret = e => e.localName === 'input' && (e.type === 'password' || /password/i.test(e.autocomplete || ''));
++  const path = [];
++  for (let e = el; e && e.nodeType === 1; e = e.parentElement) {
++    if (e.id) {
++      const id = '#' + CSS.escape(e.id);
++      let unique = false;
++      try { unique = e.getRootNode().querySelectorAll(id).length === 1; } catch (x) {}
++      if (unique) { path.unshift(id); break; }
++    }
++    let part = CSS.escape(e.localName);
++    const parent = e.parentElement;
++    if (parent) {
++      const same = [...parent.children].filter(c => c.localName === e.localName);
++      if (same.length > 1) part += ':nth-of-type(' + (same.indexOf(e) + 1) + ')';
++    }
++    path.unshift(part);
++  }
++  let html;
++  if (secret(el) || [...el.querySelectorAll('input')].some(secret)) {
++    const copy = el.cloneNode(true);
++    for (const e of [copy, ...copy.querySelectorAll('input')]) if (secret(e)) e.removeAttribute('value');
++    html = copy.outerHTML;
++  } else {
++    html = el.outerHTML;
++  }
++  const text = secret(el) ? '' : String(el.innerText ?? el.textContent ?? '');
++  const r = el.getBoundingClientRect();
++  let x = r.left, y = r.top;
++  for (let w = el.ownerDocument.defaultView; w && w.frameElement; w = w.parent) {
++    const f = w.frameElement, b = f.getBoundingClientRect(), s = getComputedStyle(f);
++    x += b.left + f.clientLeft + parseFloat(s.paddingLeft);
++    y += b.top + f.clientTop + parseFloat(s.paddingTop);
++  }
++  const cs = getComputedStyle(el), styles = {};
++  for (const k of ['display', 'position', 'width', 'height', 'margin', 'padding', 'font-family', 'font-size',
++                   'font-weight', 'line-height', 'color', 'background-color', 'border', 'border-radius']) {
++    styles[k] = cs.getPropertyValue(k).slice(0, maxStyle);
++  }
++  const out = {selector: path.join(' > '), html: html.slice(0, maxHtml), truncated: html.length > maxHtml,
++               text: text.slice(0, maxText), text_truncated: text.length > maxText,
++               styles, x, y, width: r.width, height: r.height, ratio: window.devicePixelRatio || 1};
++  await new Promise(done => { requestAnimationFrame(() => setTimeout(done)); setTimeout(done, 200); });
++  return out;
++})";
++
++constexpr char kStep[] = R"(function(parent) {
++  if (parent) return this.parentElement || (this.parentNode && this.parentNode.host) || null;
++  return this.firstElementChild || null;
++})";
++
++// The overlay's own highlight in a calm amber, with its label (tag and size).
++base::DictValue HighlightConfig() {
++  auto amber = [](double alpha) {
++    base::DictValue color;
++    color.Set("r", 255);
++    color.Set("g", 180);
++    color.Set("b", 84);
++    color.Set("a", alpha);
++    return color;
++  };
++  base::DictValue config;
++  config.Set("showInfo", true);
++  config.Set("contentColor", amber(0.14));
++  config.Set("paddingColor", amber(0.08));
++  config.Set("borderColor", amber(0.9));
++  return config;
++}
++
++base::DictValue Arg(base::Value value) {
++  base::DictValue arg;
++  arg.Set("value", std::move(value));
++  return arg;
++}
++
++std::string Base64Png(const SkBitmap& bitmap) {
++  std::optional<std::vector<uint8_t>> png = gfx::PNGCodec::EncodeBGRASkBitmap(bitmap, /*discard_transparency=*/true);
++  return png ? base::Base64Encode(*png) : std::string();
++}
++
++// Within kMaxPickedPngBase64, at half the size if it must; "" when not even that fits.
++// shortcut: encodes on the UI thread (tens of ms for a whole view at 2x); move it to the thread
++// pool if picks of big elements show as jank.
++std::string PickedPng(const SkBitmap& bitmap) {
++  if (bitmap.drawsNothing()) return std::string();
++  std::string png = Base64Png(bitmap);
++  if (png.size() <= kMaxPickedPngBase64) return png;
++  png = Base64Png(skia::ImageOperations::Resize(bitmap, skia::ImageOperations::RESIZE_GOOD,
++                                                std::max(1, bitmap.width() / 2), std::max(1, bitmap.height() / 2)));
++  return png.size() <= kMaxPickedPngBase64 ? png : std::string();
++}
++
++}  // namespace
++
++Picker::Picker(content::WebContents* contents, Send send)
++    : content::WebContentsObserver(contents), send_(std::move(send)) {}
++
++Picker::~Picker() {
++  End(false);
++}
++
++void Picker::Finish(Done& done, std::string code) {
++  if (done) std::move(done).Run(std::move(code));
++}
++
++bool Picker::Attach() {
++  if (agent_host_) return true;
++  agent_host_ = content::DevToolsAgentHost::GetOrCreateFor(web_contents());
++  if (!agent_host_ || !agent_host_->AttachClient(this)) {
++    agent_host_ = nullptr;
++    return false;
++  }
++  Command("DOM.enable");
++  Command("Overlay.enable", {}, Current(base::BindOnce([](Picker* self, const base::DictValue* result) {
++            self->overlay_on_ = result != nullptr;
++          })));
++  base::DictValue world;
++  world.Set("frameId", web_contents()->GetPrimaryMainFrame()->GetDevToolsFrameToken().ToString());
++  world.Set("worldName", kObjectGroup);
++  Command("Page.createIsolatedWorld", std::move(world),
++          Current(base::BindOnce([](Picker* self, const base::DictValue* result) {
++            if (result) self->world_ = result->FindInt("executionContextId").value_or(0);
++          })));
++  return true;
++}
++
++void Picker::Command(std::string_view method, base::DictValue params, Reply reply) {
++  if (!agent_host_) {
++    if (reply) std::move(reply).Run(nullptr);
++    return;
++  }
++  const int id = ++next_id_;
++  base::DictValue message;
++  message.Set("id", id);
++  message.Set("method", method);
++  message.Set("params", std::move(params));
++  std::optional<std::string> json = base::WriteJson(message);
++  if (!json) return;
++  if (reply) waiting_[id] = std::move(reply);  // before sending: a reply may come back right away
++  agent_host_->DispatchProtocolMessage(this, base::as_byte_span(*json));
++}
++
++Picker::Reply Picker::Current(base::OnceCallback<void(Picker*, const base::DictValue*)> then) {
++  return base::BindOnce(
++      [](base::WeakPtr<Picker> self, int generation, base::OnceCallback<void(Picker*, const base::DictValue*)> then,
++         const base::DictValue* result) {
++        if (self && self->generation_ == generation) std::move(then).Run(self.get(), result);
++      },
++      weak_factory_.GetWeakPtr(), generation_, std::move(then));
++}
++
++void Picker::Arm(Done done) {
++  Finish(arm_done_, kFailed);
++  Finish(step_done_, kFailed);
++  Finish(stop_done_, std::string());
++  arm_done_ = std::move(done);
++  ++generation_;
++  if (!web_contents() || !Attach()) {
++    End(false);
++    Finish(arm_done_, kFailed);
++    return;
++  }
++  if (state_ == State::kHeld || state_ == State::kFetching) Command("Overlay.hideHighlight");
++  if (!object_.empty()) {
++    base::DictValue group;
++    group.Set("objectGroup", kObjectGroup);
++    Command("Runtime.releaseObjectGroup", std::move(group));
++    object_.clear();
++  }
++  state_ = State::kArming;
++  base::DictValue mode;
++  mode.Set("mode", "searchForNode");
++  mode.Set("highlightConfig", HighlightConfig());
++  Command("Overlay.setInspectMode", std::move(mode),
++          Current(base::BindOnce([](Picker* self, const base::DictValue* result) {
++            if (!result || !self->overlay_on_) return self->End(false);  // answers arm_done_ "failed"
++            self->state_ = State::kArmed;
++            // A press over a cross-origin iframe lands on the <iframe> element, not inside it.
++            content::AgensEmbedRouteMouseToRoot(self->web_contents(), true);
++            Finish(self->arm_done_, std::string());
++          })));
++}
++
++void Picker::Picked(int backend_node_id) {
++  ++generation_;
++  state_ = State::kFetching;
++  content::AgensEmbedRouteMouseToRoot(web_contents(), false);
++  base::DictValue mode;
++  mode.Set("mode", "none");
++  mode.Set("highlightConfig", base::DictValue());
++  Command("Overlay.setInspectMode", std::move(mode));
++  Resolve(backend_node_id, world_ != 0);
++}
++
++void Picker::Resolve(int backend_node_id, bool in_world) {
++  base::DictValue params;
++  params.Set("backendNodeId", backend_node_id);
++  params.Set("objectGroup", kObjectGroup);
++  if (in_world) params.Set("executionContextId", world_);
++  Command("DOM.resolveNode", std::move(params),
++          Current(base::BindOnce(
++              [](int backend_node_id, bool in_world, Picker* self, const base::DictValue* result) {
++                const std::string* object = result ? result->FindStringByDottedPath("object.objectId") : nullptr;
++                if (object) return self->Describe(*object);
++                // A node of a same-origin iframe is not in the main frame's world: its frame's own.
++                if (in_world) return self->Resolve(backend_node_id, false);
++                self->End(true);
++              },
++              backend_node_id, in_world)));
++}
++
++void Picker::Describe(const std::string& object_id) {
++  base::ListValue args;
++  args.Append(Arg(base::Value(static_cast<int>(kMaxPickedHtmlBytes))));
++  args.Append(Arg(base::Value(static_cast<int>(kMaxPickedTextChars))));
++  args.Append(Arg(base::Value(static_cast<int>(kMaxPickedStyleChars))));
++  base::DictValue params;
++  params.Set("objectId", object_id);
++  params.Set("functionDeclaration", kDescribe);
++  params.Set("arguments", std::move(args));
++  params.Set("returnByValue", true);
++  params.Set("awaitPromise", true);
++  params.Set("silent", true);
++  Command("Runtime.callFunctionOn", std::move(params),
++          Current(base::BindOnce(
++              [](std::string object_id, Picker* self, const base::DictValue* result) {
++                const base::DictValue* value =
++                    result && !result->Find("exceptionDetails") ? result->FindDictByDottedPath("result.value") : nullptr;
++                PickedBox box;
++                std::optional<base::DictValue> fields = value ? ClipPicked(*value, box) : std::nullopt;
++                if (!fields) return self->End(true);
++                self->Capture(std::move(object_id), std::move(*fields), box);
++              },
++              object_id)));
++}
++
++void Picker::Capture(std::string object_id, base::DictValue fields, const PickedBox& box) {
++  content::RenderWidgetHostView* view = web_contents()->GetRenderWidgetHostView();
++  if (!view) return End(true);
++  const float scale = view->GetDeviceScaleFactor() > 0 ? view->GetDeviceScaleFactor() : 1;
++  // CSS pixels → the view's points: the page's zoom is its devicePixelRatio over the screen's.
++  const double zoom = box.ratio / scale;
++  const gfx::RectF rect(box.x * zoom, box.y * zoom, box.width * zoom, box.height * zoom);
++  fields.Set("x", static_cast<double>(rect.x()));
++  fields.Set("y", static_cast<double>(rect.y()));
++  fields.Set("width", static_cast<double>(rect.width()));
++  fields.Set("height", static_cast<double>(rect.height()));
++  // The part on screen only (a pick can be bigger than the view).
++  gfx::Rect visible = gfx::ToEnclosingRect(rect);
++  visible.Intersect(gfx::Rect(view->GetViewBounds().size()));
++  if (visible.IsEmpty()) {
++    fields.Set("png_skipped", true);
++    return Emit(std::move(object_id), std::move(fields));
++  }
++  // The same copy page.screenshot makes (control_page.cc), at the screen's scale.
++  view->CopyFromSurface(
++      visible, gfx::ScaleToCeiledSize(visible.size(), scale), kCopyWait,
++      base::BindOnce(
++          [](base::WeakPtr<Picker> self, int generation, std::string object_id, base::DictValue fields,
++             const content::CopyFromSurfaceResult& result) {
++            if (!self || self->generation_ != generation) return;
++            std::string png = result.has_value() ? PickedPng(result->bitmap) : std::string();
++            if (png.empty()) {
++              fields.Set("png_skipped", true);
++            } else {
++              fields.Set("png", std::move(png));
++            }
++            self->Emit(std::move(object_id), std::move(fields));
++          },
++          weak_factory_.GetWeakPtr(), generation_, std::move(object_id), std::move(fields)));
++}
++
++void Picker::Emit(std::string object_id, base::DictValue fields) {
++  state_ = State::kHeld;
++  object_ = std::move(object_id);
++  send_.Run(std::move(fields));
++  // Highlighted for good: it scrolls with the page, until the picker ends or arms again.
++  base::DictValue params;
++  params.Set("objectId", object_);
++  params.Set("highlightConfig", HighlightConfig());
++  Command("Overlay.highlightNode", std::move(params));
++}
++
++void Picker::Step(bool parent, Done done) {
++  if (state_ != State::kHeld) return std::move(done).Run(kNotFound);
++  Finish(step_done_, kFailed);
++  step_done_ = std::move(done);
++  ++generation_;
++  base::ListValue args;
++  args.Append(Arg(base::Value(parent)));
++  base::DictValue params;
++  params.Set("objectId", object_);
++  params.Set("functionDeclaration", kStep);
++  params.Set("arguments", std::move(args));
++  params.Set("objectGroup", kObjectGroup);
++  params.Set("silent", true);
++  Command("Runtime.callFunctionOn", std::move(params),
++          Current(base::BindOnce([](Picker* self, const base::DictValue* result) {
++            if (!result) return Finish(self->step_done_, kFailed);
++            const std::string* found = result->FindStringByDottedPath("result.objectId");
++            if (!found) return Finish(self->step_done_, kNotFound);  // the pick stays
++            const std::string object_id = *found;
++            Finish(self->step_done_, std::string());
++            self->state_ = State::kFetching;
++            self->Command("Overlay.hideHighlight");
++            self->Describe(object_id);
++          })));
++}
++
++void Picker::Stop(Done done) {
++  if (state_ == State::kOff || !agent_host_) {
++    End(false);
++    return std::move(done).Run(std::string());
++  }
++  Finish(stop_done_, std::string());
++  stop_done_ = std::move(done);
++  base::DictValue mode;
++  mode.Set("mode", "none");
++  mode.Set("highlightConfig", base::DictValue());
++  Command("Overlay.setInspectMode", std::move(mode),
++          Current(base::BindOnce([](Picker* self, const base::DictValue*) { self->End(false); })));
++}
++
++void Picker::End(bool cancelled) {
++  Finish(stop_done_, std::string());  // off is off, however it got there
++  if (state_ == State::kOff) return;
++  state_ = State::kOff;
++  ++generation_;
++  object_.clear();
++  if (web_contents()) content::AgensEmbedRouteMouseToRoot(web_contents(), false);
++  if (agent_host_) agent_host_->DetachClient(this);
++  agent_host_ = nullptr;
++  waiting_.clear();
++  overlay_on_ = false;
++  world_ = 0;
++  Finish(arm_done_, kFailed);
++  Finish(step_done_, kFailed);
++  if (cancelled) {
++    base::DictValue fields;
++    fields.Set("cancelled", true);
++    send_.Run(std::move(fields));
++  }
++}
++
++void Picker::PrimaryPageChanged(content::Page&) {
++  End(true);
++}
++
++void Picker::PrimaryMainFrameRenderProcessGone(base::TerminationStatus) {
++  End(true);
++}
++
++void Picker::WebContentsDestroyed() {
++  End(false);
++  Observe(nullptr);
++}
++
++void Picker::DispatchProtocolMessage(content::DevToolsAgentHost* agent_host, base::span<const uint8_t> message) {
++  if (agent_host != agent_host_.get()) return;
++  std::optional<base::DictValue> parsed = base::JSONReader::ReadDict(
++      std::string_view(reinterpret_cast<const char*>(message.data()), message.size()), base::JSON_PARSE_RFC);
++  if (!parsed) return;
++  if (std::optional<int> id = parsed->FindInt("id")) {
++    auto it = waiting_.find(*id);
++    if (it == waiting_.end()) return;
++    Reply reply = std::move(it->second);
++    waiting_.erase(it);
++    std::move(reply).Run(parsed->Find("error") ? nullptr : parsed->FindDict("result"));
++    return;
++  }
++  const std::string* method = parsed->FindString("method");
++  if (!method) return;
++  if (*method == "Overlay.inspectNodeRequested") {
++    // Only while armed: the person's own DevTools, or a node left pending, can send one too.
++    std::optional<int> node = parsed->FindIntByDottedPath("params.backendNodeId");
++    if (state_ == State::kArmed && node) Picked(*node);
++  } else if (*method == "Overlay.inspectModeCanceled") {
++    End(true);  // Escape in the page
++  }
++}
++
++void Picker::AgentHostClosed(content::DevToolsAgentHost* agent_host) {
++  if (agent_host != agent_host_.get()) return;
++  agent_host_ = nullptr;
++  End(true);
++}
++
++}  // namespace agens::bridge::view
+diff --git a/chrome/browser/agens/bridge/view_pick.h b/chrome/browser/agens/bridge/view_pick.h
+new file mode 100644
+index 0000000000..6dd60db3e9
+--- /dev/null
++++ b/chrome/browser/agens/bridge/view_pick.h
+@@ -0,0 +1,101 @@
++// Copyright 2026 SugiyamaLabs.
++// The element picker of a tab the host shows (docs/protocolo.md, "Passo 5.4"): view.pick,
++// view.pick.step and the view.picked event. DevTools' own inspect mode does the work inside the
++// page (the highlight under the mouse, a press that picks instead of acting), driven by an internal
++// DevTools session without a window, as session_read.cc does. view_ops.cc owns one per shown tab
++// and decides who may use it; this file only talks to the page. UI thread.
++#ifndef CHROME_BROWSER_AGENS_BRIDGE_VIEW_PICK_H_
++#define CHROME_BROWSER_AGENS_BRIDGE_VIEW_PICK_H_
++
++#include <map>
++#include <string>
++#include <string_view>
++
++#include "base/functional/callback.h"
++#include "base/memory/scoped_refptr.h"
++#include "base/memory/weak_ptr.h"
++#include "base/values.h"
++#include "content/public/browser/devtools_agent_host_client.h"
++#include "content/public/browser/web_contents_observer.h"
++
++namespace content {
++class DevToolsAgentHost;
++}
++
++namespace agens::bridge {
++struct PickedBox;
++}
++
++namespace agens::bridge::view {
++
++class Picker : public content::WebContentsObserver, public content::DevToolsAgentHostClient {
++ public:
++  // view.picked's fields without "tab": a pick, or {cancelled: true} when the picker ended by
++  // itself (Escape in the page, navigation, the renderer gone, End(true)).
++  using Send = base::RepeatingCallback<void(base::DictValue)>;
++  // An error code of protocol.h, or "" when it went through.
++  using Done = base::OnceCallback<void(std::string code)>;
++
++  Picker(content::WebContents* contents, Send send);
++  Picker(const Picker&) = delete;
++  Picker& operator=(const Picker&) = delete;
++  // Detaches the session: the page drops the mode and the highlight. Sends nothing.
++  ~Picker() override;
++
++  // view.pick on:true: the next press on the page picks (again, after a pick).
++  void Arm(Done done);
++  // view.pick.step: the parent or the first child of the pick. kNotFound when there is none (the
++  // pick stays); "" and then a new view.picked when there is.
++  void Step(bool parent, Done done);
++  // view.pick on:false: like End(false), but `done` runs once the page has left the mode, so a
++  // click sent after the answer acts on the page.
++  void Stop(Done done);
++  // Ends the mode and clears the highlight; {cancelled: true} goes out when `cancelled` and the
++  // picker was on. Nothing happens on a picker already off.
++  void End(bool cancelled);
++
++  bool armed() const { return state_ == State::kArming || state_ == State::kArmed; }
++  bool held() const { return state_ == State::kHeld; }  // a pick is highlighted in the page
++
++  // content::WebContentsObserver:
++  void PrimaryPageChanged(content::Page& page) override;
++  void PrimaryMainFrameRenderProcessGone(base::TerminationStatus status) override;
++  void WebContentsDestroyed() override;
++
++  // content::DevToolsAgentHostClient:
++  void DispatchProtocolMessage(content::DevToolsAgentHost* agent_host,
++                               base::span<const uint8_t> message) override;
++  void AgentHostClosed(content::DevToolsAgentHost* agent_host) override;
++
++ private:
++  enum class State { kOff, kArming, kArmed, kFetching, kHeld };
++  // Gets the command's "result", or null when it failed or the session went away.
++  using Reply = base::OnceCallback<void(const base::DictValue* result)>;
++
++  bool Attach();
++  void Command(std::string_view method, base::DictValue params = {}, Reply reply = {});
++  // A reply that runs only if nothing restarted the picker since it was asked.
++  Reply Current(base::OnceCallback<void(Picker*, const base::DictValue*)> then);
++  void Picked(int backend_node_id);
++  void Resolve(int backend_node_id, bool in_world);
++  void Describe(const std::string& object_id);
++  void Capture(std::string object_id, base::DictValue fields, const PickedBox& box);
++  void Emit(std::string object_id, base::DictValue fields);
++  static void Finish(Done& done, std::string code);
++
++  Send send_;
++  State state_ = State::kOff;
++  int generation_ = 0;
++  scoped_refptr<content::DevToolsAgentHost> agent_host_;
++  int next_id_ = 0;
++  std::map<int, Reply> waiting_;
++  bool overlay_on_ = false;  // Overlay.enable went through (setInspectMode says ok even when not)
++  int world_ = 0;            // our isolated world in the main frame, 0 while there is none
++  std::string object_;       // the pick, in the session's object group
++  Done arm_done_, step_done_, stop_done_;
++  base::WeakPtrFactory<Picker> weak_factory_{this};
++};
++
++}  // namespace agens::bridge::view
++
++#endif  // CHROME_BROWSER_AGENS_BRIDGE_VIEW_PICK_H_
 diff --git a/chrome/browser/agens/embed/agens_controlled.h b/chrome/browser/agens/embed/agens_controlled.h
 new file mode 100644
 index 0000000000..709347df06
@@ -9825,7 +10626,7 @@ index be4b9162d1..60b6aca238 100644
      Profile* profile =
          Profile::FromBrowserContext(source_contents_->GetBrowserContext());
 diff --git a/chrome/browser/ui/webui_browser/BUILD.gn b/chrome/browser/ui/webui_browser/BUILD.gn
-index 98ada3ff32..90027da01a 100644
+index 98ada3ff32..4e4107a9a7 100644
 --- a/chrome/browser/ui/webui_browser/BUILD.gn
 +++ b/chrome/browser/ui/webui_browser/BUILD.gn
 @@ -81,8 +81,11 @@ source_set("impl") {
@@ -9840,7 +10641,7 @@ index 98ada3ff32..90027da01a 100644
      "//chrome/browser/agens/embed/agens_embed.h",
      "//chrome/browser/agens/embed/agens_window.h",
      "//chrome/browser/agens/embed/native_shell.cc",
-@@ -97,6 +100,26 @@ source_set("impl") {
+@@ -97,6 +100,28 @@ source_set("impl") {
  
    if (is_mac) {
      sources += [
@@ -9862,12 +10663,14 @@ index 98ada3ff32..90027da01a 100644
 +      "//chrome/browser/agens/bridge/ui_ops.h",
 +      "//chrome/browser/agens/bridge/view_ops.cc",
 +      "//chrome/browser/agens/bridge/view_ops.h",
++      "//chrome/browser/agens/bridge/view_pick.cc",
++      "//chrome/browser/agens/bridge/view_pick.h",
 +      "//chrome/browser/agens/embed/agens_embedded.h",
 +      "//chrome/browser/agens/embed/agens_embedded_mac.mm",
        "//chrome/browser/agens/embed/native_shell_mac.mm",
        "//chrome/browser/agens/embed/import_chromium_keychain_mac.mm",
        "//chrome/browser/agens/ui/chrome_mac.mm",
-@@ -108,6 +131,7 @@ source_set("impl") {
+@@ -108,6 +133,7 @@ source_set("impl") {
        "LocalAuthentication.framework",
        "Security.framework",  # agens: importing from other browsers reads their Keychain key
      ]  # agens: Touch ID before showing a password
@@ -9875,7 +10678,7 @@ index 98ada3ff32..90027da01a 100644
    }
  
    deps = [
-@@ -173,6 +197,8 @@ source_set("impl") {
+@@ -173,6 +199,8 @@ source_set("impl") {
      "//components/browser_apis/ui_controllers/toolbar:mojom",
      "//components/guest_contents/browser",
      "//components/input",
@@ -9884,7 +10687,7 @@ index 98ada3ff32..90027da01a 100644
      "//components/omnibox/browser:vector_icons",
      "//components/sharing_message",
      "//components/surface_embed/browser",
-@@ -192,6 +218,7 @@ source_set("impl") {
+@@ -192,6 +220,7 @@ source_set("impl") {
  
    if (is_mac) {
      deps += [
@@ -10054,10 +10857,10 @@ index 0000000000..20f175db82
 +#endif  // CONTENT_BROWSER_RENDERER_HOST_AGENS_EMBED_INTERNAL_MAC_H_
 diff --git a/content/browser/renderer_host/agens_embed_mac.mm b/content/browser/renderer_host/agens_embed_mac.mm
 new file mode 100644
-index 0000000000..e5e64eecd4
+index 0000000000..e047c110c9
 --- /dev/null
 +++ b/content/browser/renderer_host/agens_embed_mac.mm
-@@ -0,0 +1,327 @@
+@@ -0,0 +1,359 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "content/public/browser/agens_embed_mac.h"
@@ -10068,11 +10871,13 @@ index 0000000000..e5e64eecd4
 +#include "base/strings/string_util.h"
 +#include "base/strings/sys_string_conversions.h"
 +#include "components/input/native_web_keyboard_event.h"
++#include "components/input/render_widget_host_input_event_router.h"
 +#include "components/input/web_input_event_builders_mac.h"
 +#include "content/browser/renderer_host/agens_embed_internal_mac.h"
 +#include "content/browser/renderer_host/render_widget_host_impl.h"
 +#include "content/browser/renderer_host/render_widget_host_view_mac.h"
 +#include "content/browser/renderer_host/render_widget_host_view_mac_editcommand_helper.h"
++#include "content/browser/web_contents/web_contents_impl.h"
 +#include "content/public/browser/context_menu_params.h"
 +#include "content/public/browser/render_view_host.h"
 +#include "mojo/public/cpp/bindings/remote.h"
@@ -10278,6 +11083,36 @@ index 0000000000..e5e64eecd4
 +      blink::WebInputEvent::Type::kMouseLeave, 0, base::TimeTicks::Now()));
 +}
 +
++AgensEmbedMouseKind AgensEmbedMouseKindOf(base::span<const uint8_t> native_event) {
++  NSEvent* event = ui::EventFromData(native_event);
++  if (!event) return AgensEmbedMouseKind::kOther;
++  switch (event.type) {
++    case NSEventTypeMouseMoved:
++      return AgensEmbedMouseKind::kMove;
++    case NSEventTypeLeftMouseDown:
++    case NSEventTypeRightMouseDown:
++    case NSEventTypeOtherMouseDown:
++      return AgensEmbedMouseKind::kPress;
++    default:
++      return AgensEmbedMouseKind::kOther;
++  }
++}
++
++void AgensEmbedMouseHover(WebContents* contents, const gfx::PointF& point) {
++  RenderWidgetHostViewMac* view = ViewFor(contents);
++  if (!view) return;
++  blink::WebMouseEvent move(blink::WebInputEvent::Type::kMouseMove, blink::WebInputEvent::kNoModifiers,
++                            base::TimeTicks::Now());
++  move.SetPositionInWidget(point);
++  move.SetPositionInScreen(point);
++  view->RouteOrProcessMouseEvent(move);
++}
++
++void AgensEmbedRouteMouseToRoot(WebContents* contents, bool on) {
++  auto* impl = static_cast<WebContentsImpl*>(contents);
++  if (impl && impl->GetInputEventRouter()) impl->GetInputEventRouter()->set_route_to_root_for_devtools(on);
++}
++
 +void AgensEmbedWheel(WebContents* contents,
 +                     base::span<const uint8_t> native_event,
 +                     const gfx::PointF& point) {
@@ -10471,10 +11306,10 @@ index 790d665707..19074293c5 100644
        "native_event_processor_observer_mac.h",
 diff --git a/content/public/browser/agens_embed_mac.h b/content/public/browser/agens_embed_mac.h
 new file mode 100644
-index 0000000000..f0109c9863
+index 0000000000..bf11022b92
 --- /dev/null
 +++ b/content/public/browser/agens_embed_mac.h
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,103 @@
 +// Copyright 2026 SugiyamaLabs.
 +// A tab shown by another app (docs/poc/embed.md). The tab is not in any window here: its
 +// compositor draws into a CAContext, the other app hosts that context in a CALayerHost and sends
@@ -10522,6 +11357,15 @@ index 0000000000..f0109c9863
 +                                    base::span<const uint8_t> native_event,
 +                                    const gfx::PointF& point);
 +CONTENT_EXPORT void AgensEmbedMouseLeave(WebContents* contents);
++// The element picker (chrome/browser/agens/bridge/view_pick.cc). What a view.mouse event is:
++// a move with no button down, a button going down, or anything else.
++enum class AgensEmbedMouseKind { kOther, kMove, kPress };
++CONTENT_EXPORT AgensEmbedMouseKind AgensEmbedMouseKindOf(base::span<const uint8_t> native_event);
++// A plain mouse move at `point` (no button, no modifier), as if the pointer had just arrived there.
++CONTENT_EXPORT void AgensEmbedMouseHover(WebContents* contents, const gfx::PointF& point);
++// Mouse events go to the page's main frame even over a cross-origin iframe (DevTools does the same
++// while it captures an area).
++CONTENT_EXPORT void AgensEmbedRouteMouseToRoot(WebContents* contents, bool on);
 +CONTENT_EXPORT void AgensEmbedWheel(WebContents* contents,
 +                                    base::span<const uint8_t> native_event,
 +                                    const gfx::PointF& point);

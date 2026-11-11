@@ -155,7 +155,43 @@ engine.onUIRequest = { [weak engine] request in
 - Fora do handler: `connection.answerUI(ask, .select(index: 2))`; `.cancel` cancela.
 - A senha só vai no `ui.answer`. O `description` de `UIAnswer` esconde a senha.
 
+**Itens do app no botão direito.** O menu que `presentDefaultUI` desenha aceita itens do app, depois das ações do motor e de um separador. Escolher um chama `onContextMenuItem` com o item e o pedido (aba, ponto, link, seleção) e responde cancelar ao motor. Sem itens, o menu é o de sempre.
+
+```swift
+engine.contextMenuItems = [HostMenuItem(id: "ask", title: "Perguntar ao bot"), HostMenuItem(id: "point", title: "Apontar elemento")]
+engine.onContextMenuItem = { item, request in
+  guard case .contextMenu(let menu) = request.kind, let tab = request.tab else { return }
+  if item.id == "point" { Task { try? await engine.connection?.pick(tab) } }
+  if item.id == "ask" { Task { askBot((try? await engine.connection?.selection(tab))?.text ?? menu.selection ?? "") } }
+}
+```
+
 **Cursor e IME.** A vista troca o cursor do mouse pelo `view.cursor` (o que ela não conhece vira seta) e põe a janela de candidatos do IME no lugar que `view.caret` diz.
+
+## Apontar um elemento
+
+A pessoa aponta um elemento da página e o app recebe o que é ([protocolo.md](protocolo.md), "Passo 5.4"). O motor desenha o destaque dentro da página: a vista não precisa de nada.
+
+```swift
+engine.onPick = { result in
+  switch result {
+  case .picked(let element): showComposer(element)   // selector, html, text, frame, styles, png
+  case .cancelled(let tab): closeComposer(tab)       // Escape na página, navegou, agente voltou
+  }
+}
+try await engine.connection?.pick(tab)               // liga; o próximo clique escolhe
+try await engine.connection?.stepPick(tab, to: .parent)   // ou .child: chega um .picked novo
+try await engine.connection?.pick(tab, on: false)    // desliga e tira o destaque
+let selected = try await engine.connection?.selection(tab)   // o texto selecionado, até 16 KiB
+```
+
+- `PickedElement`: `selector` (caminho CSS), `html` (até 16 KiB, `htmlTruncated`), `text` (até 2000 caracteres, `textTruncated`), `frame` (`CGRect` em pontos da vista, do canto de cima, como o mouse), `styles` (uns 14 valores, `[String: String]`), `png` (`Data?`, só a parte visível; `nil` com `pngSkipped` quando não coube). Tudo vem da página: mostre, não execute.
+- Campo de senha não leva o valor em `html` nem em `text`, e `selection` nunca lê dentro de `<input>`.
+- Depois da escolha, o destaque fica até `pick(on: false)`, um novo `pick`, navegação ou Escape. Enquanto isso, o motor ignora o movimento do mouse sem botão naquela aba.
+- Com o agente trabalhando na aba, `pick` lança `denied`; depois do Assumir, vale. Se o agente volta, chega `.cancelled`.
+- `stepPick` sem pai ou filho lança `not_found` e a escolha fica.
+- Motor mais antigo lança `unknown_op` nas três; nada mais muda.
+- Elemento dentro de `iframe` de outra origem não se escolhe nesta versão.
 
 ## O que não está no kit
 

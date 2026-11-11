@@ -7,15 +7,17 @@
 # screen nor show in the Dock, so this gate should not take focus. It never captures the screen and
 # never sends system-wide input. EMBUTIDO_STANDALONE=1 also launches the engine WITHOUT the switch
 # to check unknown_op: that one is a normal Dock app and can take focus, so it is opt-in.
+# SITE_PORT=8766 runs (or reuses) the test site on another port, e.g. when an older one holds 8765.
 source "$(dirname "$0")/lib.sh"
-export APP OUT GATES REPO
+SITE_PORT="${SITE_PORT:-8765}"
+export APP OUT GATES REPO SITE_PORT
 
 SITE_PID=""
-if ! curl -sf -o /dev/null http://127.0.0.1:8765/ext; then   # /ext: the newest page, so an older site is not reused
-  python3 "$REPO/tools/sites-teste/serve.py" >"$OUT/site.log" 2>&1 &
+if ! curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/pick"; then   # /pick: the newest page, so an older site is not reused
+  python3 "$REPO/tools/sites-teste/serve.py" "$SITE_PORT" >"$OUT/site.log" 2>&1 &
   SITE_PID=$!
-  for _ in $(seq 20); do curl -sf -o /dev/null http://127.0.0.1:8765/ext && break; sleep 0.25; done
-  curl -sf -o /dev/null http://127.0.0.1:8765/ext || { echo "FAIL: the test site has no /ext (an older serve.py on port 8765?)"; exit 1; }
+  for _ in $(seq 20); do curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/pick" && break; sleep 0.25; done
+  curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/pick" || { echo "FAIL: the test site has no /pick (an older serve.py on port $SITE_PORT? try SITE_PORT=8766)"; exit 1; }
 fi
 
 # winids lists every normal window of a pid, also the ones off screen; this one counts only those
@@ -28,21 +30,33 @@ print(list.filter { ($0[kCGWindowOwnerPID as String] as? Int) == pid }.count)
 EOF
 swiftc -O "$OUT/onscreen.swift" -o "$OUT/onscreen" || { echo "FAIL: could not build the on-screen check"; exit 1; }
 
-# A right click as the host's view sends it: the events are built and serialized, never posted.
-cat >"$OUT/rightclick.swift" <<'EOF'
+# Mouse and key events as the host's view sends them: built and serialized, never posted. One line
+# per name given: move, down, up (left button), rightdown, rightup, esc, escup (the Escape key).
+cat >"$OUT/events.swift" <<'EOF'
 import CoreGraphics
 import Foundation
-for type in [CGEventType.rightMouseDown, .rightMouseUp] {
-  let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: .zero, mouseButton: .right)!
+let mouse: [String: (CGEventType, CGMouseButton)] = [
+  "move": (.mouseMoved, .left), "down": (.leftMouseDown, .left), "up": (.leftMouseUp, .left),
+  "rightdown": (.rightMouseDown, .right), "rightup": (.rightMouseUp, .right)]
+for name in CommandLine.arguments.dropFirst() {
+  let event: CGEvent
+  if name == "esc" || name == "escup" {
+    event = CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: name == "esc")!
+  } else {
+    let (type, button) = mouse[name]!
+    event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: .zero, mouseButton: button)!
+    if name == "down" || name == "up" { event.setIntegerValueField(.mouseEventClickState, value: 1) }
+  }
   print((event.data! as Data).base64EncodedString())
 }
 EOF
-swiftc -O "$OUT/rightclick.swift" -o "$OUT/rightclick" || { echo "FAIL: could not build the right click"; exit 1; }
+swiftc -O "$OUT/events.swift" -o "$OUT/events" || { echo "FAIL: could not build the events helper"; exit 1; }
 
 cat >"$OUT/parent.py" <<'EOF'
-import json, os, re, select, socket, subprocess, sys, tempfile, time
+import base64, json, os, re, select, socket, struct, subprocess, sys, tempfile, time, zlib
 APP, OUT, GATES = os.environ["APP"], os.environ["OUT"], os.environ["GATES"]
-SITE = "http://127.0.0.1:8765"
+PORT = os.environ["SITE_PORT"]
+SITE = f"http://127.0.0.1:{PORT}"
 failed = []
 
 def check(name, ok, detail=""):
@@ -555,8 +569,8 @@ else:
     ax.ask("tab.reload", tab=at)
     title = ext_title(vt) if vt else None
     check("extension: turned off while the tab is controlled, it does not run after a reload", title == PLAIN, title)
-    ax.ask("tab.navigate", tab=at, url="http://localhost:8765/ext")
-    title = ext_title(vt, "http://localhost:8765") if vt else None
+    ax.ask("tab.navigate", tab=at, url=f"http://localhost:{PORT}/ext")
+    title = ext_title(vt, f"http://localhost:{PORT}") if vt else None
     check("extension: does not run after a cross-origin navigation (another site, a new process)", title == PLAIN, title)
     at2 = ax.ask("tab.open", ato=ato, url=SITE + "/ext").get("tab")
     vt2 = controlled_tab((vt,))
@@ -565,14 +579,15 @@ else:
     c.ask("view.control", tab=vt, action="end")
     check("extension: control ends", bool(ax.event(lambda m: m["event"] == "control.stopped", 10)))
     drop(vt); c.ask("view.reload", tab=vt); tab_event(vt, lambda e: e.get("loading"), 10)   # the reload began
-    title = ext_title(vt, "http://localhost:8765") if vt else None
+    title = ext_title(vt, f"http://localhost:{PORT}") if vt else None
     check("extension: runs again after control ends and the tab reloads", title == MARKED, title)
     for t in (vt, vt2):
         if t: c.ask("view.close", tab=t)
 c.ask("host.settings", agent_extensions=True)
 # context_menu on a tab without an agent: a right click on the page
 t = ui_tab("/form"); titled(t, "Form (test)")
-for data in subprocess.run([f"{OUT}/rightclick"], capture_output=True, text=True).stdout.split():
+def events(*names): return subprocess.run([f"{OUT}/events", *names], capture_output=True, text=True).stdout.split()
+for data in events("rightdown", "rightup"):
     c.send_raw({"op": "view.mouse", "tab": t, "data": data, "x": 300, "y": 300})
 a = ui_ask("context_menu", t, 10)
 actions = ((a or {}).get("context") or {}).get("actions", [])
@@ -582,6 +597,148 @@ check("context_menu: an action that was not offered is bad_request", err(answer(
 drop(t)
 check("context_menu: ui.answer reload reloads the page", err(answer(a, action="reload")) == "ok" and titled(t, "Form (test)"))
 c.ask("view.close", tab=t)
+
+# Step 5.4: the element picker (view.pick, view.picked) and view.selection, on /pick, whose elements sit
+# at fixed places. The clicks are serialized events, never posted; what the page did shows in its title and url.
+def png_info(b64):  # (width, height, pixel(x, y) -> (r, g, b) or None) of an 8-bit RGB(A) PNG, or None
+    try: data = base64.b64decode(b64 or "", validate=True)
+    except ValueError: return None
+    if data[:8] != b"\x89PNG\r\n\x1a\n": return None
+    pos, idat, w, h, depth, color = 8, b"", 0, 0, 0, 0
+    while pos + 8 <= len(data):
+        n, kind = struct.unpack(">I4s", data[pos:pos + 8]); body = data[pos + 8:pos + 8 + n]; pos += 12 + n
+        if kind == b"IHDR": w, h, depth, color = struct.unpack(">IIBB", body[:10])
+        elif kind == b"IDAT": idat += body
+    bpp = {2: 3, 6: 4}.get(color) if depth == 8 else None
+    if not bpp: return (w, h, lambda x, y: None)
+    raw, stride, rows, prev = zlib.decompress(idat), w * bpp, [], bytearray(w * bpp)
+    for y in range(h):
+        f, line = raw[y * (stride + 1)], bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+        for i in range(stride):
+            a, b, cc = (line[i - bpp] if i >= bpp else 0), prev[i], (prev[i - bpp] if i >= bpp else 0)
+            p = a + b - cc
+            line[i] = (line[i] + [0, a, b, (a + b) // 2, a if abs(p - a) <= abs(p - b) and abs(p - a) <= abs(p - cc)
+                                  else b if abs(p - b) <= abs(p - cc) else cc][f]) & 255
+        rows.append(line); prev = line
+    return (w, h, lambda x, y: tuple(rows[y][x * bpp:x * bpp + 3]))
+CLICK = events("move", "down", "up")
+def click(tab, x, y):
+    for data in CLICK: c.send_raw({"op": "view.mouse", "tab": tab, "data": data, "x": x, "y": y})
+def picked(tab, timeout=10):
+    return c.event(lambda e: e["event"] == "view.picked" and e.get("tab") == tab, timeout) or {}
+def pick_tab(path="/pick"):  # an attached 800 x 600 tab on a fresh /pick, and its screen scale
+    t = c.ask("view.open", ato=ato, url=SITE + path).get("tab", "")
+    c.ask("view.attach", tab=t, width=800, height=600, scale=1)
+    layer = layer_event(t, 800) or {}
+    titled(t, "Pick (element)")
+    return t, layer.get("scale", 1)
+def shows(p, *keys): return {k: p.get(k) for k in keys}
+
+t, scale = pick_tab()
+check("view.pick without on is bad_request", err(c.ask("view.pick", tab=t)) == "bad_request")
+check("view.pick.step before any pick is not_found", err(c.ask("view.pick.step", tab=t, to="parent")) == "not_found")
+check("view.pick.step with a to that is not parent or child is bad_request",
+      err(c.ask("view.pick.step", tab=t, to="up")) == "bad_request")
+check("view.pick from a connection that is not the host is unauthorized",
+      err(c2.ask("view.pick", tab=t, on=True)) == "unauthorized")
+r = c.ask("view.pick", tab=t, on=True)
+check("view.pick on:true arms the picker", r.get("ok"), r)
+click(t, 55, 235)
+p = picked(t)
+check("view.picked for a click on the checkbox: selector #check, html with its tag",
+      p.get("selector") == "#check" and "<input" in p.get("html", "") and 'id="check"' in p.get("html", ""),
+      shows(p, "selector", "html", "cancelled"))
+box = [p.get(k) for k in ("x", "y", "width", "height")]
+check("view.picked box in the view's points (40, 220, 30 x 30)",
+      all(isinstance(v, (int, float)) for v in box) and max(abs(a - b) for a, b in zip(box, [40, 220, 30, 30])) < 1, box)
+styles = p.get("styles") or {}
+check("view.picked styles: about a dozen, each a string of at most 40 characters",
+      len(styles) >= 10 and bool(styles.get("display")) and all(isinstance(v, str) and len(v) <= 40 for v in styles.values()), shows(p, "styles"))
+info = png_info(p.get("png"))
+check("view.picked png decodes at the box's size times the screen scale",
+      bool(info) and abs(info[0] - 30 * scale) <= 1 and abs(info[1] - 30 * scale) <= 1, (info and info[:2], scale))
+check("the press that picked did not reach the page (the checkbox stays unchecked)", not titled(t, "checked:true", 2))
+
+r = c.ask("view.pick", tab=t, on=True)
+click(t, 230, 80)   # inside #inner (50..250 x 50..90), right of its text
+p = picked(t)
+check("view.pick on:true again picks again: #inner and its text",
+      r.get("ok") and p.get("selector") == "#inner" and p.get("text") == "Card text", shows(p, "selector", "text"))
+info = png_info(p.get("png"))
+px = info[2](info[0] - 4, info[1] // 2) if info and info[0] > 4 else None
+check("the picture shows the element without the highlight (its own colour, #ccddee)",
+      bool(px) and max(abs(a - b) for a, b in zip(px, (204, 221, 238))) <= 6, px)
+r = c.ask("view.pick.step", tab=t, to="parent")
+p = picked(t)
+check("view.pick.step parent: #card, with the child in its html",
+      r.get("ok") and p.get("selector") == "#card" and 'id="inner"' in p.get("html", ""), shows(p, "selector"))
+r = c.ask("view.pick.step", tab=t, to="child")
+p = picked(t)
+check("view.pick.step child: back to #inner", r.get("ok") and p.get("selector") == "#inner", shows(p, "selector"))
+check("view.pick.step child of an element with no child element is not_found",
+      err(c.ask("view.pick.step", tab=t, to="child")) == "not_found")
+
+c.ask("view.pick", tab=t, on=True)
+click(t, 100, 340)
+p = picked(t)
+check("a password field is picked with no value in html or text",
+      p.get("selector") == "#pw" and p.get("text") == "" and "pick-secret-77" not in json.dumps(p), shows(p, "selector", "html", "text"))
+c.ask("view.pick", tab=t, on=True)
+drop(t)
+click(t, 50, 290)
+p = picked(t)
+check("a link is picked and the press does not follow it",
+      p.get("selector") == "#go" and tab_event(t, lambda e: "/other" in e.get("url", ""), 2) is None, shows(p, "selector"))
+
+c.ask("view.pick", tab=t, on=True)
+c.send_raw({"op": "view.focus", "tab": t, "on": True})
+for data, extra in zip(events("esc", "escup"), [{"commands": ["cancelOperation:"]}, {}]):
+    c.send_raw({"op": "view.key", "tab": t, "data": data, **extra})
+p = picked(t)
+check("Escape in the page ends the picker: view.picked cancelled", p.get("cancelled") is True, p)
+c.ask("view.pick", tab=t, on=True)
+r = c.ask("view.pick", tab=t, on=False)
+click(t, 55, 235)
+check("view.pick on:false ends it: the next click acts on the page (the checkbox gets checked)",
+      r.get("ok") and titled(t, "checked:true", 5))
+check("view.pick on:false sends no view.picked", picked(t, 1) == {})
+c.ask("view.pick", tab=t, on=True)
+c.ask("view.navigate", tab=t, text=SITE + "/other")
+p = picked(t)
+check("navigation ends the picker: view.picked cancelled", p.get("cancelled") is True, p)
+c.ask("view.close", tab=t)
+
+t, _ = pick_tab("/pick?select")
+r = c.ask("view.selection", tab=t)
+check("view.selection gives what the page's script selected",
+      r.get("ok") and r.get("text") == "Selected by the page" and not r.get("truncated"), r)
+c.ask("view.close", tab=t)
+t, _ = pick_tab()
+r = c.ask("view.selection", tab=t)
+check("view.selection with nothing selected is empty", r.get("ok") and r.get("text") == "", r)
+c.ask("view.close", tab=t)
+
+ap = Conn()
+rid = ap.send("control.start", ato=ato, reason="gate pick")
+x = c.event(lambda e: e["event"] == "approval.ask", 20)
+if x: c.ask("approval.answer", ask=x["ask"], answer="allow")
+if not (x and ap.wait(rid).get("ok")):
+    skip("view.pick on an agent's tab", "control.start did not go through")
+else:
+    ap.ask("tab.open", ato=ato, url=SITE + "/pick")
+    vt = (c.event(lambda e: e["event"] == "view.tab" and e.get("url", "").startswith(SITE + "/pick")
+                  and isinstance(e.get("control"), dict), 10) or {}).get("tab")
+    c.ask("view.attach", tab=vt, width=800, height=600, scale=1)
+    check("view.pick on a tab while its agent works is denied", err(c.ask("view.pick", tab=vt, on=True)) == "denied")
+    c.ask("view.control", tab=vt, action="take")
+    c.pump(0.5)
+    r = c.ask("view.pick", tab=vt, on=True)
+    check("after Assumir the person may pick on that tab", r.get("ok"), r)
+    c.ask("view.control", tab=vt, action="give")
+    p = picked(vt)
+    check("the agent working again ends the picker: view.picked cancelled", p.get("cancelled") is True, p)
+    ap.ask("control.stop")
+    c.ask("view.close", tab=vt)
 
 # Allowing notifications is kept for the site (Chromium has no one-time grant for them), so this goes last.
 t = ui_tab("/ui/perm?geo=0")
@@ -598,7 +755,7 @@ EOF
 
 python3 "$OUT/parent.py" &
 PARENT=$!
-for _ in $(seq 400); do [ -f "$OUT/done" ] && break; sleep 0.5; done
+for _ in $(seq 700); do [ -f "$OUT/done" ] && break; sleep 0.5; done
 ENGINE_PID="$(cat "$OUT/engine.pid" 2>/dev/null)"
 PROFILE_E="$(cat "$OUT/profile" 2>/dev/null)"
 fail=0

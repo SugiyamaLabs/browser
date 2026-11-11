@@ -34,7 +34,12 @@ final class FakeEngine: @unchecked Sendable {
   func received(_ op: String) -> [[String: JSON]] { received.filter { $0["op"]?.string == op } }
 
   func send(_ message: [String: Any]) {
-    let fd = lock.withLock { client }
+    // The client may still be on its way in (accept runs on another thread): wait for it a moment.
+    var fd = lock.withLock { client }
+    for _ in 0..<200 where fd < 0 {
+      usleep(10_000)
+      fd = lock.withLock { client }
+    }
     var data = try! JSONSerialization.data(withJSONObject: message)
     data.append(0x0A)
     _ = data.withUnsafeBytes { write(fd, $0.baseAddress!, $0.count) }

@@ -31,13 +31,17 @@ extension BrowserEngine {
 
     case .contextMenu(let context):
       guard let view else { return .cancel }
-      let menu = NSMenu()
-      for (index, action) in context.actions.enumerated() {
-        guard let title = Self.contextTitles[action] else { continue }  // the host may draw fewer
-        menu.addItem(withTitle: title, action: nil, keyEquivalent: "").tag = index
+      let (menu, choices) = Self.contextMenu(context, hostItems: contextMenuItems)
+      guard menu.numberOfItems > 0,
+        let tag = await popUp(menu, positioning: nil, at: (context.x, context.y), in: view)
+      else { return .cancel }
+      switch choices[tag] {
+      case .action(let action):
+        return .contextMenu(action: action)
+      case .host(let item):
+        onContextMenuItem?(item, request)
+        return .cancel
       }
-      guard menu.numberOfItems > 0 else { return .cancel }
-      return await popUp(menu, positioning: nil, at: (context.x, context.y), in: view).map { .contextMenu(action: context.actions[$0]) } ?? .cancel
 
     case .dialog(let dialog):
       guard let window else { return .cancel }
@@ -122,6 +126,30 @@ extension BrowserEngine {
     }
   }
 
+  /// What an item of the right-click menu stands for; an item's tag is its index here.
+  enum ContextChoice: Equatable {
+    case action(String)
+    case host(HostMenuItem)
+  }
+
+  /// The right-click menu: the engine's actions this kit has a title for, then the host's items
+  /// past a separator.
+  static func contextMenu(_ context: ContextMenu, hostItems: [HostMenuItem]) -> (NSMenu, [ContextChoice]) {
+    let menu = NSMenu()
+    var choices: [ContextChoice] = []
+    for action in context.actions {
+      guard let title = contextTitles[action] else { continue }  // the host may draw fewer
+      menu.addItem(withTitle: title, action: nil, keyEquivalent: "").tag = choices.count
+      choices.append(.action(action))
+    }
+    if !choices.isEmpty && !hostItems.isEmpty { menu.addItem(.separator()) }
+    for item in hostItems {
+      menu.addItem(withTitle: item.title, action: nil, keyEquivalent: "").tag = choices.count
+      choices.append(.host(item))
+    }
+    return (menu, choices)
+  }
+
   private static let contextTitles = [
     "open_link_new_tab": "Abrir link em nova aba", "copy_link": "Copiar link", "copy_image": "Copiar imagem",
     "save_image": "Salvar imagem como…", "copy": "Copiar", "cut": "Recortar", "paste": "Colar",
@@ -150,7 +178,7 @@ extension BrowserEngine {
   /// Pops the menu up at a point given from the view's top left; returns the chosen item's tag.
   private func popUp(_ menu: NSMenu, positioning: NSMenuItem?, at point: (x: Double, y: Double), in view: BrowserTabView) async -> Int? {
     let picker = MenuPicker()
-    for item in menu.items {
+    for item in menu.items where !item.isSeparatorItem {
       item.target = picker
       item.action = #selector(MenuPicker.pick(_:))
     }

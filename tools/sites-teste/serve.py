@@ -5,7 +5,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PAGES = {"/login": "login.html", "/app/": "app.html", "/form": "form.html", "/other": "other.html", "/agent": "agent.html", "/post": "post.html",
-         "/ui/dialog": "ui-dialog.html", "/ui/perm": "ui-perm.html", "/ui/pick": "ui-pick.html", "/ext": "ext.html"}
+         "/ui/dialog": "ui-dialog.html", "/ui/perm": "ui-perm.html", "/ui/pick": "ui-pick.html", "/ext": "ext.html", "/pick": "pick.html"}
 SID = "sid-fake-123"  # fake test values only
 SEEN = {}  # /whoami tag -> whether that request carried the login cookie (in memory only)
 

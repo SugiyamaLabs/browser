@@ -1,0 +1,20 @@
+<!doctype html><meta charset="utf-8"><title>Pick (element)</title>
+<style>
+body { margin: 0; font: 16px sans-serif; }
+#card { position: absolute; left: 40px; top: 40px; width: 300px; height: 120px; padding: 10px; background: #e8f0ff; border-radius: 8px; }
+#inner { margin: 0; width: 200px; height: 40px; background: #ccddee; }
+#check { position: absolute; left: 40px; top: 220px; width: 30px; height: 30px; margin: 0; }
+#go { position: absolute; left: 40px; top: 280px; }
+#pw { position: absolute; left: 40px; top: 330px; width: 200px; }
+#quote { position: absolute; left: 40px; top: 380px; margin: 0; }
+</style>
+<div id="card"><p id="inner">Card text</p></div>
+<input id="check" type="checkbox">
+<a id="go" href="/other">Other page</a>
+<input id="pw" type="password" value="pick-secret-77">
+<p id="quote">Selected by the page</p>
+<script>
+// Results go to the title: the gate's host sees only a tab's title and url.
+document.getElementById("check").onchange = e => { document.title = "checked:" + e.target.checked; };
+if (location.search === "?select") getSelection().selectAllChildren(document.getElementById("quote"));
+</script>
