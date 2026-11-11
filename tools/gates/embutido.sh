@@ -27,6 +27,17 @@ print(list.filter { ($0[kCGWindowOwnerPID as String] as? Int) == pid }.count)
 EOF
 swiftc -O "$OUT/onscreen.swift" -o "$OUT/onscreen" || { echo "FAIL: could not build the on-screen check"; exit 1; }
 
+# A right click as the host's view sends it: the events are built and serialized, never posted.
+cat >"$OUT/rightclick.swift" <<'EOF'
+import CoreGraphics
+import Foundation
+for type in [CGEventType.rightMouseDown, .rightMouseUp] {
+  let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: .zero, mouseButton: .right)!
+  print((event.data! as Data).base64EncodedString())
+}
+EOF
+swiftc -O "$OUT/rightclick.swift" -o "$OUT/rightclick" || { echo "FAIL: could not build the right click"; exit 1; }
+
 cat >"$OUT/parent.py" <<'EOF'
 import json, os, re, select, socket, subprocess, sys, tempfile, time
 APP, OUT, GATES = os.environ["APP"], os.environ["OUT"], os.environ["GATES"]
@@ -471,7 +482,18 @@ else:
     check("the page got the chosen option", titled(vt, "select:pe"))
     ag.ask("control.stop")
     subprocess.run(["rm", "-rf", tmp])
-skip("context_menu", "needs a right click: view.mouse takes a serialized NSEvent (CGEventCreateData) and this gate has no way to build one (select is covered above through the page's own showPicker())")
+# context_menu on a tab without an agent: a right click on the page
+t = ui_tab("/form"); titled(t, "Form (test)")
+for data in subprocess.run([f"{OUT}/rightclick"], capture_output=True, text=True).stdout.split():
+    c.send_raw({"op": "view.mouse", "tab": t, "data": data, "x": 300, "y": 300})
+a = ui_ask("context_menu", t, 10)
+actions = ((a or {}).get("context") or {}).get("actions", [])
+check("context_menu: a right click reaches the host (actions, x, y)",
+      "reload" in actions and all(isinstance((a or {}).get(k), (int, float)) for k in ("x", "y")), a)
+check("context_menu: an action that was not offered is bad_request", err(answer(a, action="copy_link")) == "bad_request")
+drop(t)
+check("context_menu: ui.answer reload reloads the page", err(answer(a, action="reload")) == "ok" and titled(t, "Form (test)"))
+c.ask("view.close", tab=t)
 
 # Allowing notifications is kept for the site (Chromium has no one-time grant for them), so this goes last.
 t = ui_tab("/ui/perm?geo=0")

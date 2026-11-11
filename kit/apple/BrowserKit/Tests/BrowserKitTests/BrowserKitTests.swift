@@ -197,7 +197,7 @@ import Testing
       ["kind": "select", "tab": "v3", "x": 120, "y": 340, "width": 180,
        "items": [["label": "Brasil"], ["label": "Chile", "disabled": true], ["label": "Sul", "group": true]], "selected": 0],
       ["kind": "context_menu", "tab": "v3", "x": 10, "y": 20,
-       "context": ["link": "https://example.com/a", "selection": "texto", "editable": true], "actions": ["open_link_new_tab", "copy_link"]],
+       "context": ["link": "https://example.com/a", "selection": "texto", "editable": true, "actions": ["open_link_new_tab", "copy_link"]]],
       ["kind": "dialog", "tab": "v3", "type": "prompt", "message": "Nome?", "origin": "https://example.com", "default": "x"],
       ["kind": "file", "tab": "v3", "mode": "open_multiple", "accept": [".png", "image/*"]],
       ["kind": "auth", "tab": "v3", "origin": "https://example.com", "realm": "Intranet", "proxy": false, "retry": true],

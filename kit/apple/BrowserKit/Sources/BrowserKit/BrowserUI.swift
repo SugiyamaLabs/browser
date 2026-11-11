@@ -41,11 +41,11 @@ public struct UIRequest: Sendable, Equatable {
         },
         selected: message["selected"]?.int ?? -1))
     case "context_menu":
-      guard message["actions"]?.array != nil else { return nil }
       let context = message["context"]?.object ?? [:]
+      guard let actions = context["actions"]?.array else { return nil }  // the list comes inside `context`
       kind = .contextMenu(ContextMenu(
         x: number("x"), y: number("y"), link: context["link"]?.string, image: context["image"]?.string,
-        selection: context["selection"]?.string, editable: context["editable"]?.bool ?? false, actions: strings("actions")))
+        selection: context["selection"]?.string, editable: context["editable"]?.bool ?? false, actions: actions.compactMap(\.string)))
     case "dialog":
       guard let type = message["type"]?.string.flatMap(PageDialog.DialogType.init(rawValue:)) else { return nil }
       kind = .dialog(PageDialog(type: type, message: string("message"), origin: string("origin"), defaultText: message["default"]?.string))
