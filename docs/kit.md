@@ -140,7 +140,7 @@ engine.onUIRequest = { [weak engine] request in
 
 - Operações sem atalho tipado: `connection.send(op: "login", params: [...])` devolve a resposta inteira, ou lança `BrowserError` com o `code` do protocolo (`not_found`, `denied`…) e a `message`. `engine.onEvent` recebe todos os eventos.
 - O kit não desenha nada além da página e dos pedidos dela: barra de endereço, abas, atos e aviso do agente são do app.
-- **Ainda não chegam ao app:** autofill. O botão direito ainda não é enviado ao motor, então o menu de contexto não vem.
+- **Ainda não chegam ao app:** autofill.
 - **Não feito:** arrastar e soltar, acessibilidade, tela cheia e dica (tooltip). Texto que não vem de tecla (emoji, ditado) é descartado.
 - Nunca testado com motor real: tela Retina e monitores com escalas diferentes.
 
