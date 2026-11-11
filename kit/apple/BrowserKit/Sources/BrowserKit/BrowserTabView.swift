@@ -24,6 +24,13 @@ public final class BrowserTabView: NSView, @preconcurrency NSTextInputClient {
   private var markedSelection = NSRange(location: 0, length: 0)
   private var unmarked = false
 
+  /// The page's mouse cursor (`view.cursor`), by its protocol name; an unknown one is `default`.
+  private(set) var cursorName = "default"
+  /// Where the text being edited is (`view.caret`), in points from the top left.
+  var caret: CGRect? {
+    didSet { inputContext?.invalidateCharacterCoordinates() }
+  }
+
   public init(engine: BrowserEngine, tab: String) {
     connection = engine.connection
     self.tab = tab
@@ -102,6 +109,39 @@ public final class BrowserTabView: NSView, @preconcurrency NSTextInputClient {
     sendSize()
   }
 
+  // Cursor.
+  private static let hiddenCursor = NSCursor(image: NSImage(size: NSSize(width: 1, height: 1)), hotSpot: .zero)
+
+  /// The cursor for a `view.cursor` name, or nil for a name this kit does not know.
+  static func cursor(_ name: String) -> NSCursor? {
+    switch name {
+    // macOS has no public wait or move cursor.
+    case "default", "wait", "move": return .arrow
+    case "pointer": return .pointingHand
+    case "text": return .iBeam
+    case "crosshair": return .crosshair
+    case "grab": return .openHand
+    case "grabbing": return .closedHand
+    case "not_allowed": return .operationNotAllowed
+    case "resize_ew": return .resizeLeftRight
+    case "resize_ns": return .resizeUpDown
+    case "resize_nesw", "resize_nwse":
+      guard #available(macOS 15, *) else { return .arrow }
+      return .frameResize(position: name == "resize_nesw" ? .topRight : .topLeft, directions: .all)
+    case "none": return hiddenCursor
+    default: return nil
+    }
+  }
+
+  func setCursor(_ name: String) {
+    cursorName = Self.cursor(name) == nil ? "default" : name
+    window?.invalidateCursorRects(for: self)
+  }
+
+  public override func resetCursorRects() {
+    addCursorRect(bounds, cursor: Self.cursor(cursorName) ?? .arrow)
+  }
+
   // Focus.
   public override var acceptsFirstResponder: Bool { true }
   public override func becomeFirstResponder() -> Bool {
@@ -170,9 +210,9 @@ public final class BrowserTabView: NSView, @preconcurrency NSTextInputClient {
   }
 
   // NSTextInputClient.
-  // shortcut: text that arrives outside a key press (the emoji picker, dictation) is dropped, and
-  // the input method's window appears under the view instead of at the caret; both need the
-  // engine to report the selection and its rectangle.
+  // shortcut: text that arrives outside a key press (the emoji picker, dictation) is dropped; it
+  // needs the engine to report the selection. The input method's window goes at `caret`, or under
+  // the view until the engine reports one.
   public func insertText(_ string: Any, replacementRange: NSRange) {
     if handlingKey { insertedText += (string as? NSAttributedString)?.string ?? (string as? String ?? "") }
     marked = ""
@@ -193,7 +233,9 @@ public final class BrowserTabView: NSView, @preconcurrency NSTextInputClient {
   public func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?) -> NSAttributedString? { nil }
   public func validAttributesForMarkedText() -> [NSAttributedString.Key] { [] }
   public func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
-    window?.convertToScreen(convert(NSRect(x: 0, y: 0, width: bounds.width, height: 0), to: nil)) ?? .zero
+    let rect = caret.map { NSRect(x: $0.minX, y: bounds.height - $0.maxY, width: $0.width, height: $0.height) }
+      ?? NSRect(x: 0, y: 0, width: bounds.width, height: 0)
+    return window?.convertToScreen(convert(rect, to: nil)) ?? .zero
   }
   public func characterIndex(for point: NSPoint) -> Int { NSNotFound }
 

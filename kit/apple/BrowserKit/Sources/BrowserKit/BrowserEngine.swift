@@ -45,12 +45,19 @@ public struct ApprovalRequest: Sendable, Equatable {
   @ObservationIgnored public var onStateChange: ((State) -> Void)?
   /// Approval requests. Without a handler the kit answers `deny`.
   @ObservationIgnored public var onApproval: ((ApprovalRequest) async -> ApprovalAnswer)?
+  /// What the engine asks the host to draw (`ui.ask`). Without a handler the kit cancels it;
+  /// `presentDefaultUI` draws it with AppKit. On `ui.cancel` (and when the engine goes away) the kit
+  /// cancels the handler's task, so close what you drew in `withTaskCancellationHandler`, and
+  /// sends nothing; the reason comes in `onEvent`.
+  @ObservationIgnored public var onUIRequest: ((UIRequest) async -> UIAnswer)?
   /// Every event, after the kit has handled the ones it knows.
   @ObservationIgnored public var onEvent: ((String, [String: JSON]) -> Void)?
 
   @ObservationIgnored private var process: Process?
   @ObservationIgnored private var generation = 0
   @ObservationIgnored private var views: [String: WeakView] = [:]
+  /// The handlers of the `ui.ask`s still open, by `ask`.
+  @ObservationIgnored private var uiTasks: [String: Task<Void, Never>] = [:]
 
   /// - Parameters:
   ///   - executable: the engine binary, e.g. `Contents/Helpers/AgensBrowser.app/Contents/MacOS/AgensBrowser`.
@@ -157,20 +164,48 @@ public struct ApprovalRequest: Sendable, Equatable {
     views[tab] = WeakView(view: view)
   }
 
+  func view(_ tab: String?) -> BrowserTabView? { tab.flatMap { views[$0]?.view } }
+
   private func handle(_ event: String, _ message: [String: JSON]) {
     if !tabs.handle(event, message) {
+      let view = view(message["tab"]?.string)
       switch event {
       case "view.layer":
-        if let tab = message["tab"]?.string, let context = message["context"]?.double {
-          views[tab]?.view?.show(context: UInt32(context))
+        if let context = message["context"]?.double { view?.show(context: UInt32(context)) }
+      case "view.cursor":
+        if let cursor = message["cursor"]?.string { view?.setCursor(cursor) }
+      case "view.caret":
+        if let x = message["x"]?.double, let y = message["y"]?.double, let width = message["width"]?.double,
+          let height = message["height"]?.double
+        {
+          view?.caret = CGRect(x: x, y: y, width: width, height: height)
         }
       case "approval.ask":
         answer(message)
+      case "ui.ask":
+        ask(message)
+      case "ui.cancel":
+        if let ask = message["ask"]?.string { uiTasks.removeValue(forKey: ask)?.cancel() }
       default:
         break
       }
     }
     onEvent?(event, message)
+  }
+
+  private func ask(_ message: [String: JSON]) {
+    guard let ask = message["ask"]?.string, uiTasks[ask] == nil else { return }
+    // One the kit cannot read is cancelled, so the page does not wait for it forever.
+    guard let request = UIRequest(message: message), let onUIRequest else {
+      connection?.request(op: "ui.answer", params: ["ask": .string(ask), "cancel": true])
+      return
+    }
+    uiTasks[ask] = Task {
+      let answer = await onUIRequest(request)
+      guard !Task.isCancelled else { return }
+      uiTasks[ask] = nil
+      try? await connection?.answerUI(ask, answer)
+    }
   }
 
   private func answer(_ message: [String: JSON]) {
@@ -220,6 +255,8 @@ public struct ApprovalRequest: Sendable, Equatable {
     tabs.connection = nil
     tabs.reset()
     views = [:]
+    uiTasks.values.forEach { $0.cancel() }
+    uiTasks = [:]
     if let process, process.isRunning { process.terminate() }
     process = nil
   }

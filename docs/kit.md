@@ -104,12 +104,44 @@ engine.onApproval = { request in
 }
 ```
 
+## Menus, diálogos e pedidos da página
+
+O que a página abre por conta própria chega como `ui.ask` ([protocolo.md](protocolo.md), "Passo 5.3"): lista de `select`, botão direito, `alert`/`confirm`/`prompt`/`beforeunload`, escolher arquivo, login HTTP, permissão do site e instalar extensão. O motor de hoje ainda não manda nada disso.
+
+O kit já desenha tudo em AppKit, em português. Ligue com uma linha:
+
+```swift
+engine.onUIRequest = { [weak engine] in await engine?.presentDefaultUI($0) ?? .cancel }
+```
+
+- `select` e botão direito: `NSMenu` no ponto da página.
+- Diálogo, login, permissão e extensão: folha na janela da vista. Login tem usuário e senha; permissão tem **Permitir**, **Não permitir** e **Lembrar**.
+- Arquivo: `NSOpenPanel` ou `NSSavePanel`. Não filtra pelo `accept`.
+- Sem a vista da aba (ou sem janela, nas folhas), a resposta é cancelar.
+
+Para desenhar do seu jeito, troque o handler. `request.kind` diz o que é (`.select`, `.contextMenu`, `.dialog`, `.file`, `.auth`, `.permission`, `.extension`), cada um com os campos do protocolo. Devolva o `UIAnswer` do mesmo kind, ou `.cancel`. Dá para chamar `presentDefaultUI` só nos kinds que você não quer desenhar.
+
+```swift
+engine.onUIRequest = { [weak engine] request in
+  guard case .auth(let auth) = request.kind else { return await engine?.presentDefaultUI(request) ?? .cancel }
+  let (user, password) = await myLoginSheet(auth.origin)   // ou do Keychain do app
+  return .auth(username: user, password: password)
+}
+```
+
+- **Fechar.** Se o motor desiste (`ui.cancel`: a aba fechou ou navegou, a página desistiu) ou cai, o kit cancela a `Task` do handler e não responde nada. Feche o que desenhou num `withTaskCancellationHandler`. O motivo vem em `engine.onEvent`.
+- Sem handler, o kit cancela na hora. Pedido que o kit não entende também é cancelado.
+- Fora do handler: `connection.answerUI(ask, .select(index: 2))`; `.cancel` cancela.
+- A senha só vai no `ui.answer`. O `description` de `UIAnswer` esconde a senha.
+
+**Cursor e IME.** A vista troca o cursor do mouse pelo `view.cursor` (o que ela não conhece vira seta) e põe a janela de candidatos do IME no lugar que `view.caret` diz.
+
 ## O que não está no kit
 
 - Operações sem atalho tipado: `connection.send(op: "login", params: [...])` devolve a resposta inteira, ou lança `BrowserError` com o `code` do protocolo (`not_found`, `denied`…) e a `message`. `engine.onEvent` recebe todos os eventos.
-- O kit não desenha nada além da página: barra de endereço, abas, atos e aviso do agente são do app.
-- **Ainda não chegam ao app:** o que a página abre por conta própria, como a lista de um `select`, o menu de contexto (o botão direito não é enviado), `alert`/`confirm` e outros diálogos, autofill.
-- **Não feito:** arrastar e soltar, acessibilidade, tela cheia, forma do cursor e dica (tooltip). A janela do IME aparece sob a vista, não no cursor, e texto que não vem de tecla (emoji, ditado) é descartado.
+- O kit não desenha nada além da página e dos pedidos dela: barra de endereço, abas, atos e aviso do agente são do app.
+- **Ainda não chegam ao app:** autofill. O botão direito ainda não é enviado ao motor, então o menu de contexto não vem.
+- **Não feito:** arrastar e soltar, acessibilidade, tela cheia e dica (tooltip). Texto que não vem de tecla (emoji, ditado) é descartado.
 - Nunca testado com motor real: tela Retina e monitores com escalas diferentes.
 
 ## Versões

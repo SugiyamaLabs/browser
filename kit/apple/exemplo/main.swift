@@ -78,6 +78,8 @@ import QuartzCore
       default: return .deny
       }
     }
+    // Menus, page dialogs, file panels, logins and permissions, drawn by the kit.
+    engine.onUIRequest = { [weak engine] in await engine?.presentDefaultUI($0) ?? .cancel }
 
     window.title = "Exemplo do embed"
     window.center()
