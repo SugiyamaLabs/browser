@@ -236,6 +236,8 @@ Um mecanismo só, no formato de `approval.ask` / `approval.answer`: o motor mand
 
 **7. Instalar extensão** (`kind: "extension"`). Campos: `name`, `version`, `permissions` (lista de textos prontos para mostrar, em português quando o motor os tem), `host_permissions` (lista de padrões de endereço), `from` (origem de quem pediu, ou `"store"`/`"file"`). Resposta: `ui.answer {ask, allow: true|false}`. Sem `remember`. Quem responde: só a pessoa, sempre pelo hospedeiro, mesmo com agente controlando alguma aba (como em 6). O agente não instala extensão.
 
+**8. Cursor e posição do texto.** Dois eventos, só para o hospedeiro, sem resposta. `view.cursor {tab, cursor}` quando o cursor do mouse sobre a página muda: `default`, `pointer`, `text`, `wait`, `crosshair`, `grab`, `grabbing`, `not_allowed`, `move`, `resize_ew`, `resize_ns`, `resize_nesw`, `resize_nwse` ou `none` (o que o motor não conhece vira `default`). `view.caret {tab, x, y, width, height}` quando muda o lugar do texto em edição (em pontos, do canto de cima da vista): o hospedeiro usa para pôr a janela de candidatos do teclado (IME) e o painel de acentos no lugar certo.
+
 **Erros novos.** Nenhum código novo: `unauthorized` (`ui.answer` de quem não é o hospedeiro), `not_found` (`ask` que não vale mais), `bad_request` (campos errados). **Eventos novos:** `ui.ask` e `ui.cancel`, na tabela de Eventos. **Operação nova:** `ui.answer`.
 
 ## Erros
@@ -262,6 +264,7 @@ Um mecanismo só, no formato de `approval.ask` / `approval.answer`: o motor mand
 | `page.dialog` | `tab`, `type`, `message` | Uma aba controlada abriu um diálogo e espera resposta. |
 | `approval.ask` | `ask`, `title`, `detail`, `offer_always` | (fase 5, só o hospedeiro) O motor embutido pede uma aprovação; responda com `approval.answer`. |
 | `ui.ask` | `ask`, `kind`, `tab?`, mais os campos do `kind` | (proposta, passo 5.3, só o hospedeiro) O motor pede para o hospedeiro desenhar algo; responda com `ui.answer`. |
+| `view.cursor` / `view.caret` | `tab`, `cursor` / `tab`, `x`, `y`, `width`, `height` | (proposta, passo 5.3, só o hospedeiro) O cursor sobre a página mudou / o texto em edição mudou de lugar. |
 | `ui.cancel` | `ask`, `reason` | (proposta, passo 5.3) O motor desistiu do pedido: `"closed"`, `"navigated"` ou `"gone"`. |
 | `control.stopped` | `reason` | O controle desta conexão acabou: `"user"` (a pessoa tocou na bolha de parar) ou `"sharing_changed"` (mudou o grupo de atos que compartilham cookies com este). |
 
