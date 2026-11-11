@@ -29,4 +29,6 @@
   i.onkeydown = (e) => { s.k = e.key; show(); };
   onresize = () => { s.w = innerWidth; show(); };
   show();
+  // ?confirma: asks by itself, for the step that checks a page dialog drawn by the host (q: 1 yes, 0 no)
+  if (location.search === '?confirma') setTimeout(() => { s.q = confirm('Continuar?') ? 1 : 0; show(); }, 300);
 </script>

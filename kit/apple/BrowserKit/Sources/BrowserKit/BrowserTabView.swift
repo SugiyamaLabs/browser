@@ -163,8 +163,7 @@ public final class BrowserTabView: NSView, @preconcurrency NSTextInputClient {
   }
 
   // Mouse. Points go in the page's coordinates: from the top left.
-  // shortcut: the right button is not sent. The engine would open its own context menu, in a
-  // process with no window to anchor it; the menu has to come here as data first.
+  // The right button goes too: the engine answers with a `ui.ask` of kind context_menu.
   private func mouse(_ event: NSEvent, op: String) {
     guard let data = Self.encoded(event) else { return }
     let point = convert(event.locationInWindow, from: nil)
@@ -176,6 +175,12 @@ public final class BrowserTabView: NSView, @preconcurrency NSTextInputClient {
   }
   public override func mouseUp(with event: NSEvent) { mouse(event, op: "view.mouse") }
   public override func mouseDragged(with event: NSEvent) { mouse(event, op: "view.mouse") }
+  public override func rightMouseDown(with event: NSEvent) {
+    window?.makeFirstResponder(self)
+    mouse(event, op: "view.mouse")
+  }
+  public override func rightMouseUp(with event: NSEvent) { mouse(event, op: "view.mouse") }
+  public override func rightMouseDragged(with event: NSEvent) { mouse(event, op: "view.mouse") }
   public override func mouseMoved(with event: NSEvent) { mouse(event, op: "view.mouse") }
   public override func mouseExited(with event: NSEvent) { post("view.mouse.leave") }
   public override func scrollWheel(with event: NSEvent) { mouse(event, op: "view.wheel") }

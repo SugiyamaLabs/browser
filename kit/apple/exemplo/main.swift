@@ -356,6 +356,19 @@ extension Controller {
     check("5d switch back", await until { self.selected == 0 && self.value() == "abác" }, "v=\(value()) contexts seen=\(contexts)")
     await capture("6-primeira-aba")
 
+    // 7. A page dialog: the engine asks (ui.ask), the kit draws a sheet on this window, the answer reaches the page.
+    if let tab = page?.tab {
+      try? await connection.navigate(tab, to: url + "?confirma")
+      let shown = await until(10) { self.window.attachedSheet != nil }
+      check("7 page dialog shows as a sheet", shown)
+      await capture("7-dialogo")
+      func buttons(_ view: NSView) -> [NSButton] { view.subviews.flatMap { ($0 as? NSButton).map { [$0] } ?? buttons($0) } }
+      if let sheet = window.attachedSheet, let content = sheet.contentView {
+        buttons(content).first { $0.title == "OK" }?.performClick(nil)
+      }
+      check("7b the answer reaches the page", await until { self.state["q"] as? Int == 1 }, "q=\(state["q"] ?? "?")")
+    }
+
     // For the memory numbers: autoteste.sh measures while this line is the last one printed.
     print("MEASURE")
     try? await Task.sleep(nanoseconds: 4_000_000_000)
