@@ -11,10 +11,11 @@ source "$(dirname "$0")/lib.sh"
 export APP OUT GATES REPO
 
 SITE_PID=""
-if ! curl -sf -o /dev/null http://127.0.0.1:8765/form; then
+if ! curl -sf -o /dev/null http://127.0.0.1:8765/ext; then   # /ext: the newest page, so an older site is not reused
   python3 "$REPO/tools/sites-teste/serve.py" >"$OUT/site.log" 2>&1 &
   SITE_PID=$!
-  for _ in $(seq 20); do curl -sf -o /dev/null http://127.0.0.1:8765/form && break; sleep 0.25; done
+  for _ in $(seq 20); do curl -sf -o /dev/null http://127.0.0.1:8765/ext && break; sleep 0.25; done
+  curl -sf -o /dev/null http://127.0.0.1:8765/ext || { echo "FAIL: the test site has no /ext (an older serve.py on port 8765?)"; exit 1; }
 fi
 
 # winids lists every normal window of a pid, also the ones off screen; this one counts only those
@@ -49,15 +50,12 @@ def check(name, ok, detail=""):
     if not ok: failed.append(name)
 
 profile = tempfile.mkdtemp(prefix="agens-e.", dir="/tmp")   # short: a socket path is limited to 104 bytes
-# The browser blocks geolocation and notifications by default, so a site never gets to ask. The
-# permission checks need "ask" (3) on this throwaway ato.
-os.makedirs(f"{profile}/Default")
-with open(f"{profile}/Default/Preferences", "w") as f:
-    json.dump({"profile": {"default_content_setting_values": {"geolocation": 3, "notifications": 3}}}, f)
 SOCK = profile + "/agens.sock"
+# The test extension marks /ext pages (" +ext" in the title): --load-extension works in this build.
+EXTENSION = os.environ["REPO"] + "/tools/sites-teste/extensao"
 def launch(profile, *extra):
     log = open(f"{OUT}/engine{'-' + extra[0].strip('-') if extra else ''}.log", "w")
-    p = subprocess.Popen([APP, f"--user-data-dir={profile}", "--agens-embedded", *extra,
+    p = subprocess.Popen([APP, f"--user-data-dir={profile}", "--agens-embedded", *extra, f"--load-extension={EXTENSION}",
                           "--use-mock-keychain", "--no-first-run"], stdout=log, stderr=log)
     for _ in range(60):
         if os.path.exists(profile + "/agens.sock"): return p
@@ -149,6 +147,13 @@ check("a second host connection is refused", err(r) == "unauthorized", r)
 r = c2.ask("view.tabs")
 check("view.* from a connection that is not the host is unauthorized", err(r) == "unauthorized", r)
 check("host.nope is unknown_op", err(c.ask("host.nope")) == "unknown_op")
+r = c.ask("host.settings")
+check("host.settings with no field reads the defaults (site_requests false, agent_extensions true)",
+      r.get("ok") and r.get("site_requests") is False and r.get("agent_extensions") is True, r)
+check("host.settings from a connection that is not the host is unauthorized",
+      err(c2.ask("host.settings", site_requests=True)) == "unauthorized")
+check("host.settings with a value that is not a boolean is bad_request",
+      err(c.ask("host.settings", agent_extensions="no")) == "bad_request")
 
 atos = c.ask("atos.list").get("atos") or []
 ato = atos[0]["id"] if atos else c.ask("atos.create", name="Gate").get("ato")
@@ -242,9 +247,13 @@ print(f"info: winids lists {len(listed)} window(s) for the engine, all off scree
 
 # Approvals go to the host; an agent's tab shows up with control.
 agent = Conn()
-rid = agent.send("control.start", ato=ato, reason="gate")
+rid = agent.send("control.start", ato=ato, reason="gate", agent="Gate Agent", allow=["clipboard", "eval"])
 a = c.event(lambda e: e["event"] == "approval.ask", 20)
 check("control.start asks the host (approval.ask)", bool(a) and isinstance(a.get("ask"), str) and a.get("title"), a)
+check("the control approval carries its parts (kind, ato, ato_name, agent, reason, allow; no shares_with)",
+      bool(a) and a.get("kind") == "control" and a.get("ato") == ato and bool(a.get("ato_name"))
+      and a.get("agent") == "Gate Agent" and a.get("reason") == "gate" and a.get("allow") == ["clipboard", "eval"]
+      and "shares_with" not in a, a)
 if a:
     check("approval.answer deny", c.ask("approval.answer", ask=a["ask"], answer="deny").get("ok"))
     check("the agent gets denied", err(agent.wait(rid)) == "denied")
@@ -265,6 +274,20 @@ if e:
     check("view.control give (Devolver)", c.ask("view.control", tab=e["tab"], action="give").get("ok"))
     check("the agent is told it resumed", bool(agent.event(lambda m: m["event"] == "control.resumed", 10)))
     check("the agent's ops work again", agent.ask("page.snapshot", tab=r.get("tab")).get("ok"))
+    # The reply of an input op comes once the page shows it: the very next snapshot has the change.
+    def snap_node(role, name):
+        return next((n for n in agent.ask("page.snapshot", tab=r.get("tab")).get("nodes", [])
+                     if n.get("role") == role and n.get("name") == name), {})
+    field = snap_node("textField", "Text").get("ref", "none")
+    typed = agent.ask("page.type", tab=r.get("tab"), ref=field, text="gate typed")
+    got = snap_node("textField", "Text")
+    check("page.type then page.snapshot at once: the value is there", typed.get("ok") and got.get("value") == "gate typed", got)
+    agent.ask("page.key", tab=r.get("tab"), key="Backspace")
+    got = snap_node("textField", "Text")
+    check("page.key then page.snapshot at once: the change is there", got.get("value") == "gate type", got)
+    agent.ask("page.click", tab=r.get("tab"), ref=snap_node("checkBox", "Check me").get("ref", "none"))
+    got = snap_node("checkBox", "Check me")
+    check("page.click then page.snapshot at once: the checkbox is checked", got.get("checked") is True, got)
     c.ask("view.control", tab=e["tab"], action="end")
     check("view.control end: the agent's control stops",
           bool(agent.event(lambda m: m["event"] == "control.stopped", 10)))
@@ -355,6 +378,15 @@ c.pump(0.5)
 engine_log = open(f"{OUT}/engine.log", errors="replace").read()
 leaks = sum(s in engine_log or s in json.dumps([a, a2]) for s in ("wrong-password", AUTH_PW))   # a count: never print them
 check("the engine log and the auth asks have none of the passwords", leaks == 0, f"{leaks} found")
+
+# Sites may not ask by default (host.settings site_requests false): geolocation and notifications are blocked.
+t = ui_tab("/ui/perm")
+check("site_requests false: a page's permission request never reaches the host", ui_ask("permission", t, 4) is None)
+check("site_requests false: the page sees both blocked", titled(t, "perm geo=denied notif=no"))
+c.ask("view.close", tab=t)
+r = c.ask("host.settings", site_requests=True)
+check("host.settings site_requests true answers the values in force",
+      r.get("ok") and r.get("site_requests") is True and r.get("agent_extensions") is True, r)
 
 # permission: no remember, and a fresh tab each time (an allowed-once permission lives as long as its tab)
 # deny: geolocation then notifications. allow: notifications only, because allowing geolocation can make
@@ -482,6 +514,62 @@ else:
     check("the page got the chosen option", titled(vt, "select:pe"))
     ag.ask("control.stop")
     subprocess.run(["rm", "-rf", tmp])
+
+# Extensions on tabs an agent controls (host.settings agent_extensions). The test extension adds " +ext"
+# to the title of /ext when its document_start content script runs.
+def ext_title(tab, origin=SITE, timeout=15):  # the title once /ext has loaded and settled (view.tabs), or None
+    def now(): return next((x for x in c.ask("view.tabs", ato=ato).get("tabs", []) if x.get("tab") == tab), {})
+    end = time.time() + timeout
+    while time.time() < end:
+        cur = now()
+        if cur.get("url", "").startswith(origin + "/ext") and not cur.get("loading"):
+            time.sleep(1.5)   # the content script changes the title at DOMContentLoaded
+            return now().get("title")
+        time.sleep(0.3)
+    return None
+MARKED, PLAIN = "Ext (test) +ext", "Ext (test)"
+t = ui_tab("/ext")
+title = ext_title(t)
+check("extension: its content script runs on a tab without an agent", title == MARKED, title)
+c.ask("view.close", tab=t)
+ax = Conn()
+rid = ax.send("control.start", ato=ato, reason="gate ext")
+x = c.event(lambda e: e["event"] == "approval.ask", 20)
+if x: c.ask("approval.answer", ask=x["ask"], answer="allow")
+ext_ok = bool(x) and ax.wait(rid).get("ok")
+check("extension: control.start for the extension checks", ext_ok)
+if not ext_ok:
+    skip("extension checks on controlled tabs", "control.start did not go through")
+else:
+    def controlled_tab(known=(), timeout=10):  # the host's id of the agent tab that just opened /ext
+        e = c.event(lambda e: e["event"] == "view.tab" and e.get("url", "").startswith(SITE + "/ext")
+                    and isinstance(e.get("control"), dict) and e.get("tab") not in known, timeout)
+        return (e or {}).get("tab")
+    at = ax.ask("tab.open", ato=ato, url=SITE + "/ext").get("tab")
+    vt = controlled_tab()
+    title = ext_title(vt) if vt else None
+    check("extension: runs on a controlled tab with agent_extensions on", title == MARKED, title)
+    r = c.ask("host.settings", agent_extensions=False)
+    check("host.settings agent_extensions false answers the values in force",
+          r.get("ok") and r.get("agent_extensions") is False and r.get("site_requests") is True, r)
+    ax.ask("tab.reload", tab=at)
+    title = ext_title(vt) if vt else None
+    check("extension: turned off while the tab is controlled, it does not run after a reload", title == PLAIN, title)
+    ax.ask("tab.navigate", tab=at, url="http://localhost:8765/ext")
+    title = ext_title(vt, "http://localhost:8765") if vt else None
+    check("extension: does not run after a cross-origin navigation (another site, a new process)", title == PLAIN, title)
+    at2 = ax.ask("tab.open", ato=ato, url=SITE + "/ext").get("tab")
+    vt2 = controlled_tab((vt,))
+    title = ext_title(vt2) if vt2 else None
+    check("extension: does not run on a controlled tab opened while agent_extensions is off", title == PLAIN, title)
+    c.ask("view.control", tab=vt, action="end")
+    check("extension: control ends", bool(ax.event(lambda m: m["event"] == "control.stopped", 10)))
+    drop(vt); c.ask("view.reload", tab=vt); tab_event(vt, lambda e: e.get("loading"), 10)   # the reload began
+    title = ext_title(vt, "http://localhost:8765") if vt else None
+    check("extension: runs again after control ends and the tab reloads", title == MARKED, title)
+    for t in (vt, vt2):
+        if t: c.ask("view.close", tab=t)
+c.ask("host.settings", agent_extensions=True)
 # context_menu on a tab without an agent: a right click on the page
 t = ui_tab("/form"); titled(t, "Form (test)")
 for data in subprocess.run([f"{OUT}/rightclick"], capture_output=True, text=True).stdout.split():

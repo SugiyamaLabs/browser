@@ -42,10 +42,10 @@ index 0000000000..0ca36406e1
 +}
 diff --git a/chrome/browser/agens/bridge/approval.cc b/chrome/browser/agens/bridge/approval.cc
 new file mode 100644
-index 0000000000..b18c797442
+index 0000000000..53ed9316c5
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/approval.cc
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,126 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/approval.h"
@@ -70,10 +70,12 @@ index 0000000000..b18c797442
 +  uint64_t connection;
 +  std::string title, detail;
 +  bool offer_always;
++  base::DictValue facts;
 +  ApprovalCallback done;  // null once that connection closed (its sheet may still be up)
 +
 +  bool SameQuestion(const Ask& other) const {
-+    return title == other.title && detail == other.detail && offer_always == other.offer_always;
++    return title == other.title && detail == other.detail && offer_always == other.offer_always &&
++           facts == other.facts;
 +  }
 +};
 +std::deque<Ask>& Asks() {
@@ -86,7 +88,8 @@ index 0000000000..b18c797442
 +
 +// Runs (and removes) the front ask and every queued one asking the same.
 +void Resolve(AgensApprovalAnswer answer) {
-+  const Ask front = {0, Asks().front().title, Asks().front().detail, Asks().front().offer_always, {}};
++  const Ask& f = Asks().front();
++  const Ask front = {0, f.title, f.detail, f.offer_always, f.facts.Clone(), {}};
 +  std::vector<ApprovalCallback> dones;
 +  for (auto it = Asks().begin(); it != Asks().end();) {
 +    if (!it->SameQuestion(front)) {
@@ -135,7 +138,8 @@ index 0000000000..b18c797442
 +    // Copies: it may answer right away (no window to ask on), and Answered then erases `front`.
 +    const std::string title = front.title, detail = front.detail;
 +    if (IsEmbedded()) {
-+      view::AskHost(title, detail, front.offer_always, base::BindOnce(&Answered));  // no sheet: the host asks
++      view::AskHost(title, detail, front.offer_always, front.facts.Clone(),
++                    base::BindOnce(&Answered));  // no sheet: the host asks
 +    } else {
 +      agens::ShowApprovalSheet(title, detail, front.offer_always, base::BindOnce(&Answered));
 +    }
@@ -148,8 +152,10 @@ index 0000000000..b18c797442
 +                 std::string title,
 +                 std::string detail,
 +                 bool offer_always,
-+                 ApprovalCallback done) {
-+  Asks().push_back({connection, std::move(title), std::move(detail), offer_always, std::move(done)});
++                 ApprovalCallback done,
++                 base::DictValue facts) {
++  Asks().push_back(
++      {connection, std::move(title), std::move(detail), offer_always, std::move(facts), std::move(done)});
 +  AskNext();
 +}
 +
@@ -168,10 +174,10 @@ index 0000000000..b18c797442
 +}  // namespace agens::bridge
 diff --git a/chrome/browser/agens/bridge/approval.h b/chrome/browser/agens/bridge/approval.h
 new file mode 100644
-index 0000000000..7d764ce31c
+index 0000000000..40f289a3c5
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/approval.h
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,40 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Approval sheets for the socket: the person's OK before something happens on a client's behalf.
 +#ifndef CHROME_BROWSER_AGENS_BRIDGE_APPROVAL_H_
@@ -181,6 +187,7 @@ index 0000000000..7d764ce31c
 +#include <string>
 +
 +#include "base/functional/callback.h"
++#include "base/values.h"
 +#include "chrome/browser/agens/embed/agens_embed.h"
 +
 +namespace agens::bridge {
@@ -196,11 +203,14 @@ index 0000000000..7d764ce31c
 +//   closes first. Remembering kAgensApprovalAllowAlways is the caller's job.
 +// - `done` never runs if `connection` closes first (its queued asks are dropped; a sheet already
 +//   showing stays up and its answer goes only to the other asks it covers).
++// - `facts`: the parts of the question (kind, ato, agent, items…), added to approval.ask for a host
++//   that draws its own sheet; the standalone sheet shows only `title` and `detail`.
 +void AskApproval(uint64_t connection,
 +                 std::string title,
 +                 std::string detail,
 +                 bool offer_always,
-+                 ApprovalCallback done);
++                 ApprovalCallback done,
++                 base::DictValue facts = {});
 +
 +// UI thread, from OnConnectionClosed (ops.h).
 +void CancelApprovals(uint64_t connection);
@@ -210,10 +220,10 @@ index 0000000000..7d764ce31c
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_APPROVAL_H_
 diff --git a/chrome/browser/agens/bridge/bridge.h b/chrome/browser/agens/bridge/bridge.h
 new file mode 100644
-index 0000000000..1184ce2d94
+index 0000000000..aba044ff8e
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/bridge.h
-@@ -0,0 +1,32 @@
+@@ -0,0 +1,36 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The local control socket, `<user data dir>/agens.sock` (docs/agens.md, "O socket"). Accepts and
 +// reads on the IO thread, runs each operation on the UI thread (ops.cc) and writes the reply back.
@@ -235,6 +245,10 @@ index 0000000000..1184ce2d94
 +inline constexpr char kAllowedClientsPref[] = "agens.bridge.allowed_clients";
 +// control.start answered "Permitir sempre": ControlAlwaysKey (control_keys.h) strings.
 +inline constexpr char kControlAlwaysPref[] = "agens.bridge.control_always";
++// host.settings (embedded): sites may ask for geolocation and notifications (else blocked), and
++// extensions act on the tabs an agent controls.
++inline constexpr char kSiteRequestsPref[] = "agens.bridge.site_requests";
++inline constexpr char kAgentExtensionsPref[] = "agens.bridge.agent_extensions";
 +
 +void RegisterPrefs(PrefRegistrySimple* registry);
 +// UI thread. Start once the threads run; Stop at teardown removes the socket file.
@@ -248,10 +262,10 @@ index 0000000000..1184ce2d94
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_BRIDGE_H_
 diff --git a/chrome/browser/agens/bridge/bridge_mac.mm b/chrome/browser/agens/bridge/bridge_mac.mm
 new file mode 100644
-index 0000000000..99bf2d7b3a
+index 0000000000..b306964567
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/bridge_mac.mm
-@@ -0,0 +1,578 @@
+@@ -0,0 +1,581 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The socket server on macOS: a Unix socket in the user data dir, the peer's code signature read
 +// from its audit token, and the approval of the person before a signed client gets in.
@@ -461,7 +475,8 @@ index 0000000000..99bf2d7b3a
 +                    }
 +                    std::move(done).Run(answer == kAgensApprovalDeny ? kDenied : nullptr);
 +                  },
-+                  peer.identity, std::move(done)));
++                  peer.identity, std::move(done)),
++              base::DictValue().Set("kind", "connect"));
 +}
 +
 +// --- The server (IO thread).
@@ -792,6 +807,8 @@ index 0000000000..99bf2d7b3a
 +  registry->RegisterListPref(kAllowedClientsPref);
 +  registry->RegisterListPref(kControlAlwaysPref);
 +  registry->RegisterListPref(session::kAlwaysPref);
++  registry->RegisterBooleanPref(kSiteRequestsPref, false);
++  registry->RegisterBooleanPref(kAgentExtensionsPref, true);
 +}
 +
 +void Start() {
@@ -1114,10 +1131,10 @@ index 0000000000..178c1cd18f
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_CONTROL_KEYS_H_
 diff --git a/chrome/browser/agens/bridge/control_ops.cc b/chrome/browser/agens/bridge/control_ops.cc
 new file mode 100644
-index 0000000000..5f766303d3
+index 0000000000..306f68a5e6
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_ops.cc
-@@ -0,0 +1,883 @@
+@@ -0,0 +1,924 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The control session (docs/protocolo.md, "control, tab, page"): an app, after the person's OK,
 +// drives tabs of one ato. It belongs to the connection and ends on control.stop, when the
@@ -1168,6 +1185,8 @@ index 0000000000..5f766303d3
 +#include "content/public/browser/render_frame_host.h"
 +#include "content/public/browser/navigation_handle.h"
 +#include "content/public/browser/web_contents_observer.h"
++#include "extensions/browser/extension_web_contents_observer.h"
++#include "extensions/common/mojom/frame.mojom.h"
 +
 +namespace agens::bridge::control {
 +
@@ -1238,6 +1257,7 @@ index 0000000000..5f766303d3
 +    Answer(ErrorReply(&waiting_id_, kFailed, "the tab is no longer controlled"));
 +    ReleaseDialog();  // the tab stays open: its dialog goes to the person
 +    if (content::WebContents* contents = web_contents()) {
++      BlockExtensions(false);
 +      contents->RemoveUserData(AgensControlled::UserDataKey());
 +      contents->NotifyNavigationStateChanged(content::INVALIDATE_TYPE_TAB);
 +    }
@@ -1270,6 +1290,18 @@ index 0000000000..5f766303d3
 +    }
 +  }
 +  void WebContentsDestroyed() override;
++  void RenderFrameCreated(content::RenderFrameHost* frame) override {
++    if (extensions_blocked_) TellFrame(frame);  // a new frame (another process, a new document) starts unblocked
++  }
++
++  // host.settings' agent_extensions off: no extension script or CSS in any of the tab's frames
++  // (the renderer checks it before each injection), and the mark tells the rest of the browser.
++  void BlockExtensions(bool block) {
++    if (AgensControlled* mark = AgensControlled::FromWebContents(web_contents())) mark->extensions_blocked = block;
++    if (block == extensions_blocked_) return;
++    extensions_blocked_ = block;
++    web_contents()->ForEachRenderFrameHost([this](content::RenderFrameHost* frame) { TellFrame(frame); });
++  }
 +
 +  bool HasDialog() const { return !dialogs_.empty(); }
 +  // Holds `dialog` behind any already held (up to kMaxHeldDialogs; past that it's dismissed) and
@@ -1328,6 +1360,13 @@ index 0000000000..5f766303d3
 +    waiting_timer_.Stop();
 +    if (waiting_reply_) std::move(waiting_reply_).Run(std::move(line));
 +  }
++  void TellFrame(content::RenderFrameHost* frame) {
++    auto* extensions = extensions::ExtensionWebContentsObserver::GetForWebContents(web_contents());
++    // Null before the frame is live: RenderFrameCreated tells it then.
++    if (extensions::mojom::LocalFrame* local = extensions ? extensions->GetLocalFrame(frame) : nullptr) {
++      local->SetExtensionsBlocked(extensions_blocked_);
++    }
++  }
 +
 +  const uint64_t connection_;
 +  base::ScopedClosureRunner capture_;
@@ -1336,6 +1375,7 @@ index 0000000000..5f766303d3
 +  ReplyCallback waiting_reply_;
 +  base::OneShotTimer waiting_timer_;
 +  std::deque<HeldDialog> dialogs_;  // oldest first
++  bool extensions_blocked_ = false;
 +  base::WeakPtrFactory<Tab> weak_{this};
 +};
 +
@@ -1377,8 +1417,12 @@ index 0000000000..5f766303d3
 +    tab->page.clipboard = session.clipboard;
 +    tab->page.eval = session.eval;
 +    tab->page.paused = session.paused;
++    tab->BlockExtensions(!g_browser_process->local_state()->GetBoolean(kAgentExtensionsPref));
 +    contents->NotifyNavigationStateChanged(content::INVALIDATE_TYPE_TAB);
 +  }
++}
++void SyncAll() {
++  for (auto& [connection, session] : Sessions()) Sync(session);
 +}
 +
 +// The dialog manager of controlled tabs (AgensControlled::dialogs, asked by the browser for each
@@ -1559,6 +1603,7 @@ index 0000000000..5f766303d3
 +  if (!prefs->IsEmpty()) return;
 +  prefs->Init(g_browser_process->local_state());
 +  prefs->Add(AgensWindow::kAtosPref, base::BindRepeating(&SharingChanged));
++  prefs->Add(kAgentExtensionsPref, base::BindRepeating(&SyncAll));  // host.settings while tabs are controlled
 +}
 +
 +bool ControlAlways(const std::string& key) {
@@ -1617,14 +1662,26 @@ index 0000000000..5f766303d3
 +  std::vector<std::string> shares_with = SharesWith(entry->GetPath());
 +  std::string detail = *reason;
 +  if (std::string asks = AllowDetail(wanted.allow); !asks.empty()) detail += (detail.empty() ? "" : "\n\n") + asks;
++  std::vector<std::string> names;
++  for (const std::string& folder : shares_with) {
++    if (ProfileAttributesEntry* other = FindAto(folder)) names.push_back(AgensWindow::AtoName(other));
++  }
 +  if (!shares_with.empty()) {
-+    std::vector<std::string> names;
-+    for (const std::string& folder : shares_with) {
-+      if (ProfileAttributesEntry* other = FindAto(folder)) names.push_back(AgensWindow::AtoName(other));
-+    }
 +    detail += (detail.empty() ? "" : "\n\n") + ato_name + " compartilha cookies com " + JoinNames(names) +
 +              ": os logins deles também ficam ao alcance.";
 +  }
++  // The same, in parts, for a host that draws its own sheet.
++  base::DictValue facts;
++  facts.Set("kind", "control");
++  facts.Set("ato", *id);
++  facts.Set("ato_name", ato_name);
++  facts.Set("agent", wanted.agent);
++  if (!reason->empty()) facts.Set("reason", *reason);
++  base::ListValue allow_list, shares_list;
++  for (const std::string& a : wanted.allow) allow_list.Append(a);
++  for (const std::string& n : names) shares_list.Append(n);
++  facts.Set("allow", std::move(allow_list));
++  if (!shares_list.empty()) facts.Set("shares_with", std::move(shares_list));
 +  // "Permitir sempre" only for a signed app, and only for this ato with this sharing group.
 +  const bool signed_client = !client.identity.empty();
 +  const std::string always_key =
@@ -1668,7 +1725,8 @@ index 0000000000..5f766303d3
 +  }
 +  AskApproval(connection, "O " + name + " quer usar abas do ato " + ato_name, detail, /*offer_always=*/signed_client,
 +              base::BindOnce(begin, connection, std::move(wanted), entry->GetPath(), std::move(shares_with), always_key,
-+                             std::move(request), std::move(reply)));
++                             std::move(request), std::move(reply)),
++              std::move(facts));
 +}
 +
 +// A new foreground tab in `browser` (the ato's window), controlled by the session.
@@ -2039,10 +2097,10 @@ index 0000000000..d999ff7d50
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_CONTROL_OPS_H_
 diff --git a/chrome/browser/agens/bridge/control_page.cc b/chrome/browser/agens/bridge/control_page.cc
 new file mode 100644
-index 0000000000..3479ad7b9e
+index 0000000000..42950b1fa0
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_page.cc
-@@ -0,0 +1,696 @@
+@@ -0,0 +1,733 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/control_page.h"
@@ -2081,11 +2139,13 @@ index 0000000000..3479ad7b9e
 +#include "third_party/blink/public/common/input/web_input_event.h"
 +#include "third_party/blink/public/common/input/web_mouse_event.h"
 +#include "ui/accessibility/ax_enum_util.h"
++#include "ui/accessibility/ax_event.h"
 +#include "ui/accessibility/ax_mode.h"
 +#include "ui/accessibility/ax_node_data.h"
 +#include "ui/accessibility/ax_role_properties.h"
 +#include "ui/accessibility/ax_tree_manager.h"
 +#include "ui/accessibility/ax_tree_update.h"
++#include "ui/accessibility/ax_updates_and_events.h"
 +#include "ui/accessibility/platform/browser_accessibility.h"
 +#include "ui/accessibility/platform/browser_accessibility_manager.h"
 +#include "ui/events/keycodes/dom/keycode_converter.h"
@@ -2103,6 +2163,8 @@ index 0000000000..3479ad7b9e
 +constexpr base::TimeDelta kScrollWait = base::Seconds(1);
 +constexpr base::TimeDelta kAckWait = base::Seconds(2);
 +constexpr base::TimeDelta kRendererWait = base::Seconds(3);
++// Settle: a page still loading never reports a clean tree; past this the op answers anyway.
++constexpr base::TimeDelta kSettleWait = base::Seconds(1);
 +constexpr size_t kMaxWaitingOps = 64;
 +constexpr size_t kMaxLogEntries = 200;   // page.console and page.network, per tab
 +constexpr size_t kMaxLogChars = 2000;    // a message or URL in them
@@ -2270,6 +2332,7 @@ index 0000000000..3479ad7b9e
 +}
 +
 +Page::~Page() {
++  if (settled_) std::move(settled_).Run();  // the op that was settling answers ok
 +  for (Waiting& w : waiting_) std::move(w.reply).Run(ErrorReply(&w.id, kFailed, "the tab is no longer controlled"));
 +}
 +
@@ -2603,8 +2666,7 @@ index 0000000000..3479ad7b9e
 +  }
 +  if (!clickable || !visible) {
 +    node->manager()->DoDefaultAction(*node);
-+    std::move(reply).Run(OkReply(id));
-+    return;
++    return Settle(self, std::move(id), std::move(reply));  // the action is ahead of Settle's signal
 +  }
 +  // Tree bounds are in physical pixels; input takes DIPs.
 +  const float scale = self->RootManager() ? self->RootManager()->device_scale_factor() : 1;
@@ -2614,13 +2676,48 @@ index 0000000000..3479ad7b9e
 +                                          : pointer == Pointer::kHover ? blink::WebInputEvent::Type::kMouseMove
 +                                                                       : blink::WebInputEvent::Type::kMouseWheel;
 +  AckWaiter::Start(widget, last,
-+                   base::BindOnce([](base::Value id, ReplyCallback reply) { std::move(reply).Run(OkReply(id)); },
-+                                  std::move(id), std::move(reply)));
++                   base::BindOnce(&Page::Settle, self, std::move(id), std::move(reply)));
 +  if (pointer == Pointer::kScroll) return SendWheel(widget, point, dy);
 +  SendMouse(widget, blink::WebInputEvent::Type::kMouseMove, point);
 +  if (pointer == Pointer::kHover) return;
 +  SendMouse(widget, blink::WebInputEvent::Type::kMouseDown, point);
 +  SendMouse(widget, blink::WebInputEvent::Type::kMouseUp, point);
++}
++
++void Page::Settle(base::WeakPtr<Page> self, base::Value id, ReplyCallback reply) {
++  if (!self) return std::move(reply).Run(OkReply(id));
++  // Blink batches tree updates (up to a second or so); kSignalEndOfTest makes each frame serialize
++  // what is pending right away and then report kEndOfTest, once its document is clean and loaded.
++  self->settling_.clear();
++  self->web_contents()->GetPrimaryMainFrame()->ForEachRenderFrameHost([&](content::RenderFrameHost* frame) {
++    if (ui::BrowserAccessibilityManager* manager = ManagerFor(frame->GetAXTreeID())) {
++      self->settling_.insert(frame->GetAXTreeID());
++      manager->SignalEndOfTest();
++    }
++  });
++  self->settled_ = base::BindOnce([](base::Value id, ReplyCallback reply) { std::move(reply).Run(OkReply(id)); },
++                                  std::move(id), std::move(reply));
++  if (self->settling_.empty()) return self->Settled();
++  self->settle_timer_.Start(FROM_HERE, kSettleWait, base::BindOnce(&Page::Settled, self));
++}
++
++void Page::Settled() {
++  settle_timer_.Stop();
++  settling_.clear();
++  if (settled_) std::move(settled_).Run();
++}
++
++void Page::AccessibilityEventReceived(const ui::AXUpdatesAndEvents& details) {
++  if (!settled_ || !settling_.contains(details.ax_tree_id) ||
++      std::ranges::none_of(details.events,
++                           [](const ui::AXEvent& event) { return event.event_type == ax::mojom::Event::kEndOfTest; })) {
++    return;
++  }
++  settling_.erase(details.ax_tree_id);
++  // Observers hear of the bundle before the tree applies it: answer after that.
++  if (settling_.empty()) {
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE, base::BindOnce(&Page::Settled, weak_.GetWeakPtr()));
++  }
 +}
 +
 +void Page::FocusIsPassword(base::OnceCallback<void(std::optional<bool>)> done) {
@@ -2665,8 +2762,7 @@ index 0000000000..3479ad7b9e
 +        if (self->paused) return Fail(id, reply, kPaused, "the person took over the tab");
 +        content::RenderWidgetHost* widget = self->FocusedWidget();
 +        AckWaiter::Start(widget, blink::WebInputEvent::Type::kKeyUp,
-+                         base::BindOnce([](base::Value id, ReplyCallback reply) { std::move(reply).Run(OkReply(id)); },
-+                                        std::move(id), std::move(reply)),
++                         base::BindOnce(&Page::Settle, self, std::move(id), std::move(reply)),
 +                         static_cast<int>(keys.size()));
 +        for (const Key& key : keys) SendKey(widget, key);
 +      },
@@ -2685,8 +2781,7 @@ index 0000000000..3479ad7b9e
 +        if (self->paused) return Fail(id, reply, kPaused, "the person took over the tab");
 +        content::RenderWidgetHost* widget = self->FocusedWidget();
 +        AckWaiter::Start(widget, blink::WebInputEvent::Type::kKeyUp,
-+                         base::BindOnce([](base::Value id, ReplyCallback reply) { std::move(reply).Run(OkReply(id)); },
-+                                        std::move(id), std::move(reply)));
++                         base::BindOnce(&Page::Settle, self, std::move(id), std::move(reply)));
 +        SendKey(widget, key);
 +      },
 +      weak_.GetWeakPtr(), std::move(id), std::move(key), std::move(reply)));
@@ -2741,10 +2836,10 @@ index 0000000000..3479ad7b9e
 +}  // namespace agens::bridge::control
 diff --git a/chrome/browser/agens/bridge/control_page.h b/chrome/browser/agens/bridge/control_page.h
 new file mode 100644
-index 0000000000..491c90033f
+index 0000000000..e4b296e266
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_page.h
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,150 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The page side of a controlled tab (page.* in docs/protocolo.md): its accessibility tree with
 +// refs, real input on its widget, and screenshots. UI thread. Password rules, checked against the
@@ -2762,10 +2857,12 @@ index 0000000000..491c90033f
 +#include <map>
 +#include <memory>
 +#include <optional>
++#include <set>
 +#include <string>
 +#include <utility>
 +
 +#include "base/memory/weak_ptr.h"
++#include "base/timer/timer.h"
 +#include "third_party/blink/public/mojom/devtools/console_message.mojom-forward.h"
 +#include "third_party/blink/public/mojom/loader/resource_load_info.mojom-forward.h"
 +#include "chrome/browser/agens/bridge/control_keys.h"
@@ -2781,6 +2878,7 @@ index 0000000000..491c90033f
 +namespace ui {
 +class BrowserAccessibility;
 +class BrowserAccessibilityManager;
++struct AXUpdatesAndEvents;
 +}  // namespace ui
 +
 +namespace agens::bridge::control {
@@ -2836,6 +2934,7 @@ index 0000000000..491c90033f
 +                            const content::GlobalRequestID& request_id,
 +                            const GURL& original_url,
 +                            const blink::mojom::ResourceLoadInfo& info) override;
++  void AccessibilityEventReceived(const ui::AXUpdatesAndEvents& details) override;
 +
 + private:
 +  using Node = std::pair<ui::AXTreeID, int32_t>;
@@ -2863,6 +2962,10 @@ index 0000000000..491c90033f
 +                             base::TimeTicks deadline,
 +                             bool scrolled,
 +                             ReplyCallback reply);
++  // Answers ok for `id` once every frame's accessibility tree has caught up with the input already
++  // sent (or after kSettleWait), so the next page.snapshot shows what it did.
++  static void Settle(base::WeakPtr<Page> self, base::Value id, ReplyCallback reply);
++  void Settled();
 +  // Into a ring of kMaxLogEntries, oldest out first.
 +  static void Keep(std::deque<base::DictValue>& ring, base::DictValue entry);
 +  // Asks the renderer for the page as it is now (after the input already sent) whether the
@@ -2877,6 +2980,10 @@ index 0000000000..491c90033f
 +  std::map<Node, std::string> refs_;
 +  int next_ref_ = 1;
 +  std::deque<base::DictValue> console_, network_;
++  // Settle: the trees still to report, and the answer waiting on them. One op runs at a time.
++  std::set<ui::AXTreeID> settling_;
++  base::OnceClosure settled_;
++  base::OneShotTimer settle_timer_;
 +  base::WeakPtrFactory<Page> weak_{this};
 +};
 +
@@ -2885,10 +2992,10 @@ index 0000000000..491c90033f
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_CONTROL_PAGE_H_
 diff --git a/chrome/browser/agens/bridge/ops.cc b/chrome/browser/agens/bridge/ops.cc
 new file mode 100644
-index 0000000000..c7a1327881
+index 0000000000..6251c6e72c
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ops.cc
-@@ -0,0 +1,210 @@
+@@ -0,0 +1,214 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/ops.h"
@@ -2897,6 +3004,7 @@ index 0000000000..c7a1327881
 +
 +#include "base/version_info/version_info.h"
 +#include "chrome/browser/agens/bridge/approval.h"
++#include "chrome/browser/agens/bridge/control_keys.h"
 +#include "chrome/browser/agens/bridge/control_ops.h"
 +#include "chrome/browser/agens/bridge/session_ops.h"
 +#include "chrome/browser/agens/bridge/view_ops.h"
@@ -2958,10 +3066,12 @@ index 0000000000..c7a1327881
 +  std::optional<std::string> name = StringParam(request.body, "name");
 +  std::optional<std::string> color;
 +  const base::Value* tag = request.body.Find("tag");
-+  if (!name || name->empty() || !AtMostChars(*name, kMaxNameChars) || !ReadColor(request, /*optional=*/true, color) ||
++  // The name shows on the approval sheets: no control or bidi characters (IsDisplayText).
++  if (!name || !IsDisplayText(*name, kMaxNameChars) || !ReadColor(request, /*optional=*/true, color) ||
 +      (tag && (!tag->is_string() || !AtMostChars(tag->GetString(), kMaxTagChars)))) {
 +    std::move(reply).Run(ErrorReply(&request.id, kBadRequest,
-+                                    "needs name (up to 256 characters); color and tag (up to 1024) are optional strings"));
++                                    "needs name (up to 256 characters, no control characters); color and tag (up "
++                                    "to 1024) are optional strings"));
 +    return;
 +  }
 +  const base::FilePath dir = AgensWindow::FreeAtoDir();
@@ -2991,8 +3101,9 @@ index 0000000000..c7a1327881
 +void AtosRename(const Request& request, ReplyCallback reply) {
 +  std::optional<std::string> id = StringParam(request.body, "ato");
 +  std::optional<std::string> name = StringParam(request.body, "name");
-+  if (!id || !name || name->empty() || !AtMostChars(*name, kMaxNameChars)) {
-+    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs ato and name (up to 256 characters)"));
++  if (!id || !name || !IsDisplayText(*name, kMaxNameChars)) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest,
++                                    "needs ato and name (up to 256 characters, no control characters)"));
 +    return;
 +  }
 +  ProfileAttributesEntry* entry = FindAto(*id);
@@ -3576,10 +3687,10 @@ index 0000000000..f81d56005e
 +}
 diff --git a/chrome/browser/agens/bridge/session_need.cc b/chrome/browser/agens/bridge/session_need.cc
 new file mode 100644
-index 0000000000..28228cb5b4
+index 0000000000..a702e2daf8
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/session_need.cc
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,109 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/session_need.h"
@@ -3615,8 +3726,7 @@ index 0000000000..28228cb5b4
 +}
 +
 +bool ValidName(std::string_view name) {
-+  if (name.empty() || !AtMostChars(name, kMaxNameChars)) return false;
-+  return std::ranges::none_of(name, [](unsigned char c) { return c < 0x20 || c == 0x7f; });
++  return IsDisplayText(name, kMaxNameChars);  // no bidi controls either: they could reorder the sheet's lines
 +}
 +
 +std::optional<std::vector<Item>> ParseNeed(const base::Value* need, std::string& error) {
@@ -3692,7 +3802,7 @@ index 0000000000..28228cb5b4
 +}  // namespace agens::bridge::session
 diff --git a/chrome/browser/agens/bridge/session_need.h b/chrome/browser/agens/bridge/session_need.h
 new file mode 100644
-index 0000000000..6f7a2d8788
+index 0000000000..f458512484
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/session_need.h
 @@ -0,0 +1,61 @@
@@ -3728,8 +3838,8 @@ index 0000000000..6f7a2d8788
 +
 +// An http(s) origin and nothing more (no path, query, fragment or credentials).
 +std::optional<url::Origin> ParseOrigin(std::string_view text);
-+// A cookie, storage key or header name: 1..kMaxNameChars characters, no control characters (it is
-+// shown on the sheet, one item per line).
++// A cookie, storage key or header name: 1..kMaxNameChars characters, no control characters and no
++// bidi controls (it is shown on the sheet, one item per line): IsDisplayText (control_keys.h).
 +bool ValidName(std::string_view name);
 +
 +// `need` from the request: 1..kMaxItems items, repeats dropped. On failure fills `error` (the
@@ -3759,10 +3869,10 @@ index 0000000000..6f7a2d8788
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_SESSION_NEED_H_
 diff --git a/chrome/browser/agens/bridge/session_need_selfcheck.cc b/chrome/browser/agens/bridge/session_need_selfcheck.cc
 new file mode 100644
-index 0000000000..a0a3787460
+index 0000000000..778768c132
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/session_need_selfcheck.cc
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,115 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Assert-based check of session_need.h, run by agens_bridge_selfcheck (protocol_selfcheck.cc).
 +
@@ -3811,6 +3921,8 @@ index 0000000000..a0a3787460
 +  NEED_CHECK(!ValidName(""));
 +  NEED_CHECK(!ValidName("a\nheader Authorization de bank.com"));
 +  NEED_CHECK(!ValidName(std::string("a\0b", 3)));
++  NEED_CHECK(!ValidName("a\xE2\x80\xAE" "b") && !ValidName("a\xE2\x81\xA6"));  // RLO, LRI: would reorder the line
++  NEED_CHECK(!ValidName("\xFF"));  // not UTF-8
 +  NEED_CHECK(ValidName(std::string(kMaxNameChars, 'n')));
 +  NEED_CHECK(!ValidName(std::string(kMaxNameChars + 1, 'n')));
 +
@@ -3878,10 +3990,10 @@ index 0000000000..a0a3787460
 +}
 diff --git a/chrome/browser/agens/bridge/session_ops.cc b/chrome/browser/agens/bridge/session_ops.cc
 new file mode 100644
-index 0000000000..a35b3fd87f
+index 0000000000..2cd2b4633b
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/session_ops.cc
-@@ -0,0 +1,584 @@
+@@ -0,0 +1,598 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Session values (cookie, localStorage and header values) live only in memory on their way to the
 +// socket: never in a log line, pref, file or error message.
@@ -4440,9 +4552,23 @@ index 0000000000..a35b3fd87f
 +    if (ProfileAttributesEntry* other = FindAto(folder)) names.push_back(AgensWindow::AtoName(other));
 +  }
 +  const std::string app = client.name.empty() ? "app" : client.name;
++  // The sheet's text in parts, for a host that draws its own.
++  base::DictValue facts;
++  facts.Set("kind", "session");
++  facts.Set("ato", *id);
++  facts.Set("ato_name", AgensWindow::AtoName(entry));
++  if (!reason->empty()) facts.Set("reason", *reason);
++  base::ListValue item_list, shares_list;
++  for (const Item& item : *items) {
++    item_list.Append(base::DictValue().Set("type", item.type).Set("from", item.from).Set("name", item.name));
++  }
++  for (const std::string& name : names) shares_list.Append(name);
++  facts.Set("items", std::move(item_list));
++  if (!shares_list.empty()) facts.Set("shares_with", std::move(shares_list));
 +  AskApproval(client.connection, SheetTitle(app, *items), SheetDetail(*reason, AgensWindow::AtoName(entry), *items, names),
 +              /*offer_always=*/signed_client,
-+              base::BindOnce(&Read::Approved, read->GetWeakPtr(), std::move(key), signed_client, shares_with));
++              base::BindOnce(&Read::Approved, read->GetWeakPtr(), std::move(key), signed_client, shares_with),
++              std::move(facts));
 +}
 +
 +}  // namespace
@@ -6166,10 +6292,10 @@ index 0000000000..7d67567ae2
 +}
 diff --git a/chrome/browser/agens/bridge/view_ops.cc b/chrome/browser/agens/bridge/view_ops.cc
 new file mode 100644
-index 0000000000..d51a953000
+index 0000000000..f1232e47ed
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_ops.cc
-@@ -0,0 +1,788 @@
+@@ -0,0 +1,860 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The host draws the interface; the engine hands it the pages (docs/protocolo.md, "host e view").
 +// - One host: the connection that sent host.attach (the app that launched the engine).
@@ -6196,13 +6322,21 @@ index 0000000000..d51a953000
 +#include "base/no_destructor.h"
 +#include "base/strings/string_number_conversions.h"
 +#include "base/strings/utf_string_conversions.h"
++#include "base/scoped_observation.h"
 +#include "base/task/sequenced_task_runner.h"
++#include "chrome/browser/agens/bridge/bridge.h"
 +#include "chrome/browser/agens/bridge/ui_ops.h"
 +#include "chrome/browser/agens/bridge/view_input.h"
 +#include "chrome/browser/agens/embed/agens_controlled.h"
 +#include "chrome/browser/agens/embed/agens_embedded.h"
 +#include "chrome/browser/agens/embed/agens_window.h"
 +#include "chrome/browser/autocomplete/autocomplete_classifier_factory.h"
++#include "chrome/browser/browser_process.h"
++#include "chrome/browser/content_settings/host_content_settings_map_factory.h"
++#include "chrome/browser/profiles/profile_manager_observer.h"
++#include "components/content_settings/core/browser/host_content_settings_map.h"
++#include "components/prefs/pref_change_registrar.h"
++#include "components/prefs/pref_service.h"
 +#include "components/omnibox/browser/autocomplete_classifier.h"
 +#include "chrome/browser/profiles/profile_manager.h"
 +#include "chrome/browser/ui/browser_window/public/create_browser_window.h"
@@ -6767,6 +6901,63 @@ index 0000000000..d51a953000
 +  std::move(reply).Run(OkReply(request.id));
 +}
 +
++// host.settings' site_requests on every ato, also those loaded later: the default for geolocation
++// and notifications, ask or block. It overwrites what the standalone shell set per ato.
++class SiteRequests : public ProfileManagerObserver {
++ public:
++  void Start() {
++    if (!prefs_.IsEmpty()) return;
++    prefs_.Init(g_browser_process->local_state());
++    prefs_.Add(kSiteRequestsPref, base::BindRepeating(&SiteRequests::ApplyAll, base::Unretained(this)));
++    if (ProfileManager* manager = g_browser_process->profile_manager()) manager_observation_.Observe(manager);
++    ApplyAll();
++  }
++
++ private:
++  void ApplyAll() {
++    if (ProfileManager* manager = g_browser_process->profile_manager()) {
++      for (Profile* profile : manager->GetLoadedProfiles()) Apply(profile);
++    }
++  }
++  static void Apply(Profile* profile) {
++    if (profile->IsOffTheRecord()) return;
++    const ContentSetting value =
++        g_browser_process->local_state()->GetBoolean(kSiteRequestsPref) ? CONTENT_SETTING_ASK : CONTENT_SETTING_BLOCK;
++    HostContentSettingsMap* map = HostContentSettingsMapFactory::GetForProfile(profile);
++    for (ContentSettingsType type : {ContentSettingsType::GEOLOCATION, ContentSettingsType::NOTIFICATIONS}) {
++      map->SetDefaultContentSetting(type, value);
++    }
++  }
++  // ProfileManagerObserver:
++  void OnProfileAdded(Profile* profile) override { Apply(profile); }
++  void OnProfileManagerDestroying() override { manager_observation_.Reset(); }
++
++  PrefChangeRegistrar prefs_;
++  base::ScopedObservation<ProfileManager, ProfileManagerObserver> manager_observation_{this};
++};
++SiteRequests& TheSiteRequests() {
++  static base::NoDestructor<SiteRequests> site_requests;
++  return *site_requests;
++}
++
++// host.settings {site_requests?, agent_extensions?}: sets the ones given, answers both as now in force.
++void HostSettings(const Request& request, ReplyCallback reply) {
++  PrefService* local = g_browser_process->local_state();
++  const base::Value* site_requests = request.body.Find("site_requests");
++  const base::Value* agent_extensions = request.body.Find("agent_extensions");
++  if ((site_requests && !site_requests->is_bool()) || (agent_extensions && !agent_extensions->is_bool())) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "site_requests and agent_extensions are booleans"));
++    return;
++  }
++  // The prefs' observers apply them: SiteRequests here, the controlled tabs in control_ops.cc.
++  if (site_requests) local->SetBoolean(kSiteRequestsPref, site_requests->GetBool());
++  if (agent_extensions) local->SetBoolean(kAgentExtensionsPref, agent_extensions->GetBool());
++  base::DictValue result;
++  result.Set("site_requests", local->GetBoolean(kSiteRequestsPref));
++  result.Set("agent_extensions", local->GetBoolean(kAgentExtensionsPref));
++  std::move(reply).Run(OkReply(request.id, std::move(result)));
++}
++
 +void ApprovalAnswer(const Request& request, ReplyCallback reply) {
 +  State& s = S();
 +  std::optional<std::string> ask = StringParam(request.body, "ask");
@@ -6873,7 +7064,7 @@ index 0000000000..d51a953000
 +    HostAttach(client, request, std::move(reply));
 +    return;
 +  }
-+  if (op.starts_with("host.")) {
++  if (op.starts_with("host.") && op != "host.settings") {
 +    std::move(reply).Run(ErrorReply(&request.id, kUnknownOp, op));
 +    return;
 +  }
@@ -6885,7 +7076,9 @@ index 0000000000..d51a953000
 +    std::move(reply).Run(ErrorReply(&request.id, kUnauthorized, "needs host.attach on this connection"));
 +    return;
 +  }
-+  if (op == "approval.answer") {
++  if (op == "host.settings") {
++    HostSettings(request, std::move(reply));
++  } else if (op == "approval.answer") {
 +    ApprovalAnswer(request, std::move(reply));
 +  } else if (op == "view.tabs") {
 +    ViewTabs(request, std::move(reply));
@@ -6916,6 +7109,7 @@ index 0000000000..d51a953000
 +  if (!IsEmbedded()) return;
 +  WatchLayers();  // from the first window: every tab's last layer is known when it is attached
 +  ui_ask::Start();
++  TheSiteRequests().Start();
 +  S().windows.push_back(window);
 +  window->model()->AddObserver(&S());
 +  S().Schedule();
@@ -6940,7 +7134,11 @@ index 0000000000..d51a953000
 +  return KnownNumber(contents);
 +}
 +
-+void AskHost(const std::string& title, const std::string& detail, bool offer_always, ApprovalCallback done) {
++void AskHost(const std::string& title,
++             const std::string& detail,
++             bool offer_always,
++             base::DictValue facts,
++             ApprovalCallback done) {
 +  State& s = S();
 +  if (!s.host) {
 +    std::move(done).Run(kAgensApprovalDeny);
@@ -6949,7 +7147,7 @@ index 0000000000..d51a953000
 +  s.ask = "a" + base::NumberToString(++s.next_ask);
 +  s.ask_offers_always = offer_always;
 +  s.answer = std::move(done);
-+  base::DictValue fields;
++  base::DictValue fields = std::move(facts);
 +  fields.Set("ask", s.ask);
 +  fields.Set("title", title);
 +  fields.Set("detail", detail);
@@ -6960,10 +7158,10 @@ index 0000000000..d51a953000
 +}  // namespace agens::bridge::view
 diff --git a/chrome/browser/agens/bridge/view_ops.h b/chrome/browser/agens/bridge/view_ops.h
 new file mode 100644
-index 0000000000..7d258dcbb1
+index 0000000000..95d20440b7
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_ops.h
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,52 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The page inside another app (docs/protocolo.md, "host e view"): host.attach, view.* and
 +// approval.answer and ui.answer (ui_ops.h). Only when the engine runs embedded (agens_embedded.h); otherwise every op here
@@ -7006,22 +7204,27 @@ index 0000000000..7d258dcbb1
 +
 +// approval.cc, embedded: the question goes to the host as approval.ask instead of a sheet. Same
 +// contract as agens::ShowApprovalSheet: one at a time; `done` runs once (now, with deny, when no
-+// host is attached; deny too when the host goes away first).
-+void AskHost(const std::string& title, const std::string& detail, bool offer_always, ApprovalCallback done);
++// host is attached; deny too when the host goes away first). `facts` go out next to the four fields.
++void AskHost(const std::string& title,
++             const std::string& detail,
++             bool offer_always,
++             base::DictValue facts,
++             ApprovalCallback done);
 +
 +}  // namespace agens::bridge::view
 +
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_VIEW_OPS_H_
 diff --git a/chrome/browser/agens/embed/agens_controlled.h b/chrome/browser/agens/embed/agens_controlled.h
 new file mode 100644
-index 0000000000..79041779be
+index 0000000000..709347df06
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_controlled.h
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,53 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Marks a tab an app drives over the socket (bridge/control_ops.cc, docs/agens.md "Controle").
 +// The shell shows it (AgensTab.controller: the pill with Assumir / Devolver); downloads stay out
-+// of it, and saved passwords and autofill too unless the session was allowed "passwords".
++// of it, saved passwords and autofill too unless the session was allowed "passwords", and
++// extensions when the host turned agent_extensions off.
 +#ifndef CHROME_BROWSER_AGENS_EMBED_AGENS_CONTROLLED_H_
 +#define CHROME_BROWSER_AGENS_EMBED_AGENS_CONTROLLED_H_
 +
@@ -7042,11 +7245,18 @@ index 0000000000..79041779be
 +    const AgensControlled* mark = contents ? FromWebContents(contents) : nullptr;
 +    return mark && !mark->passwords;
 +  }
++  // Extensions stay out (host.settings agent_extensions off): no scripts in its frames (the bridge
++  // tells the renderer), no toolbar action, no tab-id based extension API.
++  static bool BlocksExtensions(content::WebContents* contents) {
++    const AgensControlled* mark = contents ? FromWebContents(contents) : nullptr;
++    return mark && mark->extensions_blocked;
++  }
 +
 +  std::string by;               // the agent's name, for the pill and "Controlado pelo …"
 +  std::string title, detail;    // the pill's two lines while the agent works (control.status)
 +  bool paused = false;          // the person took over ("Assumir")
 +  bool passwords = false;       // control.start's allow has "passwords"
++  bool extensions_blocked = false;  // BlocksExtensions
 +  // Where the agent last clicked or hovered, in DIPs from the page's top-left; x < 0 when never.
 +  float cursor_x = -1, cursor_y = -1;
 +  base::RepeatingClosure stop;       // "Encerrar": ends the whole control session
@@ -7992,7 +8202,7 @@ index 4eb24ab895..436be6abd7 100644
      progress_.Run(0, created ? "Criando o ato " + ato + "…" : "Usando o ato " + ato + "…");
      manager->CreateProfileAsync(
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
-index cfdc014cf4..33738ceb53 100644
+index cfdc014cf4..f31d68a7fc 100644
 --- a/chrome/browser/agens/embed/native_shell.cc
 +++ b/chrome/browser/agens/embed/native_shell.cc
 @@ -61,6 +61,7 @@
@@ -8027,7 +8237,15 @@ index cfdc014cf4..33738ceb53 100644
  void agens_window_permission_answer(AgensWindow* w, AgensPermissionAnswer answer) {
    base::WeakPtr<permissions::PermissionPrompt::Delegate> delegate = std::move(w->permission_delegate);
    if (!delegate) return;
-@@ -707,6 +718,32 @@ void agens_window_unsplit(AgensWindow* w, int index) {
+@@ -535,6 +546,7 @@ void agens_extension_click(AgensWindow* w, const char* id) {
+   const extensions::Extension* extension =
+       extensions::ExtensionRegistry::Get(profile)->enabled_extensions().GetByID(id ? id : "");
+   content::WebContents* active = w->model()->GetActiveWebContents();
++  if (AgensControlled::BlocksExtensions(active)) return;  // an agent's tab, with agent_extensions off
+   auto* runner = active ? extensions::ExtensionActionRunner::GetForWebContents(active) : nullptr;
+   if (!extension || !runner) return;
+   if (runner->RunAction(extension, /*grant_tab_permissions=*/true) != extensions::ExtensionAction::ShowAction::kShowPopup) {
+@@ -707,6 +719,32 @@ void agens_window_unsplit(AgensWindow* w, int index) {
  void agens_window_set_pinned(AgensWindow* w, int index, int pinned) {
    if (w->model()->ContainsIndex(index)) w->model()->SetTabPinned(index, pinned);
  }
@@ -8060,7 +8278,7 @@ index cfdc014cf4..33738ceb53 100644
  void agens_window_toggle_mute(AgensWindow* w, int index) {
    if (!w->model()->ContainsIndex(index)) return;
    content::WebContents* contents = w->model()->GetWebContentsAt(index);
-@@ -814,6 +851,12 @@ void NativeTabStateChanged(views::Widget*) {}
+@@ -814,6 +852,12 @@ void NativeTabStateChanged(views::Widget*) {}
  void ConfirmCloseWithDownloads(views::Widget*, int, base::OnceCallback<void(bool)> callback) {
    std::move(callback).Run(true);
  }
@@ -9097,6 +9315,30 @@ index 2c467f4524..2aee2739bd 100644
    // Check whether download is restricted for saved tab groups.
    if (tab_groups::RestrictDownloadOnSyncedTabs() &&
        TabGroupSyncTabState::FromWebContents(web_contents)) {
+diff --git a/chrome/browser/extensions/extension_tab_util.cc b/chrome/browser/extensions/extension_tab_util.cc
+index dd919b9675..6e5a9ed8cc 100644
+--- a/chrome/browser/extensions/extension_tab_util.cc
++++ b/chrome/browser/extensions/extension_tab_util.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/extensions/extension_tab_util.h"
++#include "chrome/browser/agens/embed/agens_controlled.h"  // agens
+ 
+ #include <stddef.h>
+ 
+@@ -658,6 +659,11 @@ bool ExtensionTabUtil::GetTabById(int tab_id,
+       WebContents* target_contents = window->GetWebContentsAt(i);
+       if (sessions::SessionTabHelper::IdForTab(target_contents).id() ==
+           tab_id) {
++        // agens: a tab an agent controls, with agent_extensions off, is not
++        // reachable by id.
++        if (AgensControlled::BlocksExtensions(target_contents)) {
++          return false;
++        }
+         if (out_window) {
+           *out_window = window;
+         }
 diff --git a/chrome/browser/password_manager/chrome_password_manager_client.cc b/chrome/browser/password_manager/chrome_password_manager_client.cc
 index f7819e353a..f4194c180c 100644
 --- a/chrome/browser/password_manager/chrome_password_manager_client.cc
@@ -9939,6 +10181,125 @@ index 0000000000..f0109c9863
 +}  // namespace content
 +
 +#endif  // CONTENT_PUBLIC_BROWSER_AGENS_EMBED_MAC_H_
+diff --git a/extensions/common/mojom/frame.mojom b/extensions/common/mojom/frame.mojom
+index a2e2ed87e5..0cf886199c 100644
+--- a/extensions/common/mojom/frame.mojom
++++ b/extensions/common/mojom/frame.mojom
+@@ -93,6 +93,10 @@ interface LocalFrame {
+   // Tells the render view what its tab ID is.
+   SetTabId(int32 tab_id);
+ 
++  // agens: while blocked, no extension script or CSS is injected in this frame
++  // (a tab an agent controls, with the host's agent_extensions setting off).
++  SetExtensionsBlocked(bool blocked);
++
+   // Notifies the renderer that its window has closed.
+   AppWindowClosed(bool send_onclosed);
+ 
+diff --git a/extensions/common/mojom/frame_mojom_unittest.cc b/extensions/common/mojom/frame_mojom_unittest.cc
+index f871c47238..fe1812cc81 100644
+--- a/extensions/common/mojom/frame_mojom_unittest.cc
++++ b/extensions/common/mojom/frame_mojom_unittest.cc
+@@ -34,6 +34,7 @@ class TestFrameImpl : public mojom::LocalFrame, public mojom::LocalFrameHost {
+   // mojom::LocalFrame:
+   void SetFrameName(const std::string& frame_name) override {}
+   void SetSpatialNavigationEnabled(bool spatial_nav_enabled) override {}
++  void SetExtensionsBlocked(bool blocked) override {}  // agens
+   void SetTabId(int32_t tab_id) override {}
+   void AppWindowClosed(bool send_onclosed) override {}
+   void NotifyRenderViewType(mojom::ViewType view_type) override {}
+diff --git a/extensions/renderer/extension_frame_helper.cc b/extensions/renderer/extension_frame_helper.cc
+index 5273756a5f..95c9460949 100644
+--- a/extensions/renderer/extension_frame_helper.cc
++++ b/extensions/renderer/extension_frame_helper.cc
+@@ -148,6 +148,16 @@ ExtensionFrameHelper::ExtensionFrameHelper(content::RenderFrame* render_frame,
+     has_started_first_navigation_ = true;
+   }
+ 
++  // agens: a child frame in this process starts as blocked as its parent, so
++  // its first document does not wait for the browser to say so.
++  if (blink::WebFrame* parent = render_frame->GetWebFrame()->Parent();
++      parent && parent->IsWebLocalFrame()) {
++    if (ExtensionFrameHelper* helper = Get(
++            content::RenderFrame::FromWebFrame(parent->ToWebLocalFrame()))) {
++      extensions_blocked_ = helper->extensions_blocked_;
++    }
++  }
++
+   render_frame->GetAssociatedInterfaceRegistry()
+       ->AddInterface<mojom::LocalFrame>(
+           base::BindRepeating(&ExtensionFrameHelper::BindLocalFrame,
+@@ -461,6 +471,10 @@ void ExtensionFrameHelper::SetTabId(int32_t tab_id) {
+   tab_id_ = tab_id;
+ }
+ 
++void ExtensionFrameHelper::SetExtensionsBlocked(bool blocked) {
++  extensions_blocked_ = blocked;
++}
++
+ void ExtensionFrameHelper::NotifyRenderViewType(mojom::ViewType type) {
+   // TODO(devlin): It'd be really nice to be able to
+   // DCHECK_EQ(mojom::ViewType::kInvalid, view_type_) here.
+diff --git a/extensions/renderer/extension_frame_helper.h b/extensions/renderer/extension_frame_helper.h
+index b74b195e3d..cb67902344 100644
+--- a/extensions/renderer/extension_frame_helper.h
++++ b/extensions/renderer/extension_frame_helper.h
+@@ -108,6 +108,8 @@ class ExtensionFrameHelper
+ 
+   mojom::ViewType view_type() const { return view_type_; }
+   int tab_id() const { return tab_id_; }
++  // agens: SetExtensionsBlocked; ScriptInjection checks it before injecting.
++  bool extensions_blocked() const { return extensions_blocked_; }
+   int browser_window_id() const { return browser_window_id_; }
+   bool did_create_current_document_element() const {
+     return did_create_current_document_element_;
+@@ -117,6 +119,7 @@ class ExtensionFrameHelper
+   void SetFrameName(const std::string& name) override;
+   void SetSpatialNavigationEnabled(bool enabled) override;
+   void SetTabId(int32_t id) override;
++  void SetExtensionsBlocked(bool blocked) override;
+   void AppWindowClosed(bool send_onclosed) override;
+   void NotifyRenderViewType(mojom::ViewType view_type) override;
+   void MessageInvoke(const ExtensionId& extension_id,
+@@ -208,6 +211,9 @@ class ExtensionFrameHelper
+   // The id of the tab the render frame is attached to.
+   int tab_id_ = -1;
+ 
++  // agens: no extension injections in this frame.
++  bool extensions_blocked_ = false;
++
+   // The id of the browser window the render frame is attached to.
+   int browser_window_id_ = -1;
+ 
+diff --git a/extensions/renderer/script_injection.cc b/extensions/renderer/script_injection.cc
+index 4c032bed25..31b48badfc 100644
+--- a/extensions/renderer/script_injection.cc
++++ b/extensions/renderer/script_injection.cc
+@@ -168,6 +168,12 @@ ScriptInjection::InjectionResult ScriptInjection::TryToInject(
+     return InjectionResult::kFinished;  // We're done.
+   }
+ 
++  // agens: a frame of a tab an agent controls, with agent_extensions off.
++  if (ExtensionFrameHelper::Get(render_frame_)->extensions_blocked()) {
++    NotifyWillNotInject(ScriptInjector::InjectFailureReason::kNotAllowed);
++    return InjectionResult::kFinished;
++  }
++
+   blink::WebLocalFrame* web_frame = render_frame_->GetWebFrame();
+   switch (injector_->CanExecuteOnFrame(
+       injection_host_.get(), web_frame,
+@@ -197,6 +203,11 @@ ScriptInjection::InjectionResult ScriptInjection::OnPermissionGranted(
+     NotifyWillNotInject(ScriptInjector::InjectFailureReason::kExtensionRemoved);
+     return InjectionResult::kFinished;
+   }
++  // agens: blocked while it waited for the permission.
++  if (ExtensionFrameHelper::Get(render_frame_)->extensions_blocked()) {
++    NotifyWillNotInject(ScriptInjector::InjectFailureReason::kNotAllowed);
++    return InjectionResult::kFinished;
++  }
+ 
+   return Inject(scripts_run_info);
+ }
 diff --git a/third_party/blink/renderer/modules/accessibility/ax_object.cc b/third_party/blink/renderer/modules/accessibility/ax_object.cc
 index 73333059ef..fac9314dda 100644
 --- a/third_party/blink/renderer/modules/accessibility/ax_object.cc

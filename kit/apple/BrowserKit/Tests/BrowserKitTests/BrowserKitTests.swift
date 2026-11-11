@@ -162,6 +162,60 @@ import Testing
     #expect(await eventually { fake.received("approval.answer").count == 2 })
     #expect(fake.received("approval.answer")[1]["ask"] == 8 && fake.received("approval.answer")[1]["answer"] == "deny")
   }
+
+  @Test func approvalCarriesItsParts() async throws {
+    let fake = FakeEngine()
+    defer { fake.stop() }
+    let engine = BrowserEngine(executable: URL(fileURLWithPath: "/nonexistent"), dataDirectory: URL(fileURLWithPath: "/tmp"))
+    engine.attach(try BrowserConnection(socketPath: fake.path))
+    var asked: [ApprovalRequest] = []
+    engine.onApproval = { request in
+      asked.append(request)
+      return .deny
+    }
+    fake.send([
+      "event": "approval.ask", "ask": "a1", "title": "t", "detail": "d", "offer_always": false, "kind": "control",
+      "ato": "Profile 2", "ato_name": "Trabalho", "agent": "Popi", "reason": "Ler e-mails",
+      "allow": ["clipboard", "eval"], "shares_with": ["Casa"],
+    ])
+    fake.send([
+      "event": "approval.ask", "ask": "a2", "title": "t", "detail": "d", "offer_always": true, "kind": "session",
+      "ato": "Profile 2", "items": [["type": "cookie", "from": "https://app.example.test", "name": "sid"], ["type": 1]],
+    ])
+    fake.send(["event": "approval.ask", "ask": "a3", "title": "t", "detail": "d", "offer_always": false, "kind": "payment"])
+    fake.send(["event": "approval.ask", "ask": "a4", "title": "t", "detail": "d", "offer_always": false])
+    #expect(await eventually { asked.count == 4 })
+    #expect(asked[0].kind == .control && asked[0].ato == "Profile 2" && asked[0].atoName == "Trabalho")
+    #expect(asked[0].agent == "Popi" && asked[0].reason == "Ler e-mails" && asked[0].allow == ["clipboard", "eval"])
+    #expect(asked[0].sharesWith == ["Casa"] && asked[0].items == nil)
+    #expect(asked[1].kind == .session && asked[1].sharesWith.isEmpty && asked[1].offerAlways)
+    #expect(asked[1].items == [ApprovalRequest.Item(type: "cookie", from: "https://app.example.test", name: "sid")])
+    #expect(asked[2].kind == .other("payment") && asked[2].title == "t")  // a newer kind does not break it
+    #expect(asked[3] == ApprovalRequest(ask: "a4", title: "t", detail: "d", offerAlways: false))  // an older engine
+    #expect(await eventually { fake.received("approval.answer").count == 4 })
+  }
+
+  @Test func hostSettings() async throws {
+    let fake = FakeEngine()
+    defer { fake.stop() }
+    fake.reply = { request in
+      var reply: [String: Any] = ["id": request["id"]?.int ?? 0, "ok": true]
+      if request["op"] == "host.settings" {
+        reply["site_requests"] = request["site_requests"]?.bool ?? false
+        reply["agent_extensions"] = request["agent_extensions"]?.bool ?? true
+      }
+      return [reply]
+    }
+    let engine = BrowserEngine(executable: URL(fileURLWithPath: "/nonexistent"), dataDirectory: URL(fileURLWithPath: "/tmp"))
+    engine.attach(try BrowserConnection(socketPath: fake.path))
+    let set = try await engine.settings(siteRequests: true, agentExtensions: false)
+    #expect(set == HostSettings(siteRequests: true, agentExtensions: false))
+    let read = try await engine.settings()
+    #expect(read == HostSettings(siteRequests: false, agentExtensions: true))
+    let sent = fake.received("host.settings")
+    #expect(sent.count == 2 && sent[0]["site_requests"] == true && sent[0]["agent_extensions"] == false)
+    #expect(sent[1]["site_requests"] == nil && sent[1]["agent_extensions"] == nil)
+  }
 }
 
 @MainActor @Suite(.serialized) struct UITests {

@@ -110,6 +110,7 @@ for name, op, params, want in [
         ("session without reason", "session", dict(ato=ato, need=need(D)), "bad_request"),
         ("session with a control character in reason", "session", dict(ato=ato, reason="a\nb", need=need(D)), "bad_request"),
         ("session with a reason past 1024 characters", "session", dict(ato=ato, reason="r" * 1025, need=need(D)), "bad_request"),
+        ("session with a bidi control in a name", "session", dict(ato=ato, reason="x", need=need(("cookie", "a\u202eb"))), "bad_request"),
         ("session with an unknown type", "session", dict(ato=ato, reason="x", need=[{"type": "password", "from": SITE, "name": "p"}]), "bad_request"),
         ("session with a path in from", "session", dict(ato=ato, reason="x", need=[{"type": "cookie", "from": SITE + "/app", "name": "d"}]), "bad_request"),
         ("session asking for the Cookie header", "session", dict(ato=ato, reason="x", need=[{"type": "header", "from": SITE, "name": "Cookie"}]), "bad_request"),
@@ -134,6 +135,10 @@ check("the detail has the reason, the ato and one line per item",
       detail.startswith("Gate sessao\n\nDo ato ") and "\ncookie d de http://127.0.0.1:8765" in detail
       and "\nlocalStorage token de http://127.0.0.1:8765" in detail, detail)
 check("no 'Permitir sempre' for an unsigned client", bool(a) and a.get("offer_always") is False, a)
+check("the session approval carries its parts (kind, ato, ato_name, reason, items; no shares_with)",
+      bool(a) and a.get("kind") == "session" and a.get("ato") == ato and bool(a.get("ato_name"))
+      and a.get("reason") == "Gate sessao" and "shares_with" not in a
+      and a.get("items") == [{"type": "cookie", "from": SITE, "name": "d"}, {"type": "localStorage", "from": SITE, "name": "token"}], a)
 answer(a, "deny")
 check("deny: denied", err(agent.wait(rid)) == "denied")
 

@@ -1,14 +1,95 @@
 import Foundation
 import Observation
 
-/// A request from the engine for the person's approval (`approval.ask`). The host draws it.
+/// A request from the engine for the person's approval (`approval.ask`). The host draws it:
+/// `title` and `detail` always come; the parts below come when the engine knows them (an older
+/// engine sends none), for a host that lays the sheet out itself.
 public struct ApprovalRequest: Sendable, Equatable {
+  /// What is being asked.
+  public enum Kind: Sendable, Equatable {
+    /// An app wants to connect (`hello` from a signed client).
+    case connect
+    /// `control.start`: an agent wants to use tabs of an ato.
+    case control
+    /// `session`: an app wants cookies, localStorage or headers of an ato.
+    case session
+    /// A kind this kit does not know (a newer engine): show `title` and `detail`.
+    case other(String)
+
+    init(_ name: String) {
+      switch name {
+      case "connect": self = .connect
+      case "control": self = .control
+      case "session": self = .session
+      default: self = .other(name)
+      }
+    }
+  }
+
+  /// One thing `session` asks for.
+  public struct Item: Sendable, Equatable {
+    /// `cookie`, `localStorage` or `header`.
+    public let type: String
+    /// The origin, as the app sent it.
+    public let from: String
+    public let name: String
+  }
+
   /// The engine's id for this request, echoed back in the answer.
   public let ask: JSON
   public let title: String
   public let detail: String
   /// Whether "always" may be offered.
   public let offerAlways: Bool
+  public var kind: Kind? = nil
+  /// The ato's id and name (control, session).
+  public var ato: String? = nil
+  public var atoName: String? = nil
+  /// The name the controlled tabs will show (control).
+  public var agent: String? = nil
+  /// The app's reason, when it gave one.
+  public var reason: String? = nil
+  /// Extra permissions asked (control): `passwords`, `clipboard`, `eval`.
+  public var allow: [String]? = nil
+  /// Names of the atos this one shares cookies with; empty when none.
+  public var sharesWith: [String] = []
+  /// What `session` asks for.
+  public var items: [Item]? = nil
+
+  init(message: [String: JSON]) {
+    ask = message["ask"] ?? .null
+    title = message["title"]?.string ?? ""
+    detail = message["detail"]?.string ?? ""
+    offerAlways = message["offer_always"]?.bool ?? false
+    kind = message["kind"]?.string.map(Kind.init)
+    ato = message["ato"]?.string
+    atoName = message["ato_name"]?.string
+    agent = message["agent"]?.string
+    reason = message["reason"]?.string
+    allow = message["allow"]?.array?.compactMap(\.string)
+    sharesWith = message["shares_with"]?.array?.compactMap(\.string) ?? []
+    items = message["items"]?.array?.compactMap { item in
+      guard let item = item.object, let type = item["type"]?.string, let from = item["from"]?.string,
+        let name = item["name"]?.string
+      else { return nil }
+      return Item(type: type, from: from, name: name)
+    }
+  }
+
+  init(ask: JSON, title: String, detail: String, offerAlways: Bool) {
+    self.ask = ask
+    self.title = title
+    self.detail = detail
+    self.offerAlways = offerAlways
+  }
+}
+
+/// The two options the host switches (`host.settings`), as the engine has them now.
+public struct HostSettings: Sendable, Equatable {
+  /// Sites may ask for location and notifications (the host's `ui.ask`); off, they are blocked.
+  public let siteRequests: Bool
+  /// Extensions act on the tabs an agent controls.
+  public let agentExtensions: Bool
 }
 
 /// The browser engine as a hidden child process of the host app: starts it, connects, says
@@ -150,6 +231,21 @@ public struct ApprovalRequest: Sendable, Equatable {
     state = .stopped
   }
 
+  /// Sets the options given (nil leaves one as it is) and returns both as the engine now has them;
+  /// with no argument it only reads. The engine keeps them across launches. An engine older than
+  /// this op throws `unknown_op`: it behaves as `siteRequests` false and `agentExtensions` true.
+  public func settings(siteRequests: Bool? = nil, agentExtensions: Bool? = nil) async throws(BrowserError)
+    -> HostSettings
+  {
+    guard let connection else { throw BrowserError(code: BrowserError.disconnected) }
+    var params: [String: JSON] = [:]
+    if let siteRequests { params["site_requests"] = .bool(siteRequests) }
+    if let agentExtensions { params["agent_extensions"] = .bool(agentExtensions) }
+    let reply = try await connection.send(op: "host.settings", params: params)
+    return HostSettings(
+      siteRequests: reply["site_requests"]?.bool ?? false, agentExtensions: reply["agent_extensions"]?.bool ?? true)
+  }
+
   /// Wires a connection to the model and the views (also used by the tests, without a process).
   func attach(_ connection: BrowserConnection) {
     self.connection = connection
@@ -209,9 +305,7 @@ public struct ApprovalRequest: Sendable, Equatable {
   }
 
   private func answer(_ message: [String: JSON]) {
-    let request = ApprovalRequest(
-      ask: message["ask"] ?? .null, title: message["title"]?.string ?? "", detail: message["detail"]?.string ?? "",
-      offerAlways: message["offer_always"]?.bool ?? false)
+    let request = ApprovalRequest(message: message)
     Task {
       let answer = await onApproval?(request) ?? .deny
       try? await connection?.answerApproval(request.ask, answer: answer)

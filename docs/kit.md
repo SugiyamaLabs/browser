@@ -104,6 +104,27 @@ engine.onApproval = { request in
 }
 ```
 
+`title` e `detail` vêm sempre, prontos para mostrar. Para desenhar a folha em partes, `ApprovalRequest` traz também, quando o motor sabe (um motor mais antigo deixa tudo vazio):
+
+- `kind`: `.control` (um agente quer usar abas), `.session` (um app quer cookies, `localStorage` ou headers), `.connect`, ou `.other("…")` para um tipo que este kit não conhece; nesse caso, e com `kind` nulo, mostre `title` e `detail`.
+- `ato`, `atoName`, `reason`.
+- `agent` e `allow` (`passwords`, `clipboard`, `eval`), em `.control`.
+- `items: [ApprovalRequest.Item]` (`type`, `from`, `name`), em `.session`.
+- `sharesWith`: nomes dos atos com que este divide cookies; vazio quando nenhum.
+
+## Configurações do motor
+
+Duas opções que o app liga e desliga, guardadas pelo motor entre um início e outro ([protocolo.md](protocolo.md), `host.settings`):
+
+```swift
+let now = try await engine.settings(siteRequests: true, agentExtensions: false)   // muda e devolve as duas
+let read = try await engine.settings()                                            // só lê
+```
+
+- `siteRequests` (padrão `false`): sites podem pedir localização e notificações (chega como `ui.ask` de permissão); desligado, ficam bloqueadas em todo ato.
+- `agentExtensions` (padrão `true`): as extensões agem nas abas que um agente controla. Desligado, ficam fora delas (o que ainda passa está em protocolo.md).
+- Motor mais antigo lança `BrowserError` com `code` `unknown_op`; ali vale o padrão.
+
 ## Menus, diálogos e pedidos da página
 
 O que a página abre por conta própria chega como `ui.ask` ([protocolo.md](protocolo.md), "Passo 5.3"): lista de `select`, botão direito, `alert`/`confirm`/`prompt`/`beforeunload`, escolher arquivo, login HTTP, permissão do site e instalar extensão.
