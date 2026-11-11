@@ -7946,10 +7946,10 @@ index 0000000000..edffd6c570
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_VIEW_OPS_H_
 diff --git a/chrome/browser/agens/bridge/view_pick.cc b/chrome/browser/agens/bridge/view_pick.cc
 new file mode 100644
-index 0000000000..af1ec61577
+index 0000000000..f2cf0f9403
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_pick.cc
-@@ -0,0 +1,439 @@
+@@ -0,0 +1,459 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The picker (view_pick.h). How DevTools' inspect mode behaves, and what that asks of us:
 +// - Overlay.setInspectMode answers ok even when Overlay is not enabled, and fails (keeping the
@@ -8046,9 +8046,17 @@ index 0000000000..af1ec61577
 +  return out;
 +})";
 +
++// Up stops at <body>: <html> and <head> are nothing a person points at. Down takes the first child
++// that is drawn, so it never lands in <head>, <script> or a hidden element.
 +constexpr char kStep[] = R"(function(parent) {
-+  if (parent) return this.parentElement || (this.parentNode && this.parentNode.host) || null;
-+  return this.firstElementChild || null;
++  if (parent) {
++    if (this.localName === "body" || this.localName === "html") return null;
++    return this.parentElement || (this.parentNode && this.parentNode.host) || null;
++  }
++  for (let c = this.firstElementChild; c; c = c.nextElementSibling) {
++    if (c.getClientRects().length) return c;
++  }
++  return null;
 +})";
 +
 +// The overlay's own highlight in a calm amber, with its label (tag and size).
@@ -8170,6 +8178,7 @@ index 0000000000..af1ec61577
 +    Command("Runtime.releaseObjectGroup", std::move(group));
 +    object_.clear();
 +  }
++  trail_.clear();
 +  state_ = State::kArming;
 +  base::DictValue mode;
 +  mode.Set("mode", "searchForNode");
@@ -8289,6 +8298,14 @@ index 0000000000..af1ec61577
 +  Finish(step_done_, kFailed);
 +  step_done_ = std::move(done);
 +  ++generation_;
++  if (!parent && !trail_.empty()) {  // down goes back the way up came
++    const std::string back = trail_.back();
++    trail_.pop_back();
++    Finish(step_done_, std::string());
++    state_ = State::kFetching;
++    Command("Overlay.hideHighlight");
++    return Describe(back);
++  }
 +  base::ListValue args;
 +  args.Append(Arg(base::Value(parent)));
 +  base::DictValue params;
@@ -8298,16 +8315,18 @@ index 0000000000..af1ec61577
 +  params.Set("objectGroup", kObjectGroup);
 +  params.Set("silent", true);
 +  Command("Runtime.callFunctionOn", std::move(params),
-+          Current(base::BindOnce([](Picker* self, const base::DictValue* result) {
++          Current(base::BindOnce([](bool parent, Picker* self, const base::DictValue* result) {
 +            if (!result) return Finish(self->step_done_, kFailed);
 +            const std::string* found = result->FindStringByDottedPath("result.objectId");
 +            if (!found) return Finish(self->step_done_, kNotFound);  // the pick stays
 +            const std::string object_id = *found;
++            if (parent) self->trail_.push_back(self->object_);
++            else self->trail_.clear();
 +            Finish(self->step_done_, std::string());
 +            self->state_ = State::kFetching;
 +            self->Command("Overlay.hideHighlight");
 +            self->Describe(object_id);
-+          })));
++          }, parent)));
 +}
 +
 +void Picker::Stop(Done done) {
@@ -8330,6 +8349,7 @@ index 0000000000..af1ec61577
 +  state_ = State::kOff;
 +  ++generation_;
 +  object_.clear();
++  trail_.clear();
 +  if (web_contents()) content::AgensEmbedRouteMouseToRoot(web_contents(), false);
 +  if (agent_host_) agent_host_->DetachClient(this);
 +  agent_host_ = nullptr;
@@ -8391,10 +8411,10 @@ index 0000000000..af1ec61577
 +}  // namespace agens::bridge::view
 diff --git a/chrome/browser/agens/bridge/view_pick.h b/chrome/browser/agens/bridge/view_pick.h
 new file mode 100644
-index 0000000000..6dd60db3e9
+index 0000000000..68f776593c
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_pick.h
-@@ -0,0 +1,101 @@
+@@ -0,0 +1,103 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The element picker of a tab the host shows (docs/protocolo.md, "Passo 5.4"): view.pick,
 +// view.pick.step and the view.picked event. DevTools' own inspect mode does the work inside the
@@ -8406,6 +8426,7 @@ index 0000000000..6dd60db3e9
 +
 +#include <map>
 +#include <string>
++#include <vector>
 +#include <string_view>
 +
 +#include "base/functional/callback.h"
@@ -8489,6 +8510,7 @@ index 0000000000..6dd60db3e9
 +  bool overlay_on_ = false;  // Overlay.enable went through (setInspectMode says ok even when not)
 +  int world_ = 0;            // our isolated world in the main frame, 0 while there is none
 +  std::string object_;       // the pick, in the session's object group
++  std::vector<std::string> trail_;  // the picks ↑ came from, so ↓ goes back the same way
 +  Done arm_done_, step_done_, stop_done_;
 +  base::WeakPtrFactory<Picker> weak_factory_{this};
 +};

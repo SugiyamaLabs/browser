@@ -684,6 +684,17 @@ p = picked(t)
 check("view.pick.step child: back to #inner", r.get("ok") and p.get("selector") == "#inner", shows(p, "selector"))
 check("view.pick.step child of an element with no child element is not_found",
       err(c.ask("view.pick.step", tab=t, to="child")) == "not_found")
+trail = []
+for _ in range(2):
+    c.ask("view.pick.step", tab=t, to="parent")
+    trail.append(picked(t).get("selector"))
+check("view.pick.step parent climbs to body and stops there (never html or head)",
+      trail[-1] in ("body", "html > body") and err(c.ask("view.pick.step", tab=t, to="parent")) == "not_found", trail)
+back = []
+for _ in range(2):
+    c.ask("view.pick.step", tab=t, to="child")
+    back.append(picked(t).get("selector"))
+check("view.pick.step child goes back the way parent came (body, #card, #inner)", back == ["#card", "#inner"], back)
 
 c.ask("view.pick", tab=t, on=True)
 click(t, 100, 340)
