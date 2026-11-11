@@ -4089,10 +4089,10 @@ index 0000000000..2a1a874d47
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_SESSION_OPS_H_
 diff --git a/chrome/browser/agens/bridge/ui_answer.cc b/chrome/browser/agens/bridge/ui_answer.cc
 new file mode 100644
-index 0000000000..1bd65165f3
+index 0000000000..b6c9417226
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ui_answer.cc
-@@ -0,0 +1,111 @@
+@@ -0,0 +1,146 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/ui_answer.h"
@@ -4101,6 +4101,7 @@ index 0000000000..1bd65165f3
 +
 +#include "base/files/file_path.h"
 +#include "base/files/file_util.h"
++#include "chrome/browser/agens/bridge/control_keys.h"
 +
 +namespace agens::bridge {
 +
@@ -4188,6 +4189,40 @@ index 0000000000..1bd65165f3
 +  return UiAnswer::kBadRequest;
 +}
 +
++void ClipUiAsk(base::DictValue& fields) {
++  const std::string* kind = fields.FindString("kind");
++  if (!kind) return;
++  auto clip = [](base::DictValue& dict, std::string_view key, size_t max) {
++    if (std::string* text = dict.FindString(key)) *text = ClipChars(std::move(*text), max);
++  };
++  auto clip_list = [&](base::ListValue* list, size_t max_items) {
++    if (!list) return false;
++    const bool cut = list->size() > max_items;
++    if (cut) list->erase(list->begin() + max_items, list->end());
++    for (base::Value& item : *list) {
++      if (item.is_string()) item = base::Value(ClipChars(item.GetString(), kMaxUiLabelChars));
++      if (item.is_dict()) clip(item.GetDict(), "label", kMaxUiLabelChars);
++    }
++    return cut;
++  };
++  if (*kind == "dialog") {
++    clip(fields, "message", kMaxUiDialogChars);
++    clip(fields, "default", kMaxUiDialogChars);
++  } else if (*kind == "select") {
++    if (clip_list(fields.FindList("items"), kMaxUiSelectItems)) fields.Set("truncated", true);
++    const std::optional<int> selected = fields.FindInt("selected");
++    if (selected && static_cast<size_t>(*selected) >= kMaxUiSelectItems) fields.Set("selected", -1);
++  } else if (*kind == "context_menu") {
++    if (base::DictValue* context = fields.FindDict("context")) clip(*context, "selection", kMaxUiLabelChars);
++  } else if (*kind == "auth") {
++    clip(fields, "realm", kMaxUiLabelChars);
++  } else if (*kind == "extension") {
++    clip(fields, "name", kMaxUiLabelChars);
++    clip(fields, "version", kMaxUiLabelChars);
++    clip_list(fields.FindList("permissions"), kMaxUiTexts);
++  }
++}
++
 +bool PathsFitMode(std::string_view mode, const base::ListValue& paths) {
 +  for (const base::Value& value : paths) {
 +    if (!value.is_string()) return false;
@@ -4206,10 +4241,10 @@ index 0000000000..1bd65165f3
 +}  // namespace agens::bridge
 diff --git a/chrome/browser/agens/bridge/ui_answer.h b/chrome/browser/agens/bridge/ui_answer.h
 new file mode 100644
-index 0000000000..5dd80863f3
+index 0000000000..39be098619
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ui_answer.h
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,44 @@
 +// Copyright 2026 SugiyamaLabs.
 +// What the host may answer to a ui.ask (docs/protocolo.md, "Passo 5.3"). Pure logic, so
 +// ui_answer_selfcheck.cc runs it with only //base; the engine side is ui_ops.h.
@@ -4223,6 +4258,11 @@ index 0000000000..5dd80863f3
 +namespace agens::bridge {
 +
 +inline constexpr size_t kMaxOpenUiAsks = 16;          // sent and waiting, all tabs together
++inline constexpr size_t kMaxOpenUiAsksPerTab = 4;     // so one tab can't take the others' turn
++inline constexpr size_t kMaxUiDialogChars = 1024;     // a dialog's message and prompt default
++inline constexpr size_t kMaxUiLabelChars = 200;       // a select item, realm, selection, extension texts
++inline constexpr size_t kMaxUiSelectItems = 1000;
++inline constexpr size_t kMaxUiTexts = 100;            // an extension's permission texts
 +inline constexpr size_t kMaxUiTextBytes = 64 * 1024;  // prompt text, username, password, a path
 +inline constexpr size_t kMaxUiPaths = 100;            // file, open_multiple
 +
@@ -4237,6 +4277,10 @@ index 0000000000..5dd80863f3
 +// too many).
 +UiAnswer CheckUiAnswer(bool from_host, const base::DictValue* asked, const base::DictValue& body);
 +
++// Cuts what the page controls in a ui.ask of `fields["kind"]` to the limits above; a select's
++// list past kMaxUiSelectItems keeps the first ones and gets "truncated": true.
++void ClipUiAsk(base::DictValue& fields);
++
 +// A file answer's `paths` against the disk, for `mode`: open and open_multiple want existing
 +// files that aren't folders, folder an existing folder, save a path whose folder exists and that
 +// isn't a folder itself. Blocks (it stats each one).
@@ -4247,10 +4291,10 @@ index 0000000000..5dd80863f3
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_UI_ANSWER_H_
 diff --git a/chrome/browser/agens/bridge/ui_answer_selfcheck.cc b/chrome/browser/agens/bridge/ui_answer_selfcheck.cc
 new file mode 100644
-index 0000000000..079453a136
+index 0000000000..a0414df133
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ui_answer_selfcheck.cc
-@@ -0,0 +1,141 @@
+@@ -0,0 +1,184 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Assert-based check of ui_answer.h, run by agens_bridge_selfcheck (protocol_selfcheck.cc).
 +
@@ -4261,6 +4305,7 @@ index 0000000000..079453a136
 +#include "base/files/file_util.h"
 +#include "base/files/scoped_temp_dir.h"
 +#include "base/json/json_reader.h"
++#include "base/strings/string_number_conversions.h"
 +#include "chrome/browser/agens/bridge/ui_answer.h"
 +
 +using namespace agens::bridge;
@@ -4372,6 +4417,48 @@ index 0000000000..079453a136
 +  UI_CHECK(Check(R"({"kind":"extension"})", R"({"allow":true,"remember":true})") == kBad);
 +  UI_CHECK(Check(R"({"kind":"extension"})", R"({})") == kBad);
 +
++  // What the page controls, cut before it goes out.
++  {
++    base::DictValue dialog = Json(R"({"kind":"dialog","type":"prompt"})");
++    dialog.Set("message", std::string(2000, 'm'));
++    dialog.Set("default", std::string(2000, 'd'));
++    ClipUiAsk(dialog);
++    UI_CHECK(dialog.FindString("message")->size() == kMaxUiDialogChars && dialog.FindString("default")->size() == kMaxUiDialogChars);
++    base::DictValue select = Json(R"({"kind":"select","selected":1500})");
++    base::ListValue items;
++    for (int i = 0; i < 1200; ++i) {
++      base::DictValue item;
++      item.Set("label", std::string(300, 'a'));
++      items.Append(std::move(item));
++    }
++    select.Set("items", std::move(items));
++    ClipUiAsk(select);
++    UI_CHECK(select.FindList("items")->size() == kMaxUiSelectItems && select.FindBool("truncated") == true);
++    UI_CHECK((*select.FindList("items"))[0].GetDict().FindString("label")->size() == kMaxUiLabelChars);
++    UI_CHECK(select.FindInt("selected") == -1);
++    std::string index_past = R"({"index":)" + base::NumberToString(kMaxUiSelectItems) + "}";
++    base::DictValue body = Json(index_past);
++    body.Set("ask", "u1");
++    UI_CHECK(CheckUiAnswer(true, &select, body) == kBad);  // only what was sent can be picked
++    base::DictValue small = Json(R"({"kind":"select","items":[{"label":"a"}],"selected":0})");
++    ClipUiAsk(small);
++    UI_CHECK(!small.Find("truncated") && small.FindInt("selected") == 0);
++    base::DictValue extension = Json(R"({"kind":"extension"})");
++    extension.Set("name", std::string(300, 'n'));
++    extension.Set("version", std::string(300, 'v'));
++    base::ListValue texts;
++    for (int i = 0; i < 150; ++i) texts.Append(std::string(300, 't'));
++    extension.Set("permissions", std::move(texts));
++    ClipUiAsk(extension);
++    UI_CHECK(extension.FindString("name")->size() == kMaxUiLabelChars && extension.FindString("version")->size() == kMaxUiLabelChars);
++    UI_CHECK(extension.FindList("permissions")->size() == kMaxUiTexts &&
++             (*extension.FindList("permissions"))[0].GetString().size() == kMaxUiLabelChars);
++    base::DictValue auth = Json(R"({"kind":"auth"})");
++    auth.Set("realm", std::string(300, 'r'));
++    ClipUiAsk(auth);
++    UI_CHECK(auth.FindString("realm")->size() == kMaxUiLabelChars);
++  }
++
 +  // The paths against the disk.
 +  base::ScopedTempDir dir;
 +  UI_CHECK(dir.CreateUniqueTempDir());
@@ -4394,10 +4481,10 @@ index 0000000000..079453a136
 +}
 diff --git a/chrome/browser/agens/bridge/ui_ops.cc b/chrome/browser/agens/bridge/ui_ops.cc
 new file mode 100644
-index 0000000000..7f329b6142
+index 0000000000..fe42b66f6c
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ui_ops.cc
-@@ -0,0 +1,679 @@
+@@ -0,0 +1,699 @@
 +// Copyright 2026 SugiyamaLabs.
 +// - One queue for every ask, in the order they came; only the oldest of each tab and kind is on
 +//   the host at a time, and at most kMaxOpenUiAsks wait in all.
@@ -4449,11 +4536,17 @@ index 0000000000..7f329b6142
 +namespace agens {
 +
 +namespace {
-+content::WebContents* g_file_dialog_source = nullptr;
++base::WeakPtr<content::WebContents>& FileDialogSource() {
++  static base::NoDestructor<base::WeakPtr<content::WebContents>> source;
++  return *source;
 +}
++}  // namespace
 +
 +void SetFileDialogSource(content::WebContents* contents) {
-+  g_file_dialog_source = contents;
++  FileDialogSource() = contents ? contents->GetWeakPtr() : nullptr;
++  // Only for the panel this same call opens: a policy asked and no panel followed is forgotten.
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE,
++                                                           base::BindOnce([] { FileDialogSource() = nullptr; }));
 +}
 +
 +}  // namespace agens
@@ -4461,10 +4554,6 @@ index 0000000000..7f329b6142
 +namespace agens::bridge::ui_ask {
 +
 +namespace {
-+
-+constexpr size_t kMaxDialogMessageChars = 1024;
-+constexpr size_t kMaxSelectionChars = 200;
-+constexpr size_t kMaxRealmChars = 200;
 +
 +struct Pending {
 +  int n = 0;
@@ -4479,8 +4568,6 @@ index 0000000000..7f329b6142
 +struct State {
 +  std::vector<std::unique_ptr<Pending>> asks;  // oldest first
 +  int next = 0;
-+  std::map<int, std::string> cursors;  // the last view.cursor of each tab
-+  std::map<int, gfx::Rect> carets;     // and view.caret
 +};
 +State& S() {
 +  static base::NoDestructor<State> state;
@@ -4551,11 +4638,7 @@ index 0000000000..7f329b6142
 +      EndTab(n_, "navigated", /*keep_beforeunload=*/true);
 +    }
 +  }
-+  void WebContentsDestroyed() override {
-+    S().cursors.erase(n_);
-+    S().carets.erase(n_);
-+    EndTab(n_, "closed");
-+  }
++  void WebContentsDestroyed() override { EndTab(n_, "closed"); }
 +
 + private:
 +  Watch(content::WebContents* contents, int n)
@@ -4652,7 +4735,7 @@ index 0000000000..7f329b6142
 +                       : type == content::JAVASCRIPT_DIALOG_TYPE_ALERT   ? "alert"
 +                       : type == content::JAVASCRIPT_DIALOG_TYPE_CONFIRM ? "confirm"
 +                                                                         : "prompt");
-+    fields.Set("message", ClipChars(base::UTF16ToUTF8(message), kMaxDialogMessageChars));
++    fields.Set("message", base::UTF16ToUTF8(message));
 +    fields.Set("origin", frame->GetLastCommittedOrigin().Serialize());
 +    if (type == content::JAVASCRIPT_DIALOG_TYPE_PROMPT && !beforeunload) {
 +      fields.Set("default", base::UTF16ToUTF8(default_prompt));
@@ -4740,12 +4823,6 @@ index 0000000000..7f329b6142
 +
 +// --- context_menu: a right click; the engine runs what the person picked.
 +
-+std::string WithoutRef(const GURL& url) {
-+  GURL::Replacements no_ref;
-+  no_ref.ClearRef();
-+  return url.ReplaceComponents(no_ref).spec();
-+}
-+
 +struct Clicked {
 +  content::GlobalRenderFrameHostId frame;
 +  GURL link, frame_url;
@@ -4790,18 +4867,18 @@ index 0000000000..7f329b6142
 +  base::DictValue context;
 +  base::ListValue actions;
 +  if (params.link_url.is_valid()) {
-+    context.Set("link", WithoutRef(params.link_url));
++    context.Set("link", params.link_url.spec());  // the address the actions use
 +    if (params.link_url.SchemeIsHTTPOrHTTPS()) actions.Append("open_link_new_tab");
 +    actions.Append("copy_link");
 +  }
 +  if (params.media_type == blink::mojom::ContextMenuDataMediaType::kImage && params.src_url.is_valid()) {
-+    context.Set("image", WithoutRef(params.src_url));
++    context.Set("image", params.src_url.spec());
 +    if (params.has_image_contents) actions.Append("copy_image");
 +    actions.Append("save_image");
 +  }
 +  const bool password = params.form_control_type == blink::mojom::FormControlType::kInputPassword;
 +  if (!params.selection_text.empty() && !password) {
-+    context.Set("selection", ClipChars(base::UTF16ToUTF8(params.selection_text), kMaxSelectionChars));
++    context.Set("selection", base::UTF16ToUTF8(params.selection_text));
 +  }
 +  context.Set("editable", params.is_editable);
 +  if (params.edit_flags & blink::ContextMenuDataEditFlags::kCanCopy) actions.Append("copy");
@@ -4845,7 +4922,8 @@ index 0000000000..7f329b6142
 +                      gfx::NativeWindow owning_window,
 +                      const GURL* caller) override {
 +    // Set by ChromeSelectFilePolicy right before this, in the same call.
-+    content::WebContents* contents = std::exchange(g_file_dialog_source, nullptr);
++    content::WebContents* contents = FileDialogSource().get();
++    FileDialogSource() = nullptr;
 +    const char* mode = type == SELECT_OPEN_MULTI_FILE ? "open_multiple"
 +                       : type == SELECT_SAVEAS_FILE   ? "save"
 +                       : type == SELECT_OPEN_FILE     ? "open"
@@ -4938,11 +5016,38 @@ index 0000000000..7f329b6142
 +  }
 +}
 +
++// The last view.cursor and view.caret a tab sent, and to which host; goes with the tab.
++class LastSent : public content::WebContentsUserData<LastSent> {
++ public:
++  // For `host`: forgets what an earlier host was told.
++  static LastSent& For(content::WebContents* contents, uint64_t host) {
++    CreateForWebContents(contents);  // no-op once it exists
++    LastSent* last = FromWebContents(contents);
++    if (last->host_ != host) {
++      last->host_ = host;
++      last->cursor.clear();
++      last->caret.reset();
++    }
++    return *last;
++  }
++  std::string cursor;
++  std::optional<gfx::Rect> caret;
++
++ private:
++  explicit LastSent(content::WebContents* contents, uint64_t host = 0)
++      : content::WebContentsUserData<LastSent>(*contents), host_(host) {}
++  friend class content::WebContentsUserData<LastSent>;
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++  uint64_t host_;
++};
++WEB_CONTENTS_USER_DATA_KEY_IMPL(LastSent);
++
++// Only tabs the host was told about (view.tab): no id is made up here.
 +void CursorChanged(content::WebContents* contents, ::ui::mojom::CursorType type) {
 +  const uint64_t host = view::Host();
-+  if (!host) return;
-+  const int n = view::TabNumber(contents);
-+  std::string& last = S().cursors[n];
++  const int n = host ? view::KnownTab(contents) : 0;
++  if (!n) return;
++  std::string& last = LastSent::For(contents, host).cursor;
 +  if (last == CursorName(type)) return;
 +  last = CursorName(type);
 +  base::DictValue fields;
@@ -4953,11 +5058,11 @@ index 0000000000..7f329b6142
 +
 +void CaretChanged(content::WebContents* contents, const gfx::Rect& caret) {
 +  const uint64_t host = view::Host();
-+  if (!host) return;
-+  const int n = view::TabNumber(contents);
-+  auto [it, added] = S().carets.try_emplace(n, caret);
-+  if (!added && it->second == caret) return;
-+  it->second = caret;
++  const int n = host ? view::KnownTab(contents) : 0;
++  if (!n) return;
++  std::optional<gfx::Rect>& last = LastSent::For(contents, host).caret;
++  if (last == caret) return;
++  last = caret;
 +  base::DictValue fields;
 +  fields.Set("tab", ViewTabName(n));
 +  fields.Set("x", caret.x());
@@ -4971,7 +5076,10 @@ index 0000000000..7f329b6142
 +
 +int Ask(content::WebContents* contents, std::string_view kind, base::DictValue fields, AnswerCallback done) {
 +  State& s = S();
-+  if (!view::Host() || s.asks.size() >= kMaxOpenUiAsks || (contents && contents->IsBeingDestroyed())) {
++  const int tab = contents ? view::TabNumber(contents) : 0;
++  const size_t of_tab = std::ranges::count_if(s.asks, [tab](const auto& p) { return tab && p->tab == tab; });
++  if (!view::Host() || s.asks.size() >= kMaxOpenUiAsks || of_tab >= kMaxOpenUiAsksPerTab ||
++      (contents && contents->IsBeingDestroyed())) {
 +    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
 +        FROM_HERE, base::BindOnce(std::move(done), static_cast<const base::DictValue*>(nullptr)));
 +    return 0;
@@ -4979,11 +5087,12 @@ index 0000000000..7f329b6142
 +  auto p = std::make_unique<Pending>();
 +  p->n = ++s.next;
 +  p->kind = std::string(kind);
-+  p->tab = contents ? view::TabNumber(contents) : 0;
++  p->tab = tab;
 +  p->done = std::move(done);
 +  p->fields = std::move(fields);
 +  p->fields.Set("ask", "u" + base::NumberToString(p->n));
 +  p->fields.Set("kind", kind);
++  ClipUiAsk(p->fields);
 +  if (contents) {
 +    p->fields.Set("tab", ViewTabName(p->tab));
 +    if (!Watch::FromWebContents(contents)) Watch::CreateForWebContents(contents, p->tab);
@@ -5025,8 +5134,8 @@ index 0000000000..7f329b6142
 +      return std::move(reply).Run(ErrorReply(&request.id, kNotFound, *ask));
 +    case UiAnswer::kBadRequest:
 +      return std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs ask, and fields that fit its kind"));
-+    case UiAnswer::kCancel:
-+      return Finish(p->n, request.id, std::move(reply), std::nullopt);
++    case UiAnswer::kCancel:  // the host's {cancel: true} comes as is: the person decided
++      return Finish(p->n, request.id, std::move(reply), request.body.Clone());
 +    case UiAnswer::kAnswer:
 +      break;
 +  }
@@ -5053,8 +5162,6 @@ index 0000000000..7f329b6142
 +void HostGone() {
 +  std::vector<std::unique_ptr<Pending>> asks = std::move(S().asks);
 +  S().asks.clear();
-+  S().cursors.clear();
-+  S().carets.clear();
 +  for (auto& p : asks) std::move(p->done).Run(nullptr);
 +}
 +
@@ -5079,10 +5186,10 @@ index 0000000000..7f329b6142
 +}  // namespace agens::bridge::ui_ask
 diff --git a/chrome/browser/agens/bridge/ui_ops.h b/chrome/browser/agens/bridge/ui_ops.h
 new file mode 100644
-index 0000000000..4c5af3c5a0
+index 0000000000..90a1a8c6ce
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ui_ops.h
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,57 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The host draws what the engine would put on screen (docs/protocolo.md, "Passo 5.3"): ui.ask to
 +// the host, ui.answer back, ui.cancel when the engine gives up first. Embedded only; UI thread.
@@ -5102,13 +5209,15 @@ index 0000000000..4c5af3c5a0
 +
 +namespace agens::bridge::ui_ask {
 +
-+// The host's ui.answer (already checked against the ask), or null when the ask ended without one:
-+// the host cancelled, or the engine did (the host left, the tab closed or navigated, too many open).
++// The host's ui.answer (already checked against the ask; {cancel: true} included: the person
++// decided), or null when the engine ended it (the host left, the tab closed or navigated, too
++// many open).
 +using AnswerCallback = base::OnceCallback<void(const base::DictValue* answer)>;
 +
 +// Sends ui.ask {ask, kind, tab, ...fields} once the asks of the same tab and kind before it are
 +// done. `contents` is null only for an extension. `done` runs exactly once, unless Withdraw; with
-+// null (posted) when there is no host or kMaxOpenUiAsks are open. Returns the ask, for Withdraw.
++// null (posted) when there is no host or too many are open (ui_answer.h). What the page controls
++// is cut first (ClipUiAsk). Returns the ask, for Withdraw.
 +int Ask(content::WebContents* contents, std::string_view kind, base::DictValue fields, AnswerCallback done);
 +// The page gave up: the host gets ui.cancel "gone" if it was asked, and `done` never runs.
 +void Withdraw(int ask);
@@ -5494,10 +5603,10 @@ index 0000000000..7d67567ae2
 +}
 diff --git a/chrome/browser/agens/bridge/view_ops.cc b/chrome/browser/agens/bridge/view_ops.cc
 new file mode 100644
-index 0000000000..1007a1c9ba
+index 0000000000..0763c34e1f
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_ops.cc
-@@ -0,0 +1,757 @@
+@@ -0,0 +1,767 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The host draws the interface; the engine hands it the pages (docs/protocolo.md, "host e view").
 +// - One host: the connection that sent host.attach (the app that launched the engine).
@@ -5648,6 +5757,12 @@ index 0000000000..1007a1c9ba
 +State& S() {
 +  static base::NoDestructor<State> state;
 +  return *state;
++}
++
++// Its number if the host was told about it (view.tab), else 0.
++int KnownNumber(content::WebContents* contents) {
++  const TabNumber* number = TabNumber::FromWebContents(contents);
++  return number && S().sent.contains(number->n) ? number->n : 0;
 +}
 +
 +void Shown::WebContentsDestroyed() {
@@ -6237,6 +6352,10 @@ index 0000000000..1007a1c9ba
 +  return NumberOf(contents);
 +}
 +
++int KnownTab(content::WebContents* contents) {
++  return KnownNumber(contents);
++}
++
 +void AskHost(const std::string& title, const std::string& detail, bool offer_always, ApprovalCallback done) {
 +  State& s = S();
 +  if (!s.host) {
@@ -6257,10 +6376,10 @@ index 0000000000..1007a1c9ba
 +}  // namespace agens::bridge::view
 diff --git a/chrome/browser/agens/bridge/view_ops.h b/chrome/browser/agens/bridge/view_ops.h
 new file mode 100644
-index 0000000000..f7676b85e9
+index 0000000000..7d258dcbb1
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_ops.h
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,48 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The page inside another app (docs/protocolo.md, "host e view"): host.attach, view.* and
 +// approval.answer and ui.answer (ui_ops.h). Only when the engine runs embedded (agens_embedded.h); otherwise every op here
@@ -6293,6 +6412,9 @@ index 0000000000..f7676b85e9
 +uint64_t Host();
 +// The n of the tab's id "v<n>" (given now when it has none).
 +int TabNumber(content::WebContents* contents);
++
++// The n of a tab the host was told about (view.tab); 0 for any other.
++int KnownTab(content::WebContents* contents);
 +
 +// The shell's windows (native_shell_mac.mm): their tabs are the ones the host sees.
 +void AddWindow(AgensWindow* window);
@@ -7396,21 +7518,20 @@ index d81488f053..3eef3778eb 100644
  void ConfirmCloseWithDownloads(views::Widget* widget, int count, base::OnceCallback<void(bool)> callback);
  
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
-index 5d7ca90415..80f6ba8bc0 100644
+index 5d7ca90415..c7ad21d119 100644
 --- a/chrome/browser/agens/embed/native_shell_mac.mm
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
-@@ -8,6 +8,10 @@
+@@ -8,6 +8,9 @@
  #import <AppKit/AppKit.h>
  
  #include "chrome/browser/agens/embed/agens_window.h"
-+#include "chrome/browser/agens/bridge/control_keys.h"
 +#include "chrome/browser/agens/bridge/ui_ops.h"
 +#include "chrome/browser/agens/bridge/view_ops.h"
 +#include "chrome/browser/agens/embed/agens_embedded.h"
  #include "components/split_tabs/split_tab_visual_data.h"
  #include "components/tabs/public/split_tab_data.h"
  #include "ui/base/cursor/cursor.h"
-@@ -15,8 +19,18 @@
+@@ -15,8 +18,15 @@
  #include "base/strings/sys_string_conversions.h"
  #include "chrome/browser/extensions/extension_install_prompt_show_params.h"
  #include "extensions/browser/install_prompt_data.h"
@@ -7418,9 +7539,6 @@ index 5d7ca90415..80f6ba8bc0 100644
  #include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
  #include "components/permissions/permission_request.h"
 +#include "components/permissions/permission_util.h"
-+#include "chrome/browser/content_settings/host_content_settings_map_factory.h"
-+#include "chrome/browser/profiles/profile.h"
-+#include "components/content_settings/core/browser/host_content_settings_map.h"
 +#include "components/permissions/request_type.h"
 +#include "components/permissions/resolvers/permission_prompt_options.h"
 +#include "extensions/common/extension.h"
@@ -7429,7 +7547,7 @@ index 5d7ca90415..80f6ba8bc0 100644
  #include "ui/base/metadata/metadata_header_macros.h"
  #include "ui/base/metadata/metadata_impl_macros.h"
  #include "ui/gfx/codec/png_codec.h"
-@@ -122,8 +136,10 @@ explicit NativeShellView(BrowserWindowInterface* browser)
+@@ -122,8 +132,10 @@ explicit NativeShellView(BrowserWindowInterface* browser)
      chrome_ = (__bridge_transfer NSView*)agens_ui_create_chrome(window_.get());
      window_->ui = (__bridge void*)chrome_;
      window_->extensions_anchor = extensions_anchor_;
@@ -7440,7 +7558,7 @@ index 5d7ca90415..80f6ba8bc0 100644
      agens_ui_destroy_chrome((__bridge void*)chrome_);
      [chrome_ removeFromSuperview];
      contents_->SetWebContents(nullptr);
-@@ -171,6 +187,12 @@ void Layout(PassKey) override {
+@@ -171,6 +183,12 @@ void Layout(PassKey) override {
          split = nullptr;
        }
      }
@@ -7453,7 +7571,7 @@ index 5d7ca90415..80f6ba8bc0 100644
      // Chromium keeps every tab but the active one hidden (no painting); a split shows two.
      for (views::WebView* pane : {contents_.get(), contents2_.get()}) {
        content::WebContents* was = pane->GetWebContents();
-@@ -328,6 +350,12 @@ void NativeTabStateChanged(views::Widget* widget) {
+@@ -328,6 +346,12 @@ void NativeTabStateChanged(views::Widget* widget) {
  }
  
  void ConfirmCloseWithDownloads(views::Widget* widget, int count, base::OnceCallback<void(bool)> callback) {
@@ -7466,7 +7584,7 @@ index 5d7ca90415..80f6ba8bc0 100644
    NSAlert* alert = [[NSAlert alloc] init];
    alert.messageText = count == 1 ? @"Há um download em andamento" : [NSString stringWithFormat:@"Há %d downloads em andamento", count];
    alert.informativeText = count == 1 ? @"Se fechar agora, ele é cancelado." : @"Se fechar agora, eles são cancelados.";
-@@ -360,6 +388,34 @@ bool HandleNativeCommand(BrowserWindowInterface* browser, int command_id) {
+@@ -360,6 +384,34 @@ bool HandleNativeCommand(BrowserWindowInterface* browser, int command_id) {
    return shell && shell->Command(*command);
  }
  
@@ -7501,35 +7619,7 @@ index 5d7ca90415..80f6ba8bc0 100644
  bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
    if (!IsNativeShellEnabled() || !browser->GetWindow()) return false;
    views::Widget* widget = views::Widget::GetWidgetForNativeWindow(browser->GetWindow()->GetNativeWindow());
-@@ -371,12 +427,41 @@ bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
-   return true;
- }
- 
-+// An allow without remember for a permission Chromium has no "this time" for (notifications):
-+// kept while the tab that asked lives, then back to the ato's default. Owns itself.
-+class ForgetOnClose : public content::WebContentsObserver {
-+ public:
-+  ForgetOnClose(content::WebContents* contents, GURL origin, std::vector<ContentSettingsType> types)
-+      : content::WebContentsObserver(contents),
-+        map_(HostContentSettingsMapFactory::GetForProfile(Profile::FromBrowserContext(contents->GetBrowserContext()))),
-+        origin_(std::move(origin)),
-+        types_(std::move(types)) {}
-+  void WebContentsDestroyed() override {
-+    for (ContentSettingsType type : types_) {
-+      map_->SetContentSettingDefaultScope(origin_, GURL(), type, CONTENT_SETTING_DEFAULT);
-+    }
-+    delete this;
-+  }
-+
-+ private:
-+  scoped_refptr<HostContentSettingsMap> map_;
-+  const GURL origin_;
-+  const std::vector<ContentSettingsType> types_;
-+};
-+
- // Shows the request in our panel (agens_ui_permission_prompt) and answers through the delegate
- // when the person picks (agens_window_permission_answer).
- class NativePermissionPrompt : public permissions::PermissionPrompt {
+@@ -377,6 +429,13 @@ bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
   public:
    NativePermissionPrompt(AgensWindow* window, Delegate* delegate) : window_(window->weak.GetWeakPtr()) {
      window->permission_delegate = delegate->GetWeakPtr();
@@ -7543,7 +7633,7 @@ index 5d7ca90415..80f6ba8bc0 100644
      const GURL origin = delegate->GetRequestingOrigin();
      const std::string site = origin.is_valid() ? std::string(origin.host()) : std::string();
      std::vector<std::string> asks;
-@@ -389,12 +474,15 @@ bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
+@@ -389,12 +448,15 @@ bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
      agens_ui_permission_prompt(window->ui, site.c_str(), pointers.data(), static_cast<int>(pointers.size()));
    }
    ~NativePermissionPrompt() override {
@@ -7561,7 +7651,7 @@ index 5d7ca90415..80f6ba8bc0 100644
    }
    permissions::PermissionPromptDisposition GetPromptDisposition() const override {
      return permissions::PermissionPromptDisposition::ANCHORED_BUBBLE;
-@@ -407,7 +495,69 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
+@@ -407,7 +469,65 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
    }
  
   private:
@@ -7602,26 +7692,22 @@ index 5d7ca90415..80f6ba8bc0 100644
 +  static void Answered(base::WeakPtr<Delegate> delegate, const base::DictValue* answer) {
 +    if (!delegate) return;
 +    const PromptOptions options = std::monostate();
-+    const std::optional<bool> allow = answer ? answer->FindBool("allow") : std::nullopt;
-+    const bool remember = answer && answer->FindBool("remember").value_or(false);
-+    // Notifications have no "this time" in Chromium (AcceptThisTime DCHECKs on them).
++    // Not the person's decision (the tab went, no host, too many open): Chromium's "ignored".
++    if (!answer) return delegate->Ignore(options);
++    const std::optional<bool> allow = answer->FindBool("allow");
++    const bool remember = answer->FindBool("remember").value_or(false);
++    // Chromium has no "this time" for some kinds (notifications; AcceptThisTime DCHECKs on
++    // them), and Chrome offers none: their allow is kept.
 +    bool once = true;
-+    std::vector<ContentSettingsType> types;
 +    for (const auto& request : delegate->Requests()) {
-+      types.push_back(request->GetContentSettingsType());
-+      once = once && permissions::PermissionUtil::DoesSupportTemporaryGrants(types.back());
++      once = once && permissions::PermissionUtil::DoesSupportTemporaryGrants(request->GetContentSettingsType());
 +    }
-+    if (allow && *allow && !remember && !once) {
-+      if (content::WebContents* contents = delegate->GetAssociatedWebContents()) {
-+        new ForgetOnClose(contents, delegate->GetRequestingOrigin(), std::move(types));
-+      }
-+      delegate->Accept(options);
-+    } else if (allow && *allow) {
-+      remember ? delegate->Accept(options) : delegate->AcceptThisTime(options);
++    if (allow && *allow) {
++      remember || !once ? delegate->Accept(options) : delegate->AcceptThisTime(options);
 +    } else if (allow && remember) {
 +      delegate->Deny(options);
 +    } else {
-+      delegate->Dismiss(options);
++      delegate->Dismiss(options);  // the person closed it, or refused this time
 +    }
 +  }
 +
@@ -7631,7 +7717,7 @@ index 5d7ca90415..80f6ba8bc0 100644
  };
  
  std::unique_ptr<permissions::PermissionPrompt> CreateNativePermissionPrompt(
-@@ -428,6 +578,42 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
+@@ -428,6 +548,42 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
  void ShowNativeInstallDialog(std::unique_ptr<ExtensionInstallPromptShowParams> params,
                               ExtensionInstallPrompt::DoneCallback done,
                               std::unique_ptr<extensions::InstallPromptData> prompt) {
@@ -7674,7 +7760,7 @@ index 5d7ca90415..80f6ba8bc0 100644
    NSAlert* alert = [[NSAlert alloc] init];
    alert.messageText = base::SysUTF16ToNSString(prompt->GetDialogTitle());
    NSMutableArray<NSString*>* asks = [NSMutableArray array];
-@@ -466,6 +652,7 @@ void ShowNativeInstallDialog(std::unique_ptr<ExtensionInstallPromptShowParams> p
+@@ -466,6 +622,7 @@ void ShowNativeInstallDialog(std::unique_ptr<ExtensionInstallPromptShowParams> p
    bool BuildViewImpl(const std::u16string& authority,
                       const std::u16string& explanation,
                       LoginModelData*) override {
@@ -7682,7 +7768,7 @@ index 5d7ca90415..80f6ba8bc0 100644
      NSWindow* window = web_contents() ? web_contents()->GetTopLevelNativeWindow().GetNativeNSWindow() : nil;
      if (!window) return false;
      alert_ = [[NSAlert alloc] init];
-@@ -500,13 +687,52 @@ bool BuildViewImpl(const std::u16string& authority,
+@@ -500,13 +657,52 @@ bool BuildViewImpl(const std::u16string& authority,
    void CloseDialog() override {
      if (window_ && alert_.window.sheetParent) [window_ endSheet:alert_.window returnCode:NSModalResponseAbort];
      alert_ = nil;
@@ -7707,7 +7793,7 @@ index 5d7ca90415..80f6ba8bc0 100644
 +    std::string key = base::NumberToString(bridge::view::TabNumber(contents)) + " " + origin + " " + info.realm;
 +    base::DictValue fields;
 +    fields.Set("origin", origin);
-+    fields.Set("realm", bridge::ClipChars(info.realm, 200));
++    fields.Set("realm", info.realm);  // cut in ClipUiAsk
 +    fields.Set("proxy", info.is_proxy);
 +    fields.Set("retry", Tried().contains(key));
 +    ask_ = bridge::ui_ask::Ask(contents, "auth", std::move(fields),
@@ -7735,7 +7821,7 @@ index 5d7ca90415..80f6ba8bc0 100644
  };
  
  // Owns itself: deleted when its sheet ends.
-@@ -520,6 +746,13 @@ void CloseDialog() override {
+@@ -520,6 +716,13 @@ void CloseDialog() override {
                   content::JavaScriptDialogManager::DialogClosedCallback callback,
                   base::OnceClosure force_closed)
        : callback_(std::move(callback)), force_closed_(std::move(force_closed)) {
@@ -7749,7 +7835,7 @@ index 5d7ca90415..80f6ba8bc0 100644
      alert_ = [[NSAlert alloc] init];
      alert_.messageText = base::SysUTF16ToNSString(title);
      alert_.informativeText = base::SysUTF16ToNSString(message);
-@@ -558,6 +791,8 @@ void CloseDialogWithoutCallback() override {
+@@ -558,6 +761,8 @@ void CloseDialogWithoutCallback() override {
  
   private:
    void Finish(bool ok) {
@@ -7758,7 +7844,7 @@ index 5d7ca90415..80f6ba8bc0 100644
      force_closed_.Reset();
      if (callback_) std::move(callback_).Run(ok, ok ? GetUserInput() : std::u16string());
      base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE, this);
-@@ -567,6 +802,7 @@ void Finish(bool ok) {
+@@ -567,6 +772,7 @@ void Finish(bool ok) {
    NSAlert* __strong alert_;
    NSTextField* __strong field_ = nil;
    NSWindow* __strong window_ = nil;
@@ -7766,7 +7852,7 @@ index 5d7ca90415..80f6ba8bc0 100644
    base::WeakPtrFactory<NativeJsDialog> weak_{this};
  };
  
-@@ -589,6 +825,10 @@ void Finish(bool ok) {
+@@ -589,6 +795,10 @@ void Finish(bool ok) {
        ->GetWeakPtr();
  }
  
