@@ -2,10 +2,15 @@
   "manifest_version": 3,
   "name": "Gate content script (test)",
   "version": "1",
-  "description": "Test only: marks /ext pages of the local test site, so a gate can see that extensions ran.",
+  "description": "Test only: marks /ext pages of the local test site, so a gate can see that extensions ran; on /janela, calls chrome.windows.create.",
+  "background": {"service_worker": "janela.js"},
   "content_scripts": [{
     "matches": ["http://127.0.0.1/ext*", "http://localhost/ext*", "http://[::1]/ext*"],
     "js": ["marca.js"],
     "run_at": "document_start"
+  }, {
+    "matches": ["http://127.0.0.1/janela*"],
+    "js": ["janela-pagina.js"],
+    "run_at": "document_idle"
   }]
 }

@@ -1,0 +1,25 @@
+<!doctype html><meta charset="utf-8"><title>Fuga (test)</title>
+<style>body{margin:0}button{position:absolute;left:40px;width:300px;height:80px}input{position:absolute;left:400px}</style>
+<button id="print" style="top:40px">Print</button>
+<button id="scheme" style="top:140px">Custom scheme and mailto</button>
+<button id="date" style="top:240px">Date picker</button>
+<button id="color" style="top:340px">Color picker</button>
+<input id="d" type="date" style="top:240px">
+<input id="k" type="color" style="top:340px">
+<script>
+const say = t => { document.title = t; };
+const on = (id, f) => { document.getElementById(id).onclick = f; };
+// window.print() returns at once when printing is off; with print preview it would wait.
+on("print", () => { window.print(); say("print:returned"); });
+on("scheme", () => {
+  for (const href of ["agens-gate-nope:x", "mailto:gate@example.invalid"]) {
+    const a = document.createElement("a"); a.href = href; a.click();
+  }
+  setTimeout(() => say("scheme:alive"), 500);
+});
+const picker = (id, input) => () => {
+  try { document.getElementById(input).showPicker(); say(id + ":asked"); } catch (e) { say(id + ":" + e.name); }
+};
+on("date", picker("date", "d"));
+on("color", picker("color", "k"));
+</script>

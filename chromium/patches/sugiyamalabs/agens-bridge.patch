@@ -9821,10 +9821,10 @@ index 0000000000..aef9e1cc9e
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EMBEDDED_H_
 diff --git a/chrome/browser/agens/embed/agens_embedded_mac.mm b/chrome/browser/agens/embed/agens_embedded_mac.mm
 new file mode 100644
-index 0000000000..0f8407faae
+index 0000000000..a525a83582
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embedded_mac.mm
-@@ -0,0 +1,97 @@
+@@ -0,0 +1,134 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/embed/agens_embedded.h"
@@ -9837,11 +9837,18 @@ index 0000000000..0f8407faae
 +#include <vector>
 +
 +#include "base/command_line.h"
++#include "base/logging.h"
 +#include "base/no_destructor.h"
++#include "base/strings/sys_string_conversions.h"
 +#include "chrome/browser/agens/bridge/view_input.h"
 +#include "chrome/browser/agens/bridge/view_ops.h"
 +#include "chrome/browser/lifetime/application_lifetime.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
 +#include "chrome/common/chrome_switches.h"
++#import "components/remote_cocoa/app_shim/native_widget_mac_nswindow.h"
++#include "content/public/common/content_switches.h"
++#include "ui/views/widget/widget.h"
 +
 +namespace agens {
 +
@@ -9863,6 +9870,30 @@ index 0000000000..0f8407faae
 +                   _exit(0);
 +                 });
 +}
++
++// The last net under the cases handled where they start (popups and app windows are normal
++// windows, no web apps, no picture-in-picture, printing or external apps): a views window goes on
++// screen only when it belongs to a DevTools window. Anything else stays hidden, with a log line
++// naming it. Hidden, never closed: whatever made it keeps running, nothing waits on its showing.
++BOOL MayOrderIn(NSWindow* window) {
++  NSWindow* root = window;
++  while (root.parentWindow) root = root.parentWindow;
++  views::Widget* widget = views::Widget::GetWidgetForNativeWindow(gfx::NativeWindow(root));
++  while (widget && widget->parent()) widget = widget->parent();
++  BrowserWindowInterface* browser =
++      widget ? GlobalBrowserCollection::GetInstance()->FindBrowserWithWindow(widget->GetNativeWindow()) : nullptr;
++  if (browser && browser->GetType() == BrowserWindowInterface::TYPE_DEVTOOLS) return YES;
++  LOG(ERROR) << "agens: kept off screen (embedded): "
++               << (widget && !widget->GetName().empty() ? widget->GetName()
++                                                         : base::SysNSStringToUTF8(NSStringFromClass(window.class)));
++  return NO;
++}
++
++// Page features whose only UI is a system window or panel the engine cannot keep off screen
++// (passkeys, the share sheet, the color sampler) or a dialog on a window nobody sees (payment):
++// not available in the page, so sites see them missing instead of a request that never ends.
++// shortcut: refused for now; the host could show them later (ui.ask), as it does other requests.
++constexpr char kOffBlinkFeatures[] = "WebAuth,PaymentRequest,WebShare,EyeDropperAPI,DocumentPictureInPictureAPI";
 +
 +}  // namespace
 +
@@ -9900,6 +9931,12 @@ index 0000000000..0f8407faae
 +  base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
 +  command_line->AppendSwitch(switches::kNoStartupWindow);  // also no session restore at startup
 +  command_line->AppendSwitch(switches::kNoFirstRun);
++  std::string off = command_line->GetSwitchValueASCII(switches::kDisableBlinkFeatures);
++  command_line->AppendSwitchASCII(switches::kDisableBlinkFeatures,
++                                  off.empty() ? kOffBlinkFeatures : off + "," + kOffBlinkFeatures);
++  [NativeWidgetMacNSWindow setOrderInFilter:^BOOL(NSWindow* window) {
++    return MayOrderIn(window);
++  }];
 +  // Our own onboarding window (AgensFirstRun, ui/chrome_mac.mm) is the stand-alone product's. A
 +  // volatile domain: it lasts for this process and is never saved to the shared defaults.
 +  NSUserDefaults* defaults = NSUserDefaults.standardUserDefaults;
@@ -12780,6 +12817,35 @@ index b269f1610a..ae3535a3d1 100644
    [ChromeSwizzleServicesMenuUpdater install];
  
    return ChromeBrowserMainPartsPosix::PreEarlyInitialization();
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+index 002d492ffe..d399397341 100644
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -55,6 +55,9 @@
+ #include "build/android_buildflags.h"
+ #include "build/branding_buildflags.h"
+ #include "build/build_config.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/agens/embed/agens_embedded.h"  // agens
++#endif
+ #include "build/config/chromebox_for_meetings/buildflags.h"  // PLATFORM_CFM
+ #include "chrome/browser/accessibility/caption_settings_dialog.h"
+ #include "chrome/browser/actor/actor_commit_deferring_condition.h"
+@@ -4461,6 +4464,14 @@ bool ChromeContentBrowserClient::CanCreateWindow(
+   DCHECK(profile);
+   *no_javascript_access = false;
+ 
++#if BUILDFLAG(IS_MAC)
++  // agens: embedded (agens_embedded.h), a Document Picture-in-Picture window would go on screen:
++  // refused, so documentPictureInPicture.requestWindow() rejects (automatic PiP included).
++  if (agens::IsEmbedded() && disposition == WindowOpenDisposition::NEW_PICTURE_IN_PICTURE) {
++    return false;
++  }
++#endif
++
+   // A privileged WebContents (see //chrome's PrivilegedWebContents) must not
+   // create related windows: the new window would share an opener relationship
+   // (and, for same-site targets, a process) with the privileged page. Deny
 diff --git a/chrome/browser/download/chrome_download_manager_delegate.cc b/chrome/browser/download/chrome_download_manager_delegate.cc
 index 2c467f4524..2aee2739bd 100644
 --- a/chrome/browser/download/chrome_download_manager_delegate.cc
@@ -12882,6 +12948,34 @@ index e21d9c7cee..e736c68919 100644
  
    // content::WebContentsObserver
    void RenderFrameCreated(content::RenderFrameHost* frame_host) override;
+diff --git a/chrome/browser/external_protocol/external_protocol_handler.cc b/chrome/browser/external_protocol/external_protocol_handler.cc
+index 17fd6fa6fd..9e38b70db8 100644
+--- a/chrome/browser/external_protocol/external_protocol_handler.cc
++++ b/chrome/browser/external_protocol/external_protocol_handler.cc
+@@ -24,6 +24,9 @@
+ #include "base/strings/string_util.h"
+ #include "base/types/optional_util.h"
+ #include "build/build_config.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/agens/embed/agens_embedded.h"  // agens
++#endif
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/external_protocol/auto_launch_protocols_policy_handler.h"
+ #include "chrome/browser/external_protocol/constants.h"
+@@ -549,6 +552,13 @@ void ExternalProtocolHandler::LaunchUrl(
+   BlockState block_state = GetBlockStateWithDelegate(
+       escaped_url.GetScheme(), base::OptionalToPtr(initiating_origin),
+       g_external_protocol_handler_delegate, profile);
++#if BUILDFLAG(IS_MAC)
++  // agens: embedded (agens_embedded.h), its dialog would sit on a window nobody sees and the
++  // other app would come to the front: mailto: and custom schemes are refused (console error).
++  if (agens::IsEmbedded()) {
++    block_state = BLOCK;
++  }
++#endif
+   if (block_state == BLOCK) {
+     AddMessageToConsole(
+         initiator_document, blink::mojom::ConsoleMessageLevel::kError,
 diff --git a/chrome/browser/password_manager/chrome_password_manager_client.cc b/chrome/browser/password_manager/chrome_password_manager_client.cc
 index f7819e353a..f4194c180c 100644
 --- a/chrome/browser/password_manager/chrome_password_manager_client.cc
@@ -12905,6 +12999,63 @@ index f7819e353a..f4194c180c 100644
  #if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX) || \
      BUILDFLAG(IS_CHROMEOS)
    if (IsPasswordManagerForUrlDisallowedByPolicy(url)) {
+diff --git a/chrome/browser/picture_in_picture/picture_in_picture_window_manager.cc b/chrome/browser/picture_in_picture/picture_in_picture_window_manager.cc
+index b02065efac..428a514d60 100644
+--- a/chrome/browser/picture_in_picture/picture_in_picture_window_manager.cc
++++ b/chrome/browser/picture_in_picture/picture_in_picture_window_manager.cc
+@@ -6,6 +6,10 @@
+ 
+ #include "base/memory/raw_ptr.h"
+ #include "base/numerics/safe_conversions.h"
++#include "build/build_config.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/agens/embed/agens_embedded.h"  // agens
++#endif
+ #include "chrome/browser/picture_in_picture/picture_in_picture_bounds_cache.h"
+ #include "chrome/browser/ui/navigator/browser_navigator_params.h"
+ #include "content/public/browser/document_picture_in_picture_window_controller.h"
+@@ -193,6 +197,13 @@ void PictureInPictureWindowManager::EnterDocumentPictureInPicture(
+ content::PictureInPictureResult
+ PictureInPictureWindowManager::EnterVideoPictureInPicture(
+     content::WebContents* web_contents) {
++#if BUILDFLAG(IS_MAC)
++  // agens: embedded (agens_embedded.h), the PiP window would go on screen: refused, the page's
++  // request rejects (NotSupportedError). Auto picture-in-picture comes through here too.
++  if (agens::IsEmbedded()) {
++    return content::PictureInPictureResult::kNotSupported;
++  }
++#endif
+   // Create or update |pip_window_controller_| for the current WebContents, if
+   // it is a WebContents based video PIP.
+   if (!pip_window_controller_ ||
+diff --git a/chrome/browser/printing/print_view_manager_base.cc b/chrome/browser/printing/print_view_manager_base.cc
+index b673362fe8..b7cf349171 100644
+--- a/chrome/browser/printing/print_view_manager_base.cc
++++ b/chrome/browser/printing/print_view_manager_base.cc
+@@ -24,6 +24,9 @@
+ #include "base/timer/timer.h"
+ #include "build/build_config.h"
+ #include "build/chromeos_buildflags.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/agens/embed/agens_embedded.h"  // agens
++#endif
+ #include "chrome/browser/bad_message.h"
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/printing/print_error_dialog.h"
+@@ -739,6 +742,13 @@ void PrintViewManagerBase::SystemDialogCancelled() {
+ #endif
+ 
+ bool PrintViewManagerBase::GetPrintingEnabledBooleanPref() const {
++#if BUILDFLAG(IS_MAC)
++  // agens: embedded (agens_embedded.h), print preview would wait on a window nobody sees (and
++  // hold window.print()), the system dialog would go on screen: printing is off.
++  if (agens::IsEmbedded()) {
++    return false;
++  }
++#endif
+   return printing_enabled_.GetValue();
+ }
+ 
 diff --git a/chrome/browser/ui/autofill/chrome_autofill_client.cc b/chrome/browser/ui/autofill/chrome_autofill_client.cc
 index 242bac51ca..9b04fdb59f 100644
 --- a/chrome/browser/ui/autofill/chrome_autofill_client.cc
@@ -12929,6 +13080,39 @@ index 242bac51ca..9b04fdb59f 100644
    if (expected_field_id &&
        (!delegate || delegate->GetQueriedFieldId() != expected_field_id) &&
        base::FeatureList::IsEnabled(
+diff --git a/chrome/browser/ui/browser.cc b/chrome/browser/ui/browser.cc
+index 07de580deb..2cfb905bd1 100644
+--- a/chrome/browser/ui/browser.cc
++++ b/chrome/browser/ui/browser.cc
+@@ -35,6 +35,9 @@
+ #include "base/time/time.h"
+ #include "base/trace_event/trace_event.h"
+ #include "build/build_config.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/agens/embed/agens_embedded.h"  // agens
++#endif
+ #include "chrome/browser/ai/ai_data_keyed_service.h"          // nogncheck
+ #include "chrome/browser/ai/ai_data_keyed_service_factory.h"  // nogncheck
+ #include "chrome/browser/bookmarks/bookmark_model_factory.h"
+@@ -237,6 +240,18 @@ Browser* Browser::Create(BrowserWindowCreateParams params) {
+   CHECK_EQ(CreationStatus::kOk,
+            GetBrowserWindowCreationStatusForProfile(*params.profile));
+ 
++#if BUILDFLAG(IS_MAC)
++  // agens: embedded (agens_embedded.h), a popup or app window (an extension's windows.create, a
++  // sign-in flow) would be a real window on screen: it is a normal window instead, which never
++  // shows and whose tabs reach the host like any other.
++  if (agens::IsEmbedded() && (params.type == TYPE_POPUP || params.type == TYPE_APP ||
++                              params.type == TYPE_APP_POPUP)) {
++    params.type = TYPE_NORMAL;
++    params.app_name.clear();
++    params.is_trusted_source = false;
++  }
++#endif
++
+   Profile* const profile_ptr = &*params.profile;
+   std::unique_ptr<Browser> browser =
+       base::WrapUnique(new Browser(std::move(params)));
 diff --git a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc b/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
 index 9e4154d594..ce89b2bcaa 100644
 --- a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
@@ -13169,11 +13353,146 @@ index 67c962e1dd..d607336567 100644
    widget_->Restore();
  }
  
+diff --git a/chrome/browser/web_applications/web_app_utils.cc b/chrome/browser/web_applications/web_app_utils.cc
+index 90bf5efff4..a7b289c0ed 100644
+--- a/chrome/browser/web_applications/web_app_utils.cc
++++ b/chrome/browser/web_applications/web_app_utils.cc
+@@ -33,6 +33,9 @@
+ #include "build/branding_buildflags.h"
+ #include "build/build_config.h"
+ #include "build/buildflag.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/agens/embed/agens_embedded.h"  // agens
++#endif
+ #include "chrome/browser/content_settings/host_content_settings_map_factory.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/web_applications/model/web_app_icon_types.h"
+@@ -215,6 +218,13 @@ bool AreWebAppsEnabled(Profile* profile) {
+   if (!profile || profile->IsSystemProfile()) {
+     return false;
+   }
++#if BUILDFLAG(IS_MAC)
++  // agens: embedded (agens_embedded.h), no app window may go on screen: no web apps at all, so
++  // none is offered, installed, launched or captures a link (as in an incognito profile).
++  if (agens::IsEmbedded()) {
++    return false;
++  }
++#endif
+ 
+ #if BUILDFLAG(IS_CHROMEOS)
+   // Web Apps should not be installed to the ChromeOS system profiles except the
+diff --git a/components/remote_cocoa/app_shim/native_widget_mac_nswindow.h b/components/remote_cocoa/app_shim/native_widget_mac_nswindow.h
+index 48f47bf3ee..45af66eaf6 100644
+--- a/components/remote_cocoa/app_shim/native_widget_mac_nswindow.h
++++ b/components/remote_cocoa/app_shim/native_widget_mac_nswindow.h
+@@ -53,6 +53,12 @@ REMOTE_COCOA_APP_SHIM_EXPORT
+ // https://crbug.com/960904
+ - (void)enforceNeverMadeVisible;
+ 
++// agens: an embedder whose windows must stay off screen sets this once, at startup. A window it
++// answers NO for is never ordered in, shown or activated. Nil (the default) lets every one in.
+++ (void)setOrderInFilter:(BOOL (^)(NSWindow* window))filter;
++// NO when the filter above keeps this window (or the window tree it belongs to) off screen.
++- (BOOL)mayOrderIn;
++
+ // `- [NSWindow orderWindow:]` does not have any effect when called on child
+ // windows. If you need to order a child window, use this method. Important:
+ // this method adds or removes children from the parent. If you're observing
+diff --git a/components/remote_cocoa/app_shim/native_widget_mac_nswindow.mm b/components/remote_cocoa/app_shim/native_widget_mac_nswindow.mm
+index 6f02db4063..c25dd8c69f 100644
+--- a/components/remote_cocoa/app_shim/native_widget_mac_nswindow.mm
++++ b/components/remote_cocoa/app_shim/native_widget_mac_nswindow.mm
+@@ -209,6 +209,9 @@ - (BOOL)usesCustomDrawing {
+ }
+ @end
+ 
++// agens: see +setOrderInFilter:.
++static BOOL (^g_order_in_filter)(NSWindow*) = nil;
++
+ @implementation NativeWidgetMacNSWindow {
+  @private
+   CommandDispatcher* __strong _commandDispatcher;
+@@ -345,6 +348,14 @@ - (void)enforceNeverMadeVisible {
+             context:nil];
+ }
+ 
+++ (void)setOrderInFilter:(BOOL (^)(NSWindow*))filter {
++  g_order_in_filter = [filter copy];
++}
++
++- (BOOL)mayOrderIn {
++  return !g_order_in_filter || g_order_in_filter(self);
++}
++
+ - (void)observeValueForKeyPath:(NSString*)keyPath
+                       ofObject:(id)object
+                         change:(NSDictionary*)change
+@@ -845,6 +856,10 @@ - (void)orderWindow:(NSWindowOrderingMode)orderingMode
+   if (_isEnforcingNeverMadeVisible && orderingMode != NSWindowOut) {
+     return;
+   }
++  // agens: the embedder's last net (+setOrderInFilter:), also against AppKit's own ordering.
++  if (orderingMode != NSWindowOut && ![self mayOrderIn]) {
++    return;
++  }
+   [super orderWindow:orderingMode relativeTo:otherWindowNumber];
+   [[self viewsNSWindowDelegate] onWindowOrderChanged:nil];
+ }
+@@ -885,6 +900,9 @@ - (void)_regularMinimizeToDock {
+ 
+ - (void)makeKeyAndOrderFront:(id)sender {
+   _miniaturizationInProgress = NO;
++  if (![self mayOrderIn]) {  // agens: neither shown nor made key
++    return;
++  }
+   [super makeKeyAndOrderFront:sender];
+ }
+ 
+diff --git a/components/remote_cocoa/app_shim/native_widget_ns_window_bridge.mm b/components/remote_cocoa/app_shim/native_widget_ns_window_bridge.mm
+index 26a877e3a6..fde7d6e0a0 100644
+--- a/components/remote_cocoa/app_shim/native_widget_ns_window_bridge.mm
++++ b/components/remote_cocoa/app_shim/native_widget_ns_window_bridge.mm
+@@ -993,6 +993,13 @@ NSUInteger CountBridgedWindows(NSArray* child_windows) {
+     session_restore_in_progress = true;
+   }
+ 
++  // agens: a window the embedder keeps off screen (+[NativeWidgetMacNSWindow setOrderInFilter:])
++  // is neither shown, miniaturized into the Dock nor activated. A child follows its parent below.
++  if (new_state != WindowVisibilityState::kHideWindow && !parent_ &&
++      ![window_ mayOrderIn]) {
++    return;
++  }
++
+   // Ensure that:
+   //  - A window with an invisible parent is not made visible.
+   //  - A parent changing visibility updates child window visibility.
 diff --git a/content/app_shim_remote_cocoa/render_widget_host_ns_view_bridge.mm b/content/app_shim_remote_cocoa/render_widget_host_ns_view_bridge.mm
-index 2eda2e79d7..f78ad1fbcf 100644
+index 2eda2e79d7..1bd592d898 100644
 --- a/content/app_shim_remote_cocoa/render_widget_host_ns_view_bridge.mm
 +++ b/content/app_shim_remote_cocoa/render_widget_host_ns_view_bridge.mm
-@@ -435,7 +435,9 @@ void Hide() override {
+@@ -10,6 +10,7 @@
+ #include "base/apple/foundation_util.h"
+ #include "base/apple/scoped_cftyperef.h"
+ #include "base/functional/bind.h"
++#include "base/logging.h"
+ #import "base/mac/scoped_sending_event.h"
+ #import "base/message_loop/message_pump_apple.h"
+ #include "base/strings/sys_string_conversions.h"
+@@ -86,6 +87,13 @@
+ void RenderWidgetHostNSViewBridge::InitAsPopup(
+     const gfx::Rect& content_rect,
+     uint64_t popup_parent_ns_view_id) {
++  // agens: a page in no window (a tab another app shows) gets no popup window for its date,
++  // time or color picker: it would be a real window on screen, where nobody looks.
++  NSView* parent = remote_cocoa::GetNSViewFromId(popup_parent_ns_view_id);
++  if (parent && !parent.window) {
++    LOG(ERROR) << "agens: kept off screen (embedded): a page's picker popup";
++    return;
++  }
+   popup_window_ = std::make_unique<PopupWindowMac>(content_rect, cocoa_view_);
+ 
+   [cocoa_view_ setPopupParentNSViewId:popup_parent_ns_view_id];
+@@ -435,7 +443,9 @@ void Hide() override {
    // `NativeWidgetMacNSWindow`, so this doesn't use a strict cast.
    NativeWidgetMacNSWindow* ns_window =
        base::apple::ObjCCast<NativeWidgetMacNSWindow>(cocoa_view_.window);

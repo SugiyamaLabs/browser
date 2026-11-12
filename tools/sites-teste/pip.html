@@ -1,0 +1,22 @@
+<!doctype html><meta charset="utf-8"><title>PiP (test)</title>
+<style>body{margin:0}button{position:absolute;left:40px;width:300px;height:100px}#v{position:absolute;left:400px;top:40px;width:160px;height:120px}</style>
+<button id="video" style="top:40px">Video picture-in-picture</button>
+<button id="doc" style="top:180px">Document picture-in-picture</button>
+<video id="v" muted playsinline></video>
+<script>
+// A video from a canvas, so it has frames without any file; "PiP ready" once it can enter PiP.
+const v = document.getElementById("v"), canvas = document.createElement("canvas");
+canvas.width = 160; canvas.height = 120;
+const g = canvas.getContext("2d");
+let n = 0;
+setInterval(() => { g.fillStyle = n++ % 2 ? "#3366cc" : "#cc6633"; g.fillRect(0, 0, 160, 120); }, 100);
+v.srcObject = canvas.captureStream(10);
+v.onloadedmetadata = () => { document.title = "PiP ready"; };
+v.play();
+const say = t => { document.title = t; };
+document.getElementById("video").onclick = () =>
+  v.requestPictureInPicture().then(() => say("pip:opened"), e => say("pip:" + e.name));
+document.getElementById("doc").onclick = () =>
+  !window.documentPictureInPicture ? say("dpip:missing")
+    : documentPictureInPicture.requestWindow({width: 200, height: 150}).then(() => say("dpip:opened"), e => say("dpip:" + e.name));
+</script>

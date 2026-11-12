@@ -7,8 +7,8 @@
 # screen nor show in the Dock, so this gate should not take focus. It never captures the screen and
 # never sends system-wide input. EMBUTIDO_STANDALONE=1 also launches the engine WITHOUT the switch
 # to check unknown_op: that one is a normal Dock app and can take focus, so it is opt-in.
-# EMBUTIDO_INSPECT=1 also opens a real DevTools window (view.inspect) and checks that a page's popup
-# becomes a tab: that window shows on screen and takes the keyboard focus, so it is opt-in too.
+# EMBUTIDO_INSPECT=1 also opens a real DevTools window (view.inspect): that window shows on screen
+# and takes the keyboard focus, so it is opt-in too.
 # SITE_PORT=8766 runs (or reuses) the test site on another port, e.g. when an older one holds 8765.
 source "$(dirname "$0")/lib.sh"
 SITE_PORT="${SITE_PORT:-8765}"
@@ -16,11 +16,11 @@ EMBUTIDO_INSPECT="${EMBUTIDO_INSPECT:-0}"
 export APP OUT GATES REPO SITE_PORT EMBUTIDO_INSPECT
 
 SITE_PID=""
-if ! curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/popup"; then   # /popup: the newest page, so an older site is not reused
+if ! curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/janela"; then   # /janela: the newest page, so an older site is not reused
   python3 "$REPO/tools/sites-teste/serve.py" "$SITE_PORT" >"$OUT/site.log" 2>&1 &
   SITE_PID=$!
-  for _ in $(seq 20); do curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/popup" && break; sleep 0.25; done
-  curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/popup" || { echo "FAIL: the test site has no /popup (an older serve.py on port $SITE_PORT? try SITE_PORT=8766)"; exit 1; }
+  for _ in $(seq 20); do curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/janela" && break; sleep 0.25; done
+  curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/janela" || { echo "FAIL: the test site has no /janela (an older serve.py on port $SITE_PORT? try SITE_PORT=8766)"; exit 1; }
 fi
 
 # winids lists every normal window of a pid, also the ones off screen; this one counts only those
@@ -957,6 +957,84 @@ else:
     c.ask("extension.remove", ato=ato, extension=crx_id)
     check("extension.remove (this ato) removes the .crx's", bool(changed(ato, crx_id, "removed", 20)) and not listed(ato, crx_id))
 
+# Nothing else may put a window on screen (only DevTools, below): each step that could is followed by
+# the on-screen count, and the first window ends the run (the engine is killed) so it stays up at most a moment.
+def on_screen(): return subprocess.run([f"{OUT}/onscreen", str(engine.pid)], capture_output=True, text=True).stdout.strip()
+def no_window(step):
+    time.sleep(1)
+    n = on_screen()
+    check(f"no window on screen after {step}", n == "0", f"on screen: {n}")
+    if n != "0":
+        engine.kill()
+        print("parent: stopped at the first window on screen; failed: " + ", ".join(failed), flush=True)
+        open(f"{OUT}/done", "w").write("1"); time.sleep(3600)
+def others(tab, path):  # the tabs that showed up on path, other than tab
+    return [e for e in c.events if e["event"] == "view.tab" and e.get("tab") != tab and e.get("url", "").startswith(SITE + path)]
+
+c.events = [x for x in c.events if x["event"] != "view.tab"]
+t = ui_tab("/popup"); titled(t, "Popup (test)")
+click(t, 190, 100)
+e = c.event(lambda e: e["event"] == "view.tab" and e.get("tab") != t and e.get("url", "").startswith(SITE + "/other"), 10)
+check("a page's popup (window.open with features) becomes a tab of the same ato",
+      bool(e) and e.get("ato") == ato and e.get("tab") != t, e)
+no_window("a page's popup")
+if e: c.ask("view.close", tab=e["tab"])
+c.ask("view.close", tab=t)
+
+# The test extension (extensao/) calls chrome.windows.create on /janela: a popup, then a normal window.
+c.events = [x for x in c.events if x["event"] != "view.tab"]
+t = ui_tab("/janela")
+e = tab_event(t, lambda e: e.get("title", "").startswith("janela "), 20)
+got = (e or {}).get("title", "")
+check("windows.create popup and normal resolve, each a normal window with its tab",
+      got == "janela popup:normal:1 normal:normal:1", got)
+c.pump(1)
+made = {e.get("url", "").split("from=")[-1]: e for e in others(t, "/other?from=")}
+check("windows.create: both URLs reach the host as view.tab of the same ato",
+      set(made) >= {"popup", "normal"} and all(x.get("ato") == ato for x in made.values()), sorted(made))
+no_window("windows.create (popup and normal)")
+for x in {x["tab"] for x in made.values()}: c.ask("view.close", tab=x)
+c.ask("view.close", tab=t)
+
+# Picture-in-picture is refused: no window, the page's request rejects.
+t = ui_tab("/pip")
+ready = titled(t, "PiP ready", 15)
+click(t, 190, 90)
+e = tab_event(t, lambda e: e.get("title", "").startswith("pip:"), 10)
+check("video picture-in-picture after a click is refused (NotSupportedError)",
+      ready and (e or {}).get("title") == "pip:NotSupportedError", (ready, (e or {}).get("title")))
+no_window("video picture-in-picture")
+click(t, 190, 230)
+e = tab_event(t, lambda e: e.get("title", "").startswith("dpip:"), 10)
+check("Document picture-in-picture is not available (documentPictureInPicture missing)",
+      (e or {}).get("title") == "dpip:missing", (e or {}).get("title"))
+no_window("Document picture-in-picture")
+c.ask("view.close", tab=t)
+
+# window.print(), a custom scheme and mailto:, the date and color pickers: no window, the page goes on.
+t = ui_tab("/fuga"); titled(t, "Fuga (test)")
+click(t, 190, 80)
+check("window.print() returns at once (printing is off)", titled(t, "print:returned"))
+no_window("window.print()")
+click(t, 190, 180)
+check("a custom-scheme link and mailto: launch nothing, the page goes on", titled(t, "scheme:alive"))
+no_window("a custom-scheme link and mailto:")
+check("the scheme links did not navigate the tab",
+      next((x for x in c.ask("view.tabs", ato=ato).get("tabs", []) if x.get("tab") == t), {}).get("url", "").startswith(SITE + "/fuga"))
+# Focused, as the host's view is when the person clicks: an unfocused page gets no picker popup at all.
+c.send_raw({"op": "view.focus", "tab": t, "on": True})
+click(t, 190, 280)
+check("the date picker is asked for", titled(t, "date:asked"))
+no_window("the date picker")
+click(t, 190, 380)
+check("the color picker is asked for", titled(t, "color:asked"))
+no_window("the color picker")
+c.ask("view.close", tab=t)
+log = open(f"{OUT}/engine.log", errors="replace").read()
+pickers = log.count("agens: kept off screen (embedded): a page's picker popup")
+check("the date and color pickers got no window (the engine log names both)", pickers >= 2, f"{pickers} found")
+print(f"info: the engine log names {log.count('agens: kept off screen') - pickers} other window(s) kept off screen by the last net", flush=True)
+
 # Allowing notifications is kept for the site (Chromium has no one-time grant for them), so this goes last.
 t = ui_tab("/ui/perm?geo=0")
 a = ui_ask("permission", t)
@@ -964,21 +1042,12 @@ check("permission allow: notifications reach the host", bool(a) and a.get("permi
 answer(a, allow=True)
 check("permission allow shows in the page title", titled(t, "perm geo=skipped notif=granted"))
 c.ask("view.close", tab=t)
-def on_screen(): return subprocess.run([f"{OUT}/onscreen", str(engine.pid)], capture_output=True, text=True).stdout.strip()
 check("engine still has no window on screen at the end", on_screen() == "0", f"on screen: {on_screen()}")
 check("engine still running", engine.poll() is None)
 
 if os.environ.get("EMBUTIDO_INSPECT") == "1":
     # OPT-IN: this part puts a real DevTools window on screen and it takes the keyboard focus.
     t = ui_tab("/popup"); titled(t, "Popup (test)")
-    c.events = [x for x in c.events if x["event"] != "view.tab"]   # only tabs that show up from here on
-    click(t, 190, 100)
-    e = c.event(lambda e: e["event"] == "view.tab" and e.get("tab") != t and e.get("url", "").startswith(SITE + "/other"), 10)
-    time.sleep(1)
-    check("a page's popup (window.open with features) becomes a tab of the same ato",
-          bool(e) and e.get("ato") == ato and e.get("tab") != t, e)
-    check("the popup put no window on screen", on_screen() == "0", f"on screen: {on_screen()}")
-    if e: c.ask("view.close", tab=e["tab"])
     r = c.ask("view.inspect", tab=t, x=190, y=100)
     check("view.inspect answers ok", r.get("ok"), r)
     time.sleep(3)
@@ -989,7 +1058,7 @@ if os.environ.get("EMBUTIDO_INSPECT") == "1":
     check("the DevTools window is gone after the host disconnects", on_screen() == "0", f"on screen: {on_screen()}")
     check("engine still running after the host left", engine.poll() is None)
 else:
-    print("SKIP: view.inspect opening DevTools, and a popup becoming a tab (a real window that takes focus; EMBUTIDO_INSPECT=1 runs it)", flush=True)
+    print("SKIP: view.inspect opening DevTools (a real window that takes focus; EMBUTIDO_INSPECT=1 runs it)", flush=True)
 print("parent: " + ("all passed" if not failed else "failed: " + ", ".join(failed)), flush=True)
 open(f"{OUT}/done", "w").write("1" if failed else "0")
 time.sleep(3600)   # the gate kills this process: the engine must follow
