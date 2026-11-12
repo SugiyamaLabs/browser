@@ -15,7 +15,7 @@ check not_found login --ato Nope --url "$SITE/login" --done "url_prefix:$SITE/ap
 # The done rule must be about the site it opens (else it tells whether the person is logged in elsewhere).
 check bad_request login --ato Default --url "$SITE/login" --done "cookie:http://localhost:8765:d"
 check bad_request login --ato Default --url "$SITE/login" --done "url_prefix:http://localhost:8765/app/"
-check unknown_op session --ato Default --need "cookie:$SITE:d" --reason gate
+# session and renew are in tools/gates/sessao.sh (hidden engine): here they would open the approval sheet and wait.
 sleep 1; shot after-login      # look: no login tab left open
 stop
 echo "output: $OUT"
