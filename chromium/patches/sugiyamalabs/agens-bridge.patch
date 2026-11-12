@@ -2097,10 +2097,10 @@ index 0000000000..d999ff7d50
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_CONTROL_OPS_H_
 diff --git a/chrome/browser/agens/bridge/control_page.cc b/chrome/browser/agens/bridge/control_page.cc
 new file mode 100644
-index 0000000000..42950b1fa0
+index 0000000000..52c43a2ac3
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_page.cc
-@@ -0,0 +1,733 @@
+@@ -0,0 +1,739 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/control_page.h"
@@ -2740,6 +2740,12 @@ index 0000000000..42950b1fa0
 +  ui::BrowserAccessibility* node = Resolve(ref);
 +  if (!node) return Fail(id, reply, kNotFound, ref);
 +  if (IsPassword(node->GetData())) return Fail(id, reply, kDenied, "a password field");
++  // The focus can't land on it (a label's text, a disabled field): the keys would go to the page
++  // and be lost while the op answered ok.
++  if (!node->HasState(ax::mojom::State::kFocusable)) {
++    return Fail(id, reply, kBadRequest,
++                ref + " (" + ui::ToString(node->GetRole()) + ") does not take typing: use the field's ref");
++  }
 +  if (paused) return Fail(id, reply, kPaused, "the person took over the tab");
 +  node->manager()->SetFocus(*node);
 +  // Then, with the focus where it really landed, refuse if that is a password field.

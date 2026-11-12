@@ -311,6 +311,22 @@ if e:
     agent.ask("page.click", tab=r.get("tab"), ref=snap_node("checkBox", "Check me").get("ref", "none"))
     got = snap_node("checkBox", "Check me")
     check("page.click then page.snapshot at once: the checkbox is checked", got.get("checked") is True, got)
+    # As a bot does it: a fresh tab, read, type, click Show, read; every time (half of them on a page
+    # that is still loading when the tab opens).
+    wrong = []
+    for i in range(12):
+        ft = agent.ask("tab.open", ato=ato, url=SITE + "/form" + ("?slow=1500" if i % 2 else "")).get("tab")
+        nodes = agent.ask("page.snapshot", tab=ft).get("nodes", [])
+        ref = lambda role, name: next((n["ref"] for n in nodes if n.get("role") == role and n.get("name") == name), "none")
+        typed = agent.ask("page.type", tab=ft, ref=ref("textField", "Text"), text=f"bot {i}")
+        clicked = agent.ask("page.click", tab=ft, ref=ref("button", "Show"))
+        shown = [n.get("name") for n in agent.ask("page.snapshot", tab=ft).get("nodes", []) if n.get("role") == "staticText"]
+        if not (typed.get("ok") and clicked.get("ok") and f"bot {i} | false | a" in shown): wrong.append((i, err(typed), err(clicked), shown[-3:]))
+        if i == 0:  # the label's text next to the field: no focus can land there, so no keys are lost silently
+            r2 = agent.ask("page.type", tab=ft, ref=ref("staticText", "Text "), text="lost")
+            check("page.type on a label's text is bad_request (the keys would be lost)", err(r2) == "bad_request", r2)
+        agent.ask("tab.close", tab=ft)
+    check("12 fresh tabs: page.type then page.click Show at once, the value every time", not wrong, wrong)
     c.ask("view.control", tab=e["tab"], action="end")
     check("view.control end: the agent's control stops",
           bool(agent.event(lambda m: m["event"] == "control.stopped", 10)))

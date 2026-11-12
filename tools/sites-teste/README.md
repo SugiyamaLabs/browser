@@ -12,7 +12,7 @@ tools/sites-teste/serve.py [PORTA]   # padrão 8765
 | `/app/` | Mostra "logged in" só com o cookie `sid`; senão volta para `/login`. Grava `localStorage` `token` e a cada 3 s faz `fetch("/api/ping")` com `Authorization: Bearer test-bearer-123` (para testar `session` com `cookie`, `localStorage` e `header`). |
 | `/api/ping` | Responde `{"ok": true, "bearer": true}` quando recebe o header acima. |
 | `/logout` | Apaga os cookies e volta para `/login` (para testar `session.lost` e `needs_login`). |
-| `/form` | Para o controle: campo de texto, campo de senha, checkbox, select, botão "Show" que escreve o digitado em `#out`, e link para `/other`. O `type` no campo de senha deve ser recusado. |
+| `/form` | Para o controle: campo de texto, campo de senha, checkbox, select, botão "Show" que escreve o digitado em `#out`, e link para `/other`. O `type` no campo de senha deve ser recusado. `?slow=MS` (vale para as páginas desta tabela) manda metade da página, espera MS e manda o resto: uma página que ainda carrega. |
 | `/other` | Destino do link, para testar `tab.navigate` e o clique em link. |
 | `/post` | Um formulário POST ("Send") para `/posted`, que responde "Posted": `tab.reload` ali deve ser recusado. |
 | `/agent` | Para o resto do controle: "Hover me" escreve "Hovered: yes" ao passar o mouse, "Ask" abre um `confirm()` e escreve "Answer: true/false", a página é alta e um texto fixo mostra "Scrolled: N". Ao abrir, faz `console.log("agens-console-test")`, lança um erro não tratado ("agens-uncaught-test"), busca `/missing-404#frag-secret` (404; o fragmento não pode aparecer em `page.network`) e `/api/ping` (200). |

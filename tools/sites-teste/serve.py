@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Local test sites for the AgensBrowser socket phases. Binds 127.0.0.1 only. Usage: serve.py [PORT]"""
-import base64, http.server, json, sys, urllib.parse
+import base64, http.server, json, sys, time, urllib.parse
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -21,6 +21,18 @@ class H(http.server.BaseHTTPRequestHandler):
             self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
+
+    def slow_reply(self, body, pause):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")  # no length: the page ends when the connection does
+        self.end_headers()
+        half = len(body) // 2
+        self.wfile.write(body[:half]); self.wfile.flush()
+        time.sleep(min(pause, 30))
+        self.wfile.write(body[half:])
+        self.close_connection = True
 
     def redirect(self, to, cookies=()):
         self.reply(303, headers=[("Location", to), *[("Set-Cookie", c) for c in cookies]])
@@ -54,6 +66,9 @@ class H(http.server.BaseHTTPRequestHandler):
         if self.path == "/login?auto=1":  # logs in by itself, for gates that cannot type
             return self.login()
         if path in PAGES:
+            slow = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("slow", ["0"])[0]
+            if slow.isdigit() and int(slow) > 0:  # ?slow=MS: half the page, a pause, then the rest (a page still loading)
+                return self.slow_reply((HERE / PAGES[path]).read_bytes(), int(slow) / 1000)
             return self.reply(200, (HERE / PAGES[path]).read_bytes())
         self.reply(404, b"not found")
 
