@@ -95,12 +95,15 @@ public struct HostMenuItem: Sendable, Equatable, Identifiable {
   }
 }
 
-/// The two options the host switches (`host.settings`), as the engine has them now.
+/// The options the host switches (`host.settings`), as the engine has them now.
 public struct HostSettings: Sendable, Equatable {
   /// Sites may ask for location and notifications (the host's `ui.ask`); off, they are blocked.
   public let siteRequests: Bool
   /// Extensions act on the tabs an agent controls.
   public let agentExtensions: Bool
+  /// The host can make and use passkeys of this Mac: what sites see in
+  /// `isUserVerifyingPlatformAuthenticatorAvailable()`. Off by default.
+  public var webauthnPlatform: Bool = false
 }
 
 /// The browser engine as a hidden child process of the host app: starts it, connects, says
@@ -171,6 +174,9 @@ public struct HostSettings: Sendable, Equatable {
   /// A tab's DevTools closed (`closeDevTools`, its tab closed, the person closed its window): the
   /// inspected tab and the DevTools view id.
   @ObservationIgnored public var onDevToolsClosed: ((_ tab: String, _ devtools: String) -> Void)?
+  /// A link the page opens in another app (`view.external`). Without a handler the kit opens it
+  /// with `NSWorkspace` (the system's app for that scheme).
+  @ObservationIgnored public var onExternalLink: ((ExternalLink) -> Void)?
   /// Every event, after the kit has handled the ones it knows.
   @ObservationIgnored public var onEvent: ((String, [String: JSON]) -> Void)?
 
@@ -274,19 +280,22 @@ public struct HostSettings: Sendable, Equatable {
     state = .stopped
   }
 
-  /// Sets the options given (nil leaves one as it is) and returns both as the engine now has them;
-  /// with no argument it only reads. The engine keeps them across launches. An engine older than
-  /// this op throws `unknown_op`: it behaves as `siteRequests` false and `agentExtensions` true.
-  public func settings(siteRequests: Bool? = nil, agentExtensions: Bool? = nil) async throws(BrowserError)
-    -> HostSettings
+  /// Sets the options given (nil leaves one as it is) and returns them all as the engine now has
+  /// them; with no argument it only reads. The engine keeps them across launches. An engine older
+  /// than this op throws `unknown_op`: it behaves as `siteRequests` false, `agentExtensions` true
+  /// (and has no passkeys at all).
+  public func settings(siteRequests: Bool? = nil, agentExtensions: Bool? = nil, webauthnPlatform: Bool? = nil)
+    async throws(BrowserError) -> HostSettings
   {
     guard let connection else { throw BrowserError(code: BrowserError.disconnected) }
     var params: [String: JSON] = [:]
     if let siteRequests { params["site_requests"] = .bool(siteRequests) }
     if let agentExtensions { params["agent_extensions"] = .bool(agentExtensions) }
+    if let webauthnPlatform { params["webauthn_platform"] = .bool(webauthnPlatform) }
     let reply = try await connection.send(op: "host.settings", params: params)
     return HostSettings(
-      siteRequests: reply["site_requests"]?.bool ?? false, agentExtensions: reply["agent_extensions"]?.bool ?? true)
+      siteRequests: reply["site_requests"]?.bool ?? false, agentExtensions: reply["agent_extensions"]?.bool ?? true,
+      webauthnPlatform: reply["webauthn_platform"]?.bool ?? false)
   }
 
   /// The engine is another process, with no Dock icon: its DevTools window comes to the front and
@@ -340,6 +349,10 @@ public struct HostSettings: Sendable, Equatable {
         ask(message)
       case "ui.cancel":
         if let ask = message["ask"]?.string { uiTasks.removeValue(forKey: ask)?.cancel() }
+      case "view.external":
+        if let link = ExternalLink(message: message) {
+          if let onExternalLink { onExternalLink(link) } else { NSWorkspace.shared.open(link.url) }
+        }
       case "view.picked":
         if let result = PickResult(message: message) { onPick?(result) }
       case "extension.changed":

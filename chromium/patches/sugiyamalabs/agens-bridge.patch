@@ -220,10 +220,10 @@ index 0000000000..40f289a3c5
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_APPROVAL_H_
 diff --git a/chrome/browser/agens/bridge/bridge.h b/chrome/browser/agens/bridge/bridge.h
 new file mode 100644
-index 0000000000..aba044ff8e
+index 0000000000..bcb1c5bf02
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/bridge.h
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,39 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The local control socket, `<user data dir>/agens.sock` (docs/agens.md, "O socket"). Accepts and
 +// reads on the IO thread, runs each operation on the UI thread (ops.cc) and writes the reply back.
@@ -249,6 +249,9 @@ index 0000000000..aba044ff8e
 +// extensions act on the tabs an agent controls.
 +inline constexpr char kSiteRequestsPref[] = "agens.bridge.site_requests";
 +inline constexpr char kAgentExtensionsPref[] = "agens.bridge.agent_extensions";
++// host.settings: the host can create and use passkeys of this Mac (isUserVerifyingPlatform-
++// AuthenticatorAvailable answers it).
++inline constexpr char kWebAuthnPlatformPref[] = "agens.bridge.webauthn_platform";
 +
 +void RegisterPrefs(PrefRegistrySimple* registry);
 +// UI thread. Start once the threads run; Stop at teardown removes the socket file.
@@ -262,10 +265,10 @@ index 0000000000..aba044ff8e
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_BRIDGE_H_
 diff --git a/chrome/browser/agens/bridge/bridge_mac.mm b/chrome/browser/agens/bridge/bridge_mac.mm
 new file mode 100644
-index 0000000000..b306964567
+index 0000000000..d9bf742076
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/bridge_mac.mm
-@@ -0,0 +1,581 @@
+@@ -0,0 +1,582 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The socket server on macOS: a Unix socket in the user data dir, the peer's code signature read
 +// from its audit token, and the approval of the person before a signed client gets in.
@@ -809,6 +812,7 @@ index 0000000000..b306964567
 +  registry->RegisterListPref(session::kAlwaysPref);
 +  registry->RegisterBooleanPref(kSiteRequestsPref, false);
 +  registry->RegisterBooleanPref(kAgentExtensionsPref, true);
++  registry->RegisterBooleanPref(kWebAuthnPlatformPref, false);
 +}
 +
 +void Start() {
@@ -5718,20 +5722,22 @@ index 0000000000..ef8bfc467e
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_SESSION_READ_H_
 diff --git a/chrome/browser/agens/bridge/ui_answer.cc b/chrome/browser/agens/bridge/ui_answer.cc
 new file mode 100644
-index 0000000000..63b6439c7c
+index 0000000000..e8d3c4546a
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ui_answer.cc
-@@ -0,0 +1,188 @@
+@@ -0,0 +1,231 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/ui_answer.h"
 +
 +#include <algorithm>
++#include <cmath>
 +#include <initializer_list>
 +#include <vector>
 +
 +#include "base/files/file_path.h"
 +#include "base/files/file_util.h"
++#include "base/strings/string_util.h"
 +#include "chrome/browser/agens/bridge/control_keys.h"
 +
 +namespace agens::bridge {
@@ -5779,7 +5785,29 @@ index 0000000000..63b6439c7c
 +  return false;
 +}
 +
++// A date answer: in [min, max] and a whole number of steps from min (Blink's step base when the
++// page sets min). shortcut: a page with step and no min counts steps from its value attribute;
++// such a choice is refused here; send the step base in the ask if a site needs it.
++bool FitsDate(const base::DictValue& asked, double value) {
++  const std::optional<double> min = asked.FindDouble("min"), max = asked.FindDouble("max");
++  const std::optional<double> step = asked.FindDouble("step");
++  if (!std::isfinite(value) || !min || !max || !step || *step <= 0) return false;
++  if (value < *min || value > *max) return false;
++  const double steps = (value - *min) / *step;
++  return std::abs(steps - std::round(steps)) < 1e-6;
++}
++
 +}  // namespace
++
++bool IsWebAuthnError(std::string_view name) {
++  return name == "NotAllowedError" || name == "InvalidStateError" || name == "NotSupportedError" ||
++         name == "SecurityError" || name == "AbortError" || name == "ConstraintError" || name == "UnknownError";
++}
++
++bool IsHexColor(std::string_view text) {
++  return text.size() == 7 && text[0] == '#' &&
++         std::all_of(text.begin() + 1, text.end(), [](char c) { return base::IsHexDigit(c); });
++}
 +
 +UiAnswer CheckUiAnswer(bool from_host, const base::DictValue* asked_or_null, const base::DictValue& body) {
 +  if (!from_host) return UiAnswer::kUnauthorized;
@@ -5838,6 +5866,20 @@ index 0000000000..63b6439c7c
 +    const base::Value* remember = body.Find("remember");
 +    return Pick(OnlyKeys(body, {"allow", "remember"}) && body.FindBool("allow") && (!remember || remember->is_bool()));
 +  }
++  if (*kind == "date") {
++    const base::Value* value = body.Find("value");
++    return Pick(OnlyKeys(body, {"value"}) && value && (value->is_int() || value->is_double()) && FitsDate(asked, value->GetDouble()));
++  }
++  if (*kind == "color") {
++    const std::string* value = body.FindString("value");
++    return Pick(OnlyKeys(body, {"value"}) && value && IsHexColor(*value));
++  }
++  if (*kind == "webauthn") {
++    const base::Value* response = body.Find("response");
++    const base::Value* error = body.Find("error");
++    if (!OnlyKeys(body, {"response", "error"}) || !response == !error) return UiAnswer::kBadRequest;
++    return Pick(response ? response->is_dict() : error->is_string() && IsWebAuthnError(error->GetString()));
++  }
 +  if (*kind == "extension") {
 +    if (!OnlyKeys(body, {"allow", "atos"}) || !body.FindBool("allow")) return UiAnswer::kBadRequest;
 +    const base::Value* atos = body.Find("atos");
@@ -5887,6 +5929,11 @@ index 0000000000..63b6439c7c
 +    if (base::DictValue* context = fields.FindDict("context")) clip(*context, "selection", kMaxUiLabelChars);
 +  } else if (*kind == "auth") {
 +    clip(fields, "realm", kMaxUiLabelChars);
++  } else if (*kind == "date" || *kind == "color") {
++    clip_list(fields.FindList("suggestions"), kMaxUiSuggestions);
++  } else if (*kind == "print") {
++    clip(fields, "title", kMaxUiLabelChars);
++    clip(fields, "url", kMaxUiUrlBytes);
 +  } else if (*kind == "extension") {
 +    clip(fields, "name", kMaxUiLabelChars);
 +    clip(fields, "version", kMaxUiLabelChars);
@@ -5912,10 +5959,10 @@ index 0000000000..63b6439c7c
 +}  // namespace agens::bridge
 diff --git a/chrome/browser/agens/bridge/ui_answer.h b/chrome/browser/agens/bridge/ui_answer.h
 new file mode 100644
-index 0000000000..0b0ecb5d32
+index 0000000000..0304ade671
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ui_answer.h
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,65 @@
 +// Copyright 2026 SugiyamaLabs.
 +// What the host may answer to a ui.ask (docs/protocolo.md, "Passo 5.3"). Pure logic, so
 +// ui_answer_selfcheck.cc runs it with only //base; the engine side is ui_ops.h.
@@ -5939,6 +5986,8 @@ index 0000000000..0b0ecb5d32
 +
 +inline constexpr size_t kMaxUiMenuItems = 500;        // a DevTools menu's items, submenus included
 +inline constexpr int kMaxUiMenuDepth = 4;             // its submenus in submenus
++inline constexpr size_t kMaxUiUrlBytes = 8 * 1024;    // view.external's url (longer is refused), print's
++inline constexpr size_t kMaxUiSuggestions = 100;      // a date or color field's <datalist>
 +
 +enum class UiAnswer { kAnswer, kCancel, kBadRequest, kNotFound, kUnauthorized };
 +
@@ -5955,8 +6004,17 @@ index 0000000000..0b0ecb5d32
 +// or header item, an action outside `actions`, text outside an accepted prompt, a relative path or
 +// too many). A context_menu answer is `action` or `item` (the `id` of an entry of
 +// `context.items` that is not disabled, a separator, a group header or a submenu); `dock` goes
-+// only with the action inspect.
++// only with the action inspect. A date answer is a `value` number between the ask's `min` and
++// `max`, a whole number of `step`s from `min`; a color answer a `value` "#rrggbb"; a webauthn
++// answer a `response` object (its shape is checked by the engine side) or an `error` named by
++// IsWebAuthnError. print has no answer but cancel.
 +UiAnswer CheckUiAnswer(bool from_host, const base::DictValue* asked, const base::DictValue& body);
++
++// The DOMException names a webauthn answer may carry.
++bool IsWebAuthnError(std::string_view name);
++
++// "#rrggbb", lowercase or not.
++bool IsHexColor(std::string_view text);
 +
 +// Cuts what the page controls in a ui.ask of `fields["kind"]` to the limits above; a select's
 +// list past kMaxUiSelectItems keeps the first ones and gets "truncated": true.
@@ -5972,10 +6030,10 @@ index 0000000000..0b0ecb5d32
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_UI_ANSWER_H_
 diff --git a/chrome/browser/agens/bridge/ui_answer_selfcheck.cc b/chrome/browser/agens/bridge/ui_answer_selfcheck.cc
 new file mode 100644
-index 0000000000..46b9e9d930
+index 0000000000..df835d4a98
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ui_answer_selfcheck.cc
-@@ -0,0 +1,216 @@
+@@ -0,0 +1,264 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Assert-based check of ui_answer.h, run by agens_bridge_selfcheck (protocol_selfcheck.cc).
 +
@@ -6130,7 +6188,55 @@ index 0000000000..46b9e9d930
 +  UI_CHECK(Check(atos, R"({"allow":false,"atos":["Profile 1"]})") == kBad);
 +  UI_CHECK(Check(R"({"kind":"extension"})", R"({"allow":true,"atos":["Default"]})") == kBad);  // none offered
 +
++  // date: a number in [min, max], whole steps from min (a day is 86400000 ms).
++  const std::string date = R"({"kind":"date","type":"date","min":0,"max":864000000,"step":86400000})";
++  UI_CHECK(Check(date, R"({"value":0})") == kOk && Check(date, R"({"value":172800000})") == kOk);
++  UI_CHECK(Check(date, R"({"value":864000000})") == kOk && Check(date, R"({"value":864000000.0})") == kOk);
++  UI_CHECK(Check(date, R"({"value":-86400000})") == kBad && Check(date, R"({"value":950400000})") == kBad);
++  UI_CHECK(Check(date, R"({"value":1000})") == kBad);  // between two days
++  UI_CHECK(Check(date, R"({"value":"1970-01-02"})") == kBad && Check(date, R"({})") == kBad);
++  UI_CHECK(Check(date, R"({"value":0,"index":0})") == kBad && Check(date, R"({"cancel":true})") == kCancel);
++  UI_CHECK(Check(R"({"kind":"date","type":"month","min":-24000,"max":24000,"step":1})", R"({"value":670})") == kOk);
++  UI_CHECK(Check(R"({"kind":"date","type":"time","min":0,"max":86399999,"step":60000})", R"({"value":3600000})") == kOk);
++  UI_CHECK(Check(R"({"kind":"date","min":0,"max":10})", R"({"value":1})") == kBad);  // no step sent
++  // color: "#rrggbb".
++  const std::string color = R"({"kind":"color","value":"#000000"})";
++  UI_CHECK(Check(color, R"({"value":"#1a2B3c"})") == kOk);
++  UI_CHECK(Check(color, R"({"value":"#12345"})") == kBad && Check(color, R"({"value":"#12345g"})") == kBad);
++  UI_CHECK(Check(color, R"({"value":"red"})") == kBad && Check(color, R"({"value":1})") == kBad);
++  UI_CHECK(Check(color, R"({"value":"#123456","index":0})") == kBad);
++  // print: only cancel (the host is done).
++  UI_CHECK(Check(R"({"kind":"print"})", R"({"cancel":true})") == kCancel);
++  UI_CHECK(Check(R"({"kind":"print"})", R"({"accept":true})") == kBad && Check(R"({"kind":"print"})", R"({})") == kBad);
++  // webauthn: a response object or a known DOMException name, never both.
++  const std::string passkey = R"({"kind":"webauthn","type":"create","origin":"https://a.example"})";
++  UI_CHECK(Check(passkey, R"({"response":{"id":"x"}})") == kOk);
++  UI_CHECK(Check(passkey, R"({"error":"NotAllowedError"})") == kOk && Check(passkey, R"({"error":"InvalidStateError"})") == kOk);
++  UI_CHECK(Check(passkey, R"({"error":"TypeError"})") == kBad && Check(passkey, R"({"error":1})") == kBad);
++  UI_CHECK(Check(passkey, R"({"response":"x"})") == kBad && Check(passkey, R"({})") == kBad);
++  UI_CHECK(Check(passkey, R"({"response":{},"error":"NotAllowedError"})") == kBad);
++  UI_CHECK(IsHexColor("#abcdef") && !IsHexColor("abcdef1") && !IsHexColor("#abcde"));
++
 +  // What the page controls, cut before it goes out.
++  {
++    base::DictValue print = Json(R"({"kind":"print"})");
++    print.Set("title", std::string(300, 't'));
++    print.Set("url", std::string(kMaxUiUrlBytes + 10, 'u'));
++    ClipUiAsk(print);
++    UI_CHECK(print.FindString("title")->size() == kMaxUiLabelChars && print.FindString("url")->size() == kMaxUiUrlBytes);
++    base::DictValue picker = Json(R"({"kind":"date"})");
++    base::ListValue suggestions;
++    for (size_t i = 0; i < kMaxUiSuggestions + 5; ++i) {
++      base::DictValue suggestion;
++      suggestion.Set("value", 0);
++      suggestion.Set("label", std::string(300, 'l'));
++      suggestions.Append(std::move(suggestion));
++    }
++    picker.Set("suggestions", std::move(suggestions));
++    ClipUiAsk(picker);
++    UI_CHECK(picker.FindList("suggestions")->size() == kMaxUiSuggestions &&
++             (*picker.FindList("suggestions"))[0].GetDict().FindString("label")->size() == kMaxUiLabelChars);
++  }
 +  {
 +    base::DictValue dialog = Json(R"({"kind":"dialog","type":"prompt"})");
 +    dialog.Set("message", std::string(2000, 'm'));
@@ -6194,10 +6300,10 @@ index 0000000000..46b9e9d930
 +}
 diff --git a/chrome/browser/agens/bridge/ui_ops.cc b/chrome/browser/agens/bridge/ui_ops.cc
 new file mode 100644
-index 0000000000..6509632e53
+index 0000000000..6d867a7d9e
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ui_ops.cc
-@@ -0,0 +1,783 @@
+@@ -0,0 +1,1226 @@
 +// Copyright 2026 SugiyamaLabs.
 +// - One queue for every ask, in the order they came; only the oldest of each tab and kind is on
 +//   the host at a time, and at most kMaxOpenUiAsks wait in all.
@@ -6207,27 +6313,44 @@ index 0000000000..6509632e53
 +#include "chrome/browser/agens/bridge/ui_ops.h"
 +
 +#include <algorithm>
++#include <cmath>
 +#include <map>
 +#include <memory>
 +#include <optional>
 +#include <set>
 +#include <utility>
++#include <variant>
 +#include <vector>
 +
++#include "base/files/file.h"
 +#include "base/files/file_path.h"
++#include "base/files/file_util.h"
 +#include "base/memory/scoped_refptr.h"
 +#include "base/no_destructor.h"
++#include "base/path_service.h"
++#include "base/strings/string_util.h"
++#include "base/strings/stringprintf.h"
 +#include "base/strings/string_number_conversions.h"
 +#include "base/strings/utf_string_conversions.h"
 +#include "base/task/sequenced_task_runner.h"
 +#include "base/task/thread_pool.h"
++#include "chrome/browser/agens/bridge/bridge.h"
 +#include "chrome/browser/agens/bridge/control_keys.h"
 +#include "chrome/browser/agens/bridge/ui_answer.h"
 +#include "chrome/browser/agens/bridge/view_input.h"
 +#include "chrome/browser/agens/bridge/view_ops.h"
 +#include "chrome/browser/agens/embed/agens_controlled.h"
 +#include "chrome/browser/agens/embed/agens_embedded.h"
++#include "chrome/browser/browser_process.h"
 +#include "chrome/browser/devtools/devtools_window.h"
++#include "chrome/browser/printing/print_view_manager.h"
++#include "chrome/common/chrome_paths.h"
++#include "components/prefs/pref_service.h"
++#include "components/printing/browser/print_to_pdf/pdf_print_result.h"
++#include "components/printing/browser/print_to_pdf/pdf_print_utils.h"
++#include "components/printing/common/print.mojom.h"
++#include "components/webauthn/json/value_conversions.h"
++#include "content/public/browser/color_chooser.h"
 +#include "content/public/browser/agens_embed_mac.h"
 +#include "content/public/browser/context_menu_params.h"
 +#include "content/public/browser/javascript_dialog_manager.h"
@@ -6235,12 +6358,20 @@ index 0000000000..6509632e53
 +#include "content/public/browser/navigation_handle.h"
 +#include "content/public/browser/page_navigator.h"
 +#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/render_widget_host_view.h"
++#include "content/public/browser/web_authentication_request_proxy.h"
 +#include "content/public/browser/web_contents.h"
 +#include "content/public/browser/web_contents_observer.h"
 +#include "content/public/browser/web_contents_user_data.h"
 +#include "third_party/blink/public/common/context_menu_data/edit_flags.h"
 +#include "third_party/blink/public/mojom/context_menu/context_menu.mojom.h"
++#include "mojo/public/cpp/bindings/self_owned_receiver.h"
++#include "third_party/blink/public/mojom/choosers/date_time_chooser.mojom.h"
 +#include "third_party/blink/public/mojom/forms/form_control_type.mojom-shared.h"
++#include "third_party/blink/public/mojom/webauthn/authenticator.mojom.h"
++#include "third_party/skia/include/core/SkColor.h"
++#include "ui/base/ime/text_input_type.h"
++#include "url/origin.h"
 +#include "ui/base/clipboard/scoped_clipboard_writer.h"
 +#include "ui/shell_dialogs/select_file_dialog.h"
 +#include "ui/shell_dialogs/select_file_dialog_factory.h"
@@ -6269,6 +6400,8 @@ index 0000000000..6509632e53
 +namespace agens::bridge::ui_ask {
 +
 +namespace {
++
++constexpr char kFailed[] = "failed";
 +
 +struct Pending {
 +  int n = 0;
@@ -6866,6 +6999,314 @@ index 0000000000..6509632e53
 +  SendEventTo(host, "view.caret", std::move(fields));
 +}
 +
++// A rect in screen DIPs (as the page's renderer sees the screen) into the tab's view, as
++// view.mouse counts; nothing when it is empty or the tab has no view.
++void SetAnchor(base::DictValue& fields, content::WebContents* contents, gfx::Rect rect) {
++  content::RenderWidgetHostView* view = contents->GetRenderWidgetHostView();
++  if (rect.IsEmpty() || !view) return;
++  rect.Offset(-view->GetViewBounds().OffsetFromOrigin());
++  fields.Set("x", rect.x());
++  fields.Set("y", rect.y());
++  fields.Set("width", rect.width());
++  fields.Set("height", rect.height());
++}
++
++// --- date: an <input>'s date, time, month or week picker. Values in the page's units
++// (valueAsNumber): ms since 1970-01-01 UTC for date, datetime-local and week, ms since midnight
++// for time, months since 1970-01 for month.
++
++const char* DateType(::ui::TextInputType type) {
++  switch (type) {
++    case ::ui::TEXT_INPUT_TYPE_DATE: return "date";
++    case ::ui::TEXT_INPUT_TYPE_DATE_TIME_LOCAL: return "datetime-local";
++    case ::ui::TEXT_INPUT_TYPE_MONTH: return "month";
++    case ::ui::TEXT_INPUT_TYPE_TIME: return "time";
++    case ::ui::TEXT_INPUT_TYPE_WEEK: return "week";
++    default: return nullptr;
++  }
++}
++
++class HostDateChooser : public blink::mojom::DateTimeChooser {
++ public:
++  explicit HostDateChooser(content::GlobalRenderFrameHostId frame) : frame_(frame) {}
++  ~HostDateChooser() override { Withdraw(std::exchange(ask_, 0)); }
++
++  void OpenDateTimeDialog(blink::mojom::DateTimeDialogValuePtr value, OpenDateTimeDialogCallback done) override {
++    content::RenderFrameHost* frame = content::RenderFrameHost::FromID(frame_);
++    content::WebContents* contents = frame ? content::WebContents::FromRenderFrameHost(frame) : nullptr;
++    const char* type = DateType(value->dialog_type);
++    // One at a time (Blink asks again only after the first ended); the agent's tab: cancelled.
++    if (done_ || !contents || !type || AgentWorking(contents)) return std::move(done).Run(false, 0);
++    base::DictValue fields;
++    fields.Set("type", type);
++    if (std::isfinite(value->dialog_value)) fields.Set("value", value->dialog_value);
++    fields.Set("min", value->minimum);
++    fields.Set("max", value->maximum);
++    fields.Set("step", value->step);
++    base::ListValue suggestions;
++    for (const auto& suggestion : value->suggestions) {
++      base::DictValue entry;
++      entry.Set("value", suggestion->value);
++      entry.Set("label", base::UTF16ToUTF8(suggestion->label.empty() ? suggestion->localized_value : suggestion->label));
++      suggestions.Append(std::move(entry));
++    }
++    fields.Set("suggestions", std::move(suggestions));
++    SetAnchor(fields, contents, value->anchor);
++    done_ = std::move(done);
++    ask_ = Ask(contents, "date", std::move(fields),
++               base::BindOnce(&HostDateChooser::Answered, weak_.GetWeakPtr()));
++  }
++  // The page closed the picker first (the field went, it lost focus...).
++  void CloseDateTimeDialog() override {
++    Withdraw(std::exchange(ask_, 0));
++    if (done_) std::move(done_).Run(false, 0);
++  }
++
++ private:
++  void Answered(const base::DictValue* answer) {
++    ask_ = 0;
++    std::optional<double> value = answer ? answer->FindDouble("value") : std::nullopt;
++    if (done_) std::move(done_).Run(value.has_value(), value.value_or(0));
++  }
++
++  const content::GlobalRenderFrameHostId frame_;
++  int ask_ = 0;
++  OpenDateTimeDialogCallback done_;
++  base::WeakPtrFactory<HostDateChooser> weak_{this};
++};
++
++// --- color: an <input type=color>'s chooser; the choice goes back as #rrggbb.
++
++std::string HexColor(SkColor color) {
++  return base::StringPrintf("#%02x%02x%02x", SkColorGetR(color), SkColorGetG(color), SkColorGetB(color));
++}
++
++class HostColorChooser : public content::ColorChooser {
++ public:
++  explicit HostColorChooser(int ask) : ask_(ask) {}
++  ~HostColorChooser() override { End(); }
++  // The page closed it, or the host's answer ended it (then the ask is gone already).
++  void End() override { Withdraw(std::exchange(ask_, 0)); }
++  // shortcut: a page changing the value while the host shows the chooser is not passed on; send
++  // a fresh ui.ask (or a ui.update) if a host wants to follow it.
++  void SetSelectedColor(SkColor color) override {}
++
++ private:
++  int ask_;
++};
++
++std::unique_ptr<content::ColorChooser> OpenColor(content::WebContents* contents,
++                                                 SkColor color,
++                                                 std::vector<std::pair<SkColor, std::string>> suggestions,
++                                                 const gfx::Rect& anchor) {
++  if (AgentWorking(contents)) return nullptr;  // the page sees it close at once
++  base::DictValue fields;
++  fields.Set("value", HexColor(color));
++  base::ListValue list;
++  for (const auto& [value, label] : suggestions) {
++    base::DictValue entry;
++    entry.Set("value", HexColor(value));
++    entry.Set("label", label);
++    list.Append(std::move(entry));
++  }
++  fields.Set("suggestions", std::move(list));
++  SetAnchor(fields, contents, anchor);
++  const int ask = Ask(contents, "color", std::move(fields),
++                      base::BindOnce(
++                          [](base::WeakPtr<content::WebContents> contents, const base::DictValue* answer) {
++                            if (!contents) return;
++                            const std::string* value = answer ? answer->FindString("value") : nullptr;
++                            uint32_t rgb = 0;
++                            if (value && base::HexStringToUInt(value->substr(1), &rgb)) {
++                              contents->DidChooseColorInColorChooser(SkColorSetA(rgb, SK_AlphaOPAQUE));
++                            }
++                            contents->DidEndColorChooser();
++                          },
++                          contents->GetWeakPtr()));
++  return ask ? std::make_unique<HostColorChooser>(ask) : nullptr;
++}
++
++// --- webauthn: navigator.credentials.create and get, answered by the host (its own passkey sheet,
++// later the system's through ASAuthorizationController). One proxy for every frame: content asks
++// for it (Frame) right before each request, which is how a request learns its frame.
++
++class HostWebAuthn : public content::WebAuthenticationRequestProxy {
++ public:
++  static HostWebAuthn& Get() {
++    static base::NoDestructor<HostWebAuthn> proxy;
++    return *proxy;
++  }
++  static content::WebAuthenticationRequestProxy* For(content::RenderFrameHost* frame) {
++    Get().frame_ = frame->GetGlobalId();
++    return &Get();
++  }
++
++  bool IsActive(const url::Origin& caller_origin) override { return true; }
++  RequestId SignalCreateRequest(const blink::mojom::PublicKeyCredentialCreationOptionsPtr& options,
++                                CreateCallback callback) override {
++    return Start("create", webauthn::ToValue(options), options->remote_desktop_client_override, std::move(callback));
++  }
++  RequestId SignalGetRequest(const blink::mojom::PublicKeyCredentialRequestOptionsPtr& options,
++                             GetCallback callback) override {
++    return Start("get", webauthn::ToValue(options), options->extensions->remote_desktop_client_override,
++                 std::move(callback));
++  }
++  RequestId SignalIsUvpaaRequest(IsUvpaaCallback callback) override {
++    // shortcut: the host's word (host.settings webauthn_platform), not asked per request; ask
++    // per origin when the host gets the system's passkeys.
++    std::move(callback).Run(g_browser_process->local_state()->GetBoolean(kWebAuthnPlatformPref));
++    return ++next_;
++  }
++  void CancelRequest(RequestId id) override {
++    auto it = pending_.find(id);
++    if (it == pending_.end()) return;
++    Withdraw(it->second.ask);
++    pending_.erase(it);  // content gave up on it: no callback
++  }
++
++ private:
++  friend class base::NoDestructor<HostWebAuthn>;
++  HostWebAuthn() = default;
++  using Callback = std::variant<CreateCallback, GetCallback>;
++  struct Open {
++    int ask = 0;
++    Callback done;
++  };
++
++  RequestId Start(const char* type,
++                  base::Value request,
++                  const blink::mojom::RemoteDesktopClientOverridePtr& caller,
++                  Callback done) {
++    const RequestId id = ++next_;
++    content::RenderFrameHost* frame = content::RenderFrameHost::FromID(std::exchange(frame_, {}));
++    content::WebContents* contents = frame ? content::WebContents::FromRenderFrameHost(frame) : nullptr;
++    pending_[id].done = std::move(done);
++    // The agent never answers a passkey: cancelled for it until "Assumir". Posted: content takes
++    // the id first.
++    if (!contents || !caller || AgentWorking(contents)) {
++      base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++          FROM_HERE, base::BindOnce(&HostWebAuthn::Answered, base::Unretained(this), id, std::string(type),
++                                    static_cast<const base::DictValue*>(nullptr)));
++      return id;
++    }
++    base::DictValue fields;
++    fields.Set("type", type);
++    fields.Set("origin", caller->origin.Serialize());
++    fields.Set("cross_origin", !caller->same_origin_with_ancestors);
++    fields.Set("request", std::move(request));
++    pending_[id].ask = Ask(contents, "webauthn", std::move(fields),
++                           base::BindOnce(&HostWebAuthn::Answered, base::Unretained(this), id, std::string(type)));
++    return id;
++  }
++
++  // The response was checked in HandleAnswer; anything else is the page's NotAllowedError.
++  void Answered(RequestId id, const std::string& type, const base::DictValue* answer) {
++    auto it = pending_.find(id);
++    if (it == pending_.end()) return;
++    Callback done = std::move(it->second.done);
++    pending_.erase(it);
++    const base::DictValue* response = answer ? answer->FindDict("response") : nullptr;
++    const std::string* error = answer ? answer->FindString("error") : nullptr;
++    auto exception = [&] {
++      return blink::mojom::WebAuthnDOMExceptionDetails::New(
++          error ? *error : "NotAllowedError",
++          error ? "The host refused the request." : "The request was cancelled or timed out.");
++    };
++    if (auto* create = std::get_if<CreateCallback>(&done)) {
++      blink::mojom::MakeCredentialAuthenticatorResponsePtr made;
++      if (response) made = webauthn::MakeCredentialResponseFromValue(base::Value(response->Clone())).first;
++      if (made) return std::move(*create).Run(id, nullptr, std::move(made));
++      return std::move(*create).Run(id, exception(), nullptr);
++    }
++    blink::mojom::GetAssertionAuthenticatorResponsePtr got;
++    if (response) got = webauthn::GetAssertionResponseFromValue(base::Value(response->Clone())).first;
++    if (got) return std::move(std::get<GetCallback>(done)).Run(id, nullptr, std::move(got));
++    std::move(std::get<GetCallback>(done)).Run(id, exception(), nullptr);
++  }
++
++  content::GlobalRenderFrameHostId frame_;
++  std::map<RequestId, Open> pending_;
++  RequestId next_ = 0;
++};
++
++// A webauthn answer's response, as the page's request type wants it.
++bool ResponseFits(const base::DictValue& asked, const base::DictValue& body) {
++  const base::DictValue* response = body.FindDict("response");
++  if (!response) return true;  // an error
++  const std::string* type = asked.FindString("type");
++  base::Value value(response->Clone());
++  return type && (*type == "create" ? !!webauthn::MakeCredentialResponseFromValue(value).first
++                                    : !!webauthn::GetAssertionResponseFromValue(value).first);
++}
++
++// --- view.print_pdf: the tab's PDF, in <user data>/print/v<n>/page.pdf (0600, its folder 0700).
++
++base::FilePath PrintRoot() {
++  base::FilePath dir;
++  base::PathService::Get(chrome::DIR_USER_DATA, &dir);
++  return dir.Append("print");
++}
++
++// Every write and delete of the PDFs, in order (a delete at startup never follows a new PDF).
++scoped_refptr<base::SequencedTaskRunner> PdfFiles() {
++  static base::NoDestructor<scoped_refptr<base::SequencedTaskRunner>> files(
++      base::ThreadPool::CreateSequencedTaskRunner({base::MayBlock(), base::TaskPriority::USER_VISIBLE}));
++  return *files;
++}
++
++void DeleteLater(base::FilePath path) {
++  PdfFiles()->PostTask(FROM_HERE, base::GetDeletePathRecursivelyCallback(std::move(path)));
++}
++
++// The tab's PDF folder: goes with the tab.
++class PrintedPdf : public content::WebContentsUserData<PrintedPdf> {
++ public:
++  ~PrintedPdf() override { DeleteLater(dir_); }
++  const base::FilePath& dir() const { return dir_; }
++
++ private:
++  PrintedPdf(content::WebContents* contents, base::FilePath dir)
++      : content::WebContentsUserData<PrintedPdf>(*contents), dir_(std::move(dir)) {}
++  friend class content::WebContentsUserData<PrintedPdf>;
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++  const base::FilePath dir_;
++};
++WEB_CONTENTS_USER_DATA_KEY_IMPL(PrintedPdf);
++
++// Pages of a PDF as Chromium writes it (Skia): its "/Type /Page" objects. shortcut: not a PDF
++// parser; a PDF from elsewhere (compressed object streams) would count 0.
++int CountPages(std::string_view pdf) {
++  int pages = 0;
++  for (size_t at = pdf.find("/Type"); at != std::string_view::npos; at = pdf.find("/Type", at + 5)) {
++    size_t i = at + 5;
++    while (i < pdf.size() && (pdf[i] == ' ' || pdf[i] == '\n' || pdf[i] == '\r')) ++i;
++    if (pdf.substr(i, 5) == "/Page" && (i + 5 >= pdf.size() || !base::IsAsciiAlpha(pdf[i + 5]))) ++pages;
++  }
++  return pages;
++}
++
++// Off the UI thread: replaces the folder's PDF. The size, or nullopt when it could not be written.
++std::optional<int64_t> WritePdf(const base::FilePath& dir, const base::FilePath& path, std::string data) {
++  if (!base::DeletePathRecursively(dir) || !base::CreateDirectory(dir)) return std::nullopt;  // 0700
++  base::File file(path, base::File::FLAG_CREATE | base::File::FLAG_WRITE);  // 0600
++  if (!file.IsValid() || !file.WriteAtCurrentPosAndCheck(base::as_byte_span(data))) return std::nullopt;
++  return static_cast<int64_t>(data.size());
++}
++
++// Reads an optional value of `body`; false when it is there with another type.
++bool OptionalBool(const base::DictValue& body, std::string_view key, std::optional<bool>& out) {
++  const base::Value* value = body.Find(key);
++  if (value && !value->is_bool()) return false;
++  if (value) out = value->GetBool();
++  return true;
++}
++bool OptionalNumber(const base::DictValue& body, std::string_view key, std::optional<double>& out) {
++  const base::Value* value = body.Find(key);
++  if (value && !(value->is_int() || value->is_double())) return false;
++  if (value) out = value->GetDouble();
++  return true;
++}
++
 +}  // namespace
 +
 +int Ask(content::WebContents* contents, std::string_view kind, base::DictValue fields, AnswerCallback done) {
@@ -6933,6 +7374,10 @@ index 0000000000..6509632e53
 +    case UiAnswer::kAnswer:
 +      break;
 +  }
++  if (p->kind == "webauthn" && !ResponseFits(p->fields, request.body)) {
++    return std::move(reply).Run(
++        ErrorReply(&request.id, kBadRequest, "response is not a PublicKeyCredential (JSON) for this request"));
++  }
 +  if (p->kind != "file") return Finish(p->n, request.id, std::move(reply), request.body.Clone());
 +  // The paths are checked on disk, off this thread; the ask can't be answered twice meanwhile.
 +  p->checking = true;
@@ -6957,6 +7402,107 @@ index 0000000000..6509632e53
 +  std::vector<std::unique_ptr<Pending>> asks = std::move(S().asks);
 +  S().asks.clear();
 +  for (auto& p : asks) std::move(p->done).Run(nullptr);
++  DeleteLater(PrintRoot());  // the PDFs were the host's
++}
++
++void BindDateTimeChooser(content::RenderFrameHost* frame,
++                         mojo::PendingReceiver<blink::mojom::DateTimeChooser> receiver) {
++  mojo::MakeSelfOwnedReceiver(std::make_unique<HostDateChooser>(frame->GetGlobalId()), std::move(receiver));
++}
++
++void AskPrint(content::WebContents* contents) {
++  if (!contents || AgentWorking(contents)) return;
++  base::DictValue fields;
++  fields.Set("title", base::UTF16ToUTF8(contents->GetTitle()));
++  fields.Set("url", contents->GetLastCommittedURL().spec());
++  Ask(contents, "print", std::move(fields), base::DoNothing());  // the host's cancel: it is done
++}
++
++bool LaunchExternal(content::WebContents* contents,
++                    const GURL& url,
++                    const std::optional<url::Origin>& initiator,
++                    bool gesture) {
++  const uint64_t host = view::Host();
++  const int n = host && contents ? view::KnownTab(contents) : 0;
++  if (!n || AgentWorking(contents) || url.spec().size() > kMaxUiUrlBytes) return false;
++  base::DictValue fields;
++  fields.Set("tab", ViewTabName(n));
++  fields.Set("url", url.spec());
++  fields.Set("scheme", url.GetScheme());
++  // As Chromium's own dialog names it: an opaque origin by what it came from.
++  if (initiator) fields.Set("origin", initiator->GetTupleOrPrecursorTupleIfOpaque().Serialize());
++  fields.Set("gesture", gesture);
++  SendEventTo(host, "view.external", std::move(fields));
++  return true;
++}
++
++void PrintPdf(content::WebContents* contents, const Request& request, ReplyCallback reply) {
++  const base::DictValue& body = request.body;
++  std::optional<bool> landscape, background, header_footer, css_page_size;
++  std::optional<double> scale, paper_width, paper_height, top, bottom, left, right;
++  const base::Value* margins = body.Find("margins");
++  const base::Value* ranges = body.Find("page_ranges");
++  const bool typed =
++      OptionalBool(body, "landscape", landscape) && OptionalBool(body, "background", background) &&
++      OptionalBool(body, "header_footer", header_footer) && OptionalBool(body, "css_page_size", css_page_size) &&
++      OptionalNumber(body, "scale", scale) && OptionalNumber(body, "paper_width", paper_width) &&
++      OptionalNumber(body, "paper_height", paper_height) && (!ranges || ranges->is_string()) &&
++      (!margins || (margins->is_dict() && OptionalNumber(margins->GetDict(), "top", top) &&
++                    OptionalNumber(margins->GetDict(), "bottom", bottom) &&
++                    OptionalNumber(margins->GetDict(), "left", left) &&
++                    OptionalNumber(margins->GetDict(), "right", right)));
++  if (!typed) {
++    return std::move(reply).Run(ErrorReply(&request.id, kBadRequest,
++                                           "landscape, background, header_footer and css_page_size are booleans; "
++                                           "scale, paper_width, paper_height and margins.* numbers; page_ranges text"));
++  }
++  if (AgentWorking(contents)) {
++    return std::move(reply).Run(ErrorReply(&request.id, kDenied, "an agent is working on this tab"));
++  }
++  content::RenderFrameHost* frame = contents->GetPrimaryMainFrame();
++  auto params = print_to_pdf::GetPrintPagesParams(frame->GetLastCommittedURL(), landscape, header_footer, background,
++                                                  scale, paper_width, paper_height, top, bottom, left, right,
++                                                  /*header_template=*/std::nullopt, /*footer_template=*/std::nullopt,
++                                                  css_page_size.value_or(true), /*generate_tagged_pdf=*/std::nullopt,
++                                                  /*generate_document_outline=*/std::nullopt);
++  if (auto* error = std::get_if<std::string>(&params)) {
++    return std::move(reply).Run(ErrorReply(&request.id, kBadRequest, *error));
++  }
++  auto* manager = printing::PrintViewManager::FromWebContents(contents);
++  if (!manager) return std::move(reply).Run(ErrorReply(&request.id, kFailed, "printing is not available here"));
++  const base::FilePath dir = PrintRoot().Append(ViewTabName(view::TabNumber(contents)));
++  PrintedPdf::CreateForWebContents(contents, dir);  // no-op once it exists
++  manager->PrintToPdf(
++      frame, ranges ? ranges->GetString() : std::string(),
++      std::move(std::get<printing::mojom::PrintPagesParamsPtr>(params)),
++      base::BindOnce(
++          [](base::Value id, base::FilePath dir, ReplyCallback reply, print_to_pdf::PdfPrintResult result,
++             scoped_refptr<base::RefCountedMemory> data) {
++            using R = print_to_pdf::PdfPrintResult;
++            if (result != R::kPrintSuccess || !data) {
++              const bool caller = result == R::kPageRangeSyntaxError || result == R::kPageRangeInvalidRange ||
++                                  result == R::kPageCountExceeded;
++              return std::move(reply).Run(
++                  ErrorReply(&id, caller ? kBadRequest : kFailed, print_to_pdf::PdfPrintResultToString(result)));
++            }
++            std::string pdf(base::as_string_view(base::span(*data)));
++            const int pages = CountPages(pdf);
++            const base::FilePath path = dir.Append("page.pdf");
++            PdfFiles()->PostTaskAndReplyWithResult(
++                FROM_HERE, base::BindOnce(&WritePdf, dir, path, std::move(pdf)),
++                base::BindOnce(
++                    [](base::Value id, base::FilePath path, int pages, ReplyCallback reply,
++                       std::optional<int64_t> bytes) {
++                      if (!bytes) return std::move(reply).Run(ErrorReply(&id, kFailed, "could not write the PDF"));
++                      base::DictValue result;
++                      result.Set("path", path.value());
++                      result.Set("bytes", static_cast<double>(*bytes));
++                      result.Set("pages", pages);
++                      std::move(reply).Run(OkReply(id, std::move(result)));
++                    },
++                    std::move(id), path, pages, std::move(reply)));
++          },
++          request.id.Clone(), dir, std::move(reply)));
 +}
 +
 +void Start() {
@@ -6969,7 +7515,10 @@ index 0000000000..6509632e53
 +  // has no window: its menus and lists go to the host (ContextMenu, Select).
 +  content::SetAgensEmbedOwnWindow(base::BindRepeating(&view::InOwnDevToolsWindow));
 +  content::SetAgensEmbedCursorCallbacks(base::BindRepeating(&CursorChanged), base::BindRepeating(&CaretChanged));
++  content::SetAgensEmbedColorChooser(base::BindRepeating(&OpenColor));
++  content::SetAgensEmbedWebAuthn(base::BindRepeating(&HostWebAuthn::For));
 +  ::ui::SelectFileDialog::SetFactory(std::make_unique<HostFileDialogFactory>());
++  DeleteLater(PrintRoot());  // what a crash or a killed host left
 +}
 +
 +content::JavaScriptDialogManager* Dialogs() {
@@ -6983,26 +7532,34 @@ index 0000000000..6509632e53
 +}  // namespace agens::bridge::ui_ask
 diff --git a/chrome/browser/agens/bridge/ui_ops.h b/chrome/browser/agens/bridge/ui_ops.h
 new file mode 100644
-index 0000000000..90a1a8c6ce
+index 0000000000..19b49ac97d
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ui_ops.h
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,87 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The host draws what the engine would put on screen (docs/protocolo.md, "Passo 5.3"): ui.ask to
 +// the host, ui.answer back, ui.cancel when the engine gives up first. Embedded only; UI thread.
 +#ifndef CHROME_BROWSER_AGENS_BRIDGE_UI_OPS_H_
 +#define CHROME_BROWSER_AGENS_BRIDGE_UI_OPS_H_
 +
++#include <optional>
 +#include <string_view>
 +
 +#include "base/functional/callback.h"
 +#include "base/values.h"
 +#include "chrome/browser/agens/bridge/ops.h"
++#include "mojo/public/cpp/bindings/pending_receiver.h"
++#include "third_party/blink/public/mojom/choosers/date_time_chooser.mojom-forward.h"
 +
++class GURL;
 +namespace content {
 +class JavaScriptDialogManager;
++class RenderFrameHost;
 +class WebContents;
 +}  // namespace content
++namespace url {
++class Origin;
++}  // namespace url
 +
 +namespace agens::bridge::ui_ask {
 +
@@ -7032,8 +7589,30 @@ index 0000000000..90a1a8c6ce
 +void HandleAnswer(bool from_host, const Request& request, ReplyCallback reply);
 +void HostGone();
 +
-+// Embedded, once: <select> lists, right clicks, file panels, the cursor and the caret go to the host.
++// Embedded, once: <select> lists, right clicks, file panels, color choosers, passkey requests,
++// the cursor and the caret go to the host.
 +void Start();
++
++// The date and time pickers of a frame's <input> (ui.ask "date"), bound for the embedded engine
++// only (chrome_browser_interface_binders.cc); one open at a time per frame.
++void BindDateTimeChooser(content::RenderFrameHost* frame,
++                         mojo::PendingReceiver<blink::mojom::DateTimeChooser> receiver);
++
++// window.print() and the like reached print preview: ui.ask "print" for the host, which prints
++// with view.print_pdf and answers cancel when done. Nothing for a tab an agent works.
++void AskPrint(content::WebContents* contents);
++
++// A link to another app (mailto:, zoommtg:...) that Chromium would launch: the host gets
++// view.external and opens it. False (refused) when there is no host, the tab is not one it
++// knows, an agent works it, or the address is longer than kMaxUiUrlBytes.
++bool LaunchExternal(content::WebContents* contents,
++                    const GURL& url,
++                    const std::optional<url::Origin>& initiator,
++                    bool gesture);
++
++// view.print_pdf (view_ops.cc): the tab's page as a PDF in a file of the host's, kept until the
++// next call, the tab closing or the host going.
++void PrintPdf(content::WebContents* contents, const Request& request, ReplyCallback reply);
 +
 +// The JavaScript dialogs of embedded tabs no agent holds (ui.ask "dialog").
 +content::JavaScriptDialogManager* Dialogs();
@@ -7514,10 +8093,10 @@ index 0000000000..e98cac0576
 +}
 diff --git a/chrome/browser/agens/bridge/view_ops.cc b/chrome/browser/agens/bridge/view_ops.cc
 new file mode 100644
-index 0000000000..528cc37f3a
+index 0000000000..e394ad3e59
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_ops.cc
-@@ -0,0 +1,1305 @@
+@@ -0,0 +1,1314 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The host draws the interface; the engine hands it the pages (docs/protocolo.md, "host e view").
 +// - One host: the connection that sent host.attach (the app that launched the engine).
@@ -8228,21 +8807,27 @@ index 0000000000..528cc37f3a
 +  return *site_requests;
 +}
 +
-+// host.settings {site_requests?, agent_extensions?}: sets the ones given, answers both as now in force.
++// host.settings {site_requests?, agent_extensions?, webauthn_platform?}: sets the ones given,
++// answers all three as now in force.
 +void HostSettings(const Request& request, ReplyCallback reply) {
 +  PrefService* local = g_browser_process->local_state();
-+  const base::Value* site_requests = request.body.Find("site_requests");
-+  const base::Value* agent_extensions = request.body.Find("agent_extensions");
-+  if ((site_requests && !site_requests->is_bool()) || (agent_extensions && !agent_extensions->is_bool())) {
-+    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "site_requests and agent_extensions are booleans"));
-+    return;
++  const std::pair<const char*, const char*> settings[] = {{"site_requests", kSiteRequestsPref},
++                                                          {"agent_extensions", kAgentExtensionsPref},
++                                                          {"webauthn_platform", kWebAuthnPlatformPref}};
++  for (const auto& [key, pref] : settings) {
++    const base::Value* value = request.body.Find(key);
++    if (value && !value->is_bool()) {
++      std::move(reply).Run(
++          ErrorReply(&request.id, kBadRequest, "site_requests, agent_extensions and webauthn_platform are booleans"));
++      return;
++    }
 +  }
 +  // The prefs' observers apply them: SiteRequests here, the controlled tabs in control_ops.cc.
-+  if (site_requests) local->SetBoolean(kSiteRequestsPref, site_requests->GetBool());
-+  if (agent_extensions) local->SetBoolean(kAgentExtensionsPref, agent_extensions->GetBool());
 +  base::DictValue result;
-+  result.Set("site_requests", local->GetBoolean(kSiteRequestsPref));
-+  result.Set("agent_extensions", local->GetBoolean(kAgentExtensionsPref));
++  for (const auto& [key, pref] : settings) {
++    if (const base::Value* value = request.body.Find(key)) local->SetBoolean(pref, value->GetBool());
++    result.Set(key, local->GetBoolean(pref));
++  }
 +  std::move(reply).Run(OkReply(request.id, std::move(result)));
 +}
 +
@@ -8615,6 +9200,9 @@ index 0000000000..528cc37f3a
 +    return;
 +  } else if (op == "view.devtools.close") {
 +    ViewDevToolsClose(contents, request, std::move(reply));
++    return;
++  } else if (op == "view.print_pdf") {
++    ui_ask::PrintPdf(contents, request, std::move(reply));
 +    return;
 +  } else {
 +    std::move(reply).Run(ErrorReply(&request.id, kUnknownOp, op));
@@ -10174,10 +10762,10 @@ index 0000000000..aef9e1cc9e
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EMBEDDED_H_
 diff --git a/chrome/browser/agens/embed/agens_embedded_mac.mm b/chrome/browser/agens/embed/agens_embedded_mac.mm
 new file mode 100644
-index 0000000000..a525a83582
+index 0000000000..25424a7af4
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embedded_mac.mm
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,138 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/embed/agens_embedded.h"
@@ -10225,7 +10813,8 @@ index 0000000000..a525a83582
 +}
 +
 +// The last net under the cases handled where they start (popups and app windows are normal
-+// windows, no web apps, no picture-in-picture, printing or external apps): a views window goes on
++// windows, no web apps, no picture-in-picture; pickers, printing and external apps go to the
++// host): a views window goes on
 +// screen only when it belongs to a DevTools window. Anything else stays hidden, with a log line
 +// naming it. Hidden, never closed: whatever made it keeps running, nothing waits on its showing.
 +BOOL MayOrderIn(NSWindow* window) {
@@ -10243,10 +10832,13 @@ index 0000000000..a525a83582
 +}
 +
 +// Page features whose only UI is a system window or panel the engine cannot keep off screen
-+// (passkeys, the share sheet, the color sampler) or a dialog on a window nobody sees (payment):
-+// not available in the page, so sites see them missing instead of a request that never ends.
++// (the share sheet, the color sampler) or a dialog on a window nobody sees (payment): not
++// available in the page, so sites see them missing instead of a request that never ends.
 +// shortcut: refused for now; the host could show them later (ui.ask), as it does other requests.
-+constexpr char kOffBlinkFeatures[] = "WebAuth,PaymentRequest,WebShare,EyeDropperAPI,DocumentPictureInPictureAPI";
++// PagePopup: the date, time and color pickers are drawn in a popup window of their own; without
++// it they go to the browser, and so to the host (ui.ask date and color), while date fields keep
++// their inline segments (chrome_client_impl.cc). Passkeys (WebAuth) go to the host too.
++constexpr char kOffBlinkFeatures[] = "PaymentRequest,WebShare,EyeDropperAPI,DocumentPictureInPictureAPI,PagePopup";
 +
 +}  // namespace
 +
@@ -11493,7 +12085,7 @@ index d81488f053..3eef3778eb 100644
  void ConfirmCloseWithDownloads(views::Widget* widget, int count, base::OnceCallback<void(bool)> callback);
  
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
-index 5d7ca90415..1a7f6718e1 100644
+index 5d7ca90415..c5a95a9597 100644
 --- a/chrome/browser/agens/embed/native_shell_mac.mm
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
 @@ -7,7 +7,16 @@
@@ -11513,12 +12105,13 @@ index 5d7ca90415..1a7f6718e1 100644
  #include "components/split_tabs/split_tab_visual_data.h"
  #include "components/tabs/public/split_tab_data.h"
  #include "ui/base/cursor/cursor.h"
-@@ -15,8 +24,15 @@
+@@ -15,8 +24,16 @@
  #include "base/strings/sys_string_conversions.h"
  #include "chrome/browser/extensions/extension_install_prompt_show_params.h"
  #include "extensions/browser/install_prompt_data.h"
 +#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
  #include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
++#include "components/custom_handlers/register_protocol_handler_permission_request.h"
  #include "components/permissions/permission_request.h"
 +#include "components/permissions/permission_util.h"
 +#include "components/permissions/request_type.h"
@@ -11529,7 +12122,7 @@ index 5d7ca90415..1a7f6718e1 100644
  #include "ui/base/metadata/metadata_header_macros.h"
  #include "ui/base/metadata/metadata_impl_macros.h"
  #include "ui/gfx/codec/png_codec.h"
-@@ -48,6 +64,24 @@ void Watch(content::WebContents* contents) {
+@@ -48,6 +65,24 @@ void Watch(content::WebContents* contents) {
    base::RepeatingCallback<void(content::WebContents*)> on_focus_;
  };
  
@@ -11554,7 +12147,7 @@ index 5d7ca90415..1a7f6718e1 100644
  // The gap between a split's two cards: drag it to change how much each tab gets.
  class SplitHandle : public views::View {
    METADATA_HEADER(SplitHandle, views::View)
-@@ -98,6 +132,16 @@ explicit NativeShellView(BrowserWindowInterface* browser)
+@@ -98,6 +133,16 @@ explicit NativeShellView(BrowserWindowInterface* browser)
      card2_ = AddChildView(std::make_unique<views::View>());
      contents_ = AddChildView(std::make_unique<views::WebView>(browser->GetProfile()));
      contents2_ = AddChildView(std::make_unique<views::WebView>(browser->GetProfile()));  // a split's second tab
@@ -11571,7 +12164,7 @@ index 5d7ca90415..1a7f6718e1 100644
      auto activate = base::BindRepeating(
          [](BrowserWindowInterface* browser, content::WebContents* contents) {
            TabStripModel* model = browser->GetTabStripModel();
-@@ -122,14 +166,43 @@ explicit NativeShellView(BrowserWindowInterface* browser)
+@@ -122,14 +167,43 @@ explicit NativeShellView(BrowserWindowInterface* browser)
      chrome_ = (__bridge_transfer NSView*)agens_ui_create_chrome(window_.get());
      window_->ui = (__bridge void*)chrome_;
      window_->extensions_anchor = extensions_anchor_;
@@ -11615,7 +12208,7 @@ index 5d7ca90415..1a7f6718e1 100644
    void FocusAddress() { agens_ui_focus_address((__bridge void*)chrome_); }
    float TitlebarHeight() { return agens_ui_titlebar_height((__bridge void*)chrome_); }
    AgensWindow* window() { return window_.get(); }
-@@ -171,6 +244,12 @@ void Layout(PassKey) override {
+@@ -171,6 +245,12 @@ void Layout(PassKey) override {
          split = nullptr;
        }
      }
@@ -11628,7 +12221,7 @@ index 5d7ca90415..1a7f6718e1 100644
      // Chromium keeps every tab but the active one hidden (no painting); a split shows two.
      for (views::WebView* pane : {contents_.get(), contents2_.get()}) {
        content::WebContents* was = pane->GetWebContents();
-@@ -188,6 +267,19 @@ void Layout(PassKey) override {
+@@ -188,6 +268,19 @@ void Layout(PassKey) override {
      handle_->SetVisible(second);
      pane1_->Watch(first);
      pane2_->Watch(second);
@@ -11648,7 +12241,7 @@ index 5d7ca90415..1a7f6718e1 100644
      if (page_fullscreen) {
        SetBackground(views::CreateSolidBackground(SK_ColorBLACK));
        contents_->SetBoundsRect(GetLocalBounds());
-@@ -236,6 +328,21 @@ void Layout(PassKey) override {
+@@ -236,6 +329,21 @@ void Layout(PassKey) override {
        }
      }
      card_->SetBoundsRect(card);
@@ -11670,7 +12263,7 @@ index 5d7ca90415..1a7f6718e1 100644
      card.Inset(1);
      contents_->SetBoundsRect(card);
      contents_->holder()->SetNativeViewCornerRadii(gfx::RoundedCornersF(radius_ - 1));
-@@ -297,6 +404,8 @@ void OnTabStripModelChanged(TabStripModel*, const TabStripModelChange&,
+@@ -297,6 +405,8 @@ void OnTabStripModelChanged(TabStripModel*, const TabStripModelChange&,
    raw_ptr<views::WebView> contents_;
    raw_ptr<views::View> card2_;
    raw_ptr<views::WebView> contents2_;
@@ -11679,7 +12272,7 @@ index 5d7ca90415..1a7f6718e1 100644
    std::unique_ptr<PaneWatcher> pane1_, pane2_;
    raw_ptr<SplitHandle> handle_;
    gfx::Rect split_page_;  // the whole page area the split shares
-@@ -309,8 +418,53 @@ void OnTabStripModelChanged(TabStripModel*, const TabStripModelChange&,
+@@ -309,8 +419,53 @@ void OnTabStripModelChanged(TabStripModel*, const TabStripModelChange&,
  BEGIN_METADATA(NativeShellView)
  END_METADATA
  
@@ -11733,7 +12326,7 @@ index 5d7ca90415..1a7f6718e1 100644
  std::unique_ptr<views::View> CreateNativeShellView(BrowserWindowInterface* browser) {
    return std::make_unique<NativeShellView>(browser);
  }
-@@ -328,6 +482,12 @@ void NativeTabStateChanged(views::Widget* widget) {
+@@ -328,6 +483,12 @@ void NativeTabStateChanged(views::Widget* widget) {
  }
  
  void ConfirmCloseWithDownloads(views::Widget* widget, int count, base::OnceCallback<void(bool)> callback) {
@@ -11746,7 +12339,7 @@ index 5d7ca90415..1a7f6718e1 100644
    NSAlert* alert = [[NSAlert alloc] init];
    alert.messageText = count == 1 ? @"Há um download em andamento" : [NSString stringWithFormat:@"Há %d downloads em andamento", count];
    alert.informativeText = count == 1 ? @"Se fechar agora, ele é cancelado." : @"Se fechar agora, eles são cancelados.";
-@@ -360,6 +520,34 @@ bool HandleNativeCommand(BrowserWindowInterface* browser, int command_id) {
+@@ -360,6 +521,34 @@ bool HandleNativeCommand(BrowserWindowInterface* browser, int command_id) {
    return shell && shell->Command(*command);
  }
  
@@ -11781,7 +12374,7 @@ index 5d7ca90415..1a7f6718e1 100644
  bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
    if (!IsNativeShellEnabled() || !browser->GetWindow()) return false;
    views::Widget* widget = views::Widget::GetWidgetForNativeWindow(browser->GetWindow()->GetNativeWindow());
-@@ -377,6 +565,13 @@ bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
+@@ -377,6 +566,13 @@ bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
   public:
    NativePermissionPrompt(AgensWindow* window, Delegate* delegate) : window_(window->weak.GetWeakPtr()) {
      window->permission_delegate = delegate->GetWeakPtr();
@@ -11795,7 +12388,7 @@ index 5d7ca90415..1a7f6718e1 100644
      const GURL origin = delegate->GetRequestingOrigin();
      const std::string site = origin.is_valid() ? std::string(origin.host()) : std::string();
      std::vector<std::string> asks;
-@@ -389,12 +584,15 @@ bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
+@@ -389,12 +585,15 @@ bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
      agens_ui_permission_prompt(window->ui, site.c_str(), pointers.data(), static_cast<int>(pointers.size()));
    }
    ~NativePermissionPrompt() override {
@@ -11813,7 +12406,7 @@ index 5d7ca90415..1a7f6718e1 100644
    }
    permissions::PermissionPromptDisposition GetPromptDisposition() const override {
      return permissions::PermissionPromptDisposition::ANCHORED_BUBBLE;
-@@ -407,7 +605,65 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
+@@ -407,7 +606,74 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
    }
  
   private:
@@ -11823,6 +12416,7 @@ index 5d7ca90415..1a7f6718e1 100644
 +      case permissions::RequestType::kMicStream: return "microphone";
 +      case permissions::RequestType::kGeolocation: return "geolocation";
 +      case permissions::RequestType::kNotifications: return "notifications";
++      case permissions::RequestType::kRegisterProtocolHandler: return "protocol_handler";
 +      default: return nullptr;
 +    }
 +  }
@@ -11845,6 +12439,14 @@ index 5d7ca90415..1a7f6718e1 100644
 +    fields.Set("origin", url::Origin::Create(delegate->GetRequestingOrigin()).Serialize());
 +    if (names.size() == 1) {
 +      fields.Set("permission", names[0].GetString());
++      // navigator.registerProtocolHandler: which links would open where (never asked with others).
++      if (delegate->Requests()[0]->request_type() == permissions::RequestType::kRegisterProtocolHandler) {
++        const custom_handlers::ProtocolHandler& handler =
++            static_cast<custom_handlers::RegisterProtocolHandlerPermissionRequest*>(delegate->Requests()[0].get())
++                ->handler();
++        fields.Set("scheme", handler.protocol());
++        fields.Set("handler_url", handler.url().spec());
++      }
 +    } else {
 +      fields.Set("permissions", std::move(names));
 +    }
@@ -11879,7 +12481,7 @@ index 5d7ca90415..1a7f6718e1 100644
  };
  
  std::unique_ptr<permissions::PermissionPrompt> CreateNativePermissionPrompt(
-@@ -424,34 +680,230 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
+@@ -424,34 +690,230 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
    return std::make_unique<NativePermissionPrompt>(shell->window(), delegate);
  }
  
@@ -12128,7 +12730,7 @@ index 5d7ca90415..1a7f6718e1 100644
  }  // namespace
  
  class NativeLoginHandler : public LoginHandler {
-@@ -466,6 +918,9 @@ void ShowNativeInstallDialog(std::unique_ptr<ExtensionInstallPromptShowParams> p
+@@ -466,6 +928,9 @@ void ShowNativeInstallDialog(std::unique_ptr<ExtensionInstallPromptShowParams> p
    bool BuildViewImpl(const std::u16string& authority,
                       const std::u16string& explanation,
                       LoginModelData*) override {
@@ -12138,7 +12740,7 @@ index 5d7ca90415..1a7f6718e1 100644
      NSWindow* window = web_contents() ? web_contents()->GetTopLevelNativeWindow().GetNativeNSWindow() : nil;
      if (!window) return false;
      alert_ = [[NSAlert alloc] init];
-@@ -500,13 +955,52 @@ bool BuildViewImpl(const std::u16string& authority,
+@@ -500,13 +965,52 @@ bool BuildViewImpl(const std::u16string& authority,
    void CloseDialog() override {
      if (window_ && alert_.window.sheetParent) [window_ endSheet:alert_.window returnCode:NSModalResponseAbort];
      alert_ = nil;
@@ -12191,7 +12793,7 @@ index 5d7ca90415..1a7f6718e1 100644
  };
  
  // Owns itself: deleted when its sheet ends.
-@@ -520,6 +1014,13 @@ void CloseDialog() override {
+@@ -520,6 +1024,13 @@ void CloseDialog() override {
                   content::JavaScriptDialogManager::DialogClosedCallback callback,
                   base::OnceClosure force_closed)
        : callback_(std::move(callback)), force_closed_(std::move(force_closed)) {
@@ -12205,7 +12807,7 @@ index 5d7ca90415..1a7f6718e1 100644
      alert_ = [[NSAlert alloc] init];
      alert_.messageText = base::SysUTF16ToNSString(title);
      alert_.informativeText = base::SysUTF16ToNSString(message);
-@@ -558,6 +1059,8 @@ void CloseDialogWithoutCallback() override {
+@@ -558,6 +1069,8 @@ void CloseDialogWithoutCallback() override {
  
   private:
    void Finish(bool ok) {
@@ -12214,7 +12816,7 @@ index 5d7ca90415..1a7f6718e1 100644
      force_closed_.Reset();
      if (callback_) std::move(callback_).Run(ok, ok ? GetUserInput() : std::u16string());
      base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE, this);
-@@ -567,6 +1070,7 @@ void Finish(bool ok) {
+@@ -567,6 +1080,7 @@ void Finish(bool ok) {
    NSAlert* __strong alert_;
    NSTextField* __strong field_ = nil;
    NSWindow* __strong window_ = nil;
@@ -12222,7 +12824,7 @@ index 5d7ca90415..1a7f6718e1 100644
    base::WeakPtrFactory<NativeJsDialog> weak_{this};
  };
  
-@@ -589,10 +1093,28 @@ void Finish(bool ok) {
+@@ -589,10 +1103,28 @@ void Finish(bool ok) {
        ->GetWeakPtr();
  }
  
@@ -13750,6 +14352,38 @@ index 433fa42fa4..db8969bb41 100644
  
    InitializeNetworkTimeTracker();
  
+diff --git a/chrome/browser/chrome_browser_interface_binders.cc b/chrome/browser/chrome_browser_interface_binders.cc
+index 65c1bcc84f..061bd40902 100644
+--- a/chrome/browser/chrome_browser_interface_binders.cc
++++ b/chrome/browser/chrome_browser_interface_binders.cc
+@@ -3,7 +3,13 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/chrome_browser_interface_binders.h"
++#include "build/build_config.h"
+ #include "chrome/browser/agens_adblock/cosmetic_service.h"  // SugiyamaLabs
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/agens/bridge/ui_ops.h"          // SugiyamaLabs
++#include "chrome/browser/agens/embed/agens_embedded.h"  // SugiyamaLabs
++#include "third_party/blink/public/mojom/choosers/date_time_chooser.mojom.h"
++#endif
+ 
+ #include <utility>
+ 
+@@ -433,6 +439,13 @@ void PopulateChromeFrameBinders(
+   agens_adblock::PrimeCosmeticLists();  // SugiyamaLabs
+   map->Add<agens_adblock::mojom::CosmeticFilter>(
+       &agens_adblock::BindCosmeticFilter);
++#if BUILDFLAG(IS_MAC)
++  // SugiyamaLabs: embedded, the host draws an <input>'s date and time pickers.
++  if (agens::IsEmbedded()) {
++    map->Add<blink::mojom::DateTimeChooser>(
++        &agens::bridge::ui_ask::BindDateTimeChooser);
++  }
++#endif
+   map->Add<glic::mojom::WebClientHandler>(&glic::BindGlicWebClientHandler);
+   // Defense in depth: privileged capability interfaces are not even registered
+   // for a frame outside a privileged process, so a non-PWC frame cannot
 diff --git a/chrome/browser/chrome_browser_main_mac.mm b/chrome/browser/chrome_browser_main_mac.mm
 index b269f1610a..ae3535a3d1 100644
 --- a/chrome/browser/chrome_browser_main_mac.mm
@@ -14131,27 +14765,37 @@ index e21d9c7cee..e736c68919 100644
    // content::WebContentsObserver
    void RenderFrameCreated(content::RenderFrameHost* frame_host) override;
 diff --git a/chrome/browser/external_protocol/external_protocol_handler.cc b/chrome/browser/external_protocol/external_protocol_handler.cc
-index 17fd6fa6fd..9e38b70db8 100644
+index 17fd6fa6fd..ed63d67557 100644
 --- a/chrome/browser/external_protocol/external_protocol_handler.cc
 +++ b/chrome/browser/external_protocol/external_protocol_handler.cc
-@@ -24,6 +24,9 @@
+@@ -24,6 +24,10 @@
  #include "base/strings/string_util.h"
  #include "base/types/optional_util.h"
  #include "build/build_config.h"
 +#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/agens/bridge/ui_ops.h"        // agens
 +#include "chrome/browser/agens/embed/agens_embedded.h"  // agens
 +#endif
  #include "chrome/browser/browser_process.h"
  #include "chrome/browser/external_protocol/auto_launch_protocols_policy_handler.h"
  #include "chrome/browser/external_protocol/constants.h"
-@@ -549,6 +552,13 @@ void ExternalProtocolHandler::LaunchUrl(
+@@ -549,6 +553,22 @@ void ExternalProtocolHandler::LaunchUrl(
    BlockState block_state = GetBlockStateWithDelegate(
        escaped_url.GetScheme(), base::OptionalToPtr(initiating_origin),
        g_external_protocol_handler_delegate, profile);
 +#if BUILDFLAG(IS_MAC)
-+  // agens: embedded (agens_embedded.h), its dialog would sit on a window nobody sees and the
-+  // other app would come to the front: mailto: and custom schemes are refused (console error).
++  // agens: embedded (agens_embedded.h), its dialog would sit on a window nobody
++  // sees: the host gets view.external and opens it (its own app for mailto:,
++  // the system for the rest). Refused (console error) when the host does not
++  // take it: an agent works the tab, no host, an address too long.
 +  if (agens::IsEmbedded()) {
++    if (block_state != BLOCK &&
++        agens::bridge::ui_ask::LaunchExternal(web_contents, escaped_url,
++                                              initiating_origin,
++                                              has_user_gesture)) {
++      g_accept_requests = false;
++      return;
++    }
 +    block_state = BLOCK;
 +  }
 +#endif
@@ -14210,34 +14854,83 @@ index b02065efac..428a514d60 100644
    // Create or update |pip_window_controller_| for the current WebContents, if
    // it is a WebContents based video PIP.
    if (!pip_window_controller_ ||
+diff --git a/chrome/browser/printing/print_view_manager.cc b/chrome/browser/printing/print_view_manager.cc
+index 25f1aa604a..f997148b37 100644
+--- a/chrome/browser/printing/print_view_manager.cc
++++ b/chrome/browser/printing/print_view_manager.cc
+@@ -16,6 +16,8 @@
+ #include "base/no_destructor.h"
+ #include "base/observer_list.h"
+ #include "build/build_config.h"
++#include "chrome/browser/agens/bridge/ui_ops.h"        // agens
++#include "chrome/browser/agens/embed/agens_embedded.h"  // agens
+ #include "chrome/browser/bad_message.h"
+ #include "chrome/browser/printing/print_preview_dialog_controller.h"
+ #include "chrome/browser/printing/printer_query.h"
+@@ -305,6 +307,16 @@ void PrintViewManager::ClearPrintPreviewSettings() {
+ void PrintViewManager::RejectPrintPreviewRequestIfRestricted(
+     content::GlobalRenderFrameHostId rfh_id,
+     base::OnceCallback<void(bool should_proceed)> callback) {
++#if BUILDFLAG(IS_MAC)
++  // agens: embedded (agens_embedded.h), the preview would sit on a window
++  // nobody sees and hold window.print(): the host gets ui.ask print (and prints
++  // with view.print_pdf), and the page goes on at once.
++  if (agens::IsEmbedded()) {
++    agens::bridge::ui_ask::AskPrint(web_contents());
++    std::move(callback).Run(/*should_proceed=*/false);
++    return;
++  }
++#endif
+ #if BUILDFLAG(IS_CHROMEOS)
+   // Don't print DLP restricted content on Chrome OS, and use `callback`
+   // directly since scanning isn't an option.
 diff --git a/chrome/browser/printing/print_view_manager_base.cc b/chrome/browser/printing/print_view_manager_base.cc
-index b673362fe8..b7cf349171 100644
+index b673362fe8..567e2c1ccf 100644
 --- a/chrome/browser/printing/print_view_manager_base.cc
 +++ b/chrome/browser/printing/print_view_manager_base.cc
-@@ -24,6 +24,9 @@
+@@ -24,6 +24,10 @@
  #include "base/timer/timer.h"
  #include "build/build_config.h"
  #include "build/chromeos_buildflags.h"
 +#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/agens/bridge/ui_ops.h"        // agens
 +#include "chrome/browser/agens/embed/agens_embedded.h"  // agens
 +#endif
  #include "chrome/browser/bad_message.h"
  #include "chrome/browser/browser_process.h"
  #include "chrome/browser/printing/print_error_dialog.h"
-@@ -739,6 +742,13 @@ void PrintViewManagerBase::SystemDialogCancelled() {
- #endif
- 
- bool PrintViewManagerBase::GetPrintingEnabledBooleanPref() const {
+@@ -555,6 +559,16 @@ void PrintViewManagerBase::DidPrintDocument(
+ void PrintViewManagerBase::GetDefaultPrintSettings(
+     GetDefaultPrintSettingsCallback callback) {
+   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 +#if BUILDFLAG(IS_MAC)
-+  // agens: embedded (agens_embedded.h), print preview would wait on a window nobody sees (and
-+  // hold window.print()), the system dialog would go on screen: printing is off.
++  // agens: embedded (agens_embedded.h), the system print dialog would follow on
++  // screen (this build prints without preview): the host gets ui.ask print and
++  // prints with view.print_pdf, and window.print() returns at once.
 +  if (agens::IsEmbedded()) {
-+    return false;
++    agens::bridge::ui_ask::AskPrint(web_contents());
++    GetDefaultPrintSettingsReply(std::move(callback), nullptr);
++    return;
 +  }
 +#endif
-   return printing_enabled_.GetValue();
- }
+   if (!GetPrintingEnabledBooleanPref()) {
+     GetDefaultPrintSettingsReply(std::move(callback), nullptr);
+     return;
+@@ -621,6 +635,14 @@ void PrintViewManagerBase::IsPrintingEnabled(
+ void PrintViewManagerBase::ScriptedPrint(mojom::ScriptedPrintParamsPtr params,
+                                          ScriptedPrintCallback callback) {
+   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++#if BUILDFLAG(IS_MAC)
++  // agens: embedded (agens_embedded.h), the system print panel would go on
++  // screen; GetDefaultPrintSettings() sent the host its ui.ask already.
++  if (agens::IsEmbedded()) {
++    std::move(callback).Run(nullptr);
++    return;
++  }
++#endif
  
+   content::RenderFrameHost& render_frame_host = CurrentTargetFrame();
+   if (!render_frame_host.IsActive()) {
 diff --git a/chrome/browser/ui/autofill/chrome_autofill_client.cc b/chrome/browser/ui/autofill/chrome_autofill_client.cc
 index 242bac51ca..9b04fdb59f 100644
 --- a/chrome/browser/ui/autofill/chrome_autofill_client.cc
@@ -14377,7 +15070,7 @@ index be4b9162d1..60b6aca238 100644
      Profile* profile =
          Profile::FromBrowserContext(source_contents_->GetBrowserContext());
 diff --git a/chrome/browser/ui/webui_browser/BUILD.gn b/chrome/browser/ui/webui_browser/BUILD.gn
-index 98ada3ff32..700ed64f5c 100644
+index 98ada3ff32..bc2d5cda39 100644
 --- a/chrome/browser/ui/webui_browser/BUILD.gn
 +++ b/chrome/browser/ui/webui_browser/BUILD.gn
 @@ -81,9 +81,14 @@ source_set("impl") {
@@ -14434,7 +15127,16 @@ index 98ada3ff32..700ed64f5c 100644
    }
  
    deps = [
-@@ -173,6 +203,8 @@ source_set("impl") {
+@@ -152,6 +182,8 @@ source_set("impl") {
+     "//chrome/browser/ui/toolbar",
+     "//chrome/browser/ui/views:bubble_anchor_util_views",
+     "//components/webui/about",  # agens: the credits page parses its about_credits.html
++    "//components/printing/browser/print_to_pdf",  # agens: view.print_pdf
++    "//components/webauthn/json",  # agens: passkey requests go to the host as JSON
+     "//chrome/browser/ui/views:find_bar_views",
+     "//chrome/browser/ui/views:tab_search_bubble_host",
+     "//chrome/browser/ui/views/exclusive_access",
+@@ -173,6 +205,8 @@ source_set("impl") {
      "//components/browser_apis/ui_controllers/toolbar:mojom",
      "//components/guest_contents/browser",
      "//components/input",
@@ -14443,7 +15145,7 @@ index 98ada3ff32..700ed64f5c 100644
      "//components/omnibox/browser:vector_icons",
      "//components/sharing_message",
      "//components/surface_embed/browser",
-@@ -192,6 +224,7 @@ source_set("impl") {
+@@ -192,6 +226,7 @@ source_set("impl") {
  
    if (is_mac) {
      deps += [
@@ -14563,6 +15265,20 @@ index 90bf5efff4..a7b289c0ed 100644
  
  #if BUILDFLAG(IS_CHROMEOS)
    // Web Apps should not be installed to the ChromeOS system profiles except the
+diff --git a/components/custom_handlers/register_protocol_handler_permission_request.h b/components/custom_handlers/register_protocol_handler_permission_request.h
+index cb50181f8d..d95817b275 100644
+--- a/components/custom_handlers/register_protocol_handler_permission_request.h
++++ b/components/custom_handlers/register_protocol_handler_permission_request.h
+@@ -41,6 +41,9 @@ class RegisterProtocolHandlerPermissionRequest
+ 
+   ~RegisterProtocolHandlerPermissionRequest() override;
+ 
++  // agens: what the embedded engine's host shows (scheme and handler URL).
++  const ProtocolHandler& handler() const { return handler_; }
++
+  private:
+   // permissions::PermissionRequest:
+   bool IsDuplicateOf(
 diff --git a/components/remote_cocoa/app_shim/native_widget_mac_nswindow.h b/components/remote_cocoa/app_shim/native_widget_mac_nswindow.h
 index 48f47bf3ee..45af66eaf6 100644
 --- a/components/remote_cocoa/app_shim/native_widget_mac_nswindow.h
@@ -14700,17 +15416,19 @@ index 901df80d0d..ecbb202f98 100644
        "renderer_host/render_widget_host_view_mac_editcommand_helper.h",
 diff --git a/content/browser/renderer_host/agens_embed_internal_mac.h b/content/browser/renderer_host/agens_embed_internal_mac.h
 new file mode 100644
-index 0000000000..20f175db82
+index 0000000000..13c75c9ba3
 --- /dev/null
 +++ b/content/browser/renderer_host/agens_embed_internal_mac.h
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,55 @@
 +// Copyright 2026 SugiyamaLabs.
 +#ifndef CONTENT_BROWSER_RENDERER_HOST_AGENS_EMBED_INTERNAL_MAC_H_
 +#define CONTENT_BROWSER_RENDERER_HOST_AGENS_EMBED_INTERNAL_MAC_H_
 +
++#include <memory>
 +#include <vector>
 +
 +#include "mojo/public/cpp/bindings/pending_remote.h"
++#include "third_party/blink/public/mojom/choosers/color_chooser.mojom.h"
 +#include "third_party/blink/public/mojom/choosers/popup_menu.mojom.h"
 +
 +namespace gfx {
@@ -14723,8 +15441,10 @@ index 0000000000..20f175db82
 +
 +namespace content {
 +
++class ColorChooser;
 +class RenderFrameHost;
 +class RenderWidgetHostViewMac;
++class WebAuthenticationRequestProxy;
 +class WebContents;
 +struct ContextMenuParams;
 +
@@ -14743,15 +15463,24 @@ index 0000000000..20f175db82
 +void AgensEmbedCursorChanged(RenderWidgetHostViewMac* view, const ui::Cursor& cursor);
 +void AgensEmbedCaretChanged(RenderWidgetHostViewMac* view, const gfx::Rect& caret);
 +
++// From WebContentsImpl::OpenColorChooser: the other app's chooser, or null.
++std::unique_ptr<ColorChooser> AgensEmbedOpenColorChooser(
++    WebContents* contents,
++    SkColor color,
++    const std::vector<blink::mojom::ColorSuggestionPtr>& suggestions,
++    const gfx::Rect& anchor);
++// From AuthenticatorCommonImpl: the other app's passkey proxy for the frame, or null.
++WebAuthenticationRequestProxy* AgensEmbedWebAuthnProxy(RenderFrameHost* frame);
++
 +}  // namespace content
 +
 +#endif  // CONTENT_BROWSER_RENDERER_HOST_AGENS_EMBED_INTERNAL_MAC_H_
 diff --git a/content/browser/renderer_host/agens_embed_mac.mm b/content/browser/renderer_host/agens_embed_mac.mm
 new file mode 100644
-index 0000000000..7c913a3a06
+index 0000000000..de3bd93acd
 --- /dev/null
 +++ b/content/browser/renderer_host/agens_embed_mac.mm
-@@ -0,0 +1,369 @@
+@@ -0,0 +1,402 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "content/public/browser/agens_embed_mac.h"
@@ -14769,6 +15498,7 @@ index 0000000000..7c913a3a06
 +#include "content/browser/renderer_host/render_widget_host_view_mac.h"
 +#include "content/browser/renderer_host/render_widget_host_view_mac_editcommand_helper.h"
 +#include "content/browser/web_contents/web_contents_impl.h"
++#include "content/public/browser/color_chooser.h"
 +#include "content/public/browser/context_menu_params.h"
 +#include "content/public/browser/render_view_host.h"
 +#include "mojo/public/cpp/bindings/remote.h"
@@ -14810,6 +15540,14 @@ index 0000000000..7c913a3a06
 +AgensEmbedCaretCallback& CaretCallback() {
 +  static base::NoDestructor<AgensEmbedCaretCallback> callback;
 +  return *callback;
++}
++AgensEmbedColorChooserHandler& ColorChooserHandler() {
++  static base::NoDestructor<AgensEmbedColorChooserHandler> handler;
++  return *handler;
++}
++AgensEmbedWebAuthnHandler& WebAuthnHandler() {
++  static base::NoDestructor<AgensEmbedWebAuthnHandler> handler;
++  return *handler;
 +}
 +
 +// A page's main view only: popups have no RenderViewHost.
@@ -14883,6 +15621,30 @@ index 0000000000..7c913a3a06
 +void SetAgensEmbedCursorCallbacks(AgensEmbedCursorCallback cursor, AgensEmbedCaretCallback caret) {
 +  CursorCallback() = std::move(cursor);
 +  CaretCallback() = std::move(caret);
++}
++
++void SetAgensEmbedColorChooser(AgensEmbedColorChooserHandler handler) {
++  ColorChooserHandler() = std::move(handler);
++}
++void SetAgensEmbedWebAuthn(AgensEmbedWebAuthnHandler handler) {
++  WebAuthnHandler() = std::move(handler);
++}
++
++std::unique_ptr<ColorChooser> AgensEmbedOpenColorChooser(
++    WebContents* contents,
++    SkColor color,
++    const std::vector<blink::mojom::ColorSuggestionPtr>& suggestions,
++    const gfx::Rect& anchor) {
++  if (!ColorChooserHandler()) return nullptr;
++  std::vector<std::pair<SkColor, std::string>> list;
++  for (const blink::mojom::ColorSuggestionPtr& suggestion : suggestions) {
++    list.emplace_back(suggestion->color, suggestion->label);
++  }
++  return ColorChooserHandler().Run(contents, color, std::move(list), anchor);
++}
++
++WebAuthenticationRequestProxy* AgensEmbedWebAuthnProxy(RenderFrameHost* frame) {
++  return WebAuthnHandler() && frame ? WebAuthnHandler().Run(frame) : nullptr;
 +}
 +
 +bool AgensEmbedShowPopupMenu(WebContents* contents,
@@ -15164,6 +15926,119 @@ index f99512647a..c62a206753 100644
  
    // The rest of the code is to support the Mac Zoom feature tracking the
    // text caret; we can skip it if that feature is not currently enabled.
+diff --git a/content/browser/web_contents/web_contents_impl.cc b/content/browser/web_contents/web_contents_impl.cc
+index 8bb8eeb4d3..cf27536099 100644
+--- a/content/browser/web_contents/web_contents_impl.cc
++++ b/content/browser/web_contents/web_contents_impl.cc
+@@ -274,6 +274,10 @@
+ #include "content/browser/date_time_chooser/date_time_chooser.h"
+ #endif
+ 
++#if BUILDFLAG(IS_MAC)
++#include "content/browser/renderer_host/agens_embed_internal_mac.h"  // agens
++#endif
++
+ #if BUILDFLAG(ENABLE_VR)
+ #include "content/browser/xr/service/xr_runtime_manager_impl.h"
+ #endif
+@@ -967,7 +971,7 @@ class WebContentsImpl::WebContentsDestructionObserver
+   raw_ptr<WebContentsImpl> owner_;
+ };
+ 
+-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
++#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS) || BUILDFLAG(IS_MAC)  // agens
+ // TODO(sreejakshetty): Make |WebContentsImpl::ColorChooserHolder| per-frame
+ // instead of WebContents-owned.
+ // WebContentsImpl::ColorChooserHolder -----------------------------------------
+@@ -1571,7 +1575,7 @@ WebContentsImpl::~WebContentsImpl() {
+   // Clear out any JavaScript state.
+   CancelDialogManagerDialogs(/*reset_state=*/true);
+ 
+-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
++#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS) || BUILDFLAG(IS_MAC)  // agens
+   color_chooser_holder_.reset();
+ #endif
+   find_request_manager_.reset();
+@@ -7760,7 +7764,7 @@ WebContents* WebContentsImpl::GetFirstWebContentsInLiveOriginalOpenerChain() {
+                     : nullptr;
+ }
+ 
+-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
++#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS) || BUILDFLAG(IS_MAC)  // agens
+ void WebContentsImpl::DidChooseColorInColorChooser(SkColor color) {
+   OPTIONAL_TRACE_EVENT1("content",
+                         "WebContentsImpl::DidChooseColorInColorChooser",
+@@ -9269,12 +9273,13 @@ void WebContentsImpl::OnColorChooserFactoryReceiver(
+   color_chooser_factory_receivers_.Add(this, std::move(receiver));
+ }
+ 
+-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
++#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS) || BUILDFLAG(IS_MAC)  // agens
+ void WebContentsImpl::OpenColorChooser(
+     mojo::PendingReceiver<blink::mojom::ColorChooser> chooser_receiver,
+     mojo::PendingRemote<blink::mojom::ColorChooserClient> client,
+     SkColor color,
+-    std::vector<blink::mojom::ColorSuggestionPtr> suggestions) {
++    std::vector<blink::mojom::ColorSuggestionPtr> suggestions,
++    const gfx::Rect& anchor) {
+   OPTIONAL_TRACE_EVENT0("content", "WebContentsImpl::OpenColorChooser");
+   // Create `color_chooser_holder_` before calling OpenColorChooser since
+   // OpenColorChooser may callback with results.
+@@ -9282,9 +9287,16 @@ void WebContentsImpl::OpenColorChooser(
+   color_chooser_holder_ = std::make_unique<ColorChooserHolder>(
+       std::move(chooser_receiver), std::move(client));
+ 
++#if BUILDFLAG(IS_MAC)
++  // agens: only the embedded engine opens it (no page popups there): its host
++  // draws the chooser.
++  auto new_color_chooser =
++      AgensEmbedOpenColorChooser(this, color, suggestions, anchor);
++#else
+   auto new_color_chooser =
+       delegate_ ? delegate_->OpenColorChooser(this, color, suggestions)
+                 : nullptr;
++#endif
+   if (color_chooser_holder_ && new_color_chooser) {
+     color_chooser_holder_->SetChooser(std::move(new_color_chooser));
+   } else if (new_color_chooser) {
+diff --git a/content/browser/web_contents/web_contents_impl.h b/content/browser/web_contents/web_contents_impl.h
+index fef4c035f6..8ebe656b6b 100644
+--- a/content/browser/web_contents/web_contents_impl.h
++++ b/content/browser/web_contents/web_contents_impl.h
+@@ -602,7 +602,7 @@ class CONTENT_EXPORT WebContentsImpl
+   RenderFrameHostImpl* GetOpener() override;
+   bool HasLiveOriginalOpenerChain() override;
+   WebContents* GetFirstWebContentsInLiveOriginalOpenerChain() override;
+-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
++#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS) || BUILDFLAG(IS_MAC)  // agens
+   void DidChooseColorInColorChooser(SkColor color) override;
+   void DidEndColorChooser() override;
+ #endif
+@@ -1318,12 +1318,13 @@ class CONTENT_EXPORT WebContentsImpl
+   // blink::mojom::ColorChooserFactory ---------------------------------------
+   void OnColorChooserFactoryReceiver(
+       mojo::PendingReceiver<blink::mojom::ColorChooserFactory> receiver);
+-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
++#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS) || BUILDFLAG(IS_MAC)  // agens
+   void OpenColorChooser(
+       mojo::PendingReceiver<blink::mojom::ColorChooser> chooser,
+       mojo::PendingRemote<blink::mojom::ColorChooserClient> client,
+       SkColor color,
+-      std::vector<blink::mojom::ColorSuggestionPtr> suggestions) override;
++      std::vector<blink::mojom::ColorSuggestionPtr> suggestions,
++      const gfx::Rect& anchor) override;
+ #endif
+ 
+   // FrameTree::Delegate -------------------------------------------------------
+@@ -2607,7 +2608,7 @@ class CONTENT_EXPORT WebContentsImpl
+   gfx::Size device_emulation_size_;
+   gfx::Size view_size_before_emulation_;
+ 
+-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
++#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS) || BUILDFLAG(IS_MAC)  // agens
+   // Holds information about a current color chooser dialog, if one is visible.
+   class ColorChooserHolder;
+   std::unique_ptr<ColorChooserHolder> color_chooser_holder_;
 diff --git a/content/browser/web_contents/web_contents_view_mac.mm b/content/browser/web_contents/web_contents_view_mac.mm
 index f6a08d0394..71a23276b5 100644
 --- a/content/browser/web_contents/web_contents_view_mac.mm
@@ -15193,6 +16068,52 @@ index f6a08d0394..71a23276b5 100644
    popup_menu_helper_ = std::make_unique<PopupMenuHelper>(
        this, render_frame_host, std::move(popup_client));
    popup_menu_helper_->ShowPopupMenu(bounds, item_font_size, selected_item,
+diff --git a/content/browser/webauth/authenticator_common_impl.cc b/content/browser/webauth/authenticator_common_impl.cc
+index e94288d2fb..40c189b080 100644
+--- a/content/browser/webauth/authenticator_common_impl.cc
++++ b/content/browser/webauth/authenticator_common_impl.cc
+@@ -66,6 +66,9 @@
+ #include "content/public/browser/render_frame_host.h"
+ #include "content/public/browser/web_authentication_delegate.h"
+ #include "content/public/browser/web_authentication_request_proxy.h"
++#if BUILDFLAG(IS_MAC)
++#include "content/browser/renderer_host/agens_embed_internal_mac.h"  // agens
++#endif
+ #include "content/public/browser/web_contents.h"
+ #include "content/public/browser/webauth_request_security_checker.h"
+ #include "content/public/common/content_client.h"
+@@ -3050,9 +3053,14 @@ void AuthenticatorCommonImpl::CancelWithStatus(
+     return;
+   }
+   if (req_state_->pending_proxied_request_id) {
+-    WebAuthenticationRequestProxy* proxy =
+-        GetWebAuthenticationDelegate()->MaybeGetRequestProxy(
+-            GetBrowserContext(), req_state_->caller_origin);
++    WebAuthenticationRequestProxy* proxy = nullptr;
++#if BUILDFLAG(IS_MAC)
++    proxy = AgensEmbedWebAuthnProxy(GetRenderFrameHost());  // agens: where it went
++#endif
++    if (!proxy) {
++      proxy = GetWebAuthenticationDelegate()->MaybeGetRequestProxy(
++          GetBrowserContext(), req_state_->caller_origin);
++    }
+     // As long as `req_state_->pending_proxied_request_id` is set, there should
+     // be an active request proxy. Deactivation of the proxy would have invoked
+     // `OnMakeCredentialProxyResponse()` or `OnGetAssertionProxyResponse()`, and
+@@ -3555,6 +3563,13 @@ AuthenticatorCommonImpl::GetWebAuthnRequestProxyIfActive(
+   if (!enable_request_proxy_api_ || virtual_authenticator_active) {
+     return nullptr;
+   }
++#if BUILDFLAG(IS_MAC)
++  // agens: the embedded engine's host answers instead of Chromium's dialogs.
++  if (WebAuthenticationRequestProxy* proxy =
++          AgensEmbedWebAuthnProxy(GetRenderFrameHost())) {
++    return proxy;
++  }
++#endif
+   return GetWebAuthenticationDelegate()->MaybeGetRequestProxy(
+       GetBrowserContext(), caller_origin);
+ }
 diff --git a/content/public/browser/BUILD.gn b/content/public/browser/BUILD.gn
 index 790d665707..19074293c5 100644
 --- a/content/public/browser/BUILD.gn
@@ -15207,10 +16128,10 @@ index 790d665707..19074293c5 100644
        "native_event_processor_observer_mac.h",
 diff --git a/content/public/browser/agens_embed_mac.h b/content/public/browser/agens_embed_mac.h
 new file mode 100644
-index 0000000000..cc1b4b2304
+index 0000000000..1161c9312a
 --- /dev/null
 +++ b/content/public/browser/agens_embed_mac.h
-@@ -0,0 +1,107 @@
+@@ -0,0 +1,124 @@
 +// Copyright 2026 SugiyamaLabs.
 +// A tab shown by another app (docs/poc/embed.md). The tab is not in any window here: its
 +// compositor draws into a CAContext, the other app hosts that context in a CALayerHost and sends
@@ -15221,13 +16142,16 @@ index 0000000000..cc1b4b2304
 +
 +#include <stdint.h>
 +
++#include <memory>
 +#include <optional>
 +#include <string>
++#include <utility>
 +#include <vector>
 +
 +#include "base/containers/span.h"
 +#include "base/functional/callback.h"
 +#include "content/common/content_export.h"
++#include "third_party/skia/include/core/SkColor.h"
 +#include "ui/base/cursor/mojom/cursor_type.mojom-shared.h"
 +#include "ui/gfx/geometry/point_f.h"
 +#include "ui/gfx/geometry/rect.h"
@@ -15235,7 +16159,9 @@ index 0000000000..cc1b4b2304
 +
 +namespace content {
 +
++class ColorChooser;
 +class RenderFrameHost;
++class WebAuthenticationRequestProxy;
 +class WebContents;
 +struct ContextMenuParams;
 +
@@ -15314,10 +16240,35 @@ index 0000000000..cc1b4b2304
 +using AgensEmbedCursorCallback = base::RepeatingCallback<void(WebContents*, ui::mojom::CursorType)>;
 +using AgensEmbedCaretCallback = base::RepeatingCallback<void(WebContents*, const gfx::Rect&)>;
 +CONTENT_EXPORT void SetAgensEmbedCursorCallbacks(AgensEmbedCursorCallback cursor, AgensEmbedCaretCallback caret);
++// An <input type=color>'s chooser: `anchor` is the field in screen DIPs (as the page's renderer
++// sees the screen), `suggestions` its <datalist> as color and label. Returns the open chooser
++// (End() closes it, the page went first) or null when there is nothing to show; the choice goes
++// to WebContents::DidChooseColorInColorChooser, the end to DidEndColorChooser. Unset: none opens.
++using AgensEmbedColorChooserHandler = base::RepeatingCallback<std::unique_ptr<ColorChooser>(
++    WebContents*, SkColor color, std::vector<std::pair<SkColor, std::string>> suggestions, const gfx::Rect& anchor)>;
++CONTENT_EXPORT void SetAgensEmbedColorChooser(AgensEmbedColorChooserHandler handler);
++// Who answers a frame's passkey requests (navigator.credentials.create/get, and whether a
++// platform authenticator exists) instead of Chromium's own dialogs; null keeps Chromium's. A
++// DevTools virtual authenticator still comes first. The proxy must outlive its requests.
++using AgensEmbedWebAuthnHandler = base::RepeatingCallback<WebAuthenticationRequestProxy*(RenderFrameHost*)>;
++CONTENT_EXPORT void SetAgensEmbedWebAuthn(AgensEmbedWebAuthnHandler handler);
 +
 +}  // namespace content
 +
 +#endif  // CONTENT_PUBLIC_BROWSER_AGENS_EMBED_MAC_H_
+diff --git a/content/public/browser/web_contents.h b/content/public/browser/web_contents.h
+index b8e6892a5b..c7ff744a40 100644
+--- a/content/public/browser/web_contents.h
++++ b/content/public/browser/web_contents.h
+@@ -1389,7 +1389,7 @@ class WebContents : public PageNavigator, public base::SupportsUserData {
+   // Returns false if the request is no longer valid, otherwise true.
+   virtual bool GotResponseToKeyboardLockRequest(bool allowed) = 0;
+ 
+-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
++#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS) || BUILDFLAG(IS_MAC)  // agens
+   // Called when the user has selected a color in the color chooser.
+   virtual void DidChooseColorInColorChooser(SkColor color) = 0;
+ 
 diff --git a/extensions/common/mojom/frame.mojom b/extensions/common/mojom/frame.mojom
 index a2e2ed87e5..0cf886199c 100644
 --- a/extensions/common/mojom/frame.mojom
@@ -15437,6 +16388,154 @@ index 4c032bed25..31b48badfc 100644
  
    return Inject(scripts_run_info);
  }
+diff --git a/third_party/blink/public/mojom/choosers/color_chooser.mojom b/third_party/blink/public/mojom/choosers/color_chooser.mojom
+index ebf7ea0de3..f1201cb012 100644
+--- a/third_party/blink/public/mojom/choosers/color_chooser.mojom
++++ b/third_party/blink/public/mojom/choosers/color_chooser.mojom
+@@ -4,6 +4,8 @@
+ 
+ module blink.mojom;
+ 
++import "ui/gfx/geometry/mojom/geometry.mojom";
++
+ struct ColorSuggestion {
+   uint32 color;
+   string label;
+@@ -14,11 +16,14 @@ interface ColorChooserFactory {
+   // OpenColorChooser opens a platform specific color chooser in the browser.
+   // Enabled on platfoms that opt in using the "is_using_open_color_chooser"
+   // enabled_features option.
+-  [EnableIf=is_android|is_ios]
++  // agens: also on Mac, where only the embedded engine uses it (its host draws the chooser
++  // next to `anchor`, the field in screen DIPs).
++  [EnableIf=is_android|is_ios|is_mac]
+   OpenColorChooser(pending_receiver<ColorChooser> chooser,
+                    pending_remote<ColorChooserClient> client,
+                    uint32 color,
+-                   array<ColorSuggestion> suggestions);
++                   array<ColorSuggestion> suggestions,
++                   gfx.mojom.Rect anchor);
+ };
+ 
+ interface ColorChooser {
+diff --git a/third_party/blink/public/mojom/choosers/date_time_chooser.mojom b/third_party/blink/public/mojom/choosers/date_time_chooser.mojom
+index 75c80e29b9..aa79f02f2c 100644
+--- a/third_party/blink/public/mojom/choosers/date_time_chooser.mojom
++++ b/third_party/blink/public/mojom/choosers/date_time_chooser.mojom
+@@ -6,6 +6,7 @@ module blink.mojom;
+ 
+ import "mojo/public/mojom/base/string16.mojom";
+ import "ui/base/ime/mojom/ime_types.mojom";
++import "ui/gfx/geometry/mojom/geometry.mojom";
+ 
+ struct DateTimeSuggestion {
+   // The date/time value represented as a double.
+@@ -25,6 +26,8 @@ struct DateTimeDialogValue {
+   double maximum;
+   double step;
+   array<DateTimeSuggestion> suggestions;
++  // agens: the field, in screen DIPs (the embedded engine's host draws the picker next to it).
++  gfx.mojom.Rect anchor;
+ };
+ 
+ // Interface exposed by the browser to the renderer.
+diff --git a/third_party/blink/renderer/core/html/forms/color_chooser_ui_controller.cc b/third_party/blink/renderer/core/html/forms/color_chooser_ui_controller.cc
+index 055551b3ef..cd5901f3fa 100644
+--- a/third_party/blink/renderer/core/html/forms/color_chooser_ui_controller.cc
++++ b/third_party/blink/renderer/core/html/forms/color_chooser_ui_controller.cc
+@@ -28,7 +28,9 @@
+ #include "build/build_config.h"
+ #include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
+ #include "third_party/blink/public/web/web_local_frame_client.h"
++#include "third_party/blink/renderer/core/dom/element.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
++#include "third_party/blink/renderer/core/frame/local_frame_view.h"
+ #include "third_party/blink/renderer/core/frame/web_local_frame_impl.h"
+ #include "third_party/blink/renderer/core/html/forms/color_chooser_client.h"
+ #include "third_party/blink/renderer/platform/graphics/color.h"
+@@ -57,7 +59,7 @@ void ColorChooserUIController::Trace(Visitor* visitor) const {
+ }
+ 
+ void ColorChooserUIController::OpenUI() {
+-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
++#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS) || BUILDFLAG(IS_MAC)  // agens
+   OpenColorChooser();
+ #else
+   NOTREACHED()
+@@ -88,7 +90,7 @@ void ColorChooserUIController::DidChooseColor(uint32_t color) {
+   client_->DidChooseColor(Color::FromRGBA32(color));
+ }
+ 
+-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
++#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS) || BUILDFLAG(IS_MAC)  // agens
+ void ColorChooserUIController::OpenColorChooser() {
+   DCHECK(!chooser_);
+   scoped_refptr<base::SequencedTaskRunner> runner =
+@@ -99,7 +101,9 @@ void ColorChooserUIController::OpenColorChooser() {
+   color_chooser_factory_->OpenColorChooser(
+       chooser_.BindNewPipeAndPassReceiver(runner),
+       receiver_.BindNewPipeAndPassRemote(runner), client_->CurrentColor().Rgb(),
+-      client_->Suggestions());
++      client_->Suggestions(),
++      frame_->View()->FrameToScreen(
++          client_->OwnerElement().PixelSnappedBoundingBox()));
+   receiver_.set_disconnect_handler(BindOnce(
+       &ColorChooserUIController::EndChooser, WrapWeakPersistent(this)));
+ }
+diff --git a/third_party/blink/renderer/core/html/forms/color_chooser_ui_controller.h b/third_party/blink/renderer/core/html/forms/color_chooser_ui_controller.h
+index dcb3211524..778335b88a 100644
+--- a/third_party/blink/renderer/core/html/forms/color_chooser_ui_controller.h
++++ b/third_party/blink/renderer/core/html/forms/color_chooser_ui_controller.h
+@@ -64,7 +64,7 @@ class CORE_EXPORT ColorChooserUIController
+   void DidChooseColor(uint32_t color) final;
+ 
+  protected:
+-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
++#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS) || BUILDFLAG(IS_MAC)  // agens
+   void OpenColorChooser();
+ #endif
+   HeapMojoRemote<mojom::blink::ColorChooser> chooser_;
+diff --git a/third_party/blink/renderer/core/html/forms/external_date_time_chooser.cc b/third_party/blink/renderer/core/html/forms/external_date_time_chooser.cc
+index 9d079a1d71..7a8e2193a3 100644
+--- a/third_party/blink/renderer/core/html/forms/external_date_time_chooser.cc
++++ b/third_party/blink/renderer/core/html/forms/external_date_time_chooser.cc
+@@ -81,6 +81,7 @@ void ExternalDateTimeChooser::OpenDateTimeChooser(
+   date_time_dialog_value->minimum = parameters.minimum;
+   date_time_dialog_value->maximum = parameters.maximum;
+   date_time_dialog_value->step = parameters.step;
++  date_time_dialog_value->anchor = parameters.anchor_rect_in_screen;  // agens
+   for (const auto& suggestion : parameters.suggestions) {
+     date_time_dialog_value->suggestions.push_back(suggestion->Clone());
+   }
+diff --git a/third_party/blink/renderer/core/page/chrome_client_impl.cc b/third_party/blink/renderer/core/page/chrome_client_impl.cc
+index 8a9acc6dc7..5b13b71f9c 100644
+--- a/third_party/blink/renderer/core/page/chrome_client_impl.cc
++++ b/third_party/blink/renderer/core/page/chrome_client_impl.cc
+@@ -810,9 +810,11 @@ ColorChooser* ChromeClientImpl::OpenColorChooser(
+     controller = MakeGarbageCollected<ColorChooserPopupUIController>(
+         frame, this, chooser_client);
+   } else {
+-#if !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_IOS)
++#if !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_IOS) && !BUILDFLAG(IS_MAC)
+     NOTREACHED() << "Page popups should be enabled on all but Android or iOS";
+ #else
++    // agens: on Mac only the embedded engine turns page popups off: the browser
++    // (its host) draws the chooser.
+     controller =
+         MakeGarbageCollected<ColorChooserUIController>(frame, chooser_client);
+ #endif
+@@ -829,7 +831,10 @@ DateTimeChooser* ChromeClientImpl::OpenDateTimeChooser(
+   // Android does not support PagePopup, so we must always use the native
+   // picker.
+ #if !BUILDFLAG(IS_ANDROID)
+-  if (RuntimeEnabledFeatures::InputMultipleFieldsUIEnabled()) {
++  // agens: without page popups (the embedded engine) the fields stay inline
++  // and the picker is the browser's (its host draws it).
++  if (RuntimeEnabledFeatures::InputMultipleFieldsUIEnabled() &&
++      RuntimeEnabledFeatures::PagePopupEnabled()) {
+     return MakeGarbageCollected<DateTimeChooserImpl>(frame, picker_client,
+                                                      parameters);
+   }
 diff --git a/third_party/blink/renderer/modules/accessibility/ax_object.cc b/third_party/blink/renderer/modules/accessibility/ax_object.cc
 index 73333059ef..fac9314dda 100644
 --- a/third_party/blink/renderer/modules/accessibility/ax_object.cc

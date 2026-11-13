@@ -1,25 +1,37 @@
 <!doctype html><meta charset="utf-8"><title>Fuga (test)</title>
-<style>body{margin:0}button{position:absolute;left:40px;width:300px;height:80px}input{position:absolute;left:400px}</style>
-<button id="print" style="top:40px">Print</button>
-<button id="scheme" style="top:140px">Custom scheme and mailto</button>
-<button id="date" style="top:240px">Date picker</button>
-<button id="color" style="top:340px">Color picker</button>
-<input id="d" type="date" style="top:240px">
-<input id="k" type="color" style="top:340px">
+<style>body{margin:0}button{position:absolute;left:40px;width:300px;height:50px}input{position:absolute;left:400px;width:150px;height:30px}</style>
+<button id="print" style="top:20px">Print</button>
+<button id="scheme" style="top:80px">Next scheme</button>
+<button id="date" style="top:140px">Date picker</button>
+<button id="time" style="top:200px">Time picker</button>
+<button id="month" style="top:260px">Month picker</button>
+<button id="handler" style="top:320px">Protocol handler</button>
+<input id="d" type="date" min="2020-01-01" max="2030-12-31" style="top:140px">
+<input id="t" type="time" style="top:200px">
+<input id="m" type="month" style="top:260px">
+<input id="k" type="color" value="#336699" style="top:320px;width:60px;height:40px">
 <script>
 const say = t => { document.title = t; };
 const on = (id, f) => { document.getElementById(id).onclick = f; };
-// window.print() returns at once when printing is off; with print preview it would wait.
+// window.print() returns at once embedded: the host prints (view.print_pdf).
 on("print", () => { window.print(); say("print:returned"); });
+// One link per click: Chromium lets one external launch through per user gesture.
+const schemes = ["mailto:gate@example.invalid", "zoommtg://zoom.us/join?confno=1", "webcal://example.invalid/cal.ics"];
+let next = 0;
 on("scheme", () => {
-  for (const href of ["agens-gate-nope:x", "mailto:gate@example.invalid"]) {
-    const a = document.createElement("a"); a.href = href; a.click();
-  }
-  setTimeout(() => say("scheme:alive"), 500);
+  const a = document.createElement("a"); a.href = schemes[next++ % schemes.length]; a.click();
+  setTimeout(() => say("scheme:alive:" + next), 300);
 });
-const picker = (id, input) => () => {
-  try { document.getElementById(input).showPicker(); say(id + ":asked"); } catch (e) { say(id + ":" + e.name); }
+const picker = input => () => {
+  const field = document.getElementById(input);
+  try { field.focus(); field.showPicker(); } catch (e) { say(input + ":" + e.name); }
 };
-on("date", picker("date", "d"));
-on("color", picker("color", "k"));
+on("date", picker("d"));
+on("time", picker("t"));
+on("month", picker("m"));
+for (const id of ["d", "t", "m", "k"]) document.getElementById(id).addEventListener("input", e => say(id + "=" + e.target.value));
+on("handler", () => {
+  try { navigator.registerProtocolHandler("web+gate", location.origin + "/other?u=%s"); say("handler:asked"); }
+  catch (e) { say("handler:" + e.name); }
+});
 </script>

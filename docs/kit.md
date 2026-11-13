@@ -117,17 +117,18 @@ engine.onApproval = { request in
 Duas opções que o app liga e desliga, guardadas pelo motor entre um início e outro ([protocolo.md](protocolo.md), `host.settings`):
 
 ```swift
-let now = try await engine.settings(siteRequests: true, agentExtensions: false)   // muda e devolve as duas
+let now = try await engine.settings(siteRequests: true, agentExtensions: false)   // muda e devolve todas
 let read = try await engine.settings()                                            // só lê
 ```
 
 - `siteRequests` (padrão `false`): sites podem pedir localização e notificações (chega como `ui.ask` de permissão); desligado, ficam bloqueadas em todo ato.
 - `agentExtensions` (padrão `true`): as extensões agem nas abas que um agente controla. Desligado, ficam fora delas (o que ainda passa está em protocolo.md).
+- `webauthnPlatform` (padrão `false`): o app sabe criar e usar passkeys deste Mac; é o que o site vê em `isUserVerifyingPlatformAuthenticatorAvailable()`. Ligue só quando o app responde `.webauthn` com credenciais de verdade (veja "Passkeys", abaixo).
 - Motor mais antigo lança `BrowserError` com `code` `unknown_op`; ali vale o padrão.
 
 ## Menus, diálogos e pedidos da página
 
-O que a página abre por conta própria chega como `ui.ask` ([protocolo.md](protocolo.md), "Passo 5.3"): lista de `select`, botão direito, `alert`/`confirm`/`prompt`/`beforeunload`, escolher arquivo, login HTTP, permissão do site e instalar extensão.
+O que a página abre por conta própria chega como `ui.ask` ([protocolo.md](protocolo.md), "Passo 5.3"): lista de `select`, botão direito, `alert`/`confirm`/`prompt`/`beforeunload`, escolher arquivo, login HTTP, permissão do site, instalar extensão, seletor de data e de cor, imprimir e passkey.
 
 O kit já desenha tudo em AppKit, em português. Ligue com uma linha:
 
@@ -138,9 +139,12 @@ engine.onUIRequest = { [weak engine] in await engine?.presentDefaultUI($0) ?? .c
 - `select` e botão direito: `NSMenu` no ponto da página.
 - Diálogo, login, permissão e extensão: folha na janela da vista. Login tem usuário e senha; permissão tem **Permitir**, **Não permitir** e **Lembrar**; extensão tem a escolha de atos (veja "Extensões", abaixo).
 - Arquivo: `NSOpenPanel` ou `NSSavePanel`. Não filtra pelo `accept`.
+- Data, hora, mês e cor: popover junto do campo, com `NSDatePicker` (em UTC, para mostrar o dia do campo) ou `NSColorWell`, e **Cancelar** / **OK**. A resposta já vem no passo e na faixa do campo.
+- Imprimir: pede o PDF (`printPDF`), abre no PDFKit e mostra a folha de impressão do sistema (`NSPrintOperation`) na janela da vista; no fim responde cancelar, que é o "terminei" do protocolo.
+- Passkey: responde `NotAllowedError` por enquanto (o site segue pelo caminho sem passkey). Veja "Passkeys", abaixo.
 - Sem a vista da aba (ou sem janela, nas folhas), a resposta é cancelar.
 
-Para desenhar do seu jeito, troque o handler. `request.kind` diz o que é (`.select`, `.contextMenu`, `.dialog`, `.file`, `.auth`, `.permission`, `.extension`), cada um com os campos do protocolo. Devolva o `UIAnswer` do mesmo kind, ou `.cancel`. Dá para chamar `presentDefaultUI` só nos kinds que você não quer desenhar.
+Para desenhar do seu jeito, troque o handler. `request.kind` diz o que é (`.select`, `.contextMenu`, `.dialog`, `.file`, `.auth`, `.permission`, `.extension`, `.date`, `.color`, `.print`, `.webauthn`), cada um com os campos do protocolo. Devolva o `UIAnswer` do mesmo kind, ou `.cancel`. Dá para chamar `presentDefaultUI` só nos kinds que você não quer desenhar.
 
 ```swift
 engine.onUIRequest = { [weak engine] request in
@@ -165,6 +169,34 @@ engine.onContextMenuItem = { item, request in
   if item.id == "ask" { Task { askBot((try? await engine.connection?.selection(tab))?.text ?? menu.selection ?? "") } }
 }
 ```
+
+**Data e cor.** `DatePicker` traz `type` (`.date`, `.datetimeLocal`, `.month`, `.week`, `.time`), `value` (nil com o campo vazio), `min`, `max`, `step`, `suggestions` e `anchor` (a caixa do campo em pontos da vista, do canto de cima). Os números estão na unidade do campo (a do `valueAsNumber`): milissegundos desde 1970-01-01 UTC, desde a meia-noite em `.time`, meses desde janeiro de 1970 em `.month`; `DatePicker.date(_:)` e `DatePicker.value(_:)` convertem para `Date` e de volta. Responda `.date(value:)`; fora da faixa ou do passo o motor recusa. `ColorPicker` traz `value` (`"#rrggbb"`), `suggestions` e `anchor`; responda `.color(hex: "#1a2b3c")`.
+
+**Links para outro app.** `mailto:`, `webcal:`, `zoommtg:` e afins chegam em `engine.onExternalLink` (`ExternalLink`: `tab`, `url`, `scheme`, `origin`, `gesture`); o motor não abre nada. Sem handler, o kit abre com `NSWorkspace.shared.open(url)`, o app do sistema para o esquema. Um app com e-mail e agenda próprios faz:
+
+```swift
+engine.onExternalLink = { link in
+  switch link.scheme {
+  case "mailto": composeMail(link.url)
+  case "webcal": subscribeCalendar(link.url)
+  default: NSWorkspace.shared.open(link.url)
+  }
+}
+```
+
+`navigator.registerProtocolHandler` chega como `.permission` com `permissions == ["protocol_handler"]`, `scheme` e `handlerURL`.
+
+**Imprimir.** `window.print()` chega como `.print(PrintRequest)` (`title`, `url`) e a página segue na hora. O PDF é do app pedir, a qualquer momento, também sem `ui.ask`:
+
+```swift
+var options = PrintOptions(landscape: true, pageRanges: "1-2")
+options.margins = (top: 0.4, bottom: 0.4, left: 0.4, right: 0.4)   // polegadas
+let pdf = try await engine.connection?.printPDF(tab: tab, options: options)   // url, bytes, pages
+```
+
+O arquivo é do motor (`0600`) e vale até o próximo `printPDF` da aba, a aba fechar ou o app desconectar: leia ou copie logo. Responda o `.print` com `.cancel` quando terminar.
+
+**Passkeys.** `navigator.credentials.create`/`get` chegam como `.webauthn(PasskeyRequest)`: `type` (`.create`/`.get`), `origin`, `crossOrigin` e `request`, as opções do site em JSON do WebAuthn. Responda `.webauthn(response:)` com a credencial em JSON (`RegistrationResponseJSON` ou `AuthenticationResponseJSON`), ou `.webauthnError("InvalidStateError")` e afins; `.cancel` é `NotAllowedError`. O caminho de verdade é o app chamar `ASAuthorizationController` (iCloud Keychain, celular por QR, chave de segurança, na folha do sistema) e devolver o resultado nesse JSON; isso pede o direito de navegador para passkeys da Apple, que ainda não foi liberado. Até lá, `presentDefaultUI` responde `NotAllowedError`.
 
 **Cursor e IME.** A vista troca o cursor do mouse pelo `view.cursor` (o que ela não conhece vira seta) e põe a janela de candidatos do IME no lugar que `view.caret` diz.
 

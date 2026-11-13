@@ -16,11 +16,11 @@ EMBUTIDO_INSPECT="${EMBUTIDO_INSPECT:-0}"
 export APP OUT GATES REPO SITE_PORT EMBUTIDO_INSPECT
 
 SITE_PID=""
-if ! curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/janela"; then   # /janela: the newest page, so an older site is not reused
+if ! curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/passkey"; then   # /passkey: the newest page, so an older site is not reused
   python3 "$REPO/tools/sites-teste/serve.py" "$SITE_PORT" >"$OUT/site.log" 2>&1 &
   SITE_PID=$!
-  for _ in $(seq 20); do curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/janela" && break; sleep 0.25; done
-  curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/janela" || { echo "FAIL: the test site has no /janela (an older serve.py on port $SITE_PORT? try SITE_PORT=8766)"; exit 1; }
+  for _ in $(seq 20); do curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/passkey" && break; sleep 0.25; done
+  curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/passkey" || { echo "FAIL: the test site has no /passkey (an older serve.py on port $SITE_PORT? try SITE_PORT=8766)"; exit 1; }
 fi
 
 # winids lists every normal window of a pid, also the ones off screen; this one counts only those
@@ -101,8 +101,8 @@ for line in {list(lines)!r}:
     return [json.loads(l) if l.startswith("{") else {"ok": False, "error": l} for l in out if l]
 
 class Conn:
-    def __init__(self):
-        self.s = socket.socket(socket.AF_UNIX); self.s.connect(SOCK)
+    def __init__(self, sock=None):
+        self.s = socket.socket(socket.AF_UNIX); self.s.connect(sock or SOCK)
         self.buf, self.n, self.events, self.replies = b"", 0, [], {}
     def send_raw(self, obj):
         self.s.sendall((json.dumps(obj) + "\n").encode())
@@ -1013,29 +1013,289 @@ check("Document picture-in-picture is not available (documentPictureInPicture mi
 no_window("Document picture-in-picture")
 c.ask("view.close", tab=t)
 
-# window.print(), a custom scheme and mailto:, the date and color pickers: no window, the page goes on.
+# Step 5.3, items 10 to 13: what used to be a window of its own is the host's to draw. Every result is
+# read from the tab's title; no window may show at any step.
+def ms(*ymd_hm):  # ms since 1970-01-01 UTC, as a date field's valueAsNumber
+    import datetime
+    return int(datetime.datetime(*ymd_hm, tzinfo=datetime.timezone.utc).timestamp() * 1000)
+def near(a, x, y, slack=40):  # the ask's anchor is about the field's box in the view (x, y its top left)
+    return bool(a) and abs(a.get("x", -999) - x) <= slack and abs(a.get("y", -999) - y) <= slack and a.get("width", 0) > 0
+def external(tab, timeout=5):
+    return c.event(lambda e: e["event"] == "view.external" and e.get("tab") == tab, timeout)
+
 t = ui_tab("/fuga"); titled(t, "Fuga (test)")
-click(t, 190, 80)
-check("window.print() returns at once (printing is off)", titled(t, "print:returned"))
-no_window("window.print()")
-click(t, 190, 180)
-check("a custom-scheme link and mailto: launch nothing, the page goes on", titled(t, "scheme:alive"))
-no_window("a custom-scheme link and mailto:")
-check("the scheme links did not navigate the tab",
-      next((x for x in c.ask("view.tabs", ato=ato).get("tabs", []) if x.get("tab") == t), {}).get("url", "").startswith(SITE + "/fuga"))
-# Focused, as the host's view is when the person clicks: an unfocused page gets no picker popup at all.
+# Focused, as the host's view is when the person clicks.
 c.send_raw({"op": "view.focus", "tab": t, "on": True})
-click(t, 190, 280)
-check("the date picker is asked for", titled(t, "date:asked"))
+
+# 10. date, time and month pickers: ui.ask date, the answer goes into the field.
+click(t, 190, 165)
+a = ui_ask("date", t, 10)
+check("date: showPicker() on a focused field asks the host (type date, min, max, step, suggestions)",
+      bool(a) and a.get("type") == "date" and a.get("min") == ms(2020, 1, 1) and a.get("max") == ms(2030, 12, 31)
+      and a.get("step") == 86400000 and a.get("suggestions") == [] and "value" not in a, a)
+check("date: the ask is anchored at the field (x, y, width, height in the view)", near(a, 400, 140), a)
+check("date: a value past max is bad_request", err(answer(a, value=ms(2031, 1, 1))) == "bad_request")
+check("date: a value between two days (bad step) is bad_request", err(answer(a, value=ms(2026, 11, 12) + 1000)) == "bad_request")
+check("date: a value that is not a number is bad_request", err(answer(a, value="2026-11-12")) == "bad_request")
+check("date: ui.answer with a day in range", err(answer(a, value=ms(2026, 11, 12))) == "ok")
+check("date: the field got the day", titled(t, "d=2026-11-12"))
 no_window("the date picker")
-click(t, 190, 380)
-check("the color picker is asked for", titled(t, "color:asked"))
-no_window("the color picker")
+click(t, 190, 225)
+a = ui_ask("date", t, 10)
+check("time: ui.ask date with type time (ms since midnight, step 60000)",
+      bool(a) and a.get("type") == "time" and a.get("step") == 60000, a)
+check("time: ui.answer 13:45", err(answer(a, value=(13 * 60 + 45) * 60000)) == "ok" and titled(t, "t=13:45"))
+click(t, 190, 285)
+a = ui_ask("date", t, 10)
+check("month: ui.ask date with type month (months since 1970-01)", bool(a) and a.get("type") == "month" and a.get("step") == 1, a)
+check("month: ui.answer 2026-11", err(answer(a, value=(2026 - 1970) * 12 + 10)) == "ok" and titled(t, "m=2026-11"))
+click(t, 190, 165)
+a = ui_ask("date", t, 10)
+check("date: the next ask carries the field's value", bool(a) and a.get("value") == ms(2026, 11, 12), a)
+check("date: cancel leaves the field as it was",
+      err(answer(a, cancel=True)) == "ok" and tab_event(t, lambda e: e.get("title", "").startswith("d="), 2) is None)
+no_window("the time and month pickers")
+
+# 10. color: a click on the field asks the host; "#rrggbb" back.
+click(t, 430, 340)
+a = ui_ask("color", t, 10)
+check("color: a click on the field asks the host (value, suggestions, anchor)",
+      bool(a) and a.get("value") == "#336699" and a.get("suggestions") == [] and near(a, 400, 320), a)
+check("color: a value that is not #rrggbb is bad_request", err(answer(a, value="red")) == "bad_request")
+check("color: ui.answer #1a2b3c", err(answer(a, value="#1a2b3c")) == "ok" and titled(t, "k=#1a2b3c"))
+no_window("the color chooser")
+
+# 11. links to other apps: view.external, one per click (Chromium's flood guard), the tab stays.
+got = []
+for _ in range(3):
+    click(t, 190, 105)
+    got.append(external(t))
+check("external: mailto:, zoommtg: and webcal: clicks reach the host as view.external",
+      [(e or {}).get("scheme") for e in got] == ["mailto", "zoommtg", "webcal"], got)
+e = got[0] or {}
+check("external: view.external carries url, origin and gesture",
+      e.get("url") == "mailto:gate@example.invalid" and e.get("origin") == SITE and e.get("gesture") is True, e)
+check("external: the page goes on and the tab did not navigate", titled(t, "scheme:alive:3")
+      and next((x for x in c.ask("view.tabs", ato=ato).get("tabs", []) if x.get("tab") == t), {}).get("url", "").startswith(SITE + "/fuga"))
+no_window("links to other apps")
+
+# 11. navigator.registerProtocolHandler: a permission the host answers.
+click(t, 190, 345)
+a = ui_ask("permission", t, 10)
+check("registerProtocolHandler: ui.ask permission protocol_handler with scheme and handler_url",
+      bool(a) and a.get("permission") == "protocol_handler" and a.get("scheme") == "web+gate"
+      and a.get("handler_url") == SITE + "/other?u=%s" and a.get("origin") == SITE, a)
+check("registerProtocolHandler: ui.answer deny", err(answer(a, allow=False)) == "ok")
+
+# 12. window.print(): ui.ask print, and the host prints with view.print_pdf.
+click(t, 190, 45)
+a = ui_ask("print", t, 10)
+check("print: window.print() asks the host (the tab's title now, url) and returns at once",
+      bool(a) and a.get("title") == "handler:asked" and a.get("url") == SITE + "/fuga" and titled(t, "print:returned"), a)
+check("print: an answer other than cancel is bad_request", err(answer(a, accept=True)) == "bad_request")
+def pdf_info(path):  # (mode, starts with %PDF, page count, first MediaBox (w, h)) of a PDF on disk
+    data = open(path, "rb").read()
+    box = re.search(rb"/MediaBox\s*\[\s*[\d.]+\s+[\d.]+\s+([\d.]+)\s+([\d.]+)", data)
+    return (os.stat(path).st_mode & 0o777, data[:4] == b"%PDF", len(re.findall(rb"/Type\s*/Page(?![a-zA-Z])", data)),
+            (float(box.group(1)), float(box.group(2))) if box else None)
+r = c.ask("view.print_pdf", tab=t, timeout=60)   # right after the print ask: not "printing in progress"
+info = pdf_info(r["path"]) if r.get("ok") and os.path.exists(r.get("path", "")) else None
+check("print: view.print_pdf right after window.print() writes a PDF (0600, %PDF, bytes, pages)",
+      bool(info) and info[0] == 0o600 and info[1] and r.get("bytes") == os.path.getsize(r["path"]) and r.get("pages") == info[2] == 1,
+      (r, info))
+check("print: the PDF lives under the engine's data dir, print/<tab>/",
+      os.path.realpath(r.get("path", "")).startswith(os.path.realpath(profile) + "/print/" + t + "/"), r.get("path"))
+check("print: ui.answer cancel (the host is done)", err(answer(a, cancel=True)) == "ok")
+check("view.print_pdf with a value of the wrong type is bad_request", err(c.ask("view.print_pdf", tab=t, landscape="yes")) == "bad_request")
+check("view.print_pdf with margins that are not numbers is bad_request",
+      err(c.ask("view.print_pdf", tab=t, margins={"top": "1cm"})) == "bad_request")
+check("view.print_pdf on an unknown tab is not_found", err(c.ask("view.print_pdf", tab="v999999")) == "not_found")
+check("view.print_pdf from a connection that is not the host is unauthorized", err(c2.ask("view.print_pdf", tab=t)) == "unauthorized")
+no_window("window.print() and view.print_pdf")
 c.ask("view.close", tab=t)
+
+t = ui_tab("/imprimir"); titled(t, "Imprimir (test)")
+r = c.ask("view.print_pdf", tab=t, timeout=60)
+first = r.get("path", "")
+info = pdf_info(first) if r.get("ok") and os.path.exists(first) else None
+check("print_pdf: three forced pages give pages 3, portrait", bool(info) and r.get("pages") == info[2] == 3 and info[3][0] < info[3][1], (r, info))
+r = c.ask("view.print_pdf", tab=t, landscape=True, page_ranges="1-2", background=True, scale=0.8,
+          margins={"top": 0.4, "bottom": 0.4, "left": 0.4, "right": 0.4}, timeout=60)
+info = pdf_info(r["path"]) if r.get("ok") and os.path.exists(r.get("path", "")) else None
+check("print_pdf: landscape and page_ranges 1-2 give two wide pages (the next call replaces the file)",
+      bool(info) and r.get("pages") == 2 and info[3][0] > info[3][1] and r.get("path") == first, (r, info))
+check("print_pdf: a page range past the end is bad_request", err(c.ask("view.print_pdf", tab=t, page_ranges="7-9", timeout=60)) == "bad_request")
+c.ask("view.close", tab=t)
+for _ in range(20):
+    if not os.path.exists(first): break
+    time.sleep(0.25)
+check("print_pdf: closing the tab removes its PDF", bool(first) and not os.path.exists(first) and not os.path.exists(os.path.dirname(first)), first)
+no_window("view.print_pdf")
+
+# 13. passkeys: ui.ask webauthn with the request's JSON; the host's canned answer or error reaches the page.
+import hashlib
+def b64u(b): return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+def cbor(v):  # just what an attestation object needs, keys in CTAP2 canonical order
+    def head(major, n):
+        if n < 24: return bytes([major << 5 | n])
+        for size, code in ((1, 24), (2, 25), (4, 26), (8, 27)):
+            if n < 1 << (8 * size): return bytes([major << 5 | code]) + n.to_bytes(size, "big")
+    if isinstance(v, int): return head(0, v) if v >= 0 else head(1, -1 - v)
+    if isinstance(v, bytes): return head(2, len(v)) + v
+    if isinstance(v, str): return head(3, len(v.encode())) + v.encode()
+    if isinstance(v, dict):
+        items = sorted((cbor(k), cbor(x)) for k, x in v.items())
+        items.sort(key=lambda kv: len(kv[0]))
+        return head(5, len(v)) + b"".join(k + x for k, x in items)
+PASSKEY = f"http://localhost:{PORT}"
+# The P-256 generator point: a public key on the curve, no crypto library needed.
+GX = bytes.fromhex("6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296")
+GY = bytes.fromhex("4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5")
+CRED = b"gate-credential-1"
+def created(challenge):
+    auth = hashlib.sha256(b"localhost").digest() + b"\x45" + bytes(4) + bytes(16) + len(CRED).to_bytes(2, "big") + CRED \
+        + cbor({1: 2, 3: -7, -1: 1, -2: GX, -3: GY})
+    client = json.dumps({"type": "webauthn.create", "challenge": challenge, "origin": PASSKEY}).encode()
+    spki = bytes.fromhex("3059301306072a8648ce3d020106082a8648ce3d030107034200") + b"\x04" + GX + GY
+    return {"id": b64u(CRED), "rawId": b64u(CRED), "type": "public-key", "authenticatorAttachment": "platform",
+            "response": {"clientDataJSON": b64u(client), "attestationObject": b64u(cbor({"fmt": "none", "attStmt": {}, "authData": auth})),
+                         "authenticatorData": b64u(auth), "publicKey": b64u(spki), "publicKeyAlgorithm": -7, "transports": ["internal"]},
+            "clientExtensionResults": {}}
+def asserted(challenge):
+    client = json.dumps({"type": "webauthn.get", "challenge": challenge, "origin": PASSKEY}).encode()
+    return {"id": b64u(CRED), "rawId": b64u(CRED), "type": "public-key", "authenticatorAttachment": "platform",
+            "response": {"clientDataJSON": b64u(client), "authenticatorData": b64u(hashlib.sha256(b"localhost").digest() + b"\x05" + bytes(4)),
+                         "signature": b64u(b"\x30\x06\x02\x01\x01\x02\x01\x01"), "userHandle": b64u(b"gate-user")},
+            "clientExtensionResults": {}}
+t = c.ask("view.open", ato=ato, url=PASSKEY + "/passkey").get("tab", "")
+c.ask("view.attach", tab=t, width=600, height=400, scale=1)
+c.send_raw({"op": "view.focus", "tab": t, "on": True})
+check("webauthn: navigator.credentials exists embedded; isUVPAA false by default (host.settings webauthn_platform)", titled(t, "uvpaa:false"))
+click(t, 190, 80)
+a = ui_ask("webauthn", t, 10)
+req = (a or {}).get("request") or {}
+check("webauthn: create() asks the host (type, origin, cross_origin, request JSON)",
+      bool(a) and a.get("type") == "create" and a.get("origin") == PASSKEY and a.get("cross_origin") is False
+      and (req.get("rp") or {}).get("id") == "localhost" and req.get("challenge") == b64u(b"gate-challenge-0123456789abcdef"), a)
+check("webauthn: a response that is not a credential is bad_request", err(answer(a, response={"id": "x"})) == "bad_request")
+check("webauthn: an unknown error name is bad_request", err(answer(a, error="TypeError")) == "bad_request")
+check("webauthn: ui.answer with a canned credential", err(answer(a, response=created(req.get("challenge", "")))) == "ok")
+check("webauthn: the page got the credential", titled(t, "create:ok:" + b64u(CRED)))
+click(t, 190, 180)
+a = ui_ask("webauthn", t, 10)
+check("webauthn: get() asks the host (type get, rpId)",
+      bool(a) and a.get("type") == "get" and ((a.get("request") or {}).get("rpId")) == "localhost", a)
+check("webauthn: ui.answer with a canned assertion",
+      err(answer(a, response=asserted(((a or {}).get("request") or {}).get("challenge", "")))) == "ok" and titled(t, "get:ok:" + b64u(CRED)))
+click(t, 190, 80)
+a = ui_ask("webauthn", t, 10)
+check("webauthn: an error answer reaches the page as that DOMException",
+      err(answer(a, error="InvalidStateError")) == "ok" and titled(t, "create:InvalidStateError"))
+click(t, 190, 180)
+a = ui_ask("webauthn", t, 10)
+check("webauthn: cancel is NotAllowedError", err(answer(a, cancel=True)) == "ok" and titled(t, "get:NotAllowedError"))
+r = c.ask("host.settings", webauthn_platform=True)
+check("host.settings webauthn_platform true answers it", r.get("ok") and r.get("webauthn_platform") is True, r)
+drop(t); c.ask("view.reload", tab=t)
+check("webauthn: isUVPAA follows webauthn_platform", titled(t, "uvpaa:true"))
+c.ask("host.settings", webauthn_platform=False)
+no_window("passkeys")
+c.ask("view.close", tab=t)
+
+# The same on a tab an agent works: nothing reaches the host, the page sees it refused.
+ap = Conn()
+rid = ap.send("control.start", ato=ato, reason="gate system")
+x = c.event(lambda e: e["event"] == "approval.ask", 20)
+if x: c.ask("approval.answer", ask=x["ask"], answer="allow")
+if not (bool(x) and ap.wait(rid).get("ok")):
+    skip("pickers, links, print and passkeys on an agent's tab", "control.start did not go through")
+else:
+    def agent_click(at, name):
+        nodes = ap.ask("page.snapshot", tab=at).get("nodes", [])
+        n = next((n for n in nodes if n.get("role") == "button" and n.get("name") == name), {})
+        return ap.ask("page.click", tab=at, ref=n.get("ref", "none"))
+    def agent_tab(url, path):
+        at = ap.ask("tab.open", ato=ato, url=url).get("tab")
+        e = c.event(lambda e: e["event"] == "view.tab" and path in e.get("url", "") and isinstance(e.get("control"), dict) and not e.get("loading"), 10)
+        vt = (e or {}).get("tab")
+        if vt: c.ask("view.attach", tab=vt, width=600, height=400, scale=1)
+        return at, vt
+    at, vt = agent_tab(SITE + "/fuga", "/fuga")
+    agent_click(at, "Next scheme")
+    check("agent tab: a link to another app does not reach the host (refused)", bool(vt) and external(vt, 3) is None and titled(vt, "scheme:alive:1"))
+    agent_click(at, "Date picker")
+    check("agent tab: the date picker does not reach the host", ui_ask("date", vt, 3) is None)
+    agent_click(at, "Print")
+    check("agent tab: window.print() returns and does not reach the host", titled(vt, "print:returned") and ui_ask("print", vt, 2) is None)
+    check("agent tab: view.print_pdf is denied while the agent works", err(c.ask("view.print_pdf", tab=vt)) == "denied")
+    at, vt = agent_tab(PASSKEY + "/passkey", "/passkey")
+    agent_click(at, "Create passkey")
+    check("agent tab: a passkey request does not reach the host and the page sees NotAllowedError",
+          bool(vt) and titled(vt, "create:NotAllowedError") and ui_ask("webauthn", vt, 1) is None)
+    no_window("an agent's pickers, links, print and passkeys")
+    ap.ask("control.stop")
+
+# 13. DevTools' virtual authenticator comes first: a short second engine with a DevTools pipe (no
+# window, no port) turns one on for the tab; create() then never reaches the host.
+def virtual_authenticator():
+    profile3 = tempfile.mkdtemp(prefix="agens-w.", dir="/tmp")
+    to_engine, from_gate = os.pipe(); to_gate, from_engine = os.pipe()
+    log = open(f"{OUT}/engine-webauthn.log", "w")
+    # sh only sets fds 3 and 4 (what --remote-debugging-pipe reads and writes) and execs: the parent stays this process.
+    p = subprocess.Popen(["/bin/sh", "-c", f'exec "$0" "$@" 3<&{to_engine} 4>&{from_engine}', APP, f"--user-data-dir={profile3}",
+                          "--agens-embedded", "--remote-debugging-pipe", "--use-mock-keychain", "--no-first-run"],
+                         pass_fds=(to_engine, from_engine), stdout=log, stderr=log)
+    os.close(to_engine); os.close(from_engine)
+    try:
+        for _ in range(60):
+            if os.path.exists(profile3 + "/agens.sock"): break
+            time.sleep(0.5)
+        h = Conn(profile3 + "/agens.sock")
+        h.ask("host.attach")
+        pending, n = b"", [0]
+        def cdp(method, session=None, **params):
+            nonlocal pending
+            n[0] += 1
+            msg = {"id": n[0], "method": method, "params": params}
+            if session: msg["sessionId"] = session
+            os.write(from_gate, json.dumps(msg).encode() + b"\0")
+            end = time.time() + 15
+            while time.time() < end:
+                while b"\0" in pending:
+                    line, pending = pending.split(b"\0", 1)
+                    m = json.loads(line)
+                    if m.get("id") == n[0]: return m
+                r, _, _ = select.select([to_gate], [], [], 0.5)
+                if r: pending += os.read(to_gate, 1 << 20)
+            return {"error": "timeout"}
+        hato = (h.ask("atos.list").get("atos") or [{}])[0].get("id") or h.ask("atos.create", name="Gate").get("ato")
+        vt = h.ask("view.open", ato=hato, url=PASSKEY + "/passkey").get("tab", "")
+        h.ask("view.attach", tab=vt, width=600, height=400, scale=1)
+        h.event(lambda e: e["event"] == "view.tab" and e.get("tab") == vt and e.get("title", "").startswith("uvpaa:"), 15)
+        target = next((t for t in cdp("Target.getTargets").get("result", {}).get("targetInfos", [])
+                       if t.get("type") == "page" and "/passkey" in t.get("url", "")), {})
+        session = cdp("Target.attachToTarget", targetId=target.get("targetId", ""), flatten=True).get("result", {}).get("sessionId")
+        cdp("WebAuthn.enable", session)
+        added = cdp("WebAuthn.addVirtualAuthenticator", session, options={
+            "protocol": "ctap2", "transport": "internal", "hasResidentKey": True, "hasUserVerification": True, "isUserVerified": True})
+        for data in CLICK: h.send_raw({"op": "view.mouse", "tab": vt, "data": data, "x": 190, "y": 80})
+        got = h.event(lambda e: e["event"] == "view.tab" and e.get("tab") == vt and e.get("title", "").startswith("create:"), 15)
+        asked = h.event(lambda e: e["event"] == "ui.ask" and e.get("kind") == "webauthn", 1)
+        check("webauthn: with DevTools' virtual authenticator on, create() is its (a real credential) and never reaches the host",
+              bool(session) and "result" in added and (got or {}).get("title", "").startswith("create:ok:") and asked is None,
+              (bool(session), added, (got or {}).get("title"), asked))
+        on = subprocess.run([f"{OUT}/onscreen", str(p.pid)], capture_output=True, text=True).stdout.strip()
+        check("no window on screen after the virtual authenticator (second engine)", on == "0", f"on screen: {on}")
+    finally:
+        p.terminate()
+        try: p.wait(15)
+        except subprocess.TimeoutExpired: p.kill()
+        os.close(from_gate); os.close(to_gate)
+        subprocess.run(["rm", "-rf", profile3])
+virtual_authenticator()
+
 log = open(f"{OUT}/engine.log", errors="replace").read()
-pickers = log.count("agens: kept off screen (embedded): a page's picker popup")
-check("the date and color pickers got no window (the engine log names both)", pickers >= 2, f"{pickers} found")
-print(f"info: the engine log names {log.count('agens: kept off screen') - pickers} other window(s) kept off screen by the last net", flush=True)
+print(f"info: the engine log names {log.count('agens: kept off screen')} window(s) kept off screen by the last net", flush=True)
 
 # Step 5.5, docked: DevTools as a view the host lays out next to the page (no window at all).
 def devtools_event(tab, pred=lambda e: True, timeout=20):

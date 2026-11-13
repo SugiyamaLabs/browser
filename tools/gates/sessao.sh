@@ -7,21 +7,22 @@
 # The checks marked "[waits for session_read.cc]" need the real values. SESSAO_STUB=1 runs the gate
 # against a build whose session_read.cc is a stub: those lines are then expected to FAIL.
 source "$(dirname "$0")/lib.sh"
+export SITE_PORT="${SITE_PORT:-8765}"   # another port when 8765 belongs to someone else
 export APP OUT GATES REPO
 export SESSAO_STUB="${SESSAO_STUB:-0}"
 
 SITE_PID=""
-if ! curl -sf -o /dev/null http://127.0.0.1:8765/form; then
-  python3 "$REPO/tools/sites-teste/serve.py" >"$OUT/site.log" 2>&1 &
+if ! curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/form"; then
+  python3 "$REPO/tools/sites-teste/serve.py" "$SITE_PORT" >"$OUT/site.log" 2>&1 &
   SITE_PID=$!
-  for _ in $(seq 20); do curl -sf -o /dev/null http://127.0.0.1:8765/form && break; sleep 0.25; done
+  for _ in $(seq 20); do curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/form" && break; sleep 0.25; done
 fi
 
 cat >"$OUT/parent.py" <<'EOF'
 import json, os, select, socket, subprocess, tempfile, time
 APP, OUT = os.environ["APP"], os.environ["OUT"]
 STUB = os.environ.get("SESSAO_STUB", "0") == "1"
-SITE = "http://127.0.0.1:8765"
+SITE = "http://127.0.0.1:" + os.environ["SITE_PORT"]
 # The test site's fake values (tools/sites-teste/README.md).
 FAKE = {"d": "fake-d-cookie-456", "sid": "sid-fake-123", "token": "fake-local-token-789",
         "Authorization": "Bearer test-bearer-123"}
@@ -129,10 +130,10 @@ a = approval()
 title, detail = (a or {}).get("title", ""), (a or {}).get("detail", "")
 check("session asks the host (approval.ask)", bool(a), a)
 check("the title is 'Entregar ao <app>: <first item>…'",
-      title.startswith("Entregar ao ") and title.endswith(": cookie d de http://127.0.0.1:8765…"), title)
+      title.startswith("Entregar ao ") and title.endswith(f": cookie d de {SITE}…"), title)
 check("the detail has the reason, the ato and one line per item",
-      detail.startswith("Gate sessao\n\nDo ato ") and "\ncookie d de http://127.0.0.1:8765" in detail
-      and "\nlocalStorage token de http://127.0.0.1:8765" in detail, detail)
+      detail.startswith("Gate sessao\n\nDo ato ") and f"\ncookie d de {SITE}" in detail
+      and f"\nlocalStorage token de {SITE}" in detail, detail)
 check("no 'Permitir sempre' for an unsigned client", bool(a) and a.get("offer_always") is False, a)
 check("the session approval carries its parts (kind, ato, ato_name, reason, items; no shares_with)",
       bool(a) and a.get("kind") == "session" and a.get("ato") == ato and bool(a.get("ato_name"))

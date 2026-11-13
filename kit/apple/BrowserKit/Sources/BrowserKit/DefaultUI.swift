@@ -1,8 +1,10 @@
 import AppKit
+import PDFKit
 
 // The kit's own drawing of `ui.ask`, in plain AppKit with Portuguese text: menus at the page's
-// point, sheets on the view's window, the standard file panels. Cancelling the calling task (the
-// kit does it on `ui.cancel`) closes what is open.
+// point, sheets on the view's window, the standard file panels, popovers for the date and color
+// pickers, the system's print sheet. Cancelling the calling task (the kit does it on `ui.cancel`)
+// closes what is open.
 
 extension BrowserEngine {
   /// Draws the request and returns what the person chose. Use it as the handler,
@@ -103,7 +105,8 @@ extension BrowserEngine {
     case .permission(let permission):
       guard let window else { return .cancel }
       let alert = NSAlert()
-      let wants = permission.permissions.map { Self.permissionTexts[$0] ?? $0 }.joined(separator: " e ")
+      var wants = permission.permissions.map { Self.permissionTexts[$0] ?? $0 }.joined(separator: " e ")
+      if let scheme = permission.scheme { wants += " \(scheme):" }
       alert.messageText = "\(permission.origin) quer \(wants)"
       // The engine has no one-time grant for notifications: allowing is always kept.
       if permission.permissions.contains("notifications") { alert.informativeText = "Notificações: permitir fica valendo para este site, com ou sem Lembrar." }
@@ -130,7 +133,104 @@ extension BrowserEngine {
       Self.addCancel(alert, "Cancelar")
       guard await sheet(alert, on: window) == .alertFirstButtonReturn else { return .extension(allow: false) }
       return .extension(allow: true, atos: choice.chosen)
+
+    case .date(let picker):
+      guard let view else { return .cancel }
+      let control = Self.datePicker(picker)
+      guard await popover(control, anchor: picker.anchor, in: view) else { return .cancel }
+      return .date(value: Self.value(of: control, for: picker))
+
+    case .color(let picker):
+      guard let view else { return .cancel }
+      let well = NSColorWell(frame: NSRect(x: 0, y: 0, width: 64, height: 32))
+      well.color = Self.color(picker.value) ?? .black
+      guard await popover(well, anchor: picker.anchor, in: view) else { return .cancel }
+      return .color(hex: Self.hex(well.color))
+
+    case .print(let print):
+      // The page went on already; print what it shows now, then tell the engine it is done.
+      guard let window, let tab = request.tab, let connection,
+        let pdf = try? await connection.printPDF(tab: tab), let data = try? Data(contentsOf: pdf.url),
+        let document = PDFDocument(data: data),
+        let operation = document.printOperation(for: NSPrintInfo.shared, scalingMode: .pageScaleNone, autoRotate: true)
+      else { return .cancel }
+      operation.jobTitle = print.title.isEmpty ? print.url : print.title
+      let done = PrintDone()
+      await closing({ if let sheet = window.attachedSheet { window.endSheet(sheet) } }) {
+        await withCheckedContinuation { continuation in
+          done.continuation = continuation
+          operation.runModal(for: window, delegate: done, didRun: #selector(PrintDone.printOperationDidRun(_:success:contextInfo:)), contextInfo: nil)
+        }
+      }
+      return .cancel
+
+    case .webauthn:
+      // shortcut: no passkeys of its own yet; the system's (iCloud Keychain, a phone, a security key)
+      // come through ASAuthorizationController once Apple grants the browser entitlement. Until
+      // then the site sees NotAllowedError, as when the person closes the sheet.
+      return .webauthnError("NotAllowedError")
     }
+  }
+
+  /// The NSDatePicker for a `DatePicker`, in UTC so that the day shown is the field's.
+  static func datePicker(_ picker: DatePicker) -> NSDatePicker {
+    let control = NSDatePicker()
+    control.timeZone = TimeZone(identifier: "UTC")
+    control.calendar = Calendar(identifier: .gregorian)
+    control.datePickerStyle = picker.type == .time ? .textFieldAndStepper : .clockAndCalendar
+    control.datePickerElements = switch picker.type {
+    case .time: .hourMinute
+    case .datetimeLocal: [.yearMonthDay, .hourMinute]
+    default: .yearMonthDay
+    }
+    control.minDate = date(picker.min, for: picker.type)
+    control.maxDate = date(picker.max, for: picker.type)
+    control.dateValue = date(picker.value ?? picker.suggestions.first?.value ?? value(Date(), for: picker), for: picker.type)
+    control.sizeToFit()
+    return control
+  }
+
+  /// A field value as a Date (months count from January 1970, the rest from 1970-01-01 00:00 UTC).
+  static func date(_ value: Double, for type: DatePicker.FieldType) -> Date {
+    guard type == .month else { return DatePicker.date(value) }
+    var utc = Calendar(identifier: .gregorian)
+    utc.timeZone = TimeZone(identifier: "UTC")!
+    return utc.date(from: DateComponents(year: 1970, month: 1 + Int(value))) ?? DatePicker.date(0)
+  }
+
+  /// The chosen value in the field's unit, on its steps and in its range.
+  static func value(of control: NSDatePicker, for picker: DatePicker) -> Double {
+    value(control.dateValue, for: picker)
+  }
+
+  static func value(_ date: Date, for picker: DatePicker) -> Double {
+    var utc = Calendar(identifier: .gregorian)
+    utc.timeZone = TimeZone(identifier: "UTC")!
+    var raw: Double
+    switch picker.type {
+    case .month:
+      let parts = utc.dateComponents([.year, .month], from: date)
+      raw = Double((parts.year! - 1970) * 12 + parts.month! - 1)
+    case .time:
+      let parts = utc.dateComponents([.hour, .minute, .second], from: date)
+      raw = Double((parts.hour! * 60 + parts.minute!) * 60 + parts.second!) * 1000
+    default:
+      raw = DatePicker.value(date)
+    }
+    let steps = ((raw - picker.min) / picker.step).rounded(picker.type == .time || picker.type == .datetimeLocal ? .toNearestOrEven : .down)
+    return Swift.min(picker.max, Swift.max(picker.min, picker.min + steps * picker.step))
+  }
+
+  static func color(_ hex: String) -> NSColor? {
+    guard hex.count == 7, hex.first == "#", let rgb = UInt32(hex.dropFirst(), radix: 16) else { return nil }
+    return NSColor(
+      srgbRed: CGFloat(rgb >> 16 & 0xff) / 255, green: CGFloat(rgb >> 8 & 0xff) / 255, blue: CGFloat(rgb & 0xff) / 255, alpha: 1)
+  }
+
+  static func hex(_ color: NSColor) -> String {
+    let srgb = color.usingColorSpace(.sRGB) ?? .black
+    let parts = [srgb.redComponent, srgb.greenComponent, srgb.blueComponent].map { Int(($0 * 255).rounded()) }
+    return String(format: "#%02x%02x%02x", parts[0], parts[1], parts[2])
   }
 
   /// What an item of the right-click menu stands for; an item's tag is its index here.
@@ -198,7 +298,7 @@ extension BrowserEngine {
 
   private static let permissionTexts = [
     "camera": "usar a câmera", "microphone": "usar o microfone", "geolocation": "saber a sua localização",
-    "notifications": "mostrar notificações",
+    "notifications": "mostrar notificações", "protocol_handler": "abrir links",
   ]
 
   static func installSource(_ from: String) -> String {
@@ -232,6 +332,16 @@ extension BrowserEngine {
     await closing({ window.endSheet(alert.window, returnCode: .cancel) }) { await alert.beginSheetModal(for: window) }
   }
 
+  /// Shows `content` with "Cancelar" and "OK" in a popover next to `anchor` (from the view's top
+  /// left; the view's top middle without one). True for OK; Escape, a click elsewhere or a
+  /// cancelled task is false.
+  private func popover(_ content: NSView, anchor: CGRect?, in view: BrowserTabView) async -> Bool {
+    let presenter = PickerPopover(content: content)
+    let rect = anchor.map { NSRect(x: $0.minX, y: view.bounds.height - $0.maxY, width: Swift.max($0.width, 1), height: Swift.max($0.height, 1)) }
+      ?? NSRect(x: view.bounds.midX, y: view.bounds.maxY - 1, width: 1, height: 1)
+    return await closing({ presenter.finish(false) }) { await presenter.show(relativeTo: rect, of: view) }
+  }
+
   /// Pops the menu up at a point given from the view's top left; returns the chosen item's tag.
   private func popUp(_ menu: NSMenu, positioning: NSMenuItem?, at point: (x: Double, y: Double), in view: BrowserTabView) async -> Int? {
     let picker = MenuPicker()
@@ -257,6 +367,57 @@ extension BrowserEngine {
 private final class MenuPicker: NSObject {
   var picked: Int?
   @objc func pick(_ item: NSMenuItem) { picked = item.tag }
+}
+
+/// Ends the print sheet's wait.
+private final class PrintDone: NSObject {
+  var continuation: CheckedContinuation<Void, Never>?
+  @objc func printOperationDidRun(_ operation: NSPrintOperation, success: Bool, contextInfo: UnsafeMutableRawPointer?) {
+    continuation?.resume()
+    continuation = nil
+  }
+}
+
+/// A transient popover with a control and "Cancelar" / "OK": answers once.
+@MainActor private final class PickerPopover: NSObject, NSPopoverDelegate {
+  private let popover = NSPopover()
+  private var continuation: CheckedContinuation<Bool, Never>?
+
+  init(content: NSView) {
+    super.init()
+    let cancel = NSButton(title: "Cancelar", target: self, action: #selector(cancel(_:)))
+    cancel.keyEquivalent = "\u{1b}"
+    let ok = NSButton(title: "OK", target: self, action: #selector(ok(_:)))
+    ok.keyEquivalent = "\r"
+    let buttons = NSStackView(views: [cancel, ok])
+    let stack = NSStackView(views: [content, buttons])
+    stack.orientation = .vertical
+    stack.alignment = .trailing
+    stack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+    let controller = NSViewController()
+    controller.view = stack
+    popover.contentViewController = controller
+    popover.behavior = .transient
+    popover.delegate = self
+  }
+
+  func show(relativeTo rect: NSRect, of view: NSView) async -> Bool {
+    await withCheckedContinuation { continuation in
+      self.continuation = continuation
+      popover.show(relativeTo: rect, of: view, preferredEdge: .maxY)
+    }
+  }
+
+  func finish(_ chosen: Bool) {
+    guard let continuation else { return }
+    self.continuation = nil
+    popover.close()
+    continuation.resume(returning: chosen)
+  }
+
+  @objc private func ok(_ sender: Any?) { finish(true) }
+  @objc private func cancel(_ sender: Any?) { finish(false) }
+  func popoverDidClose(_ notification: Notification) { finish(false) }
 }
 
 /// The install sheet's "Onde instalar" (prototipos/extensoes.html #instalar): only the asking ato

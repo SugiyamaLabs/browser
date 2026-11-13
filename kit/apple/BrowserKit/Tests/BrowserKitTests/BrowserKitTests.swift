@@ -203,6 +203,7 @@ import Testing
       if request["op"] == "host.settings" {
         reply["site_requests"] = request["site_requests"]?.bool ?? false
         reply["agent_extensions"] = request["agent_extensions"]?.bool ?? true
+        reply["webauthn_platform"] = request["webauthn_platform"]?.bool ?? false
       }
       return [reply]
     }
@@ -212,9 +213,12 @@ import Testing
     #expect(set == HostSettings(siteRequests: true, agentExtensions: false))
     let read = try await engine.settings()
     #expect(read == HostSettings(siteRequests: false, agentExtensions: true))
+    let passkeys = try await engine.settings(webauthnPlatform: true)
+    #expect(passkeys == HostSettings(siteRequests: false, agentExtensions: true, webauthnPlatform: true))
     let sent = fake.received("host.settings")
-    #expect(sent.count == 2 && sent[0]["site_requests"] == true && sent[0]["agent_extensions"] == false)
-    #expect(sent[1]["site_requests"] == nil && sent[1]["agent_extensions"] == nil)
+    #expect(sent.count == 3 && sent[0]["site_requests"] == true && sent[0]["agent_extensions"] == false)
+    #expect(sent[1]["site_requests"] == nil && sent[1]["agent_extensions"] == nil && sent[1]["webauthn_platform"] == nil)
+    #expect(sent[2]["webauthn_platform"] == true && sent[2]["site_requests"] == nil)
   }
 }
 
@@ -245,6 +249,7 @@ import Testing
       case .auth: return .auth(username: "ana", password: "s3cr3t")
       case .permission: return .permission(allow: true, remember: true)
       case .extension: return .extension(allow: false)
+      case .date, .color, .print, .webauthn: return .cancel
       }
     }
     let events: [[String: Any]] = [
