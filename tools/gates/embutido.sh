@@ -771,6 +771,8 @@ else:
     c.ask("view.attach", tab=vt, width=800, height=600, scale=1)
     check("view.pick on a tab while its agent works is denied", err(c.ask("view.pick", tab=vt, on=True)) == "denied")
     check("view.inspect on a tab while its agent works is denied", err(c.ask("view.inspect", tab=vt, x=50, y=50)) == "denied")
+    check("view.inspect docked on a tab while its agent works is denied",
+          err(c.ask("view.inspect", tab=vt, dock="bottom")) == "denied")
     for data in events("rightdown", "rightup"):
         c.send_raw({"op": "view.mouse", "tab": vt, "data": data, "x": 300, "y": 300})
     check("agent tab: a right click reaches no menu, so no inspect", ui_ask("context_menu", vt, 3) is None)
@@ -1035,6 +1037,82 @@ pickers = log.count("agens: kept off screen (embedded): a page's picker popup")
 check("the date and color pickers got no window (the engine log names both)", pickers >= 2, f"{pickers} found")
 print(f"info: the engine log names {log.count('agens: kept off screen') - pickers} other window(s) kept off screen by the last net", flush=True)
 
+# Step 5.5, docked: DevTools as a view the host lays out next to the page (no window at all).
+def devtools_event(tab, pred=lambda e: True, timeout=20):
+    return c.event(lambda e: e["event"] == "view.devtools" and e.get("tab") == tab and pred(e), timeout)
+def devtools_closed(tab, timeout=20):
+    return c.event(lambda e: e["event"] == "view.devtools.closed" and e.get("tab") == tab, timeout)
+t = ui_tab("/popup"); titled(t, "Popup (test)")
+check("view.inspect with a dock that is not bottom, right or window is bad_request",
+      err(c.ask("view.inspect", tab=t, dock="left")) == "bad_request")
+check("view.devtools.dock on a tab with no DevTools is not_found", err(c.ask("view.devtools.dock", tab=t, dock="right")) == "not_found")
+check("view.devtools.close on a tab with no DevTools is not_found", err(c.ask("view.devtools.close", tab=t)) == "not_found")
+for data in events("rightdown", "rightup"):
+    c.send_raw({"op": "view.mouse", "tab": t, "data": data, "x": 190, "y": 100})
+a = ui_ask("context_menu", t, 10)
+check("context_menu: inspect with a dock that is not bottom, right or window is bad_request",
+      err(answer(a, action="inspect", dock="left")) == "bad_request")
+check("context_menu: inspect with dock bottom answers ok", err(answer(a, action="inspect", dock="bottom")) == "ok")
+e = devtools_event(t)
+dv = (e or {}).get("devtools", "")
+check("right-click inspect docked at the bottom: view.devtools gives a DevTools view id, dock bottom",
+      bool(re.fullmatch(r"v[1-9][0-9]*", dv)) and dv != t and (e or {}).get("dock") == "bottom", e)
+no_window("DevTools docked at the bottom (a view)")
+c.ask("view.attach", tab=dv, width=600, height=400, scale=1)
+l = layer_event(dv, 600, 30)
+check("the DevTools view, attached, draws a layer (view.layer, non-zero context)", bool(l) and l.get("context", 0) > 0, l)
+no_window("attaching the DevTools view")
+check("the DevTools view stays out of view.tabs", dv not in [x.get("tab") for x in c.ask("view.tabs", ato=ato).get("tabs", [])])
+check("an op for a page on the DevTools view is bad_request (it is only attached)",
+      err(c.ask("view.navigate", tab=dv, text=SITE + "/other")) == "bad_request")
+r = c.ask("view.inspect", tab=t, x=190, y=100, dock="bottom")
+check("view.inspect again (open already) gives the same DevTools view", r.get("ok") and r.get("devtools") == dv, r)
+r = c.ask("view.devtools.dock", tab=t, dock="right")
+e = devtools_event(t, lambda e: e.get("dock") == "right")
+check("view.devtools.dock right keeps the same view (view.devtools dock right)",
+      r.get("ok") and r.get("devtools") == dv and (e or {}).get("devtools") == dv, (r, e))
+check("view.devtools.dock with a dock that is not bottom, right or window is bad_request",
+      err(c.ask("view.devtools.dock", tab=t, dock="top")) == "bad_request")
+no_window("moving DevTools to the right")
+# DevTools' own menus come to the host as the view's ui.ask (its items); only once its page has loaded.
+time.sleep(3)
+menus, with_items = [], None
+for y in (40, 55, 70, 85, 100, 115, 130):   # down the Elements tree, until a node's menu comes
+    for data in events("rightdown", "rightup"):
+        c.send_raw({"op": "view.mouse", "tab": dv, "data": data, "x": 90, "y": y})
+    m = ui_ask("context_menu", dv, 4)
+    if not m: continue
+    menus.append(m)
+    if ((m.get("context") or {}).get("items")): with_items = m; break
+    answer(m, cancel=True)
+check("a right click in the DevTools view reaches the host as the view's ui.ask (items, and only editing actions)",
+      bool(menus) and all(isinstance((m.get("context") or {}).get("items"), list) and
+                          set((m.get("context") or {}).get("actions", [])) <= {"copy", "cut", "paste", "select_all"} for m in menus),
+      menus[:1])
+if with_items:
+    items = with_items["context"]["items"]
+    first = next((i for i in items if isinstance(i.get("id"), int) and not i.get("disabled")), None)
+    check("DevTools' own entries come with an id and a label", bool(first) and bool(first.get("label")), items[:3])
+    check("ui.answer item that DevTools did not offer is bad_request", err(answer(with_items, item=987654)) == "bad_request")
+    check(f"ui.answer item {first.get('id') if first else None} ({(first or {}).get('label')}) runs it in DevTools (ok, the engine goes on)",
+          bool(first) and err(answer(with_items, item=first["id"])) == "ok" and engine.poll() is None)
+else:
+    skip("DevTools' own menu entries", "no point tried had a node under it")
+no_window("a right click in the DevTools view")
+r = c.ask("view.devtools.close", tab=t)
+e = devtools_closed(t)
+check("view.devtools.close closes it: view.devtools.closed with its view",
+      r.get("ok") and (e or {}).get("devtools") == dv, (r, e))
+check("view.devtools.close when none is open is not_found", err(c.ask("view.devtools.close", tab=t)) == "not_found")
+r = c.ask("view.inspect", tab=t)
+dv2 = r.get("devtools", "")
+check("view.inspect without dock opens at the side used last (a view)", r.get("ok") and bool(dv2), r)
+no_window("DevTools at the side used last")
+c.ask("view.close", tab=t)
+e = devtools_closed(t)
+check("closing the inspected tab closes its DevTools (view.devtools.closed)", (e or {}).get("devtools") == dv2, e)
+no_window("closing a tab with DevTools docked")
+
 # Allowing notifications is kept for the site (Chromium has no one-time grant for them), so this goes last.
 t = ui_tab("/ui/perm?geo=0")
 a = ui_ask("permission", t)
@@ -1048,11 +1126,20 @@ check("engine still running", engine.poll() is None)
 if os.environ.get("EMBUTIDO_INSPECT") == "1":
     # OPT-IN: this part puts a real DevTools window on screen and it takes the keyboard focus.
     t = ui_tab("/popup"); titled(t, "Popup (test)")
-    r = c.ask("view.inspect", tab=t, x=190, y=100)
-    check("view.inspect answers ok", r.get("ok"), r)
+    r = c.ask("view.inspect", tab=t, x=190, y=100, dock="window")
+    check("view.inspect dock window answers ok, with no view", r.get("ok") and "devtools" not in r, r)
+    e = devtools_event(t, lambda e: e.get("dock") == "window")
+    check("view.devtools says dock window", bool(e), e)
     time.sleep(3)
     check("exactly one window of the engine is on screen (DevTools)", on_screen() == "1", f"on screen: {on_screen()}")
-    check("view.inspect again (already open: comes to the front) answers ok", c.ask("view.inspect", tab=t).get("ok"))
+    check("view.inspect again (already open: comes to the front) answers ok", c.ask("view.inspect", tab=t, dock="window").get("ok"))
+    r = c.ask("view.devtools.dock", tab=t, dock="bottom")
+    time.sleep(2)
+    check("view.devtools.dock bottom takes it out of its window into a view (no window on screen)",
+          r.get("ok") and r.get("devtools") == (e or {}).get("devtools") and on_screen() == "0", (r, on_screen()))
+    r = c.ask("view.devtools.dock", tab=t, dock="window")
+    time.sleep(3)
+    check("view.devtools.dock window puts it back in a window", r.get("ok") and on_screen() == "1", (r, on_screen()))
     c.s.close()   # the host goes away: the DevTools window must go with it
     time.sleep(3)
     check("the DevTools window is gone after the host disconnects", on_screen() == "0", f"on screen: {on_screen()}")

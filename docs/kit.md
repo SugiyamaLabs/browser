@@ -155,7 +155,7 @@ engine.onUIRequest = { [weak engine] request in
 - Fora do handler: `connection.answerUI(ask, .select(index: 2))`; `.cancel` cancela.
 - A senha só vai no `ui.answer`. O `description` de `UIAnswer` esconde a senha.
 
-**Itens do app no botão direito.** O menu que `presentDefaultUI` desenha aceita itens do app, depois das ações do motor e de um separador. Escolher um chama `onContextMenuItem` com o item e o pedido (aba, ponto, link, seleção) e responde cancelar ao motor. Sem itens, o menu é o de sempre. **Inspecionar** vem sempre por último, depois de outro separador, quando o motor oferece (`inspect`; veja "Inspecionar", abaixo).
+**Itens do app no botão direito.** O menu que `presentDefaultUI` desenha aceita itens do app, depois das ações do motor e de um separador. Escolher um chama `onContextMenuItem` com o item e o pedido (aba, ponto, link, seleção) e responde cancelar ao motor. Sem itens, o menu é o de sempre. **Inspecionar** vem sempre por último, depois de outro separador, quando o motor oferece (`inspect`; veja "Inspecionar", abaixo). No menu do próprio DevTools encaixado, as entradas dele vêm antes das ações de edição.
 
 ```swift
 engine.contextMenuItems = [HostMenuItem(id: "ask", title: "Perguntar ao bot"), HostMenuItem(id: "point", title: "Apontar elemento")]
@@ -195,19 +195,28 @@ let selected = try await engine.connection?.selection(tab)   // o texto selecion
 
 ## Inspecionar
 
-O DevTools do Chromium, numa janela própria do motor: a única janela que o motor embutido põe na tela, e só quando a pessoa pede ([protocolo.md](protocolo.md), "Passo 5.5").
+O DevTools do Chromium, em um de três lugares ([protocolo.md](protocolo.md), "Passo 5.5"): **encaixado embaixo** ou **à direita** da página, como uma vista que o app mostra igual a uma aba (`BrowserTabView`), ou **em janela própria**, a janela do motor (a única que o motor embutido põe na tela, e só quando a pessoa pede).
 
 ```swift
-try await engine.inspect(tab)                                   // abre (ou traz para a frente)
+engine.devToolsDock = .bottom                                   // o lado que a pessoa usou por último (guarde você)
+let devtools = try await engine.inspect(tab)                    // abre; encaixado devolve o id da vista
 try await engine.inspect(tab, at: CGPoint(x: 120, y: 80))       // Elements no elemento desse ponto da vista
+try await engine.inspect(tab, dock: .window)                    // em janela própria (devolve nil)
+try await engine.setDevToolsDock(tab, .right)                   // muda de lado, ou vai para a janela e volta
+try await engine.closeDevTools(tab)
 ```
 
-- No botão direito do `presentDefaultUI`, **Inspecionar** faz o mesmo no elemento do clique. Num menu seu, responda `.contextMenu(action: "inspect")`: o kit cuida do resto.
-- O motor é outro processo, sem ícone no Dock. Antes de mandar `view.inspect` ou a resposta `inspect`, o kit entrega a ativação ao motor (`NSApplication.yieldActivation(to:)`), para a janela do DevTools vir para a frente e pegar o teclado. Por isso só funciona com o motor que o próprio kit abriu (`start()`).
-- Com o agente trabalhando na aba, `inspect` lança `denied` e o botão direito nem chega. Com o DevTools desligado por política, lança `failed` e o menu não traz o item.
-- A janela fecha sozinha quando a aba fecha ou quando o app desconecta do motor (inclusive ao sair).
+- **Sem desenhar nada:** ponha `BrowserDevToolsSplit(engine: engine, tab: tab)` onde poria a `BrowserTabView` da aba. Ela segue os eventos sozinha: página em cima (ou à esquerda), divisor para arrastar (pelo menos 120 pt de DevTools e 200 pt de página, com "312 px · 42%" enquanto arrasta) e uma barra sobre o DevTools com embaixo, à direita, janela própria e fechar. O lado escolhido vai para `engine.devToolsDock`; os tamanhos ficam em `bottomSize` e `rightSize` (o padrão é 40% embaixo e 420 pt à direita), e `onResize` avisa para guardar.
+- **Desenhando você:** `engine.devTools[tab]` (observável) diz se a aba tem DevTools, o id da vista (`devtools`) e onde ele está (`dock`). `onDevTools` e `onDevToolsClosed` avisam cada mudança, também as que vêm do botão direito. Em `.bottom` e `.right`, mostre `BrowserTabView(engine: engine, tab: state.devtools)` ao lado da página, no tamanho que quiser; a página e o DevTools não se sobrepõem, cada vista tem o seu tamanho. Em `.window`, não há o que mostrar. O id é o mesmo enquanto o DevTools viver, também quando muda de lado ou vai e volta da janela.
+- **Um por aba.** `inspect` numa aba que já tem DevTools só muda de lado (se você pediu outro), mostra de novo e escolhe o elemento. O foco é seu: `window.makeFirstResponder(devtoolsView)`.
+- **Botão direito.** No `presentDefaultUI`, **Inspecionar** faz o mesmo no elemento do clique, no lado de `devToolsDock` (sem ele, onde o motor o deixou por último; no começo, em janela). Num menu seu, responda `.contextMenu(action: "inspect")` (o kit põe o lado) ou `.inspect(dock: .right)`.
+- **Os menus do próprio DevTools.** Encaixado, o DevTools não tem janela: o botão direito dentro dele chega como `.contextMenu` com `items` (as entradas do DevTools, com submenus) e só as ações de edição. O `presentDefaultUI` desenha as entradas primeiro; num menu seu, responda `.contextMenuItem(id:)`. As listas (`select`), salvar HAR, escolher pasta e `alert` do DevTools chegam também, com o `tab` da vista do DevTools, e o `presentDefaultUI` já desenha.
+- **Teclado.** A vista do DevTools pega os atalhos ⌘ do DevTools (⌘F, ⌘[ e ⌘], ⌘P, ⌘K…) antes do menu do app, enquanto tem o foco. ⌘C, ⌘V, ⌘X, ⌘A e ⌘Z continuam no menu Editar (vão como `view.edit`); ⌘Q, ⌘W, ⌘H, ⌘M, ⌘, e ⌥⌘I continuam do app. Esc fecha a gaveta do DevTools como sempre.
+- **Janela própria.** O motor é outro processo, sem ícone no Dock. Antes de pedir a janela (`inspect` com `.window` ou sem lado, `setDevToolsDock(.window)`, a resposta `inspect`), o kit entrega a ativação ao motor (`NSApplication.yieldActivation(to:)`), para ela vir para a frente e pegar o teclado. Por isso só funciona com o motor que o próprio kit abriu (`start()`). Encaixado, não precisa.
+- Com o agente trabalhando na aba, `inspect` lança `denied` e o botão direito nem chega. Com o DevTools desligado por política, lança `failed` e o menu não traz o item. Sem DevTools aberto, `setDevToolsDock` e `closeDevTools` lançam `not_found`.
+- O DevTools fecha sozinho quando a aba fecha ou quando o app desconecta do motor (inclusive ao sair).
 - Abrir o DevTools desliga o `pick` daquela aba (chega `.cancelled`): os dois usam o mesmo modo da página.
-- Motor mais antigo lança `unknown_op` e não oferece `inspect` no menu; nada mais muda.
+- Motor mais antigo: sem `dock` ele sempre abre em janela e não manda `view.devtools`; `setDevToolsDock` e `closeDevTools` lançam `unknown_op`.
 
 ## Extensões
 

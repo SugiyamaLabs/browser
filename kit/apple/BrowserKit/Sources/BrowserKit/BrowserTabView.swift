@@ -9,6 +9,8 @@ import QuartzCore
 /// view, a flipped layer the size of the view, the CALayerHost at its origin.
 public final class BrowserTabView: NSView, @preconcurrency NSTextInputClient {
   public let tab: String
+  /// A DevTools view (`BrowserEngine.inspect`): it takes DevTools' ⌘ keys while it has the keyboard.
+  private let isDevTools: Bool
   /// The connection the tab id belongs to: after the engine restarts, a leftover view sends nothing.
   private weak var connection: BrowserConnection?
   private let flippedLayer = CALayer()
@@ -34,6 +36,7 @@ public final class BrowserTabView: NSView, @preconcurrency NSTextInputClient {
   public init(engine: BrowserEngine, tab: String) {
     connection = engine.connection
     self.tab = tab
+    isDevTools = engine.isDevTools(tab)
     super.init(frame: .zero)
     let root = CALayer()
     root.backgroundColor = NSColor.white.cgColor
@@ -204,6 +207,19 @@ public final class BrowserTabView: NSView, @preconcurrency NSTextInputClient {
     ])
   }
   // Key up and modifier changes carry only the event: nothing goes through the text system.
+  /// DevTools' ⌘ keys (⌘F, ⌘[ and ⌘], ⌘P, ⌘K…) go to a DevTools view that has the keyboard before
+  /// the host's menu sees them; the Edit menu's (⌘C, ⌘V, ⌘X, ⌘A, ⌘Z, sent as `view.edit`), the app's
+  /// (⌘Q, ⌘W, ⌘H, ⌘M, ⌘,) and ⌥⌘I (open and close DevTools) stay the host's.
+  public override func performKeyEquivalent(with event: NSEvent) -> Bool {
+    guard isDevTools, window?.firstResponder === self, event.type == .keyDown, event.modifierFlags.contains(.command),
+      let key = event.charactersIgnoringModifiers?.lowercased(), !Self.hostKeys.contains(key),
+      !(key == "i" && event.modifierFlags.contains(.option))
+    else { return super.performKeyEquivalent(with: event) }
+    keyDown(with: event)
+    return true
+  }
+  static let hostKeys: Set<String> = ["c", "v", "x", "a", "z", "q", "w", "h", "m", ",", "`"]
+
   public override func keyUp(with event: NSEvent) {
     if let data = Self.encoded(event) { post("view.key", ["data": .string(data)]) }
   }

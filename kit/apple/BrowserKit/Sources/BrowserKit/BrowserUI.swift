@@ -45,7 +45,8 @@ public struct UIRequest: Sendable, Equatable {
       guard let actions = context["actions"]?.array else { return nil }  // the list comes inside `context`
       kind = .contextMenu(ContextMenu(
         x: number("x"), y: number("y"), link: context["link"]?.string, image: context["image"]?.string,
-        selection: context["selection"]?.string, editable: context["editable"]?.bool ?? false, actions: actions.compactMap(\.string)))
+        selection: context["selection"]?.string, editable: context["editable"]?.bool ?? false, actions: actions.compactMap(\.string),
+        items: ContextMenuItem.list(context["items"])))
     case "dialog":
       guard let type = message["type"]?.string.flatMap(PageDialog.DialogType.init(rawValue:)) else { return nil }
       kind = .dialog(PageDialog(type: type, message: string("message"), origin: string("origin"), defaultText: message["default"]?.string))
@@ -112,6 +113,33 @@ public struct ContextMenu: Sendable, Equatable {
   /// What may be offered now, in the engine's order (`"copy_link"`, `"paste"`…). Draw fewer if you
   /// like, never one outside the list.
   public let actions: [String]
+  /// A DevTools view's own entries (its menu, as DevTools builds it), drawn before `actions`;
+  /// empty for a page. Answer with `.contextMenuItem(id:)`.
+  public var items: [ContextMenuItem] = []
+}
+
+/// An entry of a DevTools view's menu: one to choose (with `id`), a separator, a group header or a
+/// submenu (`items`).
+public struct ContextMenuItem: Sendable, Equatable {
+  /// What to answer; nil for a separator, a header or a submenu.
+  public let id: Int?
+  public let label: String
+  public let disabled: Bool
+  /// A check mark's state, for an entry that has one.
+  public let checked: Bool?
+  public let separator: Bool
+  public let group: Bool
+  public let items: [ContextMenuItem]
+
+  static func list(_ json: JSON?) -> [ContextMenuItem] {
+    (json?.array ?? []).compactMap { value in
+      guard let item = value.object else { return nil }
+      return ContextMenuItem(
+        id: item["id"]?.int, label: item["label"]?.string ?? "", disabled: item["disabled"]?.bool ?? false,
+        checked: item["checked"]?.bool, separator: item["separator"]?.bool ?? false, group: item["group"]?.bool ?? false,
+        items: list(item["items"]))
+    }
+  }
 }
 
 /// `alert`, `confirm`, `prompt` or `beforeunload` of a tab with no agent (`kind: "dialog"`).
@@ -198,6 +226,10 @@ public enum UIAnswer: Sendable, Equatable {
   case select(index: Int)
   /// One of `ContextMenu.actions`.
   case contextMenu(action: String)
+  /// The menu's `inspect`, with where DevTools goes.
+  case inspect(dock: DevToolsDock)
+  /// The `id` of one of `ContextMenu.items` (a DevTools view's menu).
+  case contextMenuItem(id: Int)
   /// `text` only for an accepted `prompt`.
   case dialog(accept: Bool, text: String? = nil)
   /// Absolute paths; empty is the same as cancelling.
@@ -214,6 +246,8 @@ public enum UIAnswer: Sendable, Equatable {
     switch self {
     case .select(let index): ["index": .number(Double(index))]
     case .contextMenu(let action): ["action": .string(action)]
+    case .inspect(let dock): ["action": "inspect", "dock": .string(dock.rawValue)]
+    case .contextMenuItem(let id): ["item": .number(Double(id))]
     case .dialog(let accept, let text): text.map { ["accept": .bool(accept), "text": .string($0)] } ?? ["accept": .bool(accept)]
     case .file(let paths): ["paths": .array(paths.map(JSON.string))]
     case .auth(let username, let password): ["username": .string(username), "password": .string(password)]

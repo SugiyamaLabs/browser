@@ -5718,10 +5718,10 @@ index 0000000000..ef8bfc467e
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_SESSION_READ_H_
 diff --git a/chrome/browser/agens/bridge/ui_answer.cc b/chrome/browser/agens/bridge/ui_answer.cc
 new file mode 100644
-index 0000000000..b59be54247
+index 0000000000..63b6439c7c
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ui_answer.cc
-@@ -0,0 +1,166 @@
+@@ -0,0 +1,188 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/ui_answer.h"
@@ -5764,6 +5764,21 @@ index 0000000000..b59be54247
 +  return ok ? UiAnswer::kAnswer : UiAnswer::kBadRequest;
 +}
 +
++// A DevTools menu (context.items) offers `id`: an entry with it that can be chosen, at any depth.
++bool OffersItem(const base::ListValue* items, int id) {
++  if (!items) return false;
++  for (const base::Value& value : *items) {
++    const base::DictValue* item = value.GetIfDict();
++    if (!item) continue;
++    if (const base::ListValue* submenu = item->FindList("items")) {
++      if (OffersItem(submenu, id)) return true;
++      continue;
++    }
++    if (item->FindInt("id") == id && !item->FindBool("disabled").value_or(false)) return true;
++  }
++  return false;
++}
++
 +}  // namespace
 +
 +UiAnswer CheckUiAnswer(bool from_host, const base::DictValue* asked_or_null, const base::DictValue& body) {
@@ -5785,9 +5800,16 @@ index 0000000000..b59be54247
 +    return Pick(item && !item->FindBool("disabled").value_or(false) && !item->FindBool("group").value_or(false));
 +  }
 +  if (*kind == "context_menu") {
++    if (!OnlyKeys(body, {"action", "item", "dock"})) return UiAnswer::kBadRequest;
 +    const std::string* action = body.FindString("action");
++    const base::Value* item = body.Find("item");
++    const base::Value* dock = body.Find("dock");
++    if (dock && !(action && *action == "inspect" && dock->is_string() && IsDevToolsDock(dock->GetString()))) {
++      return UiAnswer::kBadRequest;
++    }
++    if (item) return Pick(!action && item->is_int() && OffersItem(asked.FindListByDottedPath("context.items"), item->GetInt()));
 +    const base::ListValue* actions = asked.FindListByDottedPath("context.actions");
-+    return Pick(OnlyKeys(body, {"action"}) && action && actions && actions->contains(*action));
++    return Pick(action && actions && actions->contains(*action));
 +  }
 +  if (*kind == "dialog") {
 +    if (!OnlyKeys(body, {"accept", "text"})) return UiAnswer::kBadRequest;
@@ -5890,10 +5912,10 @@ index 0000000000..b59be54247
 +}  // namespace agens::bridge
 diff --git a/chrome/browser/agens/bridge/ui_answer.h b/chrome/browser/agens/bridge/ui_answer.h
 new file mode 100644
-index 0000000000..39be098619
+index 0000000000..0b0ecb5d32
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ui_answer.h
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,54 @@
 +// Copyright 2026 SugiyamaLabs.
 +// What the host may answer to a ui.ask (docs/protocolo.md, "Passo 5.3"). Pure logic, so
 +// ui_answer_selfcheck.cc runs it with only //base; the engine side is ui_ops.h.
@@ -5915,7 +5937,15 @@ index 0000000000..39be098619
 +inline constexpr size_t kMaxUiTextBytes = 64 * 1024;  // prompt text, username, password, a path
 +inline constexpr size_t kMaxUiPaths = 100;            // file, open_multiple
 +
++inline constexpr size_t kMaxUiMenuItems = 500;        // a DevTools menu's items, submenus included
++inline constexpr int kMaxUiMenuDepth = 4;             // its submenus in submenus
++
 +enum class UiAnswer { kAnswer, kCancel, kBadRequest, kNotFound, kUnauthorized };
++
++// Where DevTools goes (view.inspect, view.devtools.dock, the right click's inspect).
++inline bool IsDevToolsDock(std::string_view dock) {
++  return dock == "bottom" || dock == "right" || dock == "window";
++}
 +
 +// `body` is the whole ui.answer request; `asked` the open ui.ask its "ask" names, as sent (kind
 +// and fields), or null when none is open by that name. In order: kUnauthorized when not
@@ -5923,7 +5953,9 @@ index 0000000000..39be098619
 +// {cancel: true} alone and for a file answer with no paths; kBadRequest when a field is missing,
 +// has the wrong type, doesn't belong to the kind, or picks what the ask didn't offer (a disabled
 +// or header item, an action outside `actions`, text outside an accepted prompt, a relative path or
-+// too many).
++// too many). A context_menu answer is `action` or `item` (the `id` of an entry of
++// `context.items` that is not disabled, a separator, a group header or a submenu); `dock` goes
++// only with the action inspect.
 +UiAnswer CheckUiAnswer(bool from_host, const base::DictValue* asked, const base::DictValue& body);
 +
 +// Cuts what the page controls in a ui.ask of `fields["kind"]` to the limits above; a select's
@@ -5940,10 +5972,10 @@ index 0000000000..39be098619
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_UI_ANSWER_H_
 diff --git a/chrome/browser/agens/bridge/ui_answer_selfcheck.cc b/chrome/browser/agens/bridge/ui_answer_selfcheck.cc
 new file mode 100644
-index 0000000000..2883a685d3
+index 0000000000..46b9e9d930
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ui_answer_selfcheck.cc
-@@ -0,0 +1,196 @@
+@@ -0,0 +1,216 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Assert-based check of ui_answer.h, run by agens_bridge_selfcheck (protocol_selfcheck.cc).
 +
@@ -6025,6 +6057,26 @@ index 0000000000..2883a685d3
 +  UI_CHECK(Check(menu, R"({"action":"inspect"})") == kBad);
 +  UI_CHECK(Check(R"({"kind":"context_menu","context":{"actions":["reload","inspect"]}})", R"({"action":"inspect"})") == kOk);
 +  UI_CHECK(Check(menu, R"({})") == kBad && Check(R"({"kind":"context_menu"})", R"({"action":"copy"})") == kBad);
++  // inspect may say where DevTools goes; nothing else carries a dock.
++  const std::string inspect = R"({"kind":"context_menu","context":{"actions":["reload","inspect"]}})";
++  UI_CHECK(Check(inspect, R"({"action":"inspect","dock":"bottom"})") == kOk);
++  UI_CHECK(Check(inspect, R"({"action":"inspect","dock":"right"})") == kOk);
++  UI_CHECK(Check(inspect, R"({"action":"inspect","dock":"window"})") == kOk);
++  UI_CHECK(Check(inspect, R"({"action":"inspect","dock":"left"})") == kBad);
++  UI_CHECK(Check(inspect, R"({"action":"inspect","dock":1})") == kBad);
++  UI_CHECK(Check(inspect, R"({"action":"reload","dock":"bottom"})") == kBad);
++  // A DevTools view's own menu: the id of an item that can be chosen, at any depth.
++  const std::string devtools = R"({"kind":"context_menu","context":{"actions":["copy"],"items":[
++      {"id":3,"label":"Edit attribute"},{"separator":true},{"id":4,"label":"Off","disabled":true},
++      {"label":"Copy","items":[{"id":7,"label":"Copy selector"},{"label":"Sub","items":[{"id":9,"label":"Deep"}]}]},
++      {"label":"Header","group":true},{"id":5,"label":"Word wrap","checked":true}]}})";
++  UI_CHECK(Check(devtools, R"({"item":3})") == kOk && Check(devtools, R"({"item":5})") == kOk);
++  UI_CHECK(Check(devtools, R"({"item":7})") == kOk && Check(devtools, R"({"item":9})") == kOk);
++  UI_CHECK(Check(devtools, R"({"item":4})") == kBad);  // disabled
++  UI_CHECK(Check(devtools, R"({"item":8})") == kBad && Check(devtools, R"({"item":"3"})") == kBad);
++  UI_CHECK(Check(devtools, R"({"item":3,"action":"copy"})") == kBad);
++  UI_CHECK(Check(devtools, R"({"action":"copy"})") == kOk);
++  UI_CHECK(Check(menu, R"({"item":3})") == kBad);  // a page's menu has no items
 +
 +  // dialog: accept, and text only for an accepted prompt.
 +  const std::string prompt = R"({"kind":"dialog","type":"prompt","message":"Nome?","default":"a"})";
@@ -6142,10 +6194,10 @@ index 0000000000..2883a685d3
 +}
 diff --git a/chrome/browser/agens/bridge/ui_ops.cc b/chrome/browser/agens/bridge/ui_ops.cc
 new file mode 100644
-index 0000000000..a18a087645
+index 0000000000..6509632e53
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ui_ops.cc
-@@ -0,0 +1,721 @@
+@@ -0,0 +1,783 @@
 +// Copyright 2026 SugiyamaLabs.
 +// - One queue for every ask, in the order they came; only the oldest of each tab and kind is on
 +//   the host at a time, and at most kMaxOpenUiAsks wait in all.
@@ -6488,16 +6540,55 @@ index 0000000000..a18a087645
 +
 +struct Clicked {
 +  content::GlobalRenderFrameHostId frame;
-+  GURL link, frame_url;
++  GURL link, frame_url, link_followed;
 +  network::mojom::ReferrerPolicy referrer_policy;
 +  int x = 0, y = 0;
++  bool devtools = false;  // a DevTools view's own menu
 +};
++
++// A DevTools view's menu entries (DevToolsHost's custom items): `id` is what the frontend runs.
++base::ListValue MenuItems(const std::vector<blink::mojom::CustomContextMenuItemPtr>& items, int depth, size_t& budget) {
++  using Type = blink::mojom::CustomContextMenuItemType;
++  base::ListValue list;
++  for (const auto& item : items) {
++    if (!budget) break;
++    --budget;
++    base::DictValue entry;
++    if (item->type == Type::kSeparator) {
++      entry.Set("separator", true);
++      list.Append(std::move(entry));
++      continue;
++    }
++    if (item->type == Type::kSubMenu && depth >= kMaxUiMenuDepth) continue;
++    entry.Set("label", ClipChars(base::UTF16ToUTF8(item->label), kMaxUiLabelChars));
++    if (item->type == Type::kSubMenu) {
++      entry.Set("items", MenuItems(item->submenu, depth + 1, budget));
++    } else if (item->type == Type::kGroup) {
++      entry.Set("group", true);
++    } else {
++      entry.Set("id", item->action);
++    }
++    if (!item->enabled) entry.Set("disabled", true);
++    if (item->type == Type::kCheckableOption) entry.Set("checked", item->checked);
++    list.Append(std::move(entry));
++  }
++  return list;
++}
 +
 +void RunAction(const Clicked& clicked, const base::DictValue* answer) {
 +  const std::string* action = answer ? answer->FindString("action") : nullptr;
 +  content::RenderFrameHost* frame = content::RenderFrameHost::FromID(clicked.frame);
 +  content::WebContents* contents = frame ? content::WebContents::FromRenderFrameHost(frame) : nullptr;
-+  if (!action || !contents) return;
++  if (!contents) return;
++  if (clicked.devtools) {
++    // The frontend runs its pick, then learns the menu closed (also when nothing was picked).
++    std::optional<int> item = answer ? answer->FindInt("item") : std::nullopt;
++    if (item) contents->ExecuteCustomContextMenuCommand(*item, clicked.link_followed);
++    if (action) content::AgensEmbedEdit(contents, *action == "select_all" ? "selectAll" : *action);
++    contents->NotifyContextMenuClosed(clicked.link_followed);
++    return;
++  }
++  if (!action) return;
 +  content::NavigationController& controller = contents->GetController();
 +  if (*action == "open_link_new_tab") {
 +    contents->OpenURL(content::OpenURLParams(clicked.link, content::Referrer(clicked.frame_url, clicked.referrer_policy),
@@ -6523,7 +6614,8 @@ index 0000000000..a18a087645
 +  } else if (*action == "inspect") {
 +    // Offered when the menu opened; an agent may have started since, or the policy changed.
 +    if (!AgentWorking(contents) && view::CanInspect(contents)) {
-+      view::Inspect(contents, frame, gfx::Point(clicked.x, clicked.y));
++      const std::string* dock = answer->FindString("dock");  // checked: bottom, right or window
++      view::Inspect(contents, frame, gfx::Point(clicked.x, clicked.y), dock ? *dock : std::string());
 +    }
 +  }
 +}
@@ -6534,6 +6626,26 @@ index 0000000000..a18a087645
 +  if (!contents || AgentWorking(contents)) return;
 +  base::DictValue context;
 +  base::ListValue actions;
++  // A DevTools view: its own menu (the entries it gave) and the editing actions, nothing of a page's.
++  const bool devtools = view::IsDevToolsView(contents);
++  if (devtools) {
++    size_t budget = kMaxUiMenuItems;
++    context.Set("items", MenuItems(params.custom_items, 0, budget));
++    context.Set("editable", params.is_editable);
++    if (params.edit_flags & blink::ContextMenuDataEditFlags::kCanCopy) actions.Append("copy");
++    if (params.edit_flags & blink::ContextMenuDataEditFlags::kCanCut) actions.Append("cut");
++    if (params.edit_flags & blink::ContextMenuDataEditFlags::kCanPaste) actions.Append("paste");
++    if (params.edit_flags & blink::ContextMenuDataEditFlags::kCanSelectAll) actions.Append("select_all");
++    context.Set("actions", std::move(actions));
++    base::DictValue fields;
++    fields.Set("x", params.x);
++    fields.Set("y", params.y);
++    fields.Set("context", std::move(context));
++    Clicked clicked{frame.GetGlobalId(), params.link_url, params.frame_url, params.link_followed, params.referrer_policy,
++                    params.x, params.y, /*devtools=*/true};
++    Ask(contents, "context_menu", std::move(fields), base::BindOnce(&RunAction, std::move(clicked)));
++    return;
++  }
 +  if (params.link_url.is_valid()) {
 +    context.Set("link", params.link_url.spec());  // the address the actions use
 +    if (params.link_url.SchemeIsHTTPOrHTTPS()) actions.Append("open_link_new_tab");
@@ -6563,7 +6675,7 @@ index 0000000000..a18a087645
 +  fields.Set("y", params.y);
 +  fields.Set("context", std::move(context));
 +  Ask(contents, "context_menu", std::move(fields),
-+      base::BindOnce(&RunAction, Clicked{frame.GetGlobalId(), params.link_url, params.frame_url,
++      base::BindOnce(&RunAction, Clicked{frame.GetGlobalId(), params.link_url, params.frame_url, GURL(),
 +                                         params.referrer_policy, params.x, params.y}));
 +}
 +
@@ -6597,8 +6709,9 @@ index 0000000000..a18a087645
 +    content::WebContents* contents = FileDialogSource().get();
 +    FileDialogSource() = nullptr;
 +    // A DevTools window's own panel (save a HAR, add a workspace folder) is on screen with it: the
-+    // standard one, as Chromium shows it. The policy was checked already.
-+    if (DevToolsWindow::IsDevToolsWindow(contents)) {
++    // standard one, as Chromium shows it. The policy was checked already. A DevTools view's goes to
++    // the host like a page's.
++    if (view::InOwnDevToolsWindow(contents)) {
 +      native_ = base::MakeRefCounted<::ui::SelectFileDialogImpl>(listener_, nullptr);
 +      native_->SelectFile(type, title, default_path, file_types, file_type_index, default_extension, owning_window,
 +                          caller);
@@ -6852,8 +6965,9 @@ index 0000000000..a18a087645
 +  started = true;
 +  content::SetAgensEmbedSelectHandler(base::BindRepeating(&Select));
 +  content::SetAgensEmbedContextMenuHandler(base::BindRepeating(&ContextMenu));
-+  // A DevTools window is on screen by itself: its menus and lists are Chromium's.
-+  content::SetAgensEmbedOwnWindow(base::BindRepeating(&DevToolsWindow::IsDevToolsWindow));
++  // A DevTools window is on screen by itself: its menus and lists are Chromium's. A DevTools view
++  // has no window: its menus and lists go to the host (ContextMenu, Select).
++  content::SetAgensEmbedOwnWindow(base::BindRepeating(&view::InOwnDevToolsWindow));
 +  content::SetAgensEmbedCursorCallbacks(base::BindRepeating(&CursorChanged), base::BindRepeating(&CaretChanged));
 +  ::ui::SelectFileDialog::SetFactory(std::make_unique<HostFileDialogFactory>());
 +}
@@ -7400,10 +7514,10 @@ index 0000000000..e98cac0576
 +}
 diff --git a/chrome/browser/agens/bridge/view_ops.cc b/chrome/browser/agens/bridge/view_ops.cc
 new file mode 100644
-index 0000000000..cbf0722182
+index 0000000000..528cc37f3a
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_ops.cc
-@@ -0,0 +1,1087 @@
+@@ -0,0 +1,1305 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The host draws the interface; the engine hands it the pages (docs/protocolo.md, "host e view").
 +// - One host: the connection that sent host.attach (the app that launched the engine).
@@ -7440,6 +7554,8 @@ index 0000000000..cbf0722182
 +#include "chrome/browser/agens/embed/agens_controlled.h"
 +#include "chrome/browser/agens/embed/agens_embedded.h"
 +#include "chrome/browser/agens/embed/agens_window.h"
++#include "chrome/browser/agens/embed/native_shell.h"
++#include "chrome/browser/agens/bridge/ui_answer.h"
 +#include "chrome/browser/autocomplete/autocomplete_classifier_factory.h"
 +#include "chrome/browser/browser_process.h"
 +#include "chrome/browser/content_settings/host_content_settings_map_factory.h"
@@ -7459,7 +7575,9 @@ index 0000000000..cbf0722182
 +#include "chrome/common/webui_url_constants.h"
 +#include "components/favicon/content/content_favicon_driver.h"
 +#include "content/public/browser/agens_embed_mac.h"
++#include "content/public/browser/navigation_handle.h"
 +#include "content/public/browser/render_frame_host.h"
++#include "content/public/common/url_constants.h"
 +#include "content/public/browser/web_contents.h"
 +#include "content/public/browser/web_contents_observer.h"
 +#include "content/public/browser/web_contents_user_data.h"
@@ -7548,11 +7666,31 @@ index 0000000000..cbf0722182
 +  base::ScopedClosureRunner capture_;
 +};
 +
++// A tab's DevTools while it lives, in a view or in its window (Passo 5.5): it watches the frontend.
++class DevToolsOf : public content::WebContentsObserver {
++ public:
++  DevToolsOf(content::WebContents* frontend, int n, int tab, std::string wanted)
++      : content::WebContentsObserver(frontend), n(n), tab(tab), wanted(std::move(wanted)) {}
++
++  // content::WebContentsObserver:
++  void DidFinishNavigation(content::NavigationHandle* handle) override;
++  void WebContentsDestroyed() override;
++
++  const int n;    // the frontend's view id
++  const int tab;  // the inspected tab's
++  std::string wanted;  // bottom, right or window: where the host asked for it
++  std::string sent;    // the dock of the last view.devtools
++  bool in_views = false;
++};
++
 +struct State : public TabStripModelObserver {
 +  uint64_t host = 0;
 +  std::vector<raw_ptr<AgensWindow>> windows;
 +  std::vector<std::unique_ptr<Shown>> shown;
-+  std::vector<raw_ptr<content::WebContents>> views;  // AddView: extension popups
++  std::vector<raw_ptr<content::WebContents>> views;  // AddView: extension popups, DevTools frontends
++  std::vector<std::unique_ptr<DevToolsOf>> devtools;
++  std::string last_dock = "window";  // the side the host used last: where an inspect with none opens
++  std::string next_dock;              // set around the call that makes a DevTools (Inspect)
 +  std::map<int, base::DictValue> sent;  // the last view.tab of each tab the host knows
 +  std::map<int, gfx::Image> icons;      // the favicon it was told about
 +  std::map<int, base::DictValue> agent_cursors;  // the last view.agent_cursor; none sent: no cursor
@@ -8167,12 +8305,151 @@ index 0000000000..cbf0722182
 +                                           request.id.Clone(), *to, std::move(reply)));
 +}
 +
-+// view.inspect {tab, x?, y?}: DevTools for the tab, on the element at the point when there is one.
++// --- DevTools (Passo 5.5): a view the host lays out next to the page, or its own window.
++
++DevToolsOf* DevToolsFor(content::WebContents* frontend) {
++  for (auto& d : S().devtools) {
++    if (frontend && d->web_contents() == frontend) return d.get();
++  }
++  return nullptr;
++}
++
++// The tab's DevTools, open and not closing.
++DevToolsWindow* OpenDevTools(content::WebContents* tab) {
++  DevToolsWindow* window = DevToolsWindow::GetInstanceForInspectedWebContents(tab);
++  return window && DevToolsFor(window->GetDevToolsWebContents()) ? window : nullptr;
++}
++
++std::string DockOf(DevToolsWindow* window, const DevToolsOf& d) {
++  if (!window->agens_view()) return "window";
++  return d.wanted == "window" ? "bottom" : d.wanted;
++}
++
++// DevToolsWindow::AgensDock: whether a new one opens as a view.
++bool OpensAsView(content::WebContents*) {
++  const State& s = S();
++  return s.host && (s.next_dock.empty() ? s.last_dock : s.next_dock) != "window";
++}
++
++// DevToolsWindow::AgensDock: it shows, as a view or in its window. Tells the host when the side changed.
++void DevToolsShown(DevToolsWindow* window) {
++  State& s = S();
++  content::WebContents* frontend = window->GetDevToolsWebContents();
++  content::WebContents* inspected = window->GetInspectedWebContents();
++  if (!frontend || !inspected) return;
++  DevToolsOf* d = DevToolsFor(frontend);
++  if (!d) {
++    const std::string& wanted = s.next_dock.empty() ? s.last_dock : s.next_dock;
++    s.devtools.push_back(std::make_unique<DevToolsOf>(frontend, NumberOf(frontend), NumberOf(inspected), wanted));
++    d = s.devtools.back().get();
++  }
++  if (window->agens_view() != d->in_views) {
++    d->in_views = window->agens_view();
++    if (d->in_views) {
++      AddView(frontend);
++    } else {
++      RemoveView(frontend);
++    }
++  }
++  const std::string dock = DockOf(window, *d);
++  if (dock == d->sent || !s.host) return;
++  d->sent = dock;
++  base::DictValue fields = TabOnly(d->tab);
++  fields.Set("devtools", ViewTabName(d->n));
++  fields.Set("dock", dock);
++  SendEventTo(s.host, "view.devtools", std::move(fields));
++}
++
++// Puts an open DevTools where the host asks: a side of the page area, or its own window.
++void Dock(DevToolsWindow* window, const std::string& dock) {
++  DevToolsOf* d = DevToolsFor(window->GetDevToolsWebContents());
++  if (!d) return;
++  d->wanted = dock;
++  const bool view = dock != "window";
++  if (view == window->agens_view()) {
++    DevToolsShown(window);  // only the side changed, or nothing
++    return;
++  }
++  if (!view && d->in_views) {
++    // Out of the host's views before a window holds it (DevToolsWindow::SetAgensView).
++    d->in_views = false;
++    RemoveView(window->GetDevToolsWebContents());
++  }
++  window->SetAgensView(view);  // shows it again: DevToolsShown
++}
++
++void DevToolsOf::DidFinishNavigation(content::NavigationHandle* handle) {
++  // The frontend went somewhere else than DevTools: it is closed (posted: inside a navigation).
++  if (!handle->IsInPrimaryMainFrame() || !handle->HasCommitted() || handle->IsSameDocument() ||
++      handle->GetURL().SchemeIs(content::kChromeDevToolsScheme)) {
++    return;
++  }
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE, base::BindOnce(
++                     [](base::WeakPtr<content::WebContents> frontend) {
++                       DevToolsWindow* window = frontend ? DevToolsWindow::AsDevToolsWindow(frontend.get()) : nullptr;
++                       if (window) window->AgensClose();
++                     },
++                     web_contents()->GetWeakPtr()));
++}
++
++void DevToolsOf::WebContentsDestroyed() {
++  content::WebContents* frontend = web_contents();
++  if (in_views) {
++    // Not RemoveView: its attachment (Shown) sees the same destruction and goes by itself.
++    std::erase(S().views, frontend);
++    ui_ask::TabClosing(frontend);
++  }
++  if (S().host) {
++    base::DictValue fields = TabOnly(tab);
++    fields.Set("devtools", ViewTabName(n));
++    SendEventTo(S().host, "view.devtools.closed", std::move(fields));
++  }
++  Observe(nullptr);
++  std::erase_if(S().devtools, [this](const std::unique_ptr<DevToolsOf>& d) { return d.get() == this; });  // deletes this
++}
++
++// view.devtools.dock {tab, dock}
++void ViewDevToolsDock(content::WebContents* contents, const Request& request, ReplyCallback reply) {
++  std::optional<std::string> dock = StringParam(request.body, "dock");
++  if (!dock || !IsDevToolsDock(*dock)) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs tab and dock: bottom, right or window"));
++    return;
++  }
++  DevToolsWindow* window = OpenDevTools(contents);
++  if (!window) {
++    std::move(reply).Run(ErrorReply(&request.id, kNotFound, "no DevTools is open for this tab"));
++    return;
++  }
++  S().last_dock = *dock;
++  Dock(window, *dock);
++  base::DictValue result;
++  if (window->agens_view()) result.Set("devtools", ViewTabName(NumberOf(window->GetDevToolsWebContents())));
++  std::move(reply).Run(OkReply(request.id, std::move(result)));
++}
++
++// view.devtools.close {tab}: the view.devtools.closed event follows.
++void ViewDevToolsClose(content::WebContents* contents, const Request& request, ReplyCallback reply) {
++  DevToolsWindow* window = OpenDevTools(contents);
++  if (!window) {
++    std::move(reply).Run(ErrorReply(&request.id, kNotFound, "no DevTools is open for this tab"));
++    return;
++  }
++  window->AgensClose();
++  std::move(reply).Run(OkReply(request.id));
++}
++
++// view.inspect {tab, x?, y?, dock?}: DevTools for the tab, on the element at the point when there is one.
 +void ViewInspect(content::WebContents* contents, const Request& request, ReplyCallback reply) {
 +  double x = 0, y = 0;
 +  const bool at = request.body.contains("x") || request.body.contains("y");
 +  if (at && !ReadPoint(request.body, x, y)) {
 +    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "x and y go together, as numbers"));
++    return;
++  }
++  const base::Value* dock = request.body.Find("dock");
++  if (dock && !(dock->is_string() && IsDevToolsDock(dock->GetString()))) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "dock is bottom, right or window"));
 +    return;
 +  }
 +  if (AgentWorks(contents)) {
@@ -8185,9 +8462,17 @@ index 0000000000..cbf0722182
 +  }
 +  // shortcut: the point goes to the main frame, so over a cross-origin iframe Elements shows the
 +  // <iframe>; hit-test the frame under it (as the right click's frame does) if hosts need more.
-+  Inspect(contents, contents->GetPrimaryMainFrame(),
-+          at ? std::optional<gfx::Point>(gfx::ToRoundedPoint(gfx::PointF(x, y))) : std::nullopt);
-+  std::move(reply).Run(OkReply(request.id));
++  const std::string devtools =
++      Inspect(contents, contents->GetPrimaryMainFrame(),
++              at ? std::optional<gfx::Point>(gfx::ToRoundedPoint(gfx::PointF(x, y))) : std::nullopt,
++              dock ? dock->GetString() : std::string());
++  if (!OpenDevTools(contents)) {
++    std::move(reply).Run(ErrorReply(&request.id, kFailed, "DevTools did not open"));
++    return;
++  }
++  base::DictValue result;
++  if (!devtools.empty()) result.Set("devtools", devtools);
++  std::move(reply).Run(OkReply(request.id, std::move(result)));
 +}
 +
 +// What the page has selected, in the frame with the focus, read from an isolated world (the page
@@ -8262,6 +8547,11 @@ index 0000000000..cbf0722182
 +    std::move(reply).Run(ErrorReply(&request.id, kNotFound, *request.body.FindString("tab")));
 +    return;
 +  }
++  // A DevTools frontend is only shown: what acts on it goes through its tab (view.devtools.*).
++  if (IsDevToolsView(contents) && op != "view.attach" && op != "view.resize" && op != "view.detach") {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "a DevTools view is only attached: use its tab"));
++    return;
++  }
 +  content::NavigationController& controller = contents->GetController();
 +  if (op == "view.attach" || op == "view.resize") {
 +    int width = 0, height = 0;
@@ -8319,6 +8609,12 @@ index 0000000000..cbf0722182
 +    return;
 +  } else if (op == "view.inspect") {
 +    ViewInspect(contents, request, std::move(reply));
++    return;
++  } else if (op == "view.devtools.dock") {
++    ViewDevToolsDock(contents, request, std::move(reply));
++    return;
++  } else if (op == "view.devtools.close") {
++    ViewDevToolsClose(contents, request, std::move(reply));
 +    return;
 +  } else {
 +    std::move(reply).Run(ErrorReply(&request.id, kUnknownOp, op));
@@ -8381,18 +8677,39 @@ index 0000000000..cbf0722182
 +  return DevToolsWindow::AllowDevToolsFor(Profile::FromBrowserContext(contents->GetBrowserContext()), contents);
 +}
 +
-+void Inspect(content::WebContents* contents, content::RenderFrameHost* frame, std::optional<gfx::Point> at) {
++std::string Inspect(content::WebContents* contents,
++                    content::RenderFrameHost* frame,
++                    std::optional<gfx::Point> at,
++                    std::string dock) {
++  State& s = S();
 +  // The picker and DevTools both drive the page's inspect mode (Overlay.setInspectMode).
-+  for (auto& shown : S().shown) {
++  for (auto& shown : s.shown) {
 +    if (shown->web_contents() == contents && shown->picker) shown->picker->End(true);
 +  }
-+  // DevTools never docks here (the tabs' windows have no DevTools area): its own window, brought
-+  // to the front when it is already open.
++  if (dock.empty()) dock = s.last_dock;
++  s.last_dock = dock;
++  // One already open goes where it is asked first, so its window does not come up on the way.
++  if (DevToolsWindow* open = OpenDevTools(contents)) Dock(open, dock);
++  // A new one opens there (OpensAsView); one in its window comes to the front.
++  s.next_dock = dock;
 +  if (at) {
 +    DevToolsWindow::InspectElement(frame, at->x(), at->y());
 +  } else {
 +    DevToolsWindow::OpenDevToolsWindow(contents, DevToolsToggleAction::Show(), DevToolsOpenedByAction::kUnknown);
 +  }
++  s.next_dock.clear();
++  DevToolsWindow* window = OpenDevTools(contents);
++  return window && window->agens_view() ? ViewTabName(NumberOf(window->GetDevToolsWebContents())) : std::string();
++}
++
++bool IsDevToolsView(content::WebContents* contents) {
++  DevToolsWindow* window = DevToolsWindow::AsDevToolsWindow(contents);
++  return window && window->agens_view();
++}
++
++bool InOwnDevToolsWindow(content::WebContents* contents) {
++  DevToolsWindow* window = DevToolsWindow::AsDevToolsWindow(contents);
++  return window ? !window->agens_view() : DevToolsWindow::IsDevToolsWindow(contents);
 +}
 +
 +void OnConnectionClosed(uint64_t connection) {
@@ -8405,6 +8722,13 @@ index 0000000000..cbf0722182
 +    return true;
 +  });
 +  for (BrowserWindowInterface* b : devtools) b->GetWindow()->Close();
++  std::vector<DevToolsWindow*> views;
++  for (auto& d : s.devtools) {
++    DevToolsWindow* window = DevToolsWindow::AsDevToolsWindow(d->web_contents());
++    if (window && window->agens_view()) views.push_back(window);
++  }
++  for (DevToolsWindow* window : views) window->AgensClose();
++  s.last_dock = "window";
 +  s.host = 0;
 +  s.shown.clear();  // the tabs go back to hidden
 +  s.sent.clear();
@@ -8422,6 +8746,14 @@ index 0000000000..cbf0722182
 +void AddWindow(AgensWindow* window) {
 +  if (!IsEmbedded()) return;
 +  WatchLayers();  // from the first window: every tab's last layer is known when it is attached
++  static bool dock_set = false;
++  if (!std::exchange(dock_set, true)) {
++    DevToolsWindow::AgensDock dock;
++    dock.opens_as_view = base::BindRepeating(&OpensAsView);
++    dock.shown = base::BindRepeating(&DevToolsShown);
++    dock.dialogs = base::BindRepeating(&agens::EmbeddedDialogManager);
++    DevToolsWindow::SetAgensDock(std::move(dock));
++  }
 +  ui_ask::Start();
 +  extension::Start();
 +  TheSiteRequests().Start();
@@ -8493,10 +8825,10 @@ index 0000000000..cbf0722182
 +}  // namespace agens::bridge::view
 diff --git a/chrome/browser/agens/bridge/view_ops.h b/chrome/browser/agens/bridge/view_ops.h
 new file mode 100644
-index 0000000000..dc86ad42dd
+index 0000000000..c93b4c3a5f
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_ops.h
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,83 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The page inside another app (docs/protocolo.md, "host e view"): host.attach, view.* and
 +// approval.answer and ui.answer (ui_ops.h). Only when the engine runs embedded (agens_embedded.h); otherwise every op here
@@ -8540,10 +8872,19 @@ index 0000000000..dc86ad42dd
 +
 +// DevTools may open for the tab (policy, kiosk).
 +bool CanInspect(content::WebContents* contents);
-+// Opens DevTools for the tab in its own window, the one window the embedded engine puts on screen,
-+// or brings it to the front: Elements on the element at `at` of `frame` (root DIPs, as a right
-+// click's x and y) when given. Ends the tab's picker. Check CanInspect first.
-+void Inspect(content::WebContents* contents, content::RenderFrameHost* frame, std::optional<gfx::Point> at);
++// Opens DevTools for the tab at `dock` ("bottom" or "right": a view the host lays out next to the
++// page; "window": its own window, the one window the embedded engine puts on screen; "": where the
++// host had it last, the window at first), or moves and shows the one open: Elements on the element
++// at `at` of `frame` (root DIPs, as a right click's x and y) when given. Ends the tab's picker.
++// Returns the DevTools view's "v<n>" when it is a view, else "". Check CanInspect first.
++std::string Inspect(content::WebContents* contents,
++                    content::RenderFrameHost* frame,
++                    std::optional<gfx::Point> at,
++                    std::string dock);
++// A DevTools frontend shown as a view (its menus, lists, panels and dialogs go to the host), and one
++// in a window of its own (they stay Chromium's, in that window).
++bool IsDevToolsView(content::WebContents* contents);
++bool InOwnDevToolsWindow(content::WebContents* contents);
 +
 +// Extension popups (extension_ops.cc): views the host attaches, gives input to and answers the
 +// ui.ask of like tabs, outside any tab strip and never in view.tab. RemoveView detaches it and
@@ -9647,10 +9988,10 @@ index 0000000000..48063dd9a1
 +
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_COOKIE_POOL_H_
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
-index 9d0bf4646d..7741b308bf 100644
+index 9d0bf4646d..e28c93f5d2 100644
 --- a/chrome/browser/agens/embed/agens_embed.h
 +++ b/chrome/browser/agens/embed/agens_embed.h
-@@ -36,6 +36,11 @@ typedef struct {
+@@ -36,6 +36,12 @@ typedef struct {
    int microphone;  // the page is using the microphone now
    int indicators;  // kAgensInd* mask: Chromium's address-bar icons for this tab (active tab only)
    int zoom_percent;  // the page's zoom, 100 by default
@@ -9659,10 +10000,11 @@ index 9d0bf4646d..7741b308bf 100644
 +  const char* control_detail;
 +  int control_paused;          // the person took over: "Você está no controle"
 +  double cursor_x, cursor_y;   // the agent's last click or hover, DIPs from the page's top-left; x < 0 when none
++  int devtools;  // its DevTools: 0 none, 1 in the page card (agens_ui_devtools_layout), 2 in its own window
  } AgensTab;
  
  // What `AgensTab.indicators` carries (camera and microphone have their own fields above).
-@@ -87,6 +92,12 @@ void agens_window_show_site_info(AgensWindow* window);
+@@ -87,6 +93,15 @@ void agens_window_show_site_info(AgensWindow* window);
  // Asks the engine to lay out and repaint again (after the UI changes size or colors, e.g.
  // light/dark mode).
  void agens_window_relayout(AgensWindow* window);
@@ -9672,10 +10014,13 @@ index 9d0bf4646d..7741b308bf 100644
 +// hands them back.
 +void agens_window_take_control(AgensWindow* window, int index);
 +void agens_window_hand_back_control(AgensWindow* window, int index);
++// The active tab's DevTools (its dock control): 0 closes it, 1 moves it into the page card, 2 into
++// its own window. Does nothing when it has none (⌥⌘I and Inspecionar open it, through Chromium).
++void agens_window_devtools(AgensWindow* window, int where);
  
  // Address suggestions, from local sources only (history, bookmarks, the typed search); remote
  // search suggestions stay off. Call suggest on every edit, with "" to stop.
-@@ -109,9 +120,14 @@ typedef struct {
+@@ -109,9 +124,14 @@ typedef struct {
    const char* name;  // UTF-8
    int active;        // this window's ato
    int asleep;        // not loaded in memory right now
@@ -9690,7 +10035,7 @@ index 9d0bf4646d..7741b308bf 100644
  // Opens that ato's window over this one (each ato keeps its own window and tabs).
  void agens_window_switch_ato(AgensWindow* window, int index);
  void agens_window_new_ato(AgensWindow* window);
-@@ -219,11 +235,24 @@ typedef struct {
+@@ -219,11 +239,24 @@ typedef struct {
    const char* name;
    const char* version;
    int enabled;
@@ -9716,7 +10061,7 @@ index 9d0bf4646d..7741b308bf 100644
  
  // Senhas salvas. The list carries no passwords; agens_password_get copies one (the UI asks for
  // Touch ID first). Indexes refer to the last list delivered.
-@@ -279,6 +308,16 @@ typedef enum {
+@@ -279,6 +312,16 @@ typedef enum {
  } AgensPermissionAnswer;
  void agens_window_permission_answer(AgensWindow* window, AgensPermissionAnswer answer);
  
@@ -9733,7 +10078,7 @@ index 9d0bf4646d..7741b308bf 100644
  // The site of the active page, for the panel behind the site icon. `pattern` is what
  // agens_site_exception_set takes for this site. Strings valid until the next call.
  typedef struct {
-@@ -291,13 +330,20 @@ AgensPermission agens_site_permission(AgensWindow* window, const char* kind);  /
+@@ -291,13 +334,20 @@ AgensPermission agens_site_permission(AgensWindow* window, const char* kind);  /
  // Cookies and storage of the active page's site only.
  void agens_site_clear_data(AgensWindow* window, AgensDoneFn done, void* context);
  
@@ -9757,13 +10102,21 @@ index 9d0bf4646d..7741b308bf 100644
  } AgensExtensionButton;
  typedef void (*AgensExtensionButtonsChanged)(void* context, const AgensExtensionButton* list, int count,
                                               const char* installed);
-@@ -358,6 +404,9 @@ float agens_ui_card_radius(void* chrome);
+@@ -358,6 +408,17 @@ float agens_ui_card_radius(void* chrome);
  float agens_ui_titlebar_height(void* chrome);
  void agens_ui_permission_prompt(void* chrome, const char* site, const char* const* asks, int count);
  void agens_ui_permission_prompt_close(void* chrome);
 +// `title` is the question, `detail` the explanation under it (may hold several lines). The answer
 +// buttons are Permitir, Permitir sempre (only when `offer_always`) and Não permitir (the default).
 +void agens_ui_approval_prompt(void* chrome, const char* title, const char* detail, int offer_always);
++// DevTools (docs/casca.md, "DevTools"). Where a new one opens: 1 in the page card, 0 in its own
++// window (the choice the person made last, for every ato).
++int agens_ui_devtools_in_page(void* chrome);
++// Called on every layout, after agens_ui_layout. `shown`: the active tab's DevTools is in the page
++// card; the UI splits `*page` (the card agens_ui_layout gave) into the page's part, left in `*page`,
++// and DevTools' part, in `*devtools`, both inside the card's border, and draws the divider and its
++// dock bar between them. Not shown: the UI hides those and leaves `*page` alone.
++void agens_ui_devtools_layout(void* chrome, int shown, AgensRect* page, AgensRect* devtools);
  void agens_ui_destroy_chrome(void* chrome);
  
  #ifdef __cplusplus
@@ -10554,7 +10907,7 @@ index 0000000000..9787b1d770
 +
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EXTENSIONS_H_
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
-index 268d4dc7bd..dbddb92dcf 100644
+index 268d4dc7bd..8112ef1f04 100644
 --- a/chrome/browser/agens/embed/agens_window.h
 +++ b/chrome/browser/agens/embed/agens_window.h
 @@ -15,7 +15,13 @@
@@ -10571,7 +10924,15 @@ index 268d4dc7bd..dbddb92dcf 100644
  #include "chrome/browser/autocomplete/autocomplete_classifier_factory.h"
  #include "chrome/browser/autocomplete/chrome_autocomplete_provider_client.h"
  #include "chrome/browser/autocomplete/chrome_autocomplete_scheme_classifier.h"
-@@ -48,7 +54,9 @@
+@@ -25,6 +31,7 @@
+ #include "base/strings/stringprintf.h"
+ #include "chrome/common/chrome_constants.h"
+ #include "chrome/browser/bookmarks/bookmark_model_factory.h"
++#include "chrome/browser/devtools/devtools_window.h"
+ #include "chrome/browser/browser_process.h"
+ #include "components/bookmarks/browser/bookmark_model.h"
+ #include "components/bookmarks/browser/base_bookmark_model_observer.h"
+@@ -48,7 +55,9 @@
  #include "chrome/browser/profiles/profile_manager.h"
  #include "chrome/browser/profiles/profile_window.h"
  #include "chrome/browser/search_engines/template_url_service_factory.h"
@@ -10581,7 +10942,7 @@ index 268d4dc7bd..dbddb92dcf 100644
  #include "components/search_engines/default_search_manager.h"
  #include "components/search_engines/template_url.h"
  #include "components/search_engines/template_url_data_util.h"
-@@ -189,10 +197,16 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -189,10 +198,16 @@ struct AgensWindow : public TabStripModelObserver,
                       public download::DownloadItem::Observer,
                       public bookmarks::BaseBookmarkModelObserver,
                       public find_in_page::FindResultObserver,
@@ -10599,7 +10960,7 @@ index 268d4dc7bd..dbddb92dcf 100644
      PreferDuckDuckGo();
      if (content::DownloadManager* manager = browser->GetProfile()->GetDownloadManager()) {
        downloads_manager = manager;
-@@ -230,7 +244,13 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -230,7 +245,13 @@ struct AgensWindow : public TabStripModelObserver,
      }
    }
    ~AgensWindow() override {
@@ -10613,7 +10974,7 @@ index 268d4dc7bd..dbddb92dcf 100644
      Storage().RemoveObserver(this);
      for (download::DownloadItem* item : downloads) item->RemoveObserver(this);
      if (downloads_manager) downloads_manager->RemoveObserver(this);
-@@ -284,7 +304,81 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -284,7 +305,81 @@ struct AgensWindow : public TabStripModelObserver,
      return g_browser_process->profile_manager()->GetProfileAttributesStorage();
    }
  
@@ -10696,7 +11057,7 @@ index 268d4dc7bd..dbddb92dcf 100644
      // Creation order, so an ato keeps its place and color: Chromium names profile folders
      // "Default", then "Profile 1", "Profile 2"…
      std::vector<ProfileAttributesEntry*> atos;
-@@ -304,19 +398,18 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -304,19 +399,18 @@ struct AgensWindow : public TabStripModelObserver,
    void NotifyAtos() {
      if (!atos_observer) return;
      std::vector<ProfileAttributesEntry*> entries = Atos();
@@ -10722,7 +11083,7 @@ index 268d4dc7bd..dbddb92dcf 100644
      }
      atos_observer(atos_context, atos.data(), static_cast<int>(atos.size()));
    }
-@@ -330,14 +423,9 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -330,14 +424,9 @@ struct AgensWindow : public TabStripModelObserver,
    }
  
    void NewAto() {
@@ -10739,7 +11100,7 @@ index 268d4dc7bd..dbddb92dcf 100644
      const gfx::Rect bounds = browser->GetWindow()->GetBounds();
      const std::u16string name = base::UTF8ToUTF16(base::StringPrintf("Ato %zu", Atos().size() + 1));
      manager->CreateProfileAsync(
-@@ -362,7 +450,10 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -362,7 +451,10 @@ struct AgensWindow : public TabStripModelObserver,
  
    // ProfileAttributesStorage::Observer:
    void OnProfileAdded(const base::FilePath&) override { NotifyAtos(); }
@@ -10751,7 +11112,7 @@ index 268d4dc7bd..dbddb92dcf 100644
    void OnProfileNameChanged(const base::FilePath&, const std::u16string&) override { NotifyAtos(); }
  
    TabStripModel* model() { return browser->GetTabStripModel(); }
-@@ -370,6 +461,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -370,6 +462,7 @@ struct AgensWindow : public TabStripModelObserver,
    // Loading pages change a tab many times a frame (title, URL, favicon, loading); the UI gets one
    // update per run of the message loop instead of one per change.
    void Notify() {
@@ -10759,7 +11120,7 @@ index 268d4dc7bd..dbddb92dcf 100644
      if (notify_pending) return;
      notify_pending = true;
      base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
-@@ -406,7 +498,8 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -406,7 +499,8 @@ struct AgensWindow : public TabStripModelObserver,
      const int count = model()->count();
      bookmarks::BookmarkModel* bookmarks =
          BookmarkModelFactory::GetForBrowserContextIfExists(browser->GetProfile());
@@ -10769,7 +11130,7 @@ index 268d4dc7bd..dbddb92dcf 100644
      std::vector<std::vector<uint8_t>> icons(count);
      std::vector<AgensTab> tabs(count);
      struct Split { int layout = 0, first = 0; double ratio = 0.5; };
-@@ -455,6 +548,18 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -455,6 +549,21 @@ struct AgensWindow : public TabStripModelObserver,
                   zoom::ZoomController::FromWebContents(contents)
                       ? zoom::ZoomController::FromWebContents(contents)->GetZoomPercent()
                       : 100};
@@ -10782,13 +11143,16 @@ index 268d4dc7bd..dbddb92dcf 100644
 +        tabs[i].cursor_x = controlled->cursor_x;
 +        tabs[i].cursor_y = controlled->cursor_y;
 +      }
++      if (DevToolsWindow* devtools = DevToolsWindow::GetInstanceForInspectedWebContents(contents)) {
++        tabs[i].devtools = devtools->agens_view() ? 1 : 2;
++      }
 +      tabs[i].controller = controllers[i].c_str();
 +      tabs[i].control_title = control_titles[i].c_str();
 +      tabs[i].control_detail = control_details[i].c_str();
      }
      observer(context, tabs.data(), static_cast<int>(tabs.size()));
    }
-@@ -582,6 +687,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -582,6 +691,7 @@ struct AgensWindow : public TabStripModelObserver,
    raw_ptr<void> downloads_context = nullptr;
    base::CallbackListSubscription search_loaded_;
    base::CancelableTaskTracker history_tracker;
@@ -10796,7 +11160,7 @@ index 268d4dc7bd..dbddb92dcf 100644
    raw_ptr<void> ui = nullptr;  // the chrome (agens_ui_*), set by the platform shell
    raw_ptr<views::View> extensions_anchor = nullptr;  // under the UI's extensions button
    AgensExtensionButtonsChanged extension_buttons_observer = nullptr;
-@@ -591,62 +697,99 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -591,62 +701,99 @@ struct AgensWindow : public TabStripModelObserver,
    base::ScopedObservation<extensions::ExtensionRegistry, extensions::ExtensionRegistryObserver>
        extensions_observation{this};
  
@@ -11129,7 +11493,7 @@ index d81488f053..3eef3778eb 100644
  void ConfirmCloseWithDownloads(views::Widget* widget, int count, base::OnceCallback<void(bool)> callback);
  
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
-index 5d7ca90415..3aeb1b5d13 100644
+index 5d7ca90415..1a7f6718e1 100644
 --- a/chrome/browser/agens/embed/native_shell_mac.mm
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
 @@ -7,7 +7,16 @@
@@ -11165,7 +11529,49 @@ index 5d7ca90415..3aeb1b5d13 100644
  #include "ui/base/metadata/metadata_header_macros.h"
  #include "ui/base/metadata/metadata_impl_macros.h"
  #include "ui/gfx/codec/png_codec.h"
-@@ -122,8 +138,10 @@ explicit NativeShellView(BrowserWindowInterface* browser)
+@@ -48,6 +64,24 @@ void Watch(content::WebContents* contents) {
+   base::RepeatingCallback<void(content::WebContents*)> on_focus_;
+ };
+ 
++void SetCascaDock();
++
++// Watches the DevTools shown in the card: when it goes, the card has only the page again.
++class FrontendWatcher : public content::WebContentsObserver {
++ public:
++  explicit FrontendWatcher(base::RepeatingClosure gone) : gone_(std::move(gone)) {}
++  void Watch(content::WebContents* contents) {
++    if (web_contents() != contents) Observe(contents);
++  }
++  void WebContentsDestroyed() override {
++    Observe(nullptr);
++    gone_.Run();
++  }
++
++ private:
++  base::RepeatingClosure gone_;
++};
++
+ // The gap between a split's two cards: drag it to change how much each tab gets.
+ class SplitHandle : public views::View {
+   METADATA_HEADER(SplitHandle, views::View)
+@@ -98,6 +132,16 @@ explicit NativeShellView(BrowserWindowInterface* browser)
+     card2_ = AddChildView(std::make_unique<views::View>());
+     contents_ = AddChildView(std::make_unique<views::WebView>(browser->GetProfile()));
+     contents2_ = AddChildView(std::make_unique<views::WebView>(browser->GetProfile()));  // a split's second tab
++    // No profile: GetWebContents() then never makes a page of its own (it holds only a frontend).
++    devtools_ = AddChildView(std::make_unique<views::WebView>(nullptr));  // the active tab's DevTools
++    devtools_->SetVisible(false);
++    frontend_ = std::make_unique<FrontendWatcher>(base::BindRepeating(
++        [](base::WeakPtr<NativeShellView> view) {
++          base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++              FROM_HERE, base::BindOnce(&NativeShellView::DevToolsChanged, view));
++        },
++        weak_.GetWeakPtr()));
++    if (!IsEmbedded()) SetCascaDock();
+     auto activate = base::BindRepeating(
+         [](BrowserWindowInterface* browser, content::WebContents* contents) {
+           TabStripModel* model = browser->GetTabStripModel();
+@@ -122,14 +166,43 @@ explicit NativeShellView(BrowserWindowInterface* browser)
      chrome_ = (__bridge_transfer NSView*)agens_ui_create_chrome(window_.get());
      window_->ui = (__bridge void*)chrome_;
      window_->extensions_anchor = extensions_anchor_;
@@ -11176,7 +11582,40 @@ index 5d7ca90415..3aeb1b5d13 100644
      agens_ui_destroy_chrome((__bridge void*)chrome_);
      [chrome_ removeFromSuperview];
      contents_->SetWebContents(nullptr);
-@@ -171,6 +189,12 @@ void Layout(PassKey) override {
+     contents2_->SetWebContents(nullptr);
++    devtools_->SetWebContents(nullptr);
+   }
+ 
++  // DevTools of one of this window's tabs opened, moved or closed: the tab list says where it is
++  // (AgensTab.devtools) and the card makes room for it.
++  void DevToolsChanged() {
++    window_->Notify();
++    InvalidateLayout();
++    SchedulePaint();
++  }
++  // The dock control: the active tab's DevTools out of the card into its window (2), into the card
++  // (1) or closed (0).
++  void MoveDevTools(int where) {
++    content::WebContents* active = window_->model()->GetActiveWebContents();
++    DevToolsWindow* devtools = active ? DevToolsWindow::GetInstanceForInspectedWebContents(active) : nullptr;
++    if (!devtools) return;
++    if (where == 0) {
++      devtools->AgensClose();
++      return;
++    }
++    // The card lets go of it first: a window's WebView takes it next (DevToolsWindow::SetAgensView).
++    if (where == 2 && devtools_->GetWebContents() == devtools->GetDevToolsWebContents()) {
++      devtools_->SetWebContents(nullptr);
++      devtools_->SetVisible(false);
++    }
++    devtools->SetAgensView(where == 1);
++  }
++  NSView* chrome() { return chrome_; }
++
+   void FocusAddress() { agens_ui_focus_address((__bridge void*)chrome_); }
+   float TitlebarHeight() { return agens_ui_titlebar_height((__bridge void*)chrome_); }
+   AgensWindow* window() { return window_.get(); }
+@@ -171,6 +244,12 @@ void Layout(PassKey) override {
          split = nullptr;
        }
      }
@@ -11189,7 +11628,112 @@ index 5d7ca90415..3aeb1b5d13 100644
      // Chromium keeps every tab but the active one hidden (no painting); a split shows two.
      for (views::WebView* pane : {contents_.get(), contents2_.get()}) {
        content::WebContents* was = pane->GetWebContents();
-@@ -328,6 +352,12 @@ void NativeTabStateChanged(views::Widget* widget) {
+@@ -188,6 +267,19 @@ void Layout(PassKey) override {
+     handle_->SetVisible(second);
+     pane1_->Watch(first);
+     pane2_->Watch(second);
++    // The active tab's DevTools, when it is in the card: not in a split, nor in full screen.
++    DevToolsWindow* devtools = first && !second && !page_fullscreen
++                                   ? DevToolsWindow::GetInstanceForInspectedWebContents(first)
++                                   : nullptr;
++    content::WebContents* frontend =
++        devtools && devtools->agens_view() ? devtools->GetDevToolsWebContents().get() : nullptr;
++    if (content::WebContents* was = devtools_->GetWebContents(); was && was != frontend) {
++      devtools_->SetWebContents(nullptr);
++      was->UpdateWebContentsVisibility(content::Visibility::HIDDEN);
++    }
++    if (frontend && devtools_->GetWebContents() != frontend) devtools_->SetWebContents(frontend);
++    devtools_->SetVisible(frontend);
++    frontend_->Watch(frontend);
+     if (page_fullscreen) {
+       SetBackground(views::CreateSolidBackground(SK_ColorBLACK));
+       contents_->SetBoundsRect(GetLocalBounds());
+@@ -236,6 +328,21 @@ void Layout(PassKey) override {
+       }
+     }
+     card_->SetBoundsRect(card);
++    // DevTools in the card: the UI splits it (the page's part, its divider and dock bar, DevTools').
++    AgensRect part = page, tools = {0, 0, 0, 0};
++    agens_ui_devtools_layout((__bridge void*)chrome_, frontend != nullptr, &part, &tools);
++    if (frontend) {
++      const float r = radius_ - 1;
++      const bool right = tools.x > part.x + part.width - 2;  // else under the page
++      contents_->SetBoundsRect(gfx::Rect(part.x, part.y, part.width, part.height));
++      contents_->holder()->SetNativeViewCornerRadii(right ? gfx::RoundedCornersF(r, 0, 0, r)
++                                                          : gfx::RoundedCornersF(r, r, 0, 0));
++      devtools_->SetBoundsRect(gfx::Rect(tools.x, tools.y, tools.width, tools.height));
++      // The dock bar is above it on either side: only its bottom corners are the card's.
++      devtools_->holder()->SetNativeViewCornerRadii(right ? gfx::RoundedCornersF(0, 0, r, 0)
++                                                          : gfx::RoundedCornersF(0, 0, r, r));
++      return;
++    }
+     card.Inset(1);
+     contents_->SetBoundsRect(card);
+     contents_->holder()->SetNativeViewCornerRadii(gfx::RoundedCornersF(radius_ - 1));
+@@ -297,6 +404,8 @@ void OnTabStripModelChanged(TabStripModel*, const TabStripModelChange&,
+   raw_ptr<views::WebView> contents_;
+   raw_ptr<views::View> card2_;
+   raw_ptr<views::WebView> contents2_;
++  raw_ptr<views::WebView> devtools_;  // the active tab's DevTools, when it is in the card
++  std::unique_ptr<FrontendWatcher> frontend_;
+   std::unique_ptr<PaneWatcher> pane1_, pane2_;
+   raw_ptr<SplitHandle> handle_;
+   gfx::Rect split_page_;  // the whole page area the split shares
+@@ -309,8 +418,53 @@ void OnTabStripModelChanged(TabStripModel*, const TabStripModelChange&,
+ BEGIN_METADATA(NativeShellView)
+ END_METADATA
+ 
++NativeShellView* ShellOf(BrowserWindowInterface* browser) {
++  if (!browser || !browser->GetWindow()) return nullptr;
++  views::Widget* widget = views::Widget::GetWidgetForNativeWindow(browser->GetWindow()->GetNativeWindow());
++  return widget ? views::AsViewClass<NativeShellView>(widget->GetRootView()->GetViewByID(NativeShellView::kViewId))
++                : nullptr;
++}
++NativeShellView* ShellWithTab(content::WebContents* tab) {
++  return tab ? ShellOf(GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(tab)) : nullptr;
++}
++
++// The standalone browser shows a tab's DevTools in its page card, on the side the person used
++// last, or in its own window when that was the last choice (docs/casca.md, "DevTools").
++void SetCascaDock() {
++  static bool set = false;
++  if (std::exchange(set, true)) return;
++  DevToolsWindow::AgensDock dock;
++  dock.opens_as_view = base::BindRepeating([](content::WebContents* inspected) {
++    NativeShellView* shell = ShellWithTab(inspected);
++    return shell && agens_ui_devtools_in_page((__bridge void*)shell->chrome());
++  });
++  dock.shown = base::BindRepeating([](DevToolsWindow* devtools) {
++    NativeShellView* shell = ShellWithTab(devtools->GetInspectedWebContents());
++    if (!shell) return;
++    shell->DevToolsChanged();
++    // In the card it takes the keyboard, as Chrome's docked DevTools does (after the layout).
++    if (devtools->agens_view()) {
++      base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++          FROM_HERE, base::BindOnce(
++                         [](base::WeakPtr<content::WebContents> frontend) {
++                           if (frontend) frontend->Focus();
++                         },
++                         devtools->GetDevToolsWebContents()->GetWeakPtr()));
++    }
++  });
++  DevToolsWindow::SetAgensDock(std::move(dock));
++}
++
+ }  // namespace
+ 
++}  // namespace agens
++
++extern "C" void agens_window_devtools(AgensWindow* w, int where) {
++  if (agens::NativeShellView* shell = agens::ShellOf(w->browser)) shell->MoveDevTools(where);
++}
++
++namespace agens {
++
+ std::unique_ptr<views::View> CreateNativeShellView(BrowserWindowInterface* browser) {
+   return std::make_unique<NativeShellView>(browser);
+ }
+@@ -328,6 +482,12 @@ void NativeTabStateChanged(views::Widget* widget) {
  }
  
  void ConfirmCloseWithDownloads(views::Widget* widget, int count, base::OnceCallback<void(bool)> callback) {
@@ -11202,7 +11746,7 @@ index 5d7ca90415..3aeb1b5d13 100644
    NSAlert* alert = [[NSAlert alloc] init];
    alert.messageText = count == 1 ? @"Há um download em andamento" : [NSString stringWithFormat:@"Há %d downloads em andamento", count];
    alert.informativeText = count == 1 ? @"Se fechar agora, ele é cancelado." : @"Se fechar agora, eles são cancelados.";
-@@ -360,6 +390,34 @@ bool HandleNativeCommand(BrowserWindowInterface* browser, int command_id) {
+@@ -360,6 +520,34 @@ bool HandleNativeCommand(BrowserWindowInterface* browser, int command_id) {
    return shell && shell->Command(*command);
  }
  
@@ -11237,7 +11781,7 @@ index 5d7ca90415..3aeb1b5d13 100644
  bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
    if (!IsNativeShellEnabled() || !browser->GetWindow()) return false;
    views::Widget* widget = views::Widget::GetWidgetForNativeWindow(browser->GetWindow()->GetNativeWindow());
-@@ -377,6 +435,13 @@ bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
+@@ -377,6 +565,13 @@ bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
   public:
    NativePermissionPrompt(AgensWindow* window, Delegate* delegate) : window_(window->weak.GetWeakPtr()) {
      window->permission_delegate = delegate->GetWeakPtr();
@@ -11251,7 +11795,7 @@ index 5d7ca90415..3aeb1b5d13 100644
      const GURL origin = delegate->GetRequestingOrigin();
      const std::string site = origin.is_valid() ? std::string(origin.host()) : std::string();
      std::vector<std::string> asks;
-@@ -389,12 +454,15 @@ bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
+@@ -389,12 +584,15 @@ bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
      agens_ui_permission_prompt(window->ui, site.c_str(), pointers.data(), static_cast<int>(pointers.size()));
    }
    ~NativePermissionPrompt() override {
@@ -11269,7 +11813,7 @@ index 5d7ca90415..3aeb1b5d13 100644
    }
    permissions::PermissionPromptDisposition GetPromptDisposition() const override {
      return permissions::PermissionPromptDisposition::ANCHORED_BUBBLE;
-@@ -407,7 +475,65 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
+@@ -407,7 +605,65 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
    }
  
   private:
@@ -11335,7 +11879,7 @@ index 5d7ca90415..3aeb1b5d13 100644
  };
  
  std::unique_ptr<permissions::PermissionPrompt> CreateNativePermissionPrompt(
-@@ -424,34 +550,230 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
+@@ -424,34 +680,230 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
    return std::make_unique<NativePermissionPrompt>(shell->window(), delegate);
  }
  
@@ -11584,16 +12128,17 @@ index 5d7ca90415..3aeb1b5d13 100644
  }  // namespace
  
  class NativeLoginHandler : public LoginHandler {
-@@ -466,6 +788,8 @@ void ShowNativeInstallDialog(std::unique_ptr<ExtensionInstallPromptShowParams> p
+@@ -466,6 +918,9 @@ void ShowNativeInstallDialog(std::unique_ptr<ExtensionInstallPromptShowParams> p
    bool BuildViewImpl(const std::u16string& authority,
                       const std::u16string& explanation,
                       LoginModelData*) override {
-+    // Embedded, a DevTools window's own page is on screen by itself: the sheet goes on it.
-+    if (IsEmbedded() && !DevToolsWindow::IsDevToolsWindow(web_contents())) return AskHost();
++    // Embedded, a DevTools window's own page is on screen by itself: the sheet goes on it (a
++    // DevTools view's goes to the host).
++    if (IsEmbedded() && !bridge::view::InOwnDevToolsWindow(web_contents())) return AskHost();
      NSWindow* window = web_contents() ? web_contents()->GetTopLevelNativeWindow().GetNativeNSWindow() : nil;
      if (!window) return false;
      alert_ = [[NSAlert alloc] init];
-@@ -500,13 +824,52 @@ bool BuildViewImpl(const std::u16string& authority,
+@@ -500,13 +955,52 @@ bool BuildViewImpl(const std::u16string& authority,
    void CloseDialog() override {
      if (window_ && alert_.window.sheetParent) [window_ endSheet:alert_.window returnCode:NSModalResponseAbort];
      alert_ = nil;
@@ -11646,7 +12191,7 @@ index 5d7ca90415..3aeb1b5d13 100644
  };
  
  // Owns itself: deleted when its sheet ends.
-@@ -520,6 +883,13 @@ void CloseDialog() override {
+@@ -520,6 +1014,13 @@ void CloseDialog() override {
                   content::JavaScriptDialogManager::DialogClosedCallback callback,
                   base::OnceClosure force_closed)
        : callback_(std::move(callback)), force_closed_(std::move(force_closed)) {
@@ -11660,7 +12205,7 @@ index 5d7ca90415..3aeb1b5d13 100644
      alert_ = [[NSAlert alloc] init];
      alert_.messageText = base::SysUTF16ToNSString(title);
      alert_.informativeText = base::SysUTF16ToNSString(message);
-@@ -558,6 +928,8 @@ void CloseDialogWithoutCallback() override {
+@@ -558,6 +1059,8 @@ void CloseDialogWithoutCallback() override {
  
   private:
    void Finish(bool ok) {
@@ -11669,7 +12214,7 @@ index 5d7ca90415..3aeb1b5d13 100644
      force_closed_.Reset();
      if (callback_) std::move(callback_).Run(ok, ok ? GetUserInput() : std::u16string());
      base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE, this);
-@@ -567,6 +939,7 @@ void Finish(bool ok) {
+@@ -567,6 +1070,7 @@ void Finish(bool ok) {
    NSAlert* __strong alert_;
    NSTextField* __strong field_ = nil;
    NSWindow* __strong window_ = nil;
@@ -11677,7 +12222,7 @@ index 5d7ca90415..3aeb1b5d13 100644
    base::WeakPtrFactory<NativeJsDialog> weak_{this};
  };
  
-@@ -589,10 +962,28 @@ void Finish(bool ok) {
+@@ -589,10 +1093,28 @@ void Finish(bool ok) {
        ->GetWeakPtr();
  }
  
@@ -11707,7 +12252,7 @@ index 5d7ca90415..3aeb1b5d13 100644
    auto* shell = widget && widget->GetRootView()
                      ? views::AsViewClass<NativeShellView>(
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
-index 3c18c4eab1..03a19667a2 100644
+index 3c18c4eab1..f319b1f1f5 100644
 --- a/chrome/browser/agens/ui/chrome_mac.mm
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
 @@ -93,7 +93,8 @@ unsigned solid(NSView* v) const {
@@ -12150,7 +12695,224 @@ index 3c18c4eab1..03a19667a2 100644
        cookies.frame = NSMakeRect(90, y + 76, 460, 16);
        cookies.alignment = NSTextAlignmentCenter;
        for (NSView* v in @[ label, _atoName, cookies ]) [_body addSubview:v];
-@@ -3625,6 +3861,8 @@ @implementation AgensChrome {
+@@ -3556,6 +3792,216 @@ static void FindChanged(void* context, int current, int total) {
+   [(__bridge AgensFindBar*)context setCurrent:current total:total];
+ }
+ 
++// ---------------------------------------------------------------------------------------------
++// DevTools in the page card (prototipos/devtools.html): the page on top (or on the left), a 1 pt
++// divider, our dock bar and DevTools' own page. Side and size are the person's, for every ato.
++
++static NSString* const kDevToolsDockKey = @"AgensDevToolsDock";      // where it opens: bottom, right or window
++static NSString* const kDevToolsSideKey = @"AgensDevToolsSide";      // the side in the card used last
++static NSString* const kDevToolsHeightKey = @"AgensDevToolsHeight";  // at the bottom, bar included, pt
++static NSString* const kDevToolsWidthKey = @"AgensDevToolsWidth";    // on the right
++static const CGFloat kDevToolsBar = 28, kDevToolsMin = 120, kDevToolsPageMin = 200;
++static BOOL DevToolsOnRight() {
++  return [[NSUserDefaults.standardUserDefaults stringForKey:kDevToolsSideKey] isEqual:@"right"];
++}
++static BOOL DevToolsInWindow() {
++  return [[NSUserDefaults.standardUserDefaults stringForKey:kDevToolsDockKey] isEqual:@"window"];
++}
++// DevTools' part of `total` (the card's height, or width on the right): 40% or 420 pt at first,
++// then what the person dragged, kept to at least 120 pt of DevTools and 200 pt of page.
++static CGFloat DevToolsSize(CGFloat total) {
++  const BOOL right = DevToolsOnRight();
++  const CGFloat kept = [NSUserDefaults.standardUserDefaults doubleForKey:right ? kDevToolsWidthKey : kDevToolsHeightKey];
++  const CGFloat size = kept > 0 ? kept : right ? 420 : round(total * 0.4);
++  return floor(MAX(MIN(size, total - kDevToolsPageMin - 1), MIN(kDevToolsMin, total / 2)));
++}
++
++// The divider: a 1 pt line with 4 pt to grab on each side, warm with a handle while hovered or
++// dragged (prototype .dv).
++@interface AgensDevToolsDivider : NSView
++@property(nonatomic) BOOL vertical;  // DevTools on the right
++@property(nonatomic, copy) void (^onDrag)(NSPoint point, BOOL done);  // in the superview
++@end
++@implementation AgensDevToolsDivider {
++  NSTrackingArea* _tracking;
++  BOOL _hot, _dragging;
++  CALayer* _line;
++  CALayer* _grip;
++}
++@synthesize vertical = _vertical;
++@synthesize onDrag = _onDrag;
++- (instancetype)initWithFrame:(NSRect)frame {
++  if ((self = [super initWithFrame:frame])) {
++    self.wantsLayer = YES;
++    _line = [CALayer layer];
++    _grip = [CALayer layer];
++    _grip.cornerRadius = 2;
++    [self.layer addSublayer:_line];
++    [self.layer addSublayer:_grip];
++    self.accessibilityLabel = @"Arraste para mudar o tamanho";
++  }
++  return self;
++}
++- (BOOL)isFlipped {
++  return YES;
++}
++- (BOOL)mouseDownCanMoveWindow {
++  return NO;
++}
++- (NSAccessibilityRole)accessibilityRole {
++  return NSAccessibilitySplitterRole;
++}
++- (void)setVertical:(BOOL)vertical {
++  _vertical = vertical;
++  [self.window invalidateCursorRectsForView:self];
++  [self refresh];
++}
++- (void)layout {
++  [super layout];
++  [self refresh];
++}
++- (void)refresh {
++  [CATransaction begin];
++  [CATransaction setDisableActions:YES];
++  const NSRect b = self.bounds;
++  _line.frame = _vertical ? NSMakeRect(floor(NSMidX(b)), 0, 1, NSHeight(b)) : NSMakeRect(0, floor(NSMidY(b)), NSWidth(b), 1);
++  _grip.frame = _vertical ? NSMakeRect(NSMidX(b) - 2, NSMidY(b) - 16, 4, 32) : NSMakeRect(NSMidX(b) - 16, NSMidY(b) - 2, 32, 4);
++  const BOOL warm = _hot || _dragging;
++  _line.backgroundColor = CG(warm ? kLight3 : kLineStrong, self);
++  _grip.backgroundColor = CG(kLight3, self);
++  _grip.hidden = !warm;
++  [CATransaction commit];
++}
++- (void)viewDidChangeEffectiveAppearance {
++  [super viewDidChangeEffectiveAppearance];
++  [self refresh];
++}
++- (void)resetCursorRects {
++  [self addCursorRect:self.bounds cursor:_vertical ? NSCursor.resizeLeftRightCursor : NSCursor.resizeUpDownCursor];
++}
++- (void)updateTrackingAreas {
++  [super updateTrackingAreas];
++  if (_tracking) [self removeTrackingArea:_tracking];
++  _tracking = [[NSTrackingArea alloc] initWithRect:NSZeroRect
++                                           options:NSTrackingMouseEnteredAndExited | NSTrackingActiveInKeyWindow |
++                                                   NSTrackingInVisibleRect
++                                             owner:self
++                                          userInfo:nil];
++  [self addTrackingArea:_tracking];
++}
++- (void)mouseEntered:(NSEvent*)event {
++  _hot = YES;
++  [self refresh];
++}
++- (void)mouseExited:(NSEvent*)event {
++  _hot = NO;
++  [self refresh];
++}
++- (void)mouseDown:(NSEvent*)event {
++  _dragging = YES;
++  [self refresh];
++}
++- (void)mouseDragged:(NSEvent*)event {
++  if (_onDrag) _onDrag([self.superview convertPoint:event.locationInWindow fromView:nil], NO);
++}
++- (void)mouseUp:(NSEvent*)event {
++  _dragging = NO;
++  [self refresh];
++  if (_onDrag) _onDrag([self.superview convertPoint:event.locationInWindow fromView:nil], YES);
++}
++@end
++
++// The dock bar over DevTools: "DevTools" and, at its end, bottom, right, its own window and close
++// (prototype .dk). Drawing inside DevTools' own tab strip would mean changing its page, so the
++// control sits on a strip of ours right above it.
++@interface AgensDevToolsBar : NSView
++@property(nonatomic, copy) void (^onDock)(NSString* where);  // bottom, right, window or close
++- (void)setCurrent:(NSString*)where;
++@end
++@implementation AgensDevToolsBar {
++  NSTextField* _title;
++  NSArray<AgensToolButton*>* _buttons;
++  NSView* _separator;
++  NSView* _line;
++}
++@synthesize onDock = _onDock;
++- (instancetype)initWithFrame:(NSRect)frame {
++  if ((self = [super initWithFrame:frame])) {
++    self.wantsLayer = YES;
++    _title = Label(12, NSFontWeightMedium, kDim);
++    _title.stringValue = @"DevTools";
++    [self addSubview:_title];
++    NSArray* keys = @[ @"bottom", @"right", @"window", @"close" ];
++    NSArray* symbols = @[ @"rectangle.bottomthird.inset.filled", @"rectangle.rightthird.inset.filled",
++                          @"macwindow.on.rectangle", @"xmark" ];
++    NSArray* labels = @[ @"Encaixar embaixo", @"Encaixar à direita", @"Em janela própria", @"Fechar DevTools  ⌥⌘I" ];
++    NSMutableArray* buttons = [NSMutableArray array];
++    __weak AgensDevToolsBar* weak = self;
++    for (NSUInteger i = 0; i < keys.count; ++i) {
++      AgensToolButton* b = [[AgensToolButton alloc] initWithSymbol:symbols[i] label:labels[i] size:12];
++      b.radius = 6;
++      NSString* key = keys[i];
++      b.onPress = ^{
++        AgensDevToolsBar* strong = weak;
++        if (strong && strong->_onDock) strong->_onDock(key);
++      };
++      [self addSubview:b];
++      [buttons addObject:b];
++    }
++    _buttons = buttons;
++    _separator = [[NSView alloc] init];
++    _separator.wantsLayer = YES;
++    [self addSubview:_separator];
++    _line = [[NSView alloc] init];
++    _line.wantsLayer = YES;
++    [self addSubview:_line];
++    self.accessibilityRole = NSAccessibilityGroupRole;
++    self.accessibilityLabel = @"Onde fica o DevTools";
++  }
++  return self;
++}
++- (BOOL)isFlipped {
++  return YES;
++}
++- (BOOL)mouseDownCanMoveWindow {
++  return NO;
++}
++- (void)mouseDown:(NSEvent*)event {
++}
++- (void)layout {
++  [super layout];
++  const CGFloat h = NSHeight(self.bounds), w = NSWidth(self.bounds);
++  CGFloat x = w - 5;
++  for (NSInteger i = (NSInteger)_buttons.count - 1; i >= 0; --i) {
++    x -= 24;
++    _buttons[i].frame = NSMakeRect(x, (h - 22) / 2, 24, 22);
++    if (i == 3) {  // a thin line between the docks and close
++      x -= 7;
++      _separator.frame = NSMakeRect(x + 3, (h - 14) / 2, 1, 14);
++    } else {
++      x -= 1;
++    }
++  }
++  _title.frame = NSMakeRect(10, (h - 16) / 2, MAX(0, x - 16), 16);
++  _line.frame = NSMakeRect(0, h - 1, w, 1);
++  [self viewDidChangeEffectiveAppearance];
++}
++- (void)viewDidChangeEffectiveAppearance {
++  [super viewDidChangeEffectiveAppearance];
++  self.layer.backgroundColor = CG(kRaise, self);
++  _separator.layer.backgroundColor = CG(kLine, self);
++  _line.layer.backgroundColor = CG(kLine, self);
++}
++- (void)setCurrent:(NSString*)where {
++  NSArray* keys = @[ @"bottom", @"right", @"window" ];
++  for (NSUInteger i = 0; i < keys.count; ++i) {
++    const BOOL on = [keys[i] isEqual:where];
++    [_buttons[i] setTint:on ? kLight3 : kDim];
++    _buttons[i].accessibilityValue = on ? @"marcado" : nil;
++  }
++}
++@end
++
+ // ---------------------------------------------------------------------------------------------
+ // The chrome.
+ 
+@@ -3625,6 +4071,8 @@ @implementation AgensChrome {
    AgensDragView* _tabsDoc;
    AgensToolButton* _moreAtos;  // "⋯" when the atos don't fit
    NSMutableArray<NSString*>* _atoNames;
@@ -12159,7 +12921,7 @@ index 3c18c4eab1..03a19667a2 100644
    int _activeAto;
    NSView* _atosLine;
    NSMutableArray<AgensAtoButton*>* _atoButtons;
-@@ -3673,8 +3911,13 @@ @implementation AgensChrome {
+@@ -3673,8 +4121,13 @@ @implementation AgensChrome {
    std::vector<BookmarkItem> _bookmarks;
    long long _barId;
    AgensFindBar* _find;
@@ -12175,7 +12937,7 @@ index 3c18c4eab1..03a19667a2 100644
    AgensErrorView* _error;
    BOOL _stopPage;  // the active tab shows a security stop page
    int _split;            // the active tab's split (0 none, 1 side by side, 2 stacked)
-@@ -3691,6 +3934,20 @@ @implementation AgensChrome {
+@@ -3691,6 +4144,26 @@ @implementation AgensChrome {
    NSString* _url;
    BOOL _loading;
    NSRect _page;
@@ -12193,10 +12955,16 @@ index 3c18c4eab1..03a19667a2 100644
 +  AgensPillButton* _controlMain;  // Assumir, or Devolver ao …
 +  AgensPillButton* _controlEnd;   // the stop bubble while the person is in control
 +  AgensCursorView* _cursor;
++  int _devtools;      // the active tab's DevTools: 0 none, 1 in the card, 2 in its own window
++  BOOL _devtoolsShown;  // the engine shows it in the card (agens_ui_devtools_layout)
++  AgensDevToolsDivider* _devtoolsDivider;
++  AgensDevToolsBar* _devtoolsBar;
++  NSTextField* _devtoolsSize;  // "312 px · 42%" while the divider is dragged
++  NSRect _devtoolsPage, _devtoolsTools;  // the card's two parts, inside its border
  }
  
  - (instancetype)initWithWindow:(AgensWindow*)window {
-@@ -3786,6 +4043,7 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3786,6 +4259,7 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
      _siteButton.onPress = ^{ [weak showSiteInfo]; };
      [_omni addSubview:_siteButton positioned:NSWindowBelow relativeTo:_omniIcon];
      _extensions = [NSMutableArray array];
@@ -12204,7 +12972,7 @@ index 3c18c4eab1..03a19667a2 100644
      _extButton = [[AgensToolButton alloc] initWithSymbol:@"puzzlepiece" label:@"Extensões"];
      [_extButton setImage:AgensIcon(kIconExtensions)];
      _extButton.hidden = YES;
-@@ -3859,6 +4117,8 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3859,6 +4333,8 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
      _tabsDoc = [[AgensDragView alloc] init];
      _tabsScroll.documentView = _tabsDoc;
      _atoNames = [NSMutableArray array];
@@ -12213,7 +12981,7 @@ index 3c18c4eab1..03a19667a2 100644
      _moreAtos = [[AgensToolButton alloc] initWithSymbol:@"ellipsis" label:@"Todos os atos" size:13];
      _moreAtos.onPress = ^{ [weak showAtosMenu]; };
      _addAto = [[AgensToolButton alloc] initWithSymbol:@"plus" label:@"Novo ato"];
-@@ -3969,6 +4229,44 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3969,6 +4445,44 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
                           _atosLine, _addAto, _atoDot, _strip, _bar, _history, _bookmarksPage, _ntp2, _ntp2Click, _ntp, _error, _find, _loadbar, _statusPill, _suggest ]) {
        [self addSubview:v];
      }
@@ -12258,7 +13026,7 @@ index 3c18c4eab1..03a19667a2 100644
      [self refreshTheme];
      ApplyAppearance(agens_window_color_mode(_window));  // the saved choice, from the first window on
      agens_window_set_tabs_observer(_window, TabsChanged, (__bridge void*)self);
-@@ -4009,6 +4307,10 @@ - (void)refreshTheme {
+@@ -4009,6 +4523,10 @@ - (void)refreshTheme {
    _atoDot.layer.backgroundColor = CG(kLight3, self);
    _statusPill.layer.backgroundColor = CG(kFloat, self);
    _statusPill.layer.borderColor = CG(kLine, self);
@@ -12269,7 +13037,7 @@ index 3c18c4eab1..03a19667a2 100644
    SyncGlass(_suggest, 12 * Round());
    [self runLoadbar];  // the glow's color
  }
-@@ -4167,6 +4469,11 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4167,6 +4685,11 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
    if (!_extButton.hidden) {
      _extButton.frame = NSMakeRect(omniEnd + 4 - 30, btnY, 28, 28);
      omniEnd = NSMinX(_extButton.frame) - 4;
@@ -12281,7 +13049,22 @@ index 3c18c4eab1..03a19667a2 100644
    }
  
    // Atos: only what fits (6 in the open column, 5 collapsed, 4 on the bar); past that the last
-@@ -4367,6 +4674,7 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4340,8 +4863,13 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+ 
+   _page = page;
+   // Our pages over the card (new tab, errors…) cover the active tab's pane only; the engine splits
+-  // the card the same way (8 pt gap, the split's ratio).
++  // the card the same way (8 pt gap, the split's ratio), and leaves the page its part next to
++  // DevTools.
+   NSRect pane = _page;
++  if (_devtoolsShown && !_split) {
++    [self splitDevTools];
++    pane = NSInsetRect(_devtoolsPage, -1, -1);
++  }
+   if (_split) {
+     const CGFloat gap = 8;
+     if (_split == 2) {
+@@ -4367,14 +4895,17 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
      _ntp2.frame = NSInsetRect(other, 1, 1);
      _ntp2Click.frame = _ntp2.frame;
    }
@@ -12289,7 +13072,19 @@ index 3c18c4eab1..03a19667a2 100644
    _history.frame = _ntp.frame;
    _bookmarksPage.frame = _ntp.frame;
    _error.frame = _ntp.frame;
-@@ -4388,6 +4696,9 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+   _find.frame = NSMakeRect(NSMaxX(pane) - 10 - 340, NSMinY(pane) + 10, 340, 38);
+   _loadbar.frame = NSMakeRect(NSMinX(_page), NSMinY(_page) - 5, NSWidth(_page), 2);
+   if (NSWidth(_page) != _loadW) [self runLoadbar];  // the sweep is sized to the line
+-  CGFloat statusW = MIN(ceil(_statusText.fittingSize.width) + 24, NSWidth(_page) / 2);
+-  _statusPill.frame = NSMakeRect(NSMinX(_page) + 8, NSMaxY(_page) - 8 - 22, statusW, 22);
++  // Over the page's own part (not over DevTools in the card).
++  const NSRect statusArea = _devtoolsShown && !_split ? pane : _page;
++  CGFloat statusW = MIN(ceil(_statusText.fittingSize.width) + 24, NSWidth(statusArea) / 2);
++  _statusPill.frame = NSMakeRect(NSMinX(statusArea) + 8, NSMaxY(statusArea) - 8 - 22, statusW, 22);
+   _statusText.frame = NSMakeRect(10, 3, statusW - 20, 16);
+ 
+   NSRect anchor = [self editingField] == _ntp.field ? [_ntp convertRect:_ntp.well.frame toView:self]
+@@ -4388,6 +4919,9 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
  }
  - (AgensRect)extensionsAnchor {
    NSRect r = _extButton.hidden ? _menu.frame : _extButton.frame;
@@ -12299,7 +13094,119 @@ index 3c18c4eab1..03a19667a2 100644
    return {(int)NSMinX(r), (int)NSMinY(r), (int)NSWidth(r), (int)NSHeight(r)};
  }
  - (AgensRect)siteIconRect {
-@@ -4431,6 +4742,7 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+@@ -4398,6 +4932,111 @@ - (void)relayout {
+   [self layoutForWidth:(int)NSWidth(self.bounds) height:(int)NSHeight(self.bounds)];
+ }
+ 
++// --- DevTools in the card.
++
++- (void)makeDevToolsViews {
++  if (_devtoolsBar) return;
++  __weak AgensChrome* weak = self;
++  _devtoolsDivider = [[AgensDevToolsDivider alloc] initWithFrame:NSZeroRect];
++  _devtoolsDivider.onDrag = ^(NSPoint p, BOOL done) { [weak dragDevTools:p done:done]; };
++  _devtoolsBar = [[AgensDevToolsBar alloc] initWithFrame:NSZeroRect];
++  _devtoolsBar.onDock = ^(NSString* where) { [weak dockDevTools:where]; };
++  _devtoolsSize = Label(11.5, NSFontWeightMedium, kInk);
++  _devtoolsSize.alignment = NSTextAlignmentCenter;
++  _devtoolsSize.wantsLayer = YES;
++  _devtoolsSize.layer.cornerRadius = 7;
++  _devtoolsSize.layer.borderWidth = 1;
++  for (NSView* v in @[ _devtoolsDivider, _devtoolsBar, _devtoolsSize ]) {
++    v.hidden = YES;
++    [self addSubview:v];
++  }
++  [_devtoolsBar setCurrent:DevToolsOnRight() ? @"right" : @"bottom"];
++}
++
++// The card's parts: the page, the divider (with its grab area), our bar, DevTools.
++- (void)splitDevTools {
++  [self makeDevToolsViews];
++  const NSRect inner = NSInsetRect(_page, 1, 1);
++  const BOOL right = DevToolsOnRight();
++  const CGFloat size = DevToolsSize(right ? NSWidth(inner) : NSHeight(inner));
++  NSRect line;
++  if (right) {
++    _devtoolsPage = NSMakeRect(NSMinX(inner), NSMinY(inner), NSWidth(inner) - size - 1, NSHeight(inner));
++    line = NSMakeRect(NSMaxX(_devtoolsPage), NSMinY(inner), 1, NSHeight(inner));
++    _devtoolsDivider.frame = NSInsetRect(line, -4, 0);
++    _devtoolsBar.frame = NSMakeRect(NSMaxX(line), NSMinY(inner), size, kDevToolsBar);
++  } else {
++    _devtoolsPage = NSMakeRect(NSMinX(inner), NSMinY(inner), NSWidth(inner), NSHeight(inner) - size - 1);
++    line = NSMakeRect(NSMinX(inner), NSMaxY(_devtoolsPage), NSWidth(inner), 1);
++    _devtoolsDivider.frame = NSInsetRect(line, 0, -4);
++    _devtoolsBar.frame = NSMakeRect(NSMinX(inner), NSMaxY(line), NSWidth(inner), kDevToolsBar);
++  }
++  if (_devtoolsDivider.vertical != right) _devtoolsDivider.vertical = right;
++  _devtoolsTools = NSMakeRect(NSMinX(_devtoolsBar.frame), NSMaxY(_devtoolsBar.frame), NSWidth(_devtoolsBar.frame),
++                              NSMaxY(inner) - NSMaxY(_devtoolsBar.frame));
++}
++
++- (void)devtoolsShown:(BOOL)shown page:(AgensRect*)page tools:(AgensRect*)tools {
++  [self makeDevToolsViews];
++  if (shown != _devtoolsShown) {
++    _devtoolsShown = shown;
++    [self relayout];  // our pages over the card follow the page's part
++  }
++  _devtoolsDivider.hidden = _devtoolsBar.hidden = !shown;
++  if (!shown) {
++    _devtoolsSize.hidden = YES;
++    return;
++  }
++  [self splitDevTools];
++  auto rect = [](NSRect r) {
++    return AgensRect{(int)NSMinX(r), (int)NSMinY(r), (int)NSWidth(r), (int)NSHeight(r)};
++  };
++  *page = rect(_devtoolsPage);
++  *tools = rect(_devtoolsTools);
++}
++
++// The divider moved to `p`: DevTools gets what is past it, kept for the next time; the size shows
++// while dragging.
++- (void)dragDevTools:(NSPoint)p done:(BOOL)done {
++  const NSRect inner = NSInsetRect(_page, 1, 1);
++  const BOOL right = DevToolsOnRight();
++  const CGFloat total = right ? NSWidth(inner) : NSHeight(inner);
++  const CGFloat size = MAX(kDevToolsMin, MIN(right ? NSMaxX(inner) - p.x : NSMaxY(inner) - p.y, total - kDevToolsPageMin - 1));
++  [NSUserDefaults.standardUserDefaults setDouble:round(size) forKey:right ? kDevToolsWidthKey : kDevToolsHeightKey];
++  [self splitDevTools];
++  _devtoolsSize.stringValue = [NSString stringWithFormat:@"%d px · %d%%", (int)round(size), (int)lround(size / total * 100)];
++  _devtoolsSize.layer.backgroundColor = CG(kFloat, self);
++  _devtoolsSize.layer.borderColor = CG(kLineStrong, self);
++  const CGFloat w = ceil(_devtoolsSize.fittingSize.width) + 16, h = 22;
++  const NSRect d = _devtoolsDivider.frame;
++  _devtoolsSize.frame = right ? NSMakeRect(NSMinX(d) - w - 4, NSMidY(d) - h / 2, w, h)
++                              : NSMakeRect(NSMidX(d) - w / 2, NSMinY(d) - h - 4, w, h);
++  _devtoolsSize.hidden = done;
++  [self relayout];
++  if (_window) agens_window_relayout(_window);
++}
++
++// The dock bar: a side of the card, its own window, or close. The choice holds for every ato.
++- (void)dockDevTools:(NSString*)where {
++  if (!_window) return;
++  NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
++  if ([where isEqual:@"close"]) {
++    agens_window_devtools(_window, 0);
++    return;
++  }
++  [d setObject:where forKey:kDevToolsDockKey];
++  if (![where isEqual:@"window"]) [d setObject:where forKey:kDevToolsSideKey];
++  [_devtoolsBar setCurrent:where];
++  if ([where isEqual:@"window"]) {
++    agens_window_devtools(_window, 2);
++  } else if (_devtools == 2) {
++    agens_window_devtools(_window, 1);
++  } else {
++    [self relayout];
++    agens_window_relayout(_window);
++  }
++}
++
+ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+   __weak AgensChrome* weak = self;
+   while ((int)_rows.count < count) {
+@@ -4431,6 +5070,7 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
      [_rows removeLastObject];
    }
    int activeTab = -1;
@@ -12307,7 +13214,19 @@ index 3c18c4eab1..03a19667a2 100644
    _pinnedCount = 0;
    _partner = -1;
    BOOL partnerIsNewTab = NO;
-@@ -4480,7 +4792,10 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+@@ -4473,6 +5113,11 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+     _split = tabs[i].split;
+     _splitFirst = tabs[i].split_first;
+     _splitRatio = tabs[i].split_ratio;
++    if (_devtools != tabs[i].devtools) {
++      _devtools = tabs[i].devtools;
++      [self makeDevToolsViews];
++      [_devtoolsBar setCurrent:_devtools == 2 ? @"window" : DevToolsOnRight() ? @"right" : @"bottom"];
++    }
+     _error.hidden = !(tabs[i].error || _stopPage) || tabs[i].loading || !tabs[i].url[0];
+     if (!_error.hidden) [_error showError:tabs[i].error name:@(tabs[i].error_name) stop:_stopPage];
+     _url = @(tabs[i].url);
+@@ -4480,7 +5125,10 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
      _bookmarked = tabs[i].bookmarked;
      _back.enabled = tabs[i].can_go_back;
      _forward.enabled = tabs[i].can_go_forward;
@@ -12318,7 +13237,7 @@ index 3c18c4eab1..03a19667a2 100644
    if (_loadbar.hidden == _loading) {
      _loadbar.hidden = !_loading;
      [self runLoadbar];
-@@ -4539,14 +4854,18 @@ - (void)setAtos:(const AgensAto*)atos count:(int)count {
+@@ -4539,14 +5187,18 @@ - (void)setAtos:(const AgensAto*)atos count:(int)count {
      [_atoButtons removeLastObject];
    }
    [_atoNames removeAllObjects];
@@ -12338,7 +13257,29 @@ index 3c18c4eab1..03a19667a2 100644
    }
    [self relayout];
  }
-@@ -4854,6 +5173,15 @@ - (BOOL)collapsed {
+@@ -4671,13 +5323,20 @@ - (void)showMenu {
+     NSString* title;
+     NSString* key;
+     void (^action)(void);
+-  } items[] = {
++  };
++  std::vector<Item> items = {
+       {kIconPlus, @"Nova aba", @"⌘T", ^{ [weak menuNewTab:nil]; }},
+       {kIconStar, @"Favoritos", @"⌘⌥B", ^{ [weak menuBookmarks:nil]; }},
+       {kIconClock, @"Histórico", @"⌘Y", ^{ [weak menuHistory:nil]; }},
+       {kIconStar, _barShown ? @"Ocultar barra de favoritos" : @"Mostrar barra de favoritos", @"⌘⇧B", ^{ [weak toggleBookmarkBar]; }},
+       {kIconSettings, @"Configurações", @"⌘,", ^{ [weak menuSettings:nil]; }},
+   };
++  // DevTools in its own window has no dock bar of ours: this brings it back into the card.
++  if (_devtools == 2) {
++    items.push_back({kIconSettings, @"Trazer o DevTools para a página", @"", ^{
++                       [weak dockDevTools:DevToolsOnRight() ? @"right" : @"bottom"];
++                     }});
++  }
+   const CGFloat w = 280, rowH = 33;
+   NSView* panel = [self popoverWidth:w height:std::size(items) * rowH + 10 under:_menu];
+   panel.accessibilityRole = NSAccessibilityMenuRole;
+@@ -4854,6 +5513,15 @@ - (BOOL)collapsed {
  - (NSArray<NSString*>*)atoNamesForSettings {
    return [_atoNames copy];
  }
@@ -12354,7 +13295,7 @@ index 3c18c4eab1..03a19667a2 100644
  - (void)toggleSidebar {
    _collapsed = !_collapsed;
    [NSUserDefaults.standardUserDefaults setBool:_collapsed forKey:kCollapsedKey];
-@@ -4975,22 +5303,36 @@ - (void)detach {
+@@ -4975,22 +5643,36 @@ - (void)detach {
  // popup hangs from the button), and the "installed" notice.
  - (void)setExtensions:(const AgensExtensionButton*)list count:(int)count installed:(const char*)installed {
    [_extensions removeAllObjects];
@@ -12397,7 +13338,7 @@ index 3c18c4eab1..03a19667a2 100644
    }
  }
  - (NSImage*)extensionIcon:(NSString*)extensionId {
-@@ -4999,43 +5341,128 @@ - (NSImage*)extensionIcon:(NSString*)extensionId {
+@@ -4999,43 +5681,128 @@ - (NSImage*)extensionIcon:(NSString*)extensionId {
    }
    return nil;
  }
@@ -12541,7 +13482,7 @@ index 3c18c4eab1..03a19667a2 100644
    manage.frame = NSMakeRect(5, y, w - 10, rowH);
    manage.onPress = ^{
      AgensChrome* strong = weak;
-@@ -5044,8 +5471,63 @@ - (void)showExtensions:(NSString*)notice {
+@@ -5044,8 +5811,63 @@ - (void)showExtensions:(NSString*)notice {
      [g_settings showSection:@"extensoes"];
    };
    [panel addSubview:manage];
@@ -12605,7 +13546,7 @@ index 3c18c4eab1..03a19667a2 100644
  
  // --- Favoritos: the page, the bar and its menus.
  - (void)setBookmarks:(const AgensBookmark*)bookmarks count:(int)count bar:(long long)bar {
-@@ -5094,6 +5576,89 @@ - (NSRect)roomForBar:(NSRect)page {
+@@ -5094,6 +5916,89 @@ - (NSRect)roomForBar:(NSRect)page {
    page.size.height -= 32;
    return page;
  }
@@ -12695,7 +13636,7 @@ index 3c18c4eab1..03a19667a2 100644
  - (void)toggleBookmarkBar {
    [NSUserDefaults.standardUserDefaults setBool:!_barShown forKey:kBookmarkBarKey];
    [NSNotificationCenter.defaultCenter postNotificationName:kThemeChanged object:nil];  // every window
-@@ -5204,6 +5769,31 @@ - (void)answerPermission:(NSButton*)button {
+@@ -5204,6 +6109,31 @@ - (void)answerPermission:(NSButton*)button {
    if (_window) agens_window_permission_answer(_window, (AgensPermissionAnswer)button.tag);
    [self closeMenu];
  }
@@ -12727,7 +13668,20 @@ index 3c18c4eab1..03a19667a2 100644
  - (void)permissionGone {
    if (!_permissionAsked) return;
    _permissionAsked = NO;  // nothing to answer any more
-@@ -5412,6 +6002,9 @@ void agens_ui_permission_prompt(void* chrome, const char* site, const char* cons
+@@ -5398,6 +6328,12 @@ - (void)focusAddress {
+ AgensRect agens_ui_layout(void* chrome, int width, int height) {
+   return [(__bridge AgensChrome*)chrome layoutForWidth:width height:height];
+ }
++int agens_ui_devtools_in_page(void*) {
++  return !DevToolsInWindow();
++}
++void agens_ui_devtools_layout(void* chrome, int shown, AgensRect* page, AgensRect* devtools) {
++  [(__bridge AgensChrome*)chrome devtoolsShown:shown != 0 page:page tools:devtools];
++}
+ AgensRect agens_ui_site_icon_rect(void* chrome) {
+   return [(__bridge AgensChrome*)chrome siteIconRect];
+ }
+@@ -5412,6 +6348,9 @@ void agens_ui_permission_prompt(void* chrome, const char* site, const char* cons
    for (int i = 0; i < count; ++i) [list addObject:@(asks[i])];
    [(__bridge AgensChrome*)chrome askPermission:@(site) asks:list];
  }
@@ -12846,6 +13800,234 @@ index 002d492ffe..d399397341 100644
    // A privileged WebContents (see //chrome's PrivilegedWebContents) must not
    // create related windows: the new window would share an opener relationship
    // (and, for same-site targets, a process) with the privileged page. Deny
+diff --git a/chrome/browser/devtools/devtools_window.cc b/chrome/browser/devtools/devtools_window.cc
+index 7613579e79..0f484af82a 100644
+--- a/chrome/browser/devtools/devtools_window.cc
++++ b/chrome/browser/devtools/devtools_window.cc
+@@ -145,6 +145,12 @@ DevToolsWindows& GetDevToolsWindowInstances() {
+   return *instances;
+ }
+ 
++// agens: DevToolsWindow::SetAgensDock.
++DevToolsWindow::AgensDock& AgensDockHooks() {
++  static base::NoDestructor<DevToolsWindow::AgensDock> dock;
++  return *dock;
++}
++
+ std::vector<base::RepeatingCallback<void(DevToolsWindow*)>>&
+ GetCreationCallbacks() {
+   static base::NoDestructor<
+@@ -534,7 +540,8 @@ DevToolsWindow::~DevToolsWindow() {
+ #if BUILDFLAG(IS_MAC)
+   // Activate the inspected browser when undocked DevTools closes, so focus
+   // returns to the window that opened DevTools (e.g., a PWA window).
+-  if (!is_docked_ && inspected_browser_session_id_.is_valid()) {
++  // agens: a view was in that window already (embedded: in none on screen).
++  if (!is_docked_ && !agens_view_ && inspected_browser_session_id_.is_valid()) {
+     BrowserWindowInterface* const browser =
+         GlobalBrowserCollection::GetInstance()->FindBrowserWithID(
+             inspected_browser_session_id_);
+@@ -927,7 +934,10 @@ void DevToolsWindow::ToggleDevToolsWindow(
+ 
+   // If window is docked and visible, we hide it on toggle. If window is
+   // undocked, we show (activate) it.
+-  if (!window->is_docked_ || do_open) {
++  // agens: a view toggles as a docked one does.
++  if (window->agens_view_ && !do_open) {
++    window->CloseWindow();
++  } else if (!window->is_docked_ || do_open) {
+     window->ScheduleShow(action);
+   } else {
+     DevToolsClosedByAction closed_by;
+@@ -1095,6 +1105,16 @@ void DevToolsWindow::Show(const DevToolsToggleAction& action) {
+     return;
+   }
+ 
++  // agens: a view in the tab's page area, which the interface lays out.
++  if (agens_view_) {
++    OverrideAndSyncDevToolsRendererPrefs();
++    if (AgensDockHooks().shown) {
++      AgensDockHooks().shown.Run(this);
++    }
++    DoAction(action);
++    return;
++  }
++
+   // Avoid consecutive window switching if the devtools window has been opened
+   // and the Inspect Element shortcut is pressed in the inspected tab.
+   bool should_show_window =
+@@ -1119,10 +1139,42 @@ void DevToolsWindow::Show(const DevToolsToggleAction& action) {
+   if (toolbox_web_contents_) {
+     UpdateBrowserWindow();
+   }
++  if (AgensDockHooks().shown) {
++    AgensDockHooks().shown.Run(this);  // agens
++  }
+ #endif
+   DoAction(action);
+ }
+ 
++// agens:
++DevToolsWindow::AgensDock::AgensDock() = default;
++DevToolsWindow::AgensDock::AgensDock(const AgensDock&) = default;
++DevToolsWindow::AgensDock::~AgensDock() = default;
++
++// static
++void DevToolsWindow::SetAgensDock(AgensDock dock) {
++  AgensDockHooks() = std::move(dock);
++}
++
++void DevToolsWindow::SetAgensView(bool view) {
++  if (view == agens_view_ || life_stage_ == kClosing || is_docked_) {
++    return;
++  }
++#if !BUILDFLAG(IS_ANDROID)
++  if (view && browser_) {
++    // Out of its window, as SetIsDocked does: the window closes with its only
++    // tab.
++    TabStripModel* const tab_strip_model = browser_->GetTabStripModel();
++    browser_ = nullptr;
++    owned_main_web_contents_ = std::make_unique<OwnedMainWebContents>(
++        tab_strip_model->DetachWebContentsAtForInsertion(
++            tab_strip_model->GetIndexOfWebContents(main_web_contents_)));
++  }
++#endif
++  agens_view_ = view;
++  Show(DevToolsToggleAction::Show());
++}
++
+ #if !BUILDFLAG(IS_ANDROID)
+ void DevToolsWindow::ActivateInspectedTab() {
+   content::WebContents* inspected_web_contents = GetInspectedWebContents();
+@@ -1425,10 +1477,16 @@ DevToolsWindow* DevToolsWindow::Create(
+   if (!settings.empty()) {
+     SetPreferencesFromJson(profile, settings);
+   }
+-  return new DevToolsWindow(frontend_type, profile,
+-                            std::move(main_web_contents), bindings,
+-                            inspected_web_contents, can_dock, opened_by,
+-                            inspected_browser_session_id);
++  DevToolsWindow* window = new DevToolsWindow(
++      frontend_type, profile, std::move(main_web_contents), bindings,
++      inspected_web_contents, can_dock, opened_by,
++      inspected_browser_session_id);
++  // agens: a tab's DevTools may open as a view (SetAgensDock).
++  window->agens_view_ = !can_dock && inspected_web_contents &&
++                        frontend_type == kFrontendDefault &&
++                        AgensDockHooks().opens_as_view &&
++                        AgensDockHooks().opens_as_view.Run(inspected_web_contents);
++  return window;
+ }
+ 
+ // static
+@@ -1663,7 +1721,7 @@ void DevToolsWindow::CloseContents(WebContents* source) {
+ }
+ 
+ void DevToolsWindow::ContentsZoomChange(bool zoom_in) {
+-  DCHECK(is_docked_);
++  DCHECK(is_docked_ || agens_view_);
+   zoom::PageZoom::Zoom(main_web_contents_, zoom_in ? content::PAGE_ZOOM_IN
+                                                    : content::PAGE_ZOOM_OUT);
+ }
+@@ -1694,6 +1752,13 @@ void DevToolsWindow::BeforeUnloadFired(WebContents* tab,
+ 
+ content::JavaScriptDialogManager* DevToolsWindow::GetJavaScriptDialogManager(
+     WebContents* source) {
++  // agens: a view has no window for an app-modal dialog to hang from.
++  if (agens_view_ && AgensDockHooks().dialogs) {
++    if (content::JavaScriptDialogManager* dialogs =
++            AgensDockHooks().dialogs.Run()) {
++      return dialogs;
++    }
++  }
+   return javascript_dialogs::AppModalDialogManager::GetInstance();
+ }
+ 
+@@ -1712,7 +1777,7 @@ void DevToolsWindow::ActivateWindow() {
+ #if BUILDFLAG(IS_ANDROID)
+   NOTIMPLEMENTED();
+ #else
+-  if (is_docked_ && GetInspectedBrowserWindow()) {
++  if ((is_docked_ && GetInspectedBrowserWindow()) || agens_view_) {
+     main_web_contents_->Focus();
+   } else if (!is_docked_ && browser_ && !browser_->GetWindow()->IsActive()) {
+     browser_->GetWindow()->Activate();
+@@ -1729,6 +1794,11 @@ void DevToolsWindow::CloseWindow() {
+ #else
+     if (browser_) {
+       browser_->GetWindow()->Close();
++    } else if (agens_view_ && life_stage_ != kClosing) {
++      // agens: a view goes as a docked one whose page closes (see
++      // InspectedContentsClosing): unload, then CloseContents.
++      life_stage_ = kClosing;
++      main_web_contents_->ClosePage();
+     }
+ #endif  // BUILDFLAG(IS_ANDROID)
+   }
+@@ -1946,7 +2016,8 @@ void DevToolsWindow::InspectedContentsClosing() {
+ }
+ 
+ infobars::ContentInfoBarManager* DevToolsWindow::GetInfoBarManager() {
+-  return is_docked_ ? infobars::ContentInfoBarManager::FromWebContents(
++  // agens: a view's frontend has no infobar manager of its own.
++  return is_docked_ || agens_view_ ? infobars::ContentInfoBarManager::FromWebContents(
+                           GetInspectedWebContents())
+                     : infobars::ContentInfoBarManager::FromWebContents(
+                           main_web_contents_);
+@@ -1956,7 +2027,7 @@ void DevToolsWindow::RenderProcessGone(bool crashed) {
+   // Docked DevToolsWindow owns its main_web_contents_ and must delete it.
+   // Undocked main_web_contents_ are owned and handled by browser.
+   // see crbug.com/40363970
+-  if (is_docked_) {
++  if (is_docked_ || (agens_view_ && !browser_)) {  // agens: a view, too
+     CloseContents(main_web_contents_);
+   } else {
+ #if !BUILDFLAG(IS_ANDROID)
+diff --git a/chrome/browser/devtools/devtools_window.h b/chrome/browser/devtools/devtools_window.h
+index e44b0c31ee..98e8b60861 100644
+--- a/chrome/browser/devtools/devtools_window.h
++++ b/chrome/browser/devtools/devtools_window.h
+@@ -322,6 +322,32 @@ class DevToolsWindow : public DevToolsUIBindings::Delegate,
+   // Attaches this devtools window to the given browser.
+   void AttachToBrowser(BrowserWindowInterface* browser);
+ 
++  // agens: the AgensBrowser interface (its own window chrome, or the app that
++  // embeds the engine) can show a tab's DevTools in the tab's page area, next
++  // to the page, instead of in a window of its own. The frontend keeps its
++  // undocked layout (it never learns it is docked: no inspected-page
++  // placeholder, no dock side of its own) and the interface lays the page and
++  // the frontend out side by side.
++  struct AgensDock {
++    AgensDock();
++    AgensDock(const AgensDock&);
++    ~AgensDock();
++    // Asked when a DevTools for `inspected` is made: true opens it as a view.
++    base::RepeatingCallback<bool(content::WebContents* inspected)>
++        opens_as_view;
++    // Each time it shows, as a view or in its window (agens_view() says).
++    base::RepeatingCallback<void(DevToolsWindow*)> shown;
++    // The JavaScript dialogs of a frontend shown as a view; null: upstream's.
++    base::RepeatingCallback<content::JavaScriptDialogManager*()> dialogs;
++  };
++  static void SetAgensDock(AgensDock dock);
++  bool agens_view() const { return agens_view_; }
++  // Moves it between a view and its own window. Whoever shows the view takes
++  // the frontend out of it before this moves it to a window.
++  void SetAgensView(bool view);
++  // As its close button.
++  void AgensClose() { CloseWindow(); }
++
+  private:
+   friend class DevToolsWindowTesting;
+   friend class DevToolsWindowCreationObserver;
+@@ -575,6 +601,7 @@ class DevToolsWindow : public DevToolsUIBindings::Delegate,
+   // When DevToolsWindow is docked, it owns main_web_contents_. When it isn't
+   // docked, the tab strip model owns the main_web_contents_.
+   bool is_docked_;
++  bool agens_view_ = false;  // agens: shown as a view (SetAgensDock)
+   class OwnedMainWebContents;
+   std::unique_ptr<OwnedMainWebContents> owned_main_web_contents_;
+ 
 diff --git a/chrome/browser/download/chrome_download_manager_delegate.cc b/chrome/browser/download/chrome_download_manager_delegate.cc
 index 2c467f4524..2aee2739bd 100644
 --- a/chrome/browser/download/chrome_download_manager_delegate.cc

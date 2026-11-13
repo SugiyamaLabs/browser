@@ -160,12 +160,24 @@ public struct HostSettings: Sendable, Equatable {
   /// A popup closed (`window.close()`, its tab navigated or closed, the extension went off, or
   /// `closeExtensionPopup`). One `presentExtensionPopup` showed closes by itself.
   @ObservationIgnored public var onExtensionPopupClosed: ((String) -> Void)?
+  /// Each tab's DevTools while it is open, by the inspected tab (`view.devtools`).
+  public private(set) var devTools: [String: DevToolsState] = [:]
+  /// Where DevTools opens when nothing says (`inspect` without `dock`, the right-click menu's
+  /// `inspect`): the side the person used last, which the host keeps. nil: where the engine had it
+  /// last in this run (its own window at first).
+  @ObservationIgnored public var devToolsDock: DevToolsDock?
+  /// A tab's DevTools opened or moved (from `inspect`, `setDevToolsDock`, the right-click menu).
+  @ObservationIgnored public var onDevTools: ((DevToolsState) -> Void)?
+  /// A tab's DevTools closed (`closeDevTools`, its tab closed, the person closed its window): the
+  /// inspected tab and the DevTools view id.
+  @ObservationIgnored public var onDevToolsClosed: ((_ tab: String, _ devtools: String) -> Void)?
   /// Every event, after the kit has handled the ones it knows.
   @ObservationIgnored public var onEvent: ((String, [String: JSON]) -> Void)?
 
   @ObservationIgnored private var process: Process?
   @ObservationIgnored private var generation = 0
   @ObservationIgnored private var views: [String: WeakView] = [:]
+  @ObservationIgnored private var splits: [String: WeakSplit] = [:]
   /// The handlers of the `ui.ask`s still open, by `ask`.
   @ObservationIgnored private var uiTasks: [String: Task<Void, Never>] = [:]
   /// The popups `presentExtensionPopup` shows, by popup id.
@@ -277,25 +289,9 @@ public struct HostSettings: Sendable, Equatable {
       siteRequests: reply["site_requests"]?.bool ?? false, agentExtensions: reply["agent_extensions"]?.bool ?? true)
   }
 
-  /// Opens the inspector (DevTools) for a tab in the engine's own window, the only one it puts on
-  /// screen: Elements on the element at `point` (the view's points, as `view.mouse`), or just
-  /// opened without one. If it is open for that tab already, it comes to the front. `denied` while an
-  /// agent works on the tab, `failed` when developer tools are turned off for the page; an engine
-  /// older than this op throws `unknown_op`. Answering the right-click menu's `inspect` does the same.
-  public func inspect(_ tab: String, at point: CGPoint? = nil) async throws(BrowserError) {
-    guard let connection else { throw BrowserError(code: BrowserError.disconnected) }
-    var params: [String: JSON] = ["tab": .string(tab)]
-    if let point {
-      params["x"] = .number(Double(point.x))
-      params["y"] = .number(Double(point.y))
-    }
-    yieldActivationToEngine()
-    try await connection.send(op: "view.inspect", params: params)
-  }
-
   /// The engine is another process, with no Dock icon: its DevTools window comes to the front and
   /// takes the keyboard only if this app hands activation over first (cooperative activation).
-  private func yieldActivationToEngine() {
+  func yieldActivationToEngine() {
     guard let pid = process?.processIdentifier, let engine = NSRunningApplication(processIdentifier: pid) else { return }
     NSApp.yieldActivation(to: engine)
   }
@@ -315,6 +311,14 @@ public struct HostSettings: Sendable, Equatable {
   }
 
   func view(_ tab: String?) -> BrowserTabView? { tab.flatMap { views[$0]?.view } }
+
+  func register(_ split: BrowserDevToolsSplit, tab: String) {
+    splits = splits.filter { $0.value.split != nil }
+    splits[tab] = WeakSplit(split: split)
+  }
+
+  /// The tab is a DevTools view (its keys go to it, `BrowserTabView`).
+  func isDevTools(_ tab: String) -> Bool { devTools.values.contains { $0.devtools == tab } }
 
   private func handle(_ event: String, _ message: [String: JSON]) {
     if !tabs.handle(event, message) {
@@ -352,6 +356,18 @@ public struct HostSettings: Sendable, Equatable {
           popups[popup.popup]?.resize(to: popup.size)
           onExtensionPopup?(popup)
         }
+      case "view.devtools":
+        if let state = DevToolsState(message: message) {
+          devTools[state.tab] = state
+          splits[state.tab]?.split?.update()
+          onDevTools?(state)
+        }
+      case "view.devtools.closed":
+        if let tab = message["tab"]?.string, let devtools = message["devtools"]?.string {
+          if devTools[tab]?.devtools == devtools { devTools[tab] = nil }
+          splits[tab]?.split?.update()
+          onDevToolsClosed?(tab, devtools)
+        }
       case "extension.popup.closed":
         if let popup = message["popup"]?.string {
           popups.removeValue(forKey: popup)?.closed()
@@ -372,10 +388,11 @@ public struct HostSettings: Sendable, Equatable {
       return
     }
     uiTasks[ask] = Task {
-      let answer = await onUIRequest(request)
+      var answer = await onUIRequest(request)
       guard !Task.isCancelled else { return }
       uiTasks[ask] = nil
-      if answer == .contextMenu(action: "inspect") { yieldActivationToEngine() }
+      if answer == .contextMenu(action: "inspect"), let dock = devToolsDock { answer = .inspect(dock: dock) }
+      if answer == .contextMenu(action: "inspect") || answer == .inspect(dock: .window) { yieldActivationToEngine() }
       try? await connection?.answerUI(ask, answer)
     }
   }
@@ -425,6 +442,8 @@ public struct HostSettings: Sendable, Equatable {
     tabs.connection = nil
     tabs.reset()
     views = [:]
+    devTools = [:]
+    splits.values.forEach { $0.split?.update() }
     uiTasks.values.forEach { $0.cancel() }
     uiTasks = [:]
     popups.values.forEach { $0.closed() }
@@ -436,4 +455,8 @@ public struct HostSettings: Sendable, Equatable {
 
 private struct WeakView {
   weak var view: BrowserTabView?
+}
+
+private struct WeakSplit {
+  weak var split: BrowserDevToolsSplit?
 }

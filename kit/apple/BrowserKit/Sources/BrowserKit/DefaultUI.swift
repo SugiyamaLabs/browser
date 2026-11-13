@@ -38,6 +38,8 @@ extension BrowserEngine {
       switch choices[tag] {
       case .action(let action):
         return .contextMenu(action: action)
+      case .item(let id):
+        return .contextMenuItem(id: id)
       case .host(let item):
         onContextMenuItem?(item, request)
         return .cancel
@@ -134,6 +136,7 @@ extension BrowserEngine {
   /// What an item of the right-click menu stands for; an item's tag is its index here.
   enum ContextChoice: Equatable {
     case action(String)
+    case item(Int)
     case host(HostMenuItem)
   }
 
@@ -145,6 +148,34 @@ extension BrowserEngine {
     func add(_ title: String, _ choice: ContextChoice) {
       menu.addItem(withTitle: title, action: nil, keyEquivalent: "").tag = choices.count
       choices.append(choice)
+    }
+    // A DevTools view's own entries first, as DevTools lays them out (submenus included).
+    func addItems(_ items: [ContextMenuItem], to menu: NSMenu) {
+      for item in items {
+        if item.separator {
+          menu.addItem(.separator())
+        } else if item.group {
+          menu.addItem(.sectionHeader(title: item.label))
+        } else if !item.items.isEmpty {
+          let entry = NSMenuItem(title: item.label, action: nil, keyEquivalent: "")
+          let submenu = NSMenu(title: item.label)
+          submenu.autoenablesItems = false
+          addItems(item.items, to: submenu)
+          entry.submenu = submenu
+          menu.addItem(entry)
+        } else if let id = item.id {
+          let entry = menu.addItem(withTitle: item.label, action: nil, keyEquivalent: "")
+          entry.tag = choices.count
+          entry.isEnabled = !item.disabled
+          entry.state = item.checked == true ? .on : .off
+          choices.append(.item(id))
+        }
+      }
+    }
+    if !context.items.isEmpty {
+      menu.autoenablesItems = false
+      addItems(context.items, to: menu)
+      if !context.actions.isEmpty { menu.addItem(.separator()) }
     }
     for action in context.actions where action != "inspect" {
       guard let title = contextTitles[action] else { continue }  // the host may draw fewer
@@ -204,10 +235,17 @@ extension BrowserEngine {
   /// Pops the menu up at a point given from the view's top left; returns the chosen item's tag.
   private func popUp(_ menu: NSMenu, positioning: NSMenuItem?, at point: (x: Double, y: Double), in view: BrowserTabView) async -> Int? {
     let picker = MenuPicker()
-    for item in menu.items where !item.isSeparatorItem {
-      item.target = picker
-      item.action = #selector(MenuPicker.pick(_:))
+    func wire(_ menu: NSMenu) {
+      for item in menu.items where !item.isSeparatorItem {
+        if let submenu = item.submenu {
+          wire(submenu)
+        } else {
+          item.target = picker
+          item.action = #selector(MenuPicker.pick(_:))
+        }
+      }
     }
+    wire(menu)
     await closing({ menu.cancelTracking() }) {
       // Tracking runs a nested loop here: the cancel above still gets through it.
       _ = menu.popUp(positioning: positioning, at: NSPoint(x: point.x, y: view.bounds.height - point.y), in: view)
