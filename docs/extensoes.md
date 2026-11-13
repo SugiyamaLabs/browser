@@ -9,6 +9,14 @@ Como no Brave: a pessoa instala extensões direto da Chrome Web Store, e elas se
 
 É a segunda exceção ao "zero conexões com o navegador parado", junto com as listas do bloqueador. Sem extensão da loja instalada, nada disso acontece.
 
+## Por ato
+
+Cada ato tem as próprias extensões. Ao instalar, a pessoa escolhe: só no ato atual (padrão) ou em vários. "Em vários" acorda os atos que dormem e instala em cada um na hora, sem baixar de novo: uma cópia do que acabou de entrar (da loja ou do `.crx`), ou a mesma pasta. Quem autoriza é a pessoa, na folha; nenhum agente espalha extensão por atos. O que cada ato dormindo tem fica anotado no `Local State` (junto dos extras do ato, `agens.atos`), para a lista e para "Remover de todos os atos".
+
+## De um arquivo
+
+Configurações › Extensões › **Adicionar de um arquivo** (ou `extension.install` no Agens) aceita um `.crx` ou uma pasta descompactada, com a mesma folha da loja. O `.crx` instala como no `chrome://extensions` (fora da loja, permitido porque a pessoa escolheu o arquivo) e não se atualiza. A pasta fica ligada ao lugar onde está e liga o modo de desenvolvedor do ato (sem ele o Chromium desliga extensão descompactada). `.crx` aberto, arrastado ou baixado de um site continua recusado. Instalar da loja pelo id, sem abrir a página, fica para depois.
+
 ## Como está feito
 
 O ungoogled bloqueia a loja em três lugares; desfazemos os três:

@@ -1,0 +1,17 @@
+<!doctype html><meta charset="utf-8"><title>Form (test)</title>
+<h1>Form</h1>
+<p><label>Text <input id="text" type="text"></label></p>
+<p><label>Password <input id="pw" type="password"></label></p>
+<p><label>PIN <input id="pin" type="password" value="pin-secret-42"></label> <button id="eye" type="button" onclick="pin.type = pin.type === 'password' ? 'text' : 'password'">Mostrar senha</button></p>
+<p><label><input id="check" type="checkbox"> Check me</label></p>
+<p><label>Choice
+  <select id="choice"><option value="a">Option A</option><option value="b">Option B</option></select></label></p>
+<p><button id="show" type="button">Show</button></p>
+<p>Typed: <span id="out"></span></p>
+<p><a href="/other">Other page</a></p>
+<script>
+document.getElementById("show").onclick = () => {
+  const v = id => document.getElementById(id);
+  v("out").textContent = [v("text").value, v("check").checked, v("choice").value].join(" | ");
+};
+</script>

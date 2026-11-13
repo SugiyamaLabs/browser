@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DevTools encaixado</title>
+<style>
+/* tokens de janela.html; janela com abas na lateral (janela.html) e ícones de extensoes.html. Mesmo desenho do Agens (Agens-Prototipos/navegador-devtools.html). */
+:root{--bg:#0B0B0D;--side:#111114;--raise:#16161A;--sunk:#0F0F12;--line:#24242A;--line-strong:#3A3A42;--ink:#F2F2F4;--mute:#9A9AA4;--dim:#8A8A94;--hi:#F4F4F6;--warn:#F2C14E;--ok:#7FD1A8;
+  --hover-2:#1B1B20;--float:#1A1A1F;--line-hover:#4A4A54;--on-hi:#0B0B0D;--light-2:#FFE9C7;--light-3:#FFC98A;
+  --ui:-apple-system,"SF Pro Text",BlinkMacSystemFont,system-ui,sans-serif;--mono:ui-monospace,"SF Mono",Menlo,monospace;--ease:cubic-bezier(.16,1,.3,1);--round:1}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 var(--ui);text-wrap:pretty;-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+:focus-visible{outline:2px solid var(--light-2);outline-offset:2px}
+main{max-width:1180px;margin:0 auto;padding:32px 24px 64px}
+header h1{font-size:20px;margin:0 0 4px}header p{margin:0 0 8px;color:var(--dim);max-width:80ch}
+.toc{display:flex;gap:16px;flex-wrap:wrap;margin:0 0 28px}.toc a{color:var(--mute);font-size:13px}
+section.v{margin:0 0 40px;scroll-margin-top:16px}
+section.v>h2{font-size:13px;font-weight:600;color:var(--mute);margin:0 0 4px}
+section.v>p.cap{margin:0 0 10px;color:var(--dim);font-size:12.5px;max-width:760px}
+.logo{width:18px;height:18px;border-radius:5px;display:inline-grid;place-items:center;font:700 10.5px/1 var(--ui);flex:none;color:#0B0B0D}.l-est{background:#C9B6FF}
+kbd{font:500 12px/1 var(--ui);padding:3px 5px;border-radius:5px;background:rgba(255,255,255,.07);color:var(--dim)}
+/* moldura do Navegador */
+.nav{position:relative;height:640px;border:1px solid var(--line);border-radius:14px;background:var(--side);overflow:hidden;display:flex;flex-direction:column;flex:1;min-width:0}
+.nav-bar{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line)}.nav-bar b{font-size:15px}.nav-bar span{color:var(--dim);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nav-tabs{display:flex;gap:6px;padding:8px 14px}.nav-tab{display:flex;align-items:center;gap:7px;padding:5px 10px;border-radius:8px;font-size:12.5px;color:var(--mute)}.nav-tab.on{background:var(--raise);color:var(--ink)}
+.nav-row{display:flex;align-items:center;gap:6px;margin:0 14px 10px;position:relative}
+.ib{width:30px;height:30px;display:grid;place-items:center;border-radius:8px;color:var(--mute);position:relative;flex:none}.ib:hover{background:var(--hover-2);color:var(--ink)}
+.ib svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.nav-addr{flex:1;min-width:0;padding:6px 12px;border:1px solid var(--line);border-radius:10px;background:var(--sunk);color:var(--mute);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sep{width:1px;height:18px;background:var(--line);margin:0 2px;flex:none}
+.xi{width:18px;height:18px;border-radius:5px;display:grid;place-items:center;font:700 10px/1 var(--ui);color:#0B0B0D}
+.x-1p{background:#6FA8FF}.x-ub{background:#F08A8A}.x-gr{background:#7FD1A8}
+.badge{position:absolute;right:1px;bottom:1px;min-width:14px;height:13px;padding:0 3px;border-radius:7px;background:var(--hi);color:var(--on-hi);font:700 9px/13px var(--ui);text-align:center;box-shadow:0 0 0 2px var(--side)}
+/* página */
+.pg{padding:30px 40px;position:relative}.pg h3{font-size:24px;margin:0 0 4px}.pg>p{color:#5B5B66;margin:0 0 20px}
+.form{max-width:340px;display:flex;flex-direction:column;gap:10px}.form i{display:block;height:36px;border:1px solid #E3E3E8;border-radius:8px;position:relative}
+.form i.sel{background:rgba(111,168,255,.32);border-color:#6FA8FF}
+.form i.sel b{position:absolute;left:0;top:42px;z-index:1;font:500 11px/1 var(--ui);background:#202124;color:#e8eaed;padding:5px 7px;border-radius:4px;white-space:nowrap}
+.form i.sel b em{font-style:normal;color:#9aa0a6;margin-left:6px}
+
+/* ===== a área da página com o DevTools encaixado (o que é nosso) ===== */
+.area{flex:1;min-height:0;display:flex;margin:0 14px 14px;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:#202124}
+.area.bottom{flex-direction:column}
+.pagebox{flex:1;min-width:0;min-height:0;background:#fff;color:#15151A;overflow:hidden}
+.dv{flex:none;position:relative;background:var(--line-strong);z-index:2}
+.bottom>.dv{height:1px;cursor:row-resize}.right>.dv{width:1px;cursor:col-resize}
+.dv::before{content:"";position:absolute;inset:-4px 0}.right>.dv::before{inset:0 -4px}
+.dv>i{position:absolute;left:50%;top:50%;width:32px;height:4px;margin:-2px 0 0 -16px;border-radius:2px;background:var(--light-3);opacity:0}
+.right>.dv>i{width:4px;height:32px;margin:-16px 0 0 -2px}
+.dv:hover,.dv.drag{background:var(--light-3)}.dv:hover>i,.dv.drag>i{opacity:1}
+.dv .sz{position:absolute;left:50%;top:-30px;transform:translateX(-50%);white-space:nowrap;font:500 11.5px/1 var(--ui);color:var(--ink);background:var(--float);border:1px solid var(--line-strong);border-radius:7px;padding:5px 8px;display:none}
+.dv.drag .sz{display:block}
+/* conteúdo do DevTools: é o do Chrome (tema escuro), só imitado */
+.dt{flex:none;background:#202124;color:#e8eaed;font:12px/1.5 var(--mono);display:flex;flex-direction:column;min-height:0;min-width:0;overflow:hidden}
+.bottom>.dt{height:40%}.right>.dt{width:420px}
+.dt-top{display:flex;align-items:center;height:30px;border-bottom:1px solid #3c4043;flex:none;font:12px/1 var(--ui);color:#9aa0a6}
+.dt-tabs{flex:1;min-width:0;display:flex;align-items:center;height:100%;overflow:hidden}
+.dt-tabs>span{padding:0 9px;height:100%;display:flex;align-items:center;white-space:nowrap;flex:none}
+.dt-tabs>span.on{color:#e8eaed;box-shadow:inset 0 -2px #8ab4f8}
+.dt-tabs svg,.dk svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round}
+.dt-tabs .g{padding:0 7px}.dt-tabs .vs{width:1px;height:16px;background:#3c4043;padding:0;margin:0 2px}
+/* o controle de encaixe: nosso, no fim da faixa de abas */
+.dk{flex:none;display:flex;align-items:center;gap:1px;height:100%;padding:0 5px 0 6px;border-left:1px solid #3c4043;background:#26272b}
+.dk button{width:24px;height:22px;border-radius:6px;display:grid;place-items:center;color:#9aa0a6;position:relative}
+.dk button:hover{background:rgba(255,255,255,.08);color:#e8eaed}
+.dk button[aria-pressed=true]{background:rgba(255,201,138,.16);color:var(--light-3)}
+.dk .vs{width:1px;height:14px;background:#3c4043;margin:0 3px}
+.dk .tp{position:absolute;top:28px;right:0;z-index:4;white-space:nowrap;background:var(--float);border:1px solid var(--line-strong);border-radius:8px;padding:5px 8px;font:12px/1.35 var(--ui);color:var(--ink);text-align:left}
+.dk .tp small{display:block;color:var(--dim)}
+.dt-body{flex:1;display:flex;min-height:0}.right .dt-body{flex-direction:column}
+.dt-el{flex:1;min-width:0;min-height:0;padding:4px 0;overflow:hidden;white-space:nowrap}
+.dt-el div{padding:0 8px 0 calc(12px + var(--d,0)*14px)}
+.dt-el .s{background:#004a77}.dt-el .s em{color:#9aa0a6;font-style:normal}
+.t{color:#5db0d7}.an{color:#9bbbdc}.av2{color:#f29766}.tx{color:#e8eaed}.cm{color:#9aa0a6}
+.dt-st{width:38%;flex:none;border-left:1px solid #3c4043;display:flex;flex-direction:column;min-height:0;overflow:hidden}
+.right .dt-st{width:auto;height:46%;border-left:0;border-top:1px solid #3c4043}
+.dt-st .sub{display:flex;gap:2px;height:26px;align-items:center;border-bottom:1px solid #3c4043;font:12px/1 var(--ui);color:#9aa0a6;padding-left:4px;flex:none}
+.dt-st .sub span{padding:0 8px;height:100%;display:flex;align-items:center}.dt-st .sub span.on{color:#e8eaed;box-shadow:inset 0 -2px #8ab4f8}
+.dt-st .flt{margin:5px 8px;height:20px;border-radius:4px;background:#2a2b2e;color:#80868b;font:11.5px/20px var(--ui);padding:0 6px;flex:none}
+.dt-st .rule{padding:4px 10px;border-bottom:1px solid #3c4043;white-space:nowrap}
+.dt-st .rule div{padding-left:14px}.pn{color:#9bbbdc}.pv{color:#e8eaed}.sl{color:#e8eaed}.src{float:right;color:#9aa0a6;font-family:var(--ui);font-size:11px}
+/* janela separada */
+.pair{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap}
+.wsep{width:440px;max-width:100%;height:420px;border:1px solid var(--line-strong);border-radius:12px;overflow:hidden;display:flex;flex-direction:column;background:#202124;margin-top:60px}
+.wsep-t{height:32px;display:flex;align-items:center;gap:8px;padding:0 12px;background:var(--side);border-bottom:1px solid var(--line);font-size:12px;color:var(--mute);flex:none;white-space:nowrap;overflow:hidden}
+.wsep-t i{width:11px;height:11px;border-radius:50%;background:#2A2A30;flex:none}
+.wsep-t span{margin-left:6px;overflow:hidden;text-overflow:ellipsis}
+.wsep .dt{flex:1;width:auto}.wsep .dt-body{flex-direction:column}.wsep .dt-st{width:auto;height:46%;border-left:0;border-top:1px solid #3c4043}
+/* fechado: menu de contexto e dica */
+.ctx{position:absolute;left:250px;top:150px;z-index:6;width:250px;background:var(--float);border:1px solid var(--line-strong);border-radius:12px;padding:6px;color:var(--ink);box-shadow:0 12px 32px rgba(0,0,0,.45)}
+.ctx .mi{display:flex;align-items:center;gap:10px;padding:5px 8px;border-radius:8px;font-size:13px}
+.ctx .mi span{flex:1}.ctx .mi small{color:var(--dim);font-size:12px}
+.ctx .mi.hl{background:var(--raise)}
+.ctx hr{border:0;border-top:1px solid var(--line);margin:5px 0}
+.hint{position:absolute;right:20px;bottom:20px;z-index:5;max-width:300px;background:var(--float);border:1px solid var(--line-strong);border-radius:12px;padding:10px 12px;font-size:12.5px;color:var(--mute)}
+.hint b{color:var(--ink);font-weight:500}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+@media (max-width:640px){.pg{padding:20px}.nav-addr{font-size:12px}.right>.dt{width:58%}.bottom>.dt .dt-st{display:none}.ctx{left:16px}.hint{left:16px;right:16px;max-width:none}}
+.toolbar{display:flex;align-items:center;gap:4px;padding:10px 14px}
+.lights{display:flex;gap:8px;padding:0 10px 0 2px}.lights i{width:12px;height:12px;border-radius:50%;background:#2A2A30}
+.profiles{display:flex;gap:2px;padding:2px;margin-left:4px;border:1px solid var(--line);border-radius:9px;flex:none}.profiles>span{display:flex;align-items:center;gap:6px;height:26px;padding:0 6px;border-radius:7px;color:var(--mute);font-size:12.5px}.profiles>span.on{background:var(--raise);color:var(--ink);padding-right:9px}.profiles .logo{width:16px;height:16px;font-size:9.5px;border-radius:4px}
+.body{flex:1;display:flex;min-height:0;padding:0 14px 14px;gap:10px}.body .area{margin:0}
+.sidebar{width:220px;flex:none;display:flex;flex-direction:column;gap:2px}.side-h{margin:4px 8px 6px;font-size:12px;color:var(--dim)}
+.stab{height:32px;display:flex;align-items:center;gap:10px;padding:0 8px;border-radius:8px;color:var(--mute);font-size:13px;white-space:nowrap;overflow:hidden}.stab.on{background:var(--raise);color:var(--ink)}.stab.dim{color:var(--dim)}
+.stab .logo{width:16px;height:16px;font-size:9px;border-radius:4px}
+.ctx{left:480px;top:200px}
+@media (max-width:640px){.sidebar{display:none}.profiles>span:not(.on){display:none}}
+</style>
+</head>
+<body>
+<main>
+<header><h1>DevTools encaixado</h1><p>Protótipo separado. “Inspecionar” hoje abre o DevTools do Chrome numa janela à parte. Aqui ele encaixa dentro do cartão da página, à direita da lateral de abas: embaixo, à direita ou em janela própria. O miolo é o DevTools do próprio Chrome (tema escuro), só imitado; o que é nosso é a moldura: o divisor, o controle de encaixe e a página que encolhe. Arraste os divisores e clique nos ícones de encaixe.</p></header>
+<nav class="toc"><a href="#embaixo">1 · Embaixo</a><a href="#lado">2 · À direita</a><a href="#janela">3 · Janela própria</a><a href="#redimensionar">4 · Redimensionar</a><a href="#fechado">5 · Fechado</a></nav>
+<div id="out"></div>
+</main>
+<script>
+const IC = { back: '<svg viewBox="0 0 20 20"><path d="M12 4 6 10l6 6"/></svg>', fwd: '<svg viewBox="0 0 20 20"><path d="m8 4 6 6-6 6"/></svg>', re: '<svg viewBox="0 0 20 20"><path d="M16 10a6 6 0 1 1-2-4.5M16 3v3.5h-3.5"/></svg>',
+  menu: '<svg viewBox="0 0 20 20"><path d="M4.5 10h.1M10 10h.1M15.5 10h.1" stroke-width="2.6"/></svg>', dz: '<svg viewBox="0 0 20 20"><path d="M4 4l5 12 1.8-5.2L16 9z"/></svg>', more: '<svg viewBox="0 0 20 20"><path d="M8 4.5a2 2 0 1 1 4 0V6h3v3h-1.5a2 2 0 1 0 0 4H15v3H5v-3h1.5a2 2 0 1 0 0-4H5V6h3z"/></svg>' };
+// ícones do controle de encaixe
+const DK = { bottom: '<svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M1.5 9.5h13" /><path d="M3 11.5h10" stroke-width="2.4"/></svg>',
+  right: '<svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M9.5 2.5v11"/><path d="M11.8 4.5v7" stroke-width="2.4"/></svg>',
+  window: '<svg viewBox="0 0 16 16"><rect x="1.5" y="5" width="9" height="8.5" rx="1.6"/><path d="M5 5V3.6c0-.9.6-1.6 1.5-1.6h6.4c.9 0 1.6.7 1.6 1.6v5.8c0 .9-.7 1.6-1.6 1.6h-2.4"/></svg>',
+  close: '<svg viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8"/></svg>' };
+const DKN = { bottom: "Encaixar embaixo", right: "Encaixar à direita", window: "Em janela própria" };
+const dock = (mode, tip) => `<div class="dk" role="group" aria-label="Onde fica o DevTools">${["bottom", "right", "window"].map(k => `<button aria-label="${DKN[k]}" title="${DKN[k]}" aria-pressed="${k === mode}" data-dock="${k}">${DK[k]}${tip === k ? `<span class="tp" role="tooltip">${DKN[k]}<small>lembrado em todos os atos</small></span>` : ""}</button>`).join("")}<span class="vs"></span><button aria-label="Fechar DevTools" title="Fechar DevTools  ⌥⌘I" data-close>${DK.close}</button></div>`;
+const L = (d, h, cls = "") => `<div style="--d:${d}"${cls ? ` class="${cls}"` : ""}>${h}</div>`;
+const tg = (n, a = "") => `<span class="t">&lt;${n}</span>${a}<span class="t">&gt;</span>`;
+const at = (n, v) => ` <span class="an">${n}</span>=<span class="av2">"${v}"</span>`;
+const TREE = [L(0, '<span class="cm">&lt;!DOCTYPE html&gt;</span>'), L(0, "▼" + tg("html", at("lang", "en"))), L(1, "▶" + tg("head") + '…<span class="t">&lt;/head&gt;</span>'),
+  L(1, "▼" + tg("body", at("class", "login"))), L(2, "▼" + tg("main", at("class", "card"))), L(3, tg("h1") + '<span class="tx">Entrar no painel</span><span class="t">&lt;/h1&gt;</span>'),
+  L(3, "▼" + tg("form", at("action", "/login"))), L(4, tg("input", at("type", "email") + at("name", "email") + at("autocomplete", "username")) + ' <em>== $0</em>', "s"),
+  L(4, tg("input", at("type", "password") + at("name", "password"))), L(4, tg("button", at("type", "submit")) + '<span class="tx">Continuar</span><span class="t">&lt;/button&gt;</span>'),
+  L(3, '<span class="t">&lt;/form&gt;</span>'), L(2, '<span class="t">&lt;/main&gt;</span>'), L(1, '<span class="t">&lt;/body&gt;</span>'), L(0, '<span class="t">&lt;/html&gt;</span>')].join("");
+const STY = `<div class="sub"><span class="on">Styles</span><span>Computed</span><span>Layout</span><span>Event Listeners</span></div><div class="flt">Filter  :hov .cls +</div>
+  <div class="rule"><span class="sl">element.style</span> {<br>}</div>
+  <div class="rule"><span class="src">login.css:42</span><span class="sl">input[type="email"]</span> {<div><span class="pn">height</span>: <span class="pv">36px</span>;</div><div><span class="pn">border</span>: <span class="pv">1px solid #e3e3e8</span>;</div><div><span class="pn">border-radius</span>: <span class="pv">8px</span>;</div><div><span class="pn">padding</span>: <span class="pv">0 12px</span>;</div>}</div>
+  <div class="rule"><span class="src">user agent stylesheet</span><span class="sl">input</span> {<div><span class="pn">font</span>: <span class="pv">-webkit-small-control</span>;</div>}</div>`;
+const pick = '<svg viewBox="0 0 16 16"><path d="M6.5 13.5h-4a1 1 0 0 1-1-1v-10a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v4"/><path d="m8 8 6.5 2.3-2.8 1-1 2.8z"/></svg>';
+const dev = '<svg viewBox="0 0 16 16"><rect x="4" y="1.5" width="8" height="13" rx="1.5"/><path d="M7 12.5h2"/></svg>';
+const DT = (mode, tip) => `<div class="dt" aria-label="DevTools">
+  <div class="dt-top"><div class="dt-tabs"><span class="g">${pick}</span><span class="g">${dev}</span><span class="vs"></span>${(mode === "bottom" ? ["Elements", "Console", "Sources", "Network", "Performance", "Memory", "Application", "Lighthouse"] : ["Elements", "Console", "Sources"]).map((t, i) => `<span${i ? "" : ' class="on"'}>${t}</span>`).join("")}<span>»</span></div>${dock(mode, tip)}</div>
+  <div class="dt-body"><div class="dt-el">${TREE}</div><div class="dt-st">${STY}</div></div></div>`;
+const PAGE = sel => `<div class="pg"><h3>Entrar no painel</h3><p>dashboard.stripe.com</p><div class="form"><i class="${sel ? "sel" : ""}">${sel ? "<b>input<em>340 × 36</em></b>" : ""}</i><i></i><i style="background:#15151A;border-color:#15151A;width:120px"></i></div></div>`;
+const area = (mode, o = {}) => mode ? `<div class="area ${mode}"><div class="pagebox">${PAGE(1)}</div><div class="dv${o.drag ? " drag" : ""}" role="separator" aria-orientation="${mode === "bottom" ? "horizontal" : "vertical"}" aria-label="Arraste para mudar o tamanho" tabindex="0"><i></i><span class="sz">${o.drag || ""}</span></div>${DT(mode, o.tip)}</div>`
+  : `<div class="area"><div class="pagebox">${PAGE(0)}</div></div>`;
+const frame = (mode, o = {}) => `<div class="nav window">
+  <div class="toolbar"><span class="lights" aria-hidden="true"><i></i><i></i><i></i></span><span class="ib">${IC.back}</span><span class="ib">${IC.fwd}</span><span class="ib">${IC.re}</span>
+    <div class="nav-addr">dashboard.stripe.com/login</div>
+    <span class="ib"><span class="xi x-1p">1</span></span><span class="ib"><span class="xi x-ub">u</span><span class="badge">12</span></span><span class="ib"><span class="xi x-gr">G</span></span><span class="ib">${IC.more}</span>
+    <span class="profiles"><span class="on"><span class="logo l-est">E</span>Estúdio</span><span><span class="logo" style="background:#7F9BC7">P</span></span><span><span class="logo" style="background:#FFC98A">C</span></span></span><span class="ib">${IC.menu}</span></div>
+  <div class="body"><nav class="sidebar" aria-label="Abas na lateral"><div class="side-h">Estúdio</div><span class="stab on"><span class="logo" style="background:#6FA8FF">S</span>Stripe · entrar</span><span class="stab"><span class="logo" style="background:#B9B9C2">V</span>Vercel · deploys</span><span class="stab"><span class="logo" style="background:#7FD1A8">G</span>GitHub · PR #212</span><span class="stab dim">+ Nova aba</span></nav>
+  ${area(mode, o)}</div>${o.inner || ""}</div>`;
+const CTX = `<div class="ctx" role="menu"><div class="mi"><span>Voltar</span><small>⌘[</small></div><div class="mi"><span>Avançar</span><small>⌘]</small></div><div class="mi"><span>Recarregar</span><small>⌘R</small></div><hr>
+  <div class="mi"><span>Colar</span><small>⌘V</small></div><div class="mi"><span>Preencher com 1Password</span></div><hr><div class="mi"><span>Ver código-fonte</span><small>⌥⌘U</small></div><div class="mi hl" role="menuitem"><span>Inspecionar</span><small>⌥⌘I</small></div></div>
+  <div class="hint" role="note"><b>Inspecionar</b> abre o DevTools no elemento clicado, do lado da última vez (aqui, embaixo). <kbd>⌥⌘I</kbd> abre e fecha sem escolher elemento.</div>`;
+const SEP = `<div class="wsep" aria-label="Janela do DevTools"><div class="wsep-t"><i></i><i></i><i></i><span>DevTools · dashboard.stripe.com/login</span></div>${DT("window")}</div>`;
+const S = [
+  ["embaixo", "1 · Encaixado embaixo", "O padrão. Ocupa 40% da altura da área da página, dentro do cartão da página; a lateral de abas não muda e a página encolhe por cima, nada fica por baixo. O controle de encaixe fica no fim da faixa de abas do DevTools: embaixo (marcado), à direita, janela própria e fechar.", frame("bottom")],
+  ["lado", "2 · Encaixado à direita", "420 px à direita da página, dentro do mesmo cartão; nunca por cima da lateral de abas. Estreito assim, o Styles desce para baixo da árvore, como o Chrome faz. A escolha vale para o navegador inteiro (todos os atos) e é lembrada.", frame("right", { tip: "right" })],
+  ["janela", "3 · Em janela própria", "A página volta ao tamanho cheio e o DevTools vai para uma janela do sistema, com o mesmo controle (o terceiro ícone marcado). Clicar em embaixo ou à direita traz de volta para dentro.", `<div class="pair">${frame(null)}${SEP}</div>`],
+  ["redimensionar", "4 · Arrastando o divisor", "O divisor é uma linha de 1 px com 9 px de área de pegar. Ao passar o mouse ou arrastar, fica âmbar com uma alça e mostra o tamanho. Para em 120 px de DevTools e em 200 px de página. O tamanho também é lembrado.", frame("bottom", { drag: "312 px · 42%" })],
+  ["fechado", "5 · Fechado: como reabrir", "Botão direito na página › Inspecionar (o último item, como no Chrome) ou ⌥⌘I. Volta encaixado do lado da última vez.", frame(null, { inner: CTX })],
+];
+document.getElementById("out").innerHTML = S.map(([id, t, c, h]) => `<section class="v" id="${id}"><h2>${t}</h2><p class="cap">${c}</p>${h}</section>`).join("");
+
+// arrastar o divisor (página mínima 200 px, DevTools mínimo 120 px)
+document.addEventListener("pointerdown", e => { const dv = e.target.closest(".dv"); if (!dv) return;
+  const ar = dv.parentElement, dt = dv.nextElementSibling, bot = ar.classList.contains("bottom"), sz = dv.querySelector(".sz");
+  dv.setPointerCapture(e.pointerId); dv.classList.add("drag");
+  const mv = ev => { const r = ar.getBoundingClientRect(), tot = bot ? r.height : r.width;
+    const v = Math.max(120, Math.min(tot - 200, bot ? r.bottom - ev.clientY : r.right - ev.clientX));
+    dt.style[bot ? "height" : "width"] = v + "px"; sz.textContent = `${Math.round(v)} px · ${Math.round(v / tot * 100)}%`; };
+  const up = () => { dv.classList.remove("drag"); dv.removeEventListener("pointermove", mv); dv.removeEventListener("pointerup", up); };
+  dv.addEventListener("pointermove", mv); dv.addEventListener("pointerup", up);
+});
+// ícones de encaixe trocam o lado no próprio cartão
+document.addEventListener("click", e => { const b = e.target.closest("[data-dock]"); if (!b) return; const nav = b.closest(".nav"); if (!nav) return;
+  const m = b.dataset.dock; nav.querySelector(".area").outerHTML = area(m === "window" ? null : m); });
+</script>
+</body>
+</html>

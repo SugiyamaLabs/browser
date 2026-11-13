@@ -1,0 +1,37 @@
+# Sites de teste
+
+Servidor local para as fases 2 e 3 do protocolo (`docs/protocolo.md`). Só escuta em `127.0.0.1`. Todos os valores são falsos.
+
+```
+tools/sites-teste/serve.py [PORTA]   # padrão 8765
+```
+
+| Página | Para quê |
+|---|---|
+| `/login` | Formulário (usuário e senha, qualquer valor serve). O POST põe o cookie `sid` (httpOnly) e o cookie `d` (legível pela página) e vai para `/app/`. Use com `login --done cookie:http://127.0.0.1:8765:d` ou `--done url_prefix:http://127.0.0.1:8765/app/`. |
+| `/app/` | Mostra "logged in" só com o cookie `sid`; senão volta para `/login`. Grava `localStorage` `token` e a cada 3 s faz `fetch("/api/ping")` com `Authorization: Bearer test-bearer-123` (para testar `session` com `cookie`, `localStorage` e `header`). |
+| `/api/ping` | Responde `{"ok": true, "bearer": true}` quando recebe o header acima. |
+| `/logout` | Apaga os cookies e volta para `/login` (para testar `session.lost` e `needs_login`). |
+| `/form` | Para o controle: campo de texto, campo de senha, checkbox, select, botão "Show" que escreve o digitado em `#out`, e link para `/other`. O `type` no campo de senha deve ser recusado. `?slow=MS` (vale para as páginas desta tabela) manda metade da página, espera MS e manda o resto: uma página que ainda carrega. |
+| `/other` | Destino do link, para testar `tab.navigate` e o clique em link. |
+| `/post` | Um formulário POST ("Send") para `/posted`, que responde "Posted": `tab.reload` ali deve ser recusado. |
+| `/agent` | Para o resto do controle: "Hover me" escreve "Hovered: yes" ao passar o mouse, "Ask" abre um `confirm()` e escreve "Answer: true/false", a página é alta e um texto fixo mostra "Scrolled: N". Ao abrir, faz `console.log("agens-console-test")`, lança um erro não tratado ("agens-uncaught-test"), busca `/missing-404#frag-secret` (404; o fragmento não pode aparecer em `page.network`) e `/api/ping` (200). |
+| `/whoami?tag=X` | Anota se esse pedido veio com o cookie de login (`sid`). Serve para ver se um ato está logado sem nenhuma op de sessão: `atos open <ato> …/whoami?tag=X`. |
+| `/seen?tag=X` | Devolve o que `/whoami` anotou: `{"seen": true, "logged_in": false}`. Para o `curl` do gate. |
+| `/ui/dialog` | Para o gate embutido (passo 5.3). Botões "Alert", "Confirm" e "Prompt" (`Heads up`, `Proceed?`, `Name?` com padrão `anon`); o resultado vai para o título: `alert:done`, `confirm:true`, `prompt:texto` ou `prompt:null`. Com `?auto=alert`, `?auto=confirm` ou `?auto=prompt` o diálogo abre sozinho depois do carregamento (para aba em que ninguém clica). |
+| `/ui/perm` | Pede geolocalização e, depois que essa responde, notificações, ao carregar. O título fica `perm geo=allowed\|denied notif=granted\|no` (`?` enquanto espera). Só o código 1 de geolocalização conta como recusa. |
+| `/ui/pick` | `<input type=file>` simples (`.txt`), `multiple`, um `<select>` (Brasil, Chile desligado, Peru), um campo de texto e um link. Cada botão "Open … later" abre o controle 2,5 s depois do clique, ainda dentro da ativação do usuário: o agente clica e a pessoa assume a aba antes do pedido. Títulos: `file:nome`, `files:a,b`, `select:pe`. |
+| `/ext` | Para o gate embutido (extensões em abas de agente). A extensão de teste `extensao/` (carregada com `--load-extension`) acrescenta ` +ext` ao título "Ext (test)" quando roda (content script em `document_start`). Também em `http://localhost:8765/ext`, outra origem para o mesmo servidor. |
+| `/janela` | Para o gate embutido (nenhuma janela na tela). Ao abrir, a mesma `extensao/` pede ao seu service worker `chrome.windows.create` de um pop-up e de uma janela normal, cada um em `/other?from=popup` e `/other?from=normal`, e põe no título o que voltou: `janela popup:<type>:<abas> normal:<type>:<abas>`. |
+| `/pip` | Para o gate embutido: um vídeo feito de um canvas (o título vira "PiP ready" quando dá para pedir PiP), um botão de PiP de vídeo (300×100 em 40,40) e um de Document PiP (300×100 em 40,180). Títulos: `pip:<erro>` ou `pip:opened`, `dpip:missing`, `dpip:<erro>` ou `dpip:opened`. |
+| `/fuga` | Para o gate embutido (passo 5.3, itens 10 a 13): botões de 300×50 em x 40, a partir de y 20 de 60 em 60: `window.print()` (título `print:returned` quando volta), "Next scheme" (cada clique abre um link: `mailto:`, `zoommtg:`, `webcal:`, nessa ordem; título `scheme:alive:N` logo depois), os seletores de data, hora e mês (`focus()` e `showPicker()` dos campos ao lado, em x 400) e `navigator.registerProtocolHandler("web+gate", …)` (`handler:asked`). O `<input type=color>` fica em 400,320 (60×40) e se abre com o clique nele. Escolher um valor põe no título `d=AAAA-MM-DD`, `t=HH:MM`, `m=AAAA-MM` ou `k=#rrggbb`. |
+| `/imprimir` | Para o gate embutido (`view.print_pdf`): três páginas, uma quebra forçada entre cada. |
+| `/passkey` | Para o gate embutido (passkeys, em `http://localhost:…`, porque WebAuthn não aceita endereço IP): botões de 300×80 em 40,40 (`navigator.credentials.create`, título `create:ok:<id>` ou `create:<erro>`) e 40,140 (`navigator.credentials.get`, `get:ok:<id>` ou `get:<erro>`). Ao abrir, o título vira `uvpaa:true\|false` (`isUserVerifyingPlatformAuthenticatorAvailable`) ou `webauthn:missing`. |
+| `extensao-acao/` | Não é página: a extensão de teste do passo 5.6 do gate embutido, instalada como pasta e como `.crx` (o gate empacota): um botão com popup (`popup.html`), um selo "7" que o `background.js` põe ao instalar e uma página de opções. |
+| `/pick` | Para o apontar (passo 5.4, gate embutido): tudo em posição fixa para o gate saber onde clicar. `#card` (300×120 em 40,40, com `#inner` "Card text" dentro), checkbox `#check` (30×30 em 40,220; marcar põe o título `checked:true`), link `#go` para `/other` (40,280), campo de senha `#pw` com `value` `pick-secret-77` (40,330) e o parágrafo `#quote` "Selected by the page" (40,380). Com `?select` a própria página seleciona `#quote`, para `view.selection`. |
+| `/popup` | Para o gate embutido: um botão (300×120 em 40,40) que abre `/other` com `window.open` como janela pop-up (`popup,width=320,height=240`). Embutido, o pop-up vira aba do mesmo ato, nunca janela. |
+| `/auth`, `/auth/NOME` | Responde 401 com `WWW-Authenticate: Basic realm="teste"` (em `/auth/NOME` o realm é `teste-NOME`, porque o Chromium reaproveita a credencial de um realm repetido). Aceita `test-user` / `fake-password` (título "Auth ok"); sem credencial o título é "Auth 401". |
+
+`/` vai para `/app/` com o cookie `sid` e para `/login` sem ele: `session` e `renew` carregam a raiz da origem numa aba escondida, então é por aqui que chegam ao `localStorage` e ao header. Valores falsos que o gate `tools/gates/sessao.sh` espera: cookie `sid` = `sid-fake-123` (httpOnly), cookie `d` = `fake-d-cookie-456`, `localStorage` `token` = `fake-local-token-789`, header `Authorization` = `Bearer test-bearer-123`.
+
+`/login?auto=1` entra sozinho (grava os cookies e vai para `/app/`), para os gates que não podem digitar.

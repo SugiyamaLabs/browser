@@ -1,0 +1,17 @@
+<!doctype html><meta charset="utf-8"><title>Agent (test)</title>
+<h1>Agent page</h1>
+<p><button id="hover" type="button">Hover me</button> <span id="hovered">Hovered: no</span></p>
+<p><button id="ask" type="button">Ask</button> <span id="answer">Answer: none</span></p>
+<p id="scrolled" style="position:fixed;top:8px;right:8px;margin:0">Scrolled: 0</p>
+<div style="height:3000px"></div>
+<p>Bottom of the page</p>
+<script>
+const $ = id => document.getElementById(id);
+$("hover").onmouseenter = () => { $("hovered").textContent = "Hovered: yes"; };
+$("ask").onclick = () => { $("answer").textContent = "Answer: " + confirm("Proceed?"); };
+addEventListener("scroll", () => { $("scrolled").textContent = "Scrolled: " + Math.round(scrollY); });
+console.log("agens-console-test");
+setTimeout(() => { throw new Error("agens-uncaught-test"); });
+fetch("/missing-404#frag-secret");  // a failed request for page.network (its fragment must not show)
+fetch("/api/ping");     // a successful one, which page.network must not list
+</script>

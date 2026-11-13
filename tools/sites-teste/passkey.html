@@ -1,0 +1,18 @@
+<!doctype html><meta charset="utf-8"><title>Passkey (test)</title>
+<style>body{margin:0}button{position:absolute;left:40px;width:300px;height:80px}</style>
+<button id="create" style="top:40px">Create passkey</button>
+<button id="get" style="top:140px">Use passkey</button>
+<script>
+const say = t => { document.title = t; };
+const bytes = s => new TextEncoder().encode(s);
+const failed = what => e => say(what + ":" + e.name);
+document.getElementById("create").onclick = () => navigator.credentials.create({publicKey: {
+  rp: {name: "Gate", id: location.hostname}, user: {id: bytes("gate-user"), name: "gate", displayName: "Gate"},
+  challenge: bytes("gate-challenge-0123456789abcdef"), pubKeyCredParams: [{type: "public-key", alg: -7}], timeout: 60000,
+}}).then(c => say("create:ok:" + c.id), failed("create"));
+document.getElementById("get").onclick = () => navigator.credentials.get({publicKey: {
+  rpId: location.hostname, challenge: bytes("gate-challenge-0123456789abcdef"), timeout: 60000,
+}}).then(c => say("get:ok:" + c.id), failed("get"));
+if (!window.PublicKeyCredential) say("webauthn:missing");
+else PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable().then(v => say("uvpaa:" + v), failed("uvpaa"));
+</script>

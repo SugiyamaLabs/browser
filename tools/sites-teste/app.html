@@ -1,0 +1,13 @@
+<!doctype html><meta charset="utf-8"><title>App (test)</title>
+<h1 id="status">logged in</h1>
+<p>Last ping: <span id="ping">never</span></p>
+<p><a href="/logout">Log out</a></p>
+<script>
+localStorage.setItem("token", "fake-local-token-789");
+function ping() {
+  fetch("/api/ping", {headers: {Authorization: "Bearer test-bearer-123"}})
+    .then(r => r.json()).then(j => { document.getElementById("ping").textContent = JSON.stringify(j); });
+}
+ping();
+setInterval(ping, 3000);
+</script>
