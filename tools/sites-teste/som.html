@@ -1,0 +1,15 @@
+<!doctype html><meta charset="utf-8"><title>Som (test)</title>
+<style>body { margin: 0; } #play { position: absolute; left: 0; top: 0; width: 400px; height: 200px; }</style>
+<button id="play">Play tone</button>
+<script>
+// A click (the user gesture audio needs) starts a 440 Hz tone, very quiet but above Chromium's
+// audible threshold, until the tab closes. Result in the title: the gate's host sees only that.
+document.getElementById("play").onclick = () => {
+  const ctx = new AudioContext(), osc = ctx.createOscillator(), gain = ctx.createGain();
+  gain.gain.value = 0.003;
+  osc.connect(gain).connect(ctx.destination);
+  osc.start();
+  document.title = "tone:" + ctx.state;
+  ctx.onstatechange = () => { document.title = "tone:" + ctx.state; };
+};
+</script>

@@ -1135,10 +1135,10 @@ index 0000000000..178c1cd18f
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_CONTROL_KEYS_H_
 diff --git a/chrome/browser/agens/bridge/control_ops.cc b/chrome/browser/agens/bridge/control_ops.cc
 new file mode 100644
-index 0000000000..c551742b68
+index 0000000000..6a61f22310
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_ops.cc
-@@ -0,0 +1,942 @@
+@@ -0,0 +1,943 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The control session (docs/protocolo.md, "control, tab, page"): an app, after the person's OK,
 +// drives tabs of one ato. It belongs to the connection and ends on control.stop, when the
@@ -1252,6 +1252,7 @@ index 0000000000..c551742b68
 +  Tab(uint64_t connection, std::string id, content::WebContents* contents)
 +      : content::WebContentsObserver(contents), id(std::move(id)), page(contents), connection_(connection) {
 +    AgensControlled::CreateForWebContents(contents);
++    AgensControlled::MarkHad(contents);
 +    MarkInSession(contents, true);
 +    AgensControlled* mark = AgensControlled::FromWebContents(contents);
 +    mark->stop = base::BindRepeating(&StopByUser, connection);
@@ -8122,10 +8123,10 @@ index 0000000000..e98cac0576
 +}
 diff --git a/chrome/browser/agens/bridge/view_ops.cc b/chrome/browser/agens/bridge/view_ops.cc
 new file mode 100644
-index 0000000000..b92f58a035
+index 0000000000..6c95ae0a6b
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_ops.cc
-@@ -0,0 +1,1393 @@
+@@ -0,0 +1,1682 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The host draws the interface; the engine hands it the pages (docs/protocolo.md, "host e view").
 +// - One host: the connection that sent host.attach (the app that launched the engine).
@@ -8154,6 +8155,7 @@ index 0000000000..b92f58a035
 +#include "base/no_destructor.h"
 +#include "base/strings/string_number_conversions.h"
 +#include "base/strings/utf_string_conversions.h"
++#include "base/scoped_multi_source_observation.h"
 +#include "base/scoped_observation.h"
 +#include "base/task/sequenced_task_runner.h"
 +#include "chrome/browser/agens/bridge/bridge.h"
@@ -8179,13 +8181,26 @@ index 0000000000..b92f58a035
 +#include "components/omnibox/browser/autocomplete_classifier.h"
 +#include "chrome/browser/profiles/profile_manager.h"
 +#include "chrome/browser/sessions/session_restore.h"
++#include "chrome/browser/sessions/tab_restore_service_factory.h"
++#include "chrome/browser/ui/browser_live_tab_context.h"
 +#include "chrome/browser/ui/startup/startup_tab.h"
++#include "chrome/browser/ui/tabs/tab_enums.h"
++#include "chrome/browser/ui/tabs/tab_muted_utils.h"
 +#include "chrome/browser/ui/browser_window/public/create_browser_window.h"
 +#include "chrome/browser/ui/navigator/browser_navigator.h"
 +#include "chrome/browser/ui/navigator/browser_navigator_params.h"
 +#include "chrome/common/chrome_isolated_world_ids.h"
 +#include "chrome/common/webui_url_constants.h"
 +#include "components/favicon/content/content_favicon_driver.h"
++#include "components/find_in_page/find_result_observer.h"
++#include "components/find_in_page/find_tab_helper.h"
++#include "components/find_in_page/find_types.h"
++#include "components/sessions/content/content_live_tab.h"
++#include "components/sessions/core/tab_restore_service.h"
++#include "components/sessions/core/tab_restore_types.h"
++#include "components/zoom/page_zoom.h"
++#include "components/zoom/zoom_controller.h"
++#include "components/zoom/zoom_observer.h"
 +#include "content/public/browser/agens_embed_mac.h"
 +#include "content/public/browser/navigation_handle.h"
 +#include "content/public/browser/render_frame_host.h"
@@ -8194,6 +8209,7 @@ index 0000000000..b92f58a035
 +#include "content/public/browser/web_contents_observer.h"
 +#include "content/public/browser/web_contents_user_data.h"
 +#include "mojo/public/cpp/bindings/callback_helpers.h"
++#include "third_party/blink/public/common/page/page_zoom.h"
 +#include "ui/gfx/codec/png_codec.h"
 +#include "ui/gfx/geometry/point_conversions.h"
 +#include "ui/gfx/image/image.h"
@@ -8206,6 +8222,7 @@ index 0000000000..b92f58a035
 +
 +constexpr char kFailed[] = "failed";
 +constexpr size_t kMaxAddressChars = 8192;
++constexpr size_t kMaxFindChars = 1024;
 +
 +// A tab's number, given the first time the host could see it.
 +class TabNumber : public content::WebContentsUserData<TabNumber> {
@@ -8306,6 +8323,7 @@ index 0000000000..b92f58a035
 +  std::map<int, base::DictValue> sent;  // the last view.tab of each tab the host knows
 +  std::map<int, gfx::Image> icons;      // the favicon it was told about
 +  std::map<int, base::DictValue> agent_cursors;  // the last view.agent_cursor; none sent: no cursor
++  std::map<int, double> zooms;                   // the last view.zoom; none sent: 1
 +  bool flush_pending = false;
 +  // The approval on the host (one at a time, approval.cc keeps the queue).
 +  int next_ask = 0;
@@ -8434,6 +8452,7 @@ index 0000000000..b92f58a035
 +  tab.Set("url", VisibleUrl(contents));
 +  tab.Set("loading", contents->IsLoading());
 +  tab.Set("audible", contents->IsCurrentlyAudible());
++  tab.Set("muted", contents->IsAudioMuted());
 +  tab.Set("can_back", contents->GetController().CanGoBack());
 +  tab.Set("can_forward", contents->GetController().CanGoForward());
 +  if (const AgensControlled* controlled = AgensControlled::FromWebContents(contents)) {
@@ -8469,6 +8488,8 @@ index 0000000000..b92f58a035
 +  return fields;
 +}
 +
++void WatchZoom(content::WebContents* contents);
++
 +// Tells the host what changed since the last time: once per run of the message loop.
 +void Flush() {
 +  State& s = S();
@@ -8481,8 +8502,10 @@ index 0000000000..b92f58a035
 +    base::DictValue tab = TabFields(window, contents);
 +    auto it = s.sent.find(n);
 +    if (it == s.sent.end() || !(it->second == tab)) {
++      const bool first = it == s.sent.end();
 +      SendEventTo(s.host, "view.tab", tab.Clone());
 +      s.sent[n] = std::move(tab);
++      if (first) WatchZoom(contents);
 +    }
 +    gfx::Image icon = FaviconOf(contents);
 +    gfx::Image& known = s.icons[n];
@@ -8506,6 +8529,7 @@ index 0000000000..b92f58a035
 +    SendEventTo(s.host, "view.closed", TabOnly(it->first));
 +    s.icons.erase(it->first);
 +    s.agent_cursors.erase(it->first);
++    s.zooms.erase(it->first);
 +    it = s.sent.erase(it);
 +  }
 +}
@@ -8817,6 +8841,90 @@ index 0000000000..b92f58a035
 +  }
 +  manager->LoadProfileByPath(entry->GetPath(), /*incognito=*/false,
 +                             base::BindOnce(&RestoreIn, std::move(request), std::move(reply)));
++}
++
++// --- Closed tabs (Passo 5.7): Chromium's TabRestoreService of the ato's profile.
++
++// The closed tabs view.reopen may bring back, most recent first: never one an agent had (its entry
++// carries kAgentTabKey, browser_live_tab_context.cc). A closed window's tabs count one by one;
++// groups and splits are left out (the host has neither).
++// shortcut: only what this run closed (the last run's file is not loaded, view.restore covers that
++// run); call LoadTabsFromLastSession here if hosts want older ones.
++std::vector<SessionID> Reopenable(const std::string& ato) {
++  std::vector<SessionID> ids;
++  ProfileAttributesEntry* entry = FindAto(ato);
++  Profile* profile = entry ? g_browser_process->profile_manager()->GetProfileByPath(entry->GetPath()) : nullptr;
++  sessions::TabRestoreService* service = profile ? TabRestoreServiceFactory::GetForProfileIfExisting(profile) : nullptr;
++  if (!service) return ids;
++  auto add = [&](const sessions::tab_restore::Tab& tab) {
++    auto mark = tab.extra_data.find(kAgentTabKey);
++    if (mark == tab.extra_data.end() || mark->second != "1") ids.push_back(tab.id);
++  };
++  for (const auto& closed : service->entries()) {
++    if (closed->type == sessions::tab_restore::Type::TAB) {
++      add(static_cast<const sessions::tab_restore::Tab&>(*closed));
++    } else if (closed->type == sessions::tab_restore::Type::WINDOW) {
++      for (const auto& tab : static_cast<const sessions::tab_restore::Window&>(*closed).tabs) add(*tab);
++    }
++  }
++  return ids;
++}
++
++// view.reopenable {ato} -> {count}: for the host's "reopen closed tab" item.
++void ViewReopenable(const Request& request, ReplyCallback reply) {
++  std::optional<std::string> ato = StringParam(request.body, "ato");
++  if (!ato) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs ato"));
++    return;
++  }
++  if (!FindAto(*ato)) {
++    std::move(reply).Run(ErrorReply(&request.id, kNotFound, *ato));
++    return;
++  }
++  base::DictValue result;
++  result.Set("count", static_cast<int>(Reopenable(*ato).size()));
++  std::move(reply).Run(OkReply(request.id, std::move(result)));
++}
++
++// view.reopen {ato} -> {tab}: the most recently closed tab comes back with its history, into the
++// ato's window (a new one when it has none), and reaches the host as view.tab.
++void ViewReopen(const Request& request, ReplyCallback reply) {
++  std::optional<std::string> ato = StringParam(request.body, "ato");
++  if (!ato) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs ato"));
++    return;
++  }
++  if (!FindAto(*ato)) {
++    std::move(reply).Run(ErrorReply(&request.id, kNotFound, *ato));
++    return;
++  }
++  std::vector<SessionID> ids = Reopenable(*ato);
++  if (ids.empty()) {
++    std::move(reply).Run(ErrorReply(&request.id, kNotFound, "no closed tab to reopen"));
++    return;
++  }
++  Profile* profile = g_browser_process->profile_manager()->GetProfileByPath(FindAto(*ato)->GetPath());
++  sessions::LiveTabContext* context = nullptr;
++  for (AgensWindow* window : S().windows) {
++    BrowserWindowInterface* b = window->browser;
++    if (b->GetProfile() == profile && b->GetType() == BrowserWindowInterface::TYPE_NORMAL &&
++        !b->IsDeleteScheduled() && !b->GetTabStripModel()->closing_all()) {
++      context = BrowserLiveTabContext::From(b);
++      break;
++    }
++  }
++  std::optional<std::vector<sessions::LiveTab*>> restored =
++      TabRestoreServiceFactory::GetForProfile(profile)->RestoreEntryById(
++          context, ids.front(), context ? WindowOpenDisposition::NEW_FOREGROUND_TAB : WindowOpenDisposition::UNKNOWN);
++  if (!restored || restored->empty() || !restored->front()) {
++    std::move(reply).Run(ErrorReply(&request.id, kFailed, "could not reopen the tab"));
++    return;
++  }
++  content::WebContents& contents = static_cast<sessions::ContentLiveTab*>(restored->front())->GetWebContents();
++  base::DictValue result;
++  result.Set("tab", ViewTabName(NumberOf(&contents)));
++  std::move(reply).Run(OkReply(request.id, std::move(result)));
++  S().Schedule();
 +}
 +
 +void ViewNavigate(content::WebContents* contents, const Request& request, ReplyCallback reply) {
@@ -9202,6 +9310,165 @@ index 0000000000..b92f58a035
 +      ISOLATED_WORLD_ID_CHROME_INTERNAL);
 +}
 +
++// --- Find in page and zoom (Passo 5.7): Chromium's FindTabHelper and per-site zoom (HostZoomMap).
++
++double ZoomFactor(content::WebContents* contents) {
++  zoom::ZoomController* zoom = zoom::ZoomController::FromWebContents(contents);
++  return zoom ? zoom->GetZoomPercent() / 100.0 : 1;
++}
++
++// Tells the host a tab's zoom when it differs from the last one it was told (1 at first).
++void SendZoom(content::WebContents* contents) {
++  State& s = S();
++  const int n = KnownNumber(contents);
++  if (!s.host || !n) return;
++  const double factor = ZoomFactor(contents);
++  auto last = s.zooms.try_emplace(n, 1.0).first;
++  if (last->second == factor) return;
++  last->second = factor;
++  base::DictValue fields = TabOnly(n);
++  fields.Set("factor", factor);
++  SendEventTo(s.host, "view.zoom", std::move(fields));
++}
++
++// Watches the find results and zoom of the tabs the host knows, for view.find and view.zoom events.
++class PageWatch : public find_in_page::FindResultObserver, public zoom::ZoomObserver {
++ public:
++  void Find(find_in_page::FindTabHelper* helper) {
++    if (!finds_.IsObservingSource(helper)) finds_.AddObservation(helper);
++  }
++  void Zoom(zoom::ZoomController* zoom) {
++    if (zooms_.IsObservingSource(zoom)) return;
++    zoom->SetShowsNotificationBubble(false);  // the host draws any zoom indicator
++    zooms_.AddObservation(zoom);
++  }
++
++  // find_in_page::FindResultObserver: only the final count of each search or step.
++  void OnFindResultAvailable(content::WebContents* contents) override {
++    const find_in_page::FindNotificationDetails& result =
++        find_in_page::FindTabHelper::FromWebContents(contents)->find_result();
++    if (!result.final_update()) return;
++    SendFind(contents, result.number_of_matches(), result.active_match_ordinal());
++  }
++  void OnFindTabHelperDestroyed(find_in_page::FindTabHelper* helper) override { finds_.RemoveObservation(helper); }
++  // zoom::ZoomObserver: from view.zoom, the page, or the site's stored zoom changing in another tab.
++  void OnZoomChanged(const zoom::ZoomController::ZoomChangedEventData& data) override { SendZoom(data.web_contents); }
++  void OnZoomControllerDestroyed(zoom::ZoomController* zoom) override { zooms_.RemoveObservation(zoom); }
++
++  static void SendFind(content::WebContents* contents, int matches, int active) {
++    const int n = KnownNumber(contents);
++    if (!S().host || !n) return;
++    base::DictValue fields = TabOnly(n);
++    fields.Set("matches", std::max(matches, 0));
++    fields.Set("active", std::max(active, 0));
++    SendEventTo(S().host, "view.find", std::move(fields));
++  }
++
++ private:
++  base::ScopedMultiSourceObservation<find_in_page::FindTabHelper, find_in_page::FindResultObserver> finds_{this};
++  base::ScopedMultiSourceObservation<zoom::ZoomController, zoom::ZoomObserver> zooms_{this};
++};
++PageWatch& ThePageWatch() {
++  static base::NoDestructor<PageWatch> watch;
++  return *watch;
++}
++
++void WatchZoom(content::WebContents* contents) {
++  if (zoom::ZoomController* zoom = zoom::ZoomController::FromWebContents(contents)) {
++    ThePageWatch().Zoom(zoom);
++    SendZoom(contents);  // a site with a stored zoom, or a default other than 100%
++  }
++}
++
++// An optional boolean field: its value, `fallback` when absent, nullopt when not a boolean.
++std::optional<bool> FlagParam(const base::DictValue& body, const char* key, bool fallback) {
++  const base::Value* value = body.Find(key);
++  if (!value) return fallback;
++  return value->is_bool() ? std::optional<bool>(value->GetBool()) : std::nullopt;
++}
++
++// view.find {tab, text, forward?, match_case?, next?}: highlights the matches in the page and
++// selects one; the count comes as the view.find event. next: on to the following match of the
++// same text, else the search starts over.
++void ViewFind(content::WebContents* contents, const Request& request, ReplyCallback reply) {
++  std::optional<std::string> text = StringParam(request.body, "text");
++  std::optional<bool> forward = FlagParam(request.body, "forward", true);
++  std::optional<bool> match_case = FlagParam(request.body, "match_case", false);
++  std::optional<bool> next = FlagParam(request.body, "next", false);
++  std::u16string find;
++  if (!text || text->empty() || !AtMostChars(*text, kMaxFindChars) ||
++      !base::UTF8ToUTF16(text->data(), text->size(), &find) || !forward || !match_case || !next) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest,
++                                    "needs tab and text (1 to 1024 characters); forward, match_case and next are booleans"));
++    return;
++  }
++  if (AgentWorks(contents)) {
++    std::move(reply).Run(ErrorReply(&request.id, kDenied, "an agent is working on this tab"));
++    return;
++  }
++  find_in_page::FindTabHelper::CreateForWebContents(contents);  // no-op on a tab that has one
++  find_in_page::FindTabHelper* helper = find_in_page::FindTabHelper::FromWebContents(contents);
++  ThePageWatch().Find(helper);
++  // The same text again without next would step on: start over instead.
++  if (!*next && helper->find_text() == find) helper->StopFinding(find_in_page::SelectionAction::kClear);
++  helper->StartFinding(find, *forward, *match_case, /*find_match=*/true);
++  std::move(reply).Run(OkReply(request.id));
++}
++
++// view.find.stop {tab, keep_selection?}: ends the search and its highlight; the active match stays
++// selected with keep_selection. The host is told {matches: 0, active: 0}.
++void ViewFindStop(content::WebContents* contents, const Request& request, ReplyCallback reply) {
++  std::optional<bool> keep = FlagParam(request.body, "keep_selection", false);
++  if (!keep) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "keep_selection is a boolean"));
++    return;
++  }
++  if (auto* helper = find_in_page::FindTabHelper::FromWebContents(contents)) {
++    helper->StopFinding(*keep ? find_in_page::SelectionAction::kKeep : find_in_page::SelectionAction::kClear);
++  }
++  PageWatch::SendFind(contents, 0, 0);
++  std::move(reply).Run(OkReply(request.id));
++}
++
++// view.zoom {tab, level?: in|out|reset, factor?} -> {factor}: the zoom of the tab's site in its ato
++// (remembered per host, as in Chrome); with neither, only reads it.
++void ViewZoom(content::WebContents* contents, const Request& request, ReplyCallback reply) {
++  const base::Value* level = request.body.Find("level");
++  const base::Value* factor = request.body.Find("factor");
++  const bool level_ok = !level || (level->is_string() && (level->GetString() == "in" || level->GetString() == "out" ||
++                                                          level->GetString() == "reset"));
++  const bool factor_ok = !factor || (factor->is_double() || factor->is_int());
++  const double wanted = factor && factor_ok ? factor->GetDouble() : 1;
++  if ((level && factor) || !level_ok || !factor_ok || wanted < blink::kMinimumBrowserZoomFactor ||
++      wanted > blink::kMaximumBrowserZoomFactor) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest,
++                                    "needs tab and at most one of level (in, out or reset) and factor (0.25 to 5)"));
++    return;
++  }
++  if ((level || factor) && AgentWorks(contents)) {
++    std::move(reply).Run(ErrorReply(&request.id, kDenied, "an agent is working on this tab"));
++    return;
++  }
++  zoom::ZoomController* zoom = zoom::ZoomController::FromWebContents(contents);
++  if (!zoom) {
++    std::move(reply).Run(ErrorReply(&request.id, kFailed, "this page has no zoom"));
++    return;
++  }
++  ThePageWatch().Zoom(zoom);
++  if (level) {
++    const std::string& to = level->GetString();
++    zoom::PageZoom::Zoom(contents, to == "in"    ? content::PAGE_ZOOM_IN
++                                   : to == "out" ? content::PAGE_ZOOM_OUT
++                                                 : content::PAGE_ZOOM_RESET);
++  } else if (factor && !zoom->SetZoomLevel(blink::ZoomFactorToZoomLevel(wanted))) {
++    std::move(reply).Run(ErrorReply(&request.id, kFailed, "this page cannot zoom"));
++    return;
++  }
++  base::DictValue result;
++  result.Set("factor", ZoomFactor(contents));
++  std::move(reply).Run(OkReply(request.id, std::move(result)));
++}
++
 +void ApprovalAnswer(const Request& request, ReplyCallback reply) {
 +  State& s = S();
 +  std::optional<std::string> ask = StringParam(request.body, "ask");
@@ -9307,6 +9574,24 @@ index 0000000000..b92f58a035
 +  } else if (op == "view.devtools.close") {
 +    ViewDevToolsClose(contents, request, std::move(reply));
 +    return;
++  } else if (op == "view.find") {
++    ViewFind(contents, request, std::move(reply));
++    return;
++  } else if (op == "view.find.stop") {
++    ViewFindStop(contents, request, std::move(reply));
++    return;
++  } else if (op == "view.zoom") {
++    ViewZoom(contents, request, std::move(reply));
++    return;
++  } else if (op == "view.mute") {
++    // Allowed on an agent's tab too: the person may always silence it. Muted as Chrome's tab audio
++    // icon does (its reason, kept with the tab in the session); view.tab says the new state.
++    std::optional<bool> muted = request.body.FindBool("muted");
++    if (!muted) {
++      std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs tab and muted (a boolean)"));
++      return;
++    }
++    SetTabAudioMuted(contents, *muted, TabMutedReason::kAudioIndicator, std::string());
 +  } else if (op == "view.print_pdf") {
 +    ui_ask::PrintPdf(contents, request, std::move(reply));
 +    return;
@@ -9360,6 +9645,10 @@ index 0000000000..b92f58a035
 +    ViewOpen(std::move(request), std::move(reply));
 +  } else if (op == "view.restore") {
 +    ViewRestore(std::move(request), std::move(reply));
++  } else if (op == "view.reopen") {
++    ViewReopen(request, std::move(reply));
++  } else if (op == "view.reopenable") {
++    ViewReopenable(request, std::move(reply));
 +  } else if (extension::Handles(op)) {
 +    extension::HandleOp(client, std::move(request), std::move(reply));
 +  } else {
@@ -9430,6 +9719,7 @@ index 0000000000..b92f58a035
 +  s.sent.clear();
 +  s.icons.clear();
 +  s.agent_cursors.clear();
++  s.zooms.clear();
 +  if (ApprovalCallback done = std::move(s.answer)) std::move(done).Run(kAgensApprovalDeny);
 +  ui_ask::HostGone();
 +  extension::HostGone();
@@ -10184,10 +10474,10 @@ index 0000000000..68f776593c
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_VIEW_PICK_H_
 diff --git a/chrome/browser/agens/embed/agens_controlled.h b/chrome/browser/agens/embed/agens_controlled.h
 new file mode 100644
-index 0000000000..709347df06
+index 0000000000..93562fe42f
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_controlled.h
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,63 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Marks a tab an app drives over the socket (bridge/control_ops.cc, docs/agens.md "Controle").
 +// The shell shows it (AgensTab.controller: the pill with Assumir / Devolver); downloads stay out
@@ -10196,6 +10486,7 @@ index 0000000000..709347df06
 +#ifndef CHROME_BROWSER_AGENS_EMBED_AGENS_CONTROLLED_H_
 +#define CHROME_BROWSER_AGENS_EMBED_AGENS_CONTROLLED_H_
 +
++#include <memory>
 +#include <string>
 +
 +#include "base/functional/callback.h"
@@ -10220,6 +10511,14 @@ index 0000000000..709347df06
 +    return mark && mark->extensions_blocked;
 +  }
 +
++  // Set for good when an agent starts on the tab (control_ops.cc), and kept after its session lets
++  // go: the tab, once closed, carries kAgentTabKey (browser_live_tab_context.cc) and view.reopen
++  // never brings it back.
++  static void MarkHad(content::WebContents* contents) {
++    contents->SetUserData(&kHadKey, std::make_unique<base::SupportsUserData::Data>());
++  }
++  static bool Had(content::WebContents* contents) { return contents && contents->GetUserData(&kHadKey); }
++
 +  std::string by;               // the agent's name, for the pill and "Controlado pelo …"
 +  std::string title, detail;    // the pill's two lines while the agent works (control.status)
 +  bool paused = false;          // the person took over ("Assumir")
@@ -10234,6 +10533,7 @@ index 0000000000..709347df06
 +  content::JavaScriptDialogManager* dialogs = nullptr;
 +
 + private:
++  static constexpr char kHadKey = 0;
 +  explicit AgensControlled(content::WebContents* contents)
 +      : content::WebContentsUserData<AgensControlled>(*contents) {}
 +  friend class content::WebContentsUserData<AgensControlled>;
@@ -15928,6 +16228,30 @@ index cd3d1c68d9..d9978115a3 100644
    // agens: before the enabled check; some (the password prompt) stay disabled in our window.
    if (agens::HandleNativeCommand(browser_, id)) return true;
    if (!SupportsCommand(id) || !IsCommandEnabled(id)) {
+diff --git a/chrome/browser/ui/browser_live_tab_context.cc b/chrome/browser/ui/browser_live_tab_context.cc
+index d48ee3c659..a34dd35d8e 100644
+--- a/chrome/browser/ui/browser_live_tab_context.cc
++++ b/chrome/browser/ui/browser_live_tab_context.cc
+@@ -16,6 +16,8 @@
+ #include "base/token.h"
+ #include "base/uuid.h"
+ #include "base/values.h"
++#include "chrome/browser/agens/embed/agens_controlled.h"  // agens
++#include "chrome/browser/agens/embed/agens_embedded.h"    // agens
+ #include "chrome/browser/apps/app_service/web_contents_app_id_utils.h"
+ #include "chrome/browser/glic/glic_tab_restore_helper.h"
+ #include "chrome/browser/performance_manager/public/background_tab_loading_policy.h"
+@@ -200,6 +202,10 @@ std::map<std::string, std::string> BrowserLiveTabContext::GetExtraDataForTab(
+ 
+   glic::PopulateGlicExtraData(tab_strip_model_->GetTabAtIndex(index),
+                               &extra_data);
++  // agens: a tab an agent had is marked in its closed-tab entry, so view.reopen skips it.
++  if (AgensControlled::Had(tab_strip_model_->GetWebContentsAt(index))) {
++    extra_data[agens::kAgentTabKey] = "1";
++  }
+ 
+   return extra_data;
+ }
 diff --git a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc b/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
 index 9e4154d594..ce89b2bcaa 100644
 --- a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc

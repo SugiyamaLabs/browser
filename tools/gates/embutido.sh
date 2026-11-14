@@ -16,11 +16,11 @@ EMBUTIDO_INSPECT="${EMBUTIDO_INSPECT:-0}"
 export APP OUT GATES REPO SITE_PORT EMBUTIDO_INSPECT
 
 SITE_PID=""
-if ! curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/passkey"; then   # /passkey: the newest page, so an older site is not reused
+if ! curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/som"; then   # /som: the newest page, so an older site is not reused
   python3 "$REPO/tools/sites-teste/serve.py" "$SITE_PORT" >"$OUT/site.log" 2>&1 &
   SITE_PID=$!
-  for _ in $(seq 20); do curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/passkey" && break; sleep 0.25; done
-  curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/passkey" || { echo "FAIL: the test site has no /passkey (an older serve.py on port $SITE_PORT? try SITE_PORT=8766)"; exit 1; }
+  for _ in $(seq 20); do curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/som" && break; sleep 0.25; done
+  curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/som" || { echo "FAIL: the test site has no /som (an older serve.py on port $SITE_PORT? try SITE_PORT=8766)"; exit 1; }
 fi
 
 # winids lists every normal window of a pid, also the ones off screen; this one counts only those
@@ -1557,6 +1557,138 @@ check("cmd-Q and IDC_EXIT do not quit the embedded engine (two refusals logged, 
       engine.poll() is None and log.count("agens: quit refused (embedded)") >= 2 and c.ask("hello").get("ok"),
       log.count("agens: quit refused (embedded)"))
 no_window("cmd-Q and IDC_EXIT")
+# Step 5.7: reopen a closed tab, find in page, zoom. A fresh ato: nothing closed in it yet, and the
+# site's zoom it remembers stays out of the other atos' pages.
+rato = c.ask("atos.create", name="Gate Reabrir").get("ato")
+def reopenable(): return c.ask("view.reopenable", ato=rato).get("count")
+def closed(tab, timeout=10): return c.event(lambda e: e["event"] == "view.closed" and e.get("tab") == tab, timeout)
+check("view.reopenable of a fresh ato is 0, and view.reopen there is not_found",
+      reopenable() == 0 and err(c.ask("view.reopen", ato=rato)) == "not_found")
+check("view.reopen without ato is bad_request, of an unknown ato not_found",
+      err(c.ask("view.reopen")) == "bad_request" and err(c.ask("view.reopen", ato="Profile 404")) == "not_found")
+ft = c.ask("view.open", ato=rato, url=SITE + "/find").get("tab", "")   # stays open: the ato's window does not close
+c.ask("view.attach", tab=ft, width=800, height=600, scale=1)
+titled(ft, "Find (test)")
+t = c.ask("view.open", ato=rato, url=SITE + "/other?closed=1").get("tab", "")
+tab_event(t, loaded("/other?closed=1"))
+c.ask("view.close", tab=t)
+closed(t)
+check("a closed tab counts in view.reopenable (1)", reopenable() == 1, reopenable())
+r = c.ask("view.reopen", ato=rato)
+rt = r.get("tab", "")
+e = tab_event(rt, loaded("/other?closed=1"), 15)
+check("view.reopen brings the closed tab back at its url, as a new view.tab of the ato",
+      r.get("ok") and rt not in ("", t) and bool(e) and e.get("ato") == rato, (r, e))
+check("nothing left to reopen after it (0, not_found)", reopenable() == 0 and err(c.ask("view.reopen", ato=rato)) == "not_found")
+c.ask("view.close", tab=rt)
+closed(rt)
+c.ask("view.reopen", ato=rato)   # brings it back once more, so the count below starts at 0
+
+ag = Conn()
+rid = ag.send("control.start", ato=rato, reason="gate reopen")
+x = c.event(lambda e: e["event"] == "approval.ask", 20)
+if x: c.ask("approval.answer", ask=x["ask"], answer="allow")
+if not (x and ag.wait(rid).get("ok")):
+    skip("view.reopen, find and zoom on an agent's tab", "control.start did not go through")
+else:
+    def agent_view(path):  # the host's id of the tab the agent just opened on path
+        return (c.event(lambda e: e["event"] == "view.tab" and e.get("url", "").startswith(SITE + path)
+                        and isinstance(e.get("control"), dict), 10) or {}).get("tab", "")
+    c.pump(1)
+    base = reopenable()
+    at = ag.ask("tab.open", ato=rato, url=SITE + "/login").get("tab")
+    vt = agent_view("/login")
+    check("view.find on a tab while its agent works is denied", err(c.ask("view.find", tab=vt, text="a")) == "denied")
+    check("view.zoom in on a tab while its agent works is denied", err(c.ask("view.zoom", tab=vt, level="in")) == "denied")
+    r = c.ask("view.mute", tab=vt, muted=True)
+    check("view.mute works on an agent's tab (the person may always silence it): view.tab muted",
+          r.get("ok") and bool(tab_event(vt, lambda e: e.get("muted") is True, 10)), r)
+    ag.ask("tab.close", tab=at)
+    closed(vt)
+    check("a tab the agent closed is not reopenable", reopenable() == base, (base, reopenable()))
+    ag.ask("tab.open", ato=rato, url=SITE + "/other?agent=1")
+    vt = agent_view("/other?agent=1")
+    c.ask("view.control", tab=vt, action="end")   # the session lets go: the tab stays, no longer controlled
+    tab_event(vt, lambda e: not e.get("control"), 10)
+    c.ask("view.close", tab=vt)
+    closed(vt)
+    check("a tab an agent had, closed by the person after the agent let go, is not reopenable either",
+          reopenable() == base, (base, reopenable()))
+
+def found(tab, timeout=10): return c.event(lambda e: e["event"] == "view.find" and e.get("tab") == tab, timeout) or {}
+r = c.ask("view.find", tab=ft, text="Card")
+f = found(ft)
+check("view.find answers ok; view.find says 3 matches, active 1", r.get("ok") and (f.get("matches"), f.get("active")) == (3, 1), (r, f))
+c.ask("view.find", tab=ft, text="Card", next=True)
+f = found(ft)
+check("view.find next moves the active match (2)", (f.get("matches"), f.get("active")) == (3, 2), f)
+c.ask("view.find", tab=ft, text="Card", next=True, forward=False)
+f = found(ft)
+check("view.find next backwards goes back (1)", (f.get("matches"), f.get("active")) == (3, 1), f)
+c.ask("view.find", tab=ft, text="card", match_case=True)
+f = found(ft)
+check("view.find match_case finds no lowercase card (0)", f.get("matches") == 0, f)
+check("view.find with empty text or a flag that is not a boolean is bad_request",
+      err(c.ask("view.find", tab=ft, text="")) == "bad_request" and err(c.ask("view.find", tab=ft, text="Card", next="yes")) == "bad_request")
+c.ask("view.find", tab=ft, text="Card")
+found(ft)
+r = c.ask("view.find.stop", tab=ft, keep_selection=True)
+f = found(ft)
+check("view.find.stop keep_selection: ok, view.find says 0 and 0, the active match is the page's selection",
+      r.get("ok") and (f.get("matches"), f.get("active")) == (0, 0) and c.ask("view.selection", tab=ft).get("text") == "Card", (r, f))
+c.ask("view.find", tab=ft, text="three")
+found(ft)
+c.ask("view.find.stop", tab=ft)
+found(ft)
+check("view.find.stop clears the highlight and selection", c.ask("view.selection", tab=ft).get("text") == "")
+
+def zoomed(tab, factor=None, timeout=10):
+    return c.event(lambda e: e["event"] == "view.zoom" and e.get("tab") == tab and factor in (None, e.get("factor")), timeout) or {}
+r = c.ask("view.zoom", tab=ft)
+check("view.zoom with neither level nor factor reads 1", r.get("ok") and r.get("factor") == 1, r)
+r = c.ask("view.zoom", tab=ft, level="in")
+z = zoomed(ft)
+grown = r.get("factor") or 0
+check("view.zoom in: factor > 1, and the view.zoom event says the same", r.get("ok") and grown > 1 and z.get("factor") == grown, (r, z))
+drop(ft); c.ask("view.reload", tab=ft)
+tab_event(ft, loaded("/find"))
+check("the zoom survives a reload", c.ask("view.zoom", tab=ft).get("factor") == grown)
+t = c.ask("view.open", ato=rato, url=SITE + "/other?zoom=1").get("tab", "")
+tab_event(t, loaded("/other?zoom=1"))
+r = c.ask("view.zoom", tab=t)
+check("another tab of the same site has the site's zoom, and a view.zoom event said so when it opened",
+      r.get("factor") == grown and bool(zoomed(t, grown)), r)
+r = c.ask("view.zoom", tab=ft, factor=1.5)
+check("view.zoom factor 1.5", r.get("ok") and r.get("factor") == 1.5 and bool(zoomed(ft, 1.5)), r)
+check("the other tab of the site follows with a view.zoom event (1.5)", bool(zoomed(t, 1.5)))
+r = c.ask("view.zoom", tab=ft, level="reset")
+check("view.zoom reset goes back to 1, with the event", r.get("ok") and r.get("factor") == 1 and bool(zoomed(ft, 1)), r)
+check("view.zoom with a bad level, a factor past 5 or both is bad_request",
+      err(c.ask("view.zoom", tab=ft, level="huge")) == "bad_request" and err(c.ask("view.zoom", tab=ft, factor=9)) == "bad_request"
+      and err(c.ask("view.zoom", tab=ft, level="in", factor=2)) == "bad_request")
+
+# Sound per tab: view.tab's audible and muted, view.mute. The tone is very quiet (gain 0.003).
+st = c.ask("view.open", ato=rato, url=SITE + "/som").get("tab", "")
+c.ask("view.attach", tab=st, width=600, height=400, scale=1)
+e = tab_event(st, loaded("/som"))
+check("view.tab carries muted (false) next to audible", bool(e) and e.get("muted") is False and e.get("audible") is False, e)
+click(st, 100, 100)
+check("a tone the page plays after a click: view.tab audible true", bool(tab_event(st, lambda e: e.get("audible") is True, 10)))
+r = c.ask("view.mute", tab=st, muted=True)
+e = tab_event(st, lambda e: e.get("muted") is True, 10)
+check("view.mute true: ok, view.tab muted true", r.get("ok") and bool(e), (r, e))
+time.sleep(3)
+tabs = {x["tab"]: x for x in c.ask("view.tabs", ato=rato).get("tabs", [])}
+check("muted, the tab still reports audible (as Chromium does: the page plays, nothing comes out)",
+      tabs.get(st, {}).get("audible") is True and tabs.get(st, {}).get("muted") is True, tabs.get(st))
+r = c.ask("view.mute", tab=st, muted=False)
+check("view.mute false unmutes", r.get("ok") and bool(tab_event(st, lambda e: e.get("muted") is False, 10)), r)
+check("view.mute without a boolean muted is bad_request", err(c.ask("view.mute", tab=st, muted="yes")) == "bad_request")
+c.ask("view.close", tab=st)
+no_window("view.reopen, find, zoom and sound")
+c.ask("view.close", tab=t)
+c.ask("view.close", tab=ft)
+
 check("engine still has no window on screen at the end", on_screen() == "0", f"on screen: {on_screen()}")
 check("engine still running", engine.poll() is None)
 

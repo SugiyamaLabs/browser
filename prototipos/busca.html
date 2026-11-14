@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Buscar e zoom</title>
+<style>
+/* tokens de janela.html (Grafite escuro); janela de menus-seta.html; seta igual ao Agens */
+:root{--bg:#0B0B0D;--side:#111114;--raise:#16161A;--sunk:#0F0F12;--line:#24242A;--line-strong:#3A3A42;--ink:#F2F2F4;--mute:#9A9AA4;--dim:#8A8A94;--hi:#F4F4F6;--warn:#F2C14E;
+  --hover-2:#1B1B20;--float:#1A1A1F;--on-hi:#0B0B0D;--light-2:#FFE9C7;--light-3:#FFC98A;--red:#F28B82;
+  --ui:-apple-system,"SF Pro Text",BlinkMacSystemFont,system-ui,sans-serif;--mono:ui-monospace,"SF Mono",Menlo,monospace;--s:10px}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 var(--ui);text-wrap:pretty;-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+main{max-width:1180px;margin:0 auto;padding:32px 24px 64px}
+header h1{font-size:20px;margin:0 0 4px}header p{margin:0 0 8px;color:var(--dim);max-width:80ch}
+.toc{display:flex;gap:16px;flex-wrap:wrap;margin:0 0 28px}.toc a{color:var(--mute);font-size:13px}
+section.v{margin:0 0 40px;scroll-margin-top:16px}
+section.v>h2{font-size:13px;font-weight:600;color:var(--mute);margin:0 0 4px}
+section.v>p.cap{margin:0 0 10px;color:var(--dim);font-size:12.5px;max-width:760px}
+.logo{width:18px;height:18px;border-radius:5px;display:inline-grid;place-items:center;font:700 10.5px/1 var(--ui);flex:none;color:#0B0B0D}.l-est{background:#C9B6FF}.l-cli{background:#7FD1A8}.l-pes{background:#F2C14E}
+kbd{font:500 12px/1 var(--ui);padding:3px 5px;border-radius:5px;background:rgba(255,255,255,.07);color:var(--dim)}
+.nav{position:relative;height:520px;border:1px solid var(--line);border-radius:14px;background:var(--side);overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.lights{display:flex;gap:8px;padding:0 12px 0 16px}.lights i{width:12px;height:12px;border-radius:50%;background:#2A2A30}
+.nav-bar{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line)}.nav-bar b{font-size:15px}.nav-bar>span{color:var(--dim);font-size:12.5px;white-space:nowrap}
+.profs{border:1px solid var(--line);border-radius:9px;padding:2px;display:flex;gap:4px}.profs span{white-space:nowrap;display:flex;align-items:center;gap:6px;padding:4px 9px;border-radius:8px;font-size:12.5px;color:var(--mute)}.profs span.on{background:var(--raise);color:var(--ink)}
+.nav-tabs{display:flex;gap:6px;padding:8px 14px}.nav-tab{display:flex;align-items:center;gap:7px;padding:5px 10px;border-radius:8px;font-size:12.5px;color:var(--mute)}.nav-tab.on{background:var(--raise);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+.strip{display:flex;align-items:center;gap:4px;padding:8px 14px 0 0}.strip .nav-tab{flex:0 1 200px;min-width:0;overflow:hidden;white-space:nowrap;height:32px}.pair>div{min-width:0}.strip .nt{width:28px;height:28px;display:grid;place-items:center;color:var(--dim)}
+.fv{width:14px;height:14px;border-radius:4px;flex:none;display:grid;place-items:center;font:700 8.5px/1 var(--ui);color:#0B0B0D}
+.nav-row{display:flex;align-items:center;gap:6px;margin:0 14px 10px;position:relative}
+.ib{width:30px;height:30px;display:grid;place-items:center;border-radius:8px;color:var(--mute);flex:none}.ib.on{background:var(--raise);color:var(--ink)}
+.ib svg,.fb svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.nav-addr{flex:1;min-width:0;display:flex;align-items:center;gap:8px;padding:0 6px 0 12px;height:32px;border:1px solid var(--line);border-radius:10px;background:var(--sunk);color:var(--mute);font-size:13px;white-space:nowrap}
+.nav-addr>span{flex:1;overflow:hidden;text-overflow:ellipsis}
+.zpill{flex:none;height:22px;padding:0 8px;border-radius:7px;background:var(--raise);border:1px solid var(--line-strong);color:var(--ink);font:500 12px/20px var(--ui);font-variant-numeric:tabular-nums}
+.zpill.on{background:var(--hover-2);border-color:var(--light-3)}
+.area{flex:1;min-height:0;margin:0 14px 14px;border:1px solid var(--line);border-radius:12px;overflow:hidden;position:relative;background:#fff;color:#15151A}
+.page{padding:26px 34px;font:15px/1.6 Georgia,"Times New Roman",serif;max-width:720px;transform-origin:0 0}
+.page h3{font:600 22px/1.25 var(--ui);margin:0 0 12px}.page p{margin:0 0 12px}
+.z125 .page{zoom:1.25}
+/* realce como o Chromium pinta: amarelo; o ativo, laranja */
+mark{background:#FFFF00;color:inherit;border-radius:1px}mark.cur{background:#FF9632}
+/* barra de busca: presa ao topo da área da página, à direita */
+.find{position:absolute;top:0;right:16px;z-index:4;display:flex;align-items:center;gap:4px;padding:6px 6px 6px 8px;background:var(--float);border:1px solid var(--line-strong);border-top:0;border-radius:0 0 12px 12px;filter:drop-shadow(0 8px 18px rgba(0,0,0,.35));color:var(--ink);font:13px/1 var(--ui)}
+.fq{display:flex;align-items:center;gap:8px;width:250px;height:28px;padding:0 8px;border:1px solid var(--line-strong);border-radius:8px;background:var(--sunk)}
+.fq b{flex:1;font-weight:400;white-space:nowrap;overflow:hidden}.fq b::after{content:"";display:inline-block;width:1px;height:14px;background:var(--light-2);vertical-align:-2px;margin-left:1px}
+.fq small{color:var(--dim);font-size:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.find.none .fq{border-color:var(--red)}.find.none .fq small{color:var(--red)}
+.fb{width:26px;height:26px;display:grid;place-items:center;border-radius:7px;color:var(--mute);flex:none}.fb[aria-disabled=true]{color:#4A4A54}
+.fb.aa{width:auto;padding:0 7px;font:600 12px/1 var(--ui);border:1px solid var(--line);color:var(--mute)}.fb.aa.on{background:var(--raise);border-color:var(--light-3);color:var(--ink)}
+.fsep{width:1px;height:18px;background:var(--line);margin:0 2px}
+/* popover com seta */
+.menu{position:absolute;z-index:6;background:var(--float);border:1px solid var(--line-strong);border-radius:12px;padding:6px;filter:drop-shadow(0 10px 24px rgba(0,0,0,.45));color:var(--ink)}
+.menu .mi{display:flex;gap:10px;padding:5px 8px;border-radius:8px;font-size:13px}.menu .mi span{flex:1}.menu .mi small{color:var(--dim);font-size:12px}
+.menu .mi.hl{background:var(--raise)}.menu .mi.off{color:#5A5A64}.menu .mi.off small{color:#4A4A54}.menu hr{border:0;border-top:1px solid var(--line);margin:5px 0}
+.menu[data-side]::after{content:"";position:absolute;width:var(--s);height:var(--s);background:var(--float);border:1px solid var(--line-strong);border-right:0;border-bottom:0;border-top-left-radius:2px;clip-path:polygon(-2px -2px,calc(100% + 2px) -2px,-2px calc(100% + 2px));left:var(--ax);top:0;transform:translate(-50%,-50%) rotate(45deg)}
+.zpop{display:flex;align-items:center;gap:4px;padding:6px}
+.zpop .zb{width:30px;height:28px;border-radius:8px;border:1px solid var(--line);display:grid;place-items:center;font-size:16px;color:var(--ink)}
+.zpop .zv{width:56px;text-align:center;font-variant-numeric:tabular-nums;font-weight:500}
+.zpop .rs{margin-left:6px;padding:5px 10px;border-radius:8px;background:var(--raise);font-size:12.5px}
+.toast{position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:5;display:flex;align-items:center;gap:10px;background:var(--float);border:1px solid var(--line-strong);border-radius:10px;padding:7px 12px;font:13px/1.3 var(--ui);color:var(--ink);white-space:nowrap;filter:drop-shadow(0 8px 18px rgba(0,0,0,.35))}
+.toast small{color:var(--dim)}
+.spk{width:18px;height:18px;display:grid;place-items:center;border-radius:5px;color:var(--mute);flex:none;margin-left:2px}.spk svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.spk.on{background:var(--hover-2);color:var(--ink)}.spk.mute{color:var(--light-3)}.nav-addr .spk{width:22px;height:22px;border-radius:7px}
+.tx{color:var(--dim);font-size:13px;margin-left:2px}
+.vpop{width:220px;padding:10px 12px;display:flex;flex-direction:column;gap:8px;font-size:12.5px}.vpop .vh{display:flex;justify-content:space-between;color:var(--mute)}.vpop .vh b{color:var(--ink);font-weight:500;font-variant-numeric:tabular-nums}
+.vmute{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 6px;margin:0 -6px;border-radius:7px;white-space:nowrap;font-size:12.5px}.vmute:hover{background:var(--raise)}.vmute kbd{font-size:11px}
+.vrow{display:flex;align-items:center;gap:8px}.vtrack{flex:1;height:4px;border-radius:2px;background:var(--line-strong);position:relative}.vtrack i{position:absolute;left:0;top:0;bottom:0;width:60%;border-radius:2px;background:var(--light-3)}.vtrack u{position:absolute;left:60%;top:50%;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;background:var(--hi)}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:16px}.pair h5{margin:0 0 6px;font-size:12.5px;color:var(--mute);font-weight:500}
+.nav-tab.back{box-shadow:inset 0 0 0 1px var(--light-3)}
+@media (max-width:900px){.pair{grid-template-columns:1fr}.profs span b{display:none}.nav-bar>span{display:none}.fq{width:150px}}
+</style>
+</head>
+<body>
+<main>
+<header><h1>Buscar na página, zoom e reabrir aba · navegador sozinho</h1><p>Os mesmos estados aprovados para o Navegador do Agens, na janela da casca (janela.html, abas em cima, ato Estúdio). Estados estáticos; nada aqui é clicável.</p></header>
+<nav class="toc"><a href="#buscar">1 · Buscar</a><a href="#buscar-nada">2 · Sem resultado</a><a href="#zoom">3 · Zoom</a><a href="#reabrir">4 · Reabrir aba</a><a href="#som">5 · Som</a></nav>
+<div id="out"></div>
+</main>
+<script>
+const IC={back:'<svg viewBox="0 0 20 20"><path d="M12 4 6 10l6 6"/></svg>',fwd:'<svg viewBox="0 0 20 20"><path d="m8 4 6 6-6 6"/></svg>',re:'<svg viewBox="0 0 20 20"><path d="M16 10a6 6 0 1 1-2-4.5M16 3v3.5h-3.5"/></svg>',
+ more:'<svg viewBox="0 0 20 20"><circle cx="5" cy="10" r=".8"/><circle cx="10" cy="10" r=".8"/><circle cx="15" cy="10" r=".8"/></svg>',
+ up:'<svg viewBox="0 0 20 20"><path d="m5 12 5-5 5 5"/></svg>',dn:'<svg viewBox="0 0 20 20"><path d="m5 8 5 5 5-5"/></svg>',spk:'<svg viewBox="0 0 20 20"><path d="M4 8h3l4-3v10l-4-3H4z"/><path d="M13.5 7.5a3.5 3.5 0 0 1 0 5M15.5 5.5a6.5 6.5 0 0 1 0 9"/></svg>',mute:'<svg viewBox="0 0 20 20"><path d="M4 8h3l4-3v10l-4-3H4z"/><path d="m13.5 8 4 4M17.5 8l-4 4"/></svg>',x:'<svg viewBox="0 0 20 20"><path d="m6 6 8 8M14 6l-8 8"/></svg>'};
+const PROF={"Estúdio":["l-est","E"],"Cliente A":["l-cli","C"],"Pessoal":["l-pes","P"]};
+const TABS=[["#6FA8FF","L","Linear"],["#7FD1A8","P","Planilha de preços"],["#F08A8A","S","Stripe · painel"]];
+const TXT=q=>{let i=0;const m=w=>`<mark${++i==3&&q?' class="cur"':''}>${w}</mark>`,h=w=>q?m(w):w;
+ return `<h3>Tabela de ${h("preço")}s 2027</h3><p>O ${h("preço")} base sobe 4% em janeiro. Clientes antigos mantêm o ${h("preço")} atual até a renovação do contrato, e o desconto anual continua em 15%.</p><p>Para o plano Equipe, o ${h("preço")} por assento cai a partir de 20 pessoas. Veja a tabela abaixo antes de mandar a proposta; o ${h("preço")} de implantação é cobrado uma vez só.</p><p>Revisão: o time comercial confere cada ${h("preço")} com o financeiro na primeira semana do mês.</p>`};
+const frame=(o={})=>{const tabs=o.tabs||TABS.slice(0,2);
+ return `<div class="nav">
+ <div class="strip"><div class="lights"><i></i><i></i><i></i></div>${tabs.map((t,i)=>`<span class="nav-tab${i==tabs.length-1?" on":""}${o.back&&i==tabs.length-1?" back":""}"><span class="fv" style="background:${t[0]}">${t[1]}</span>${t[2]}${o.snd&&o.snd[i]?`<button class="spk${o.snd[i]=="mute"?" mute":""}${o.vol==i?" on":""}"${o.vol==i?" data-anchor":""} aria-label="${o.snd[i]=="mute"?"Ativar som da aba":"Silenciar aba"}">${IC[o.snd[i]]}</button>`:""}${o.snd?`<span class="tx">×</span>`:""}</span>`).join("")}<span class="nt">+</span></div>
+ <div style="height:8px"></div>
+ <div class="nav-row"><span class="ib">${IC.back}</span><span class="ib">${IC.fwd}</span><span class="ib">${IC.re}</span><div class="nav-addr"><svg viewBox="0 0 20 20" style="width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.6;flex:none"><rect x="4.5" y="9" width="11" height="8" rx="2.5"/><path d="M7 9V6.5a3 3 0 0 1 6 0V9"/></svg><span>${o.url||"docs.estudio.test/precos-2027"}</span>${o.addr?`<button class="spk ${o.addr=="mute"?"mute":""}" aria-label="${o.addr=="mute"?"Ativar som":"Silenciar"} esta aba">${IC[o.addr]}</button>`:""}${o.zoom?`<button class="zpill${o.zpop?" on":""}" aria-label="Zoom ${o.zoom}">${o.zoom}</button>`:""}</div><div class="profs">${Object.keys(PROF).map(x=>`<span class="${x=="Estúdio"?"on":""}"><span class="logo ${PROF[x][0]}">${PROF[x][1]}</span>${x=="Estúdio"?x:""}</span>`).join("")}</div><span class="ib${o.menu?" on":""}" data-more>${IC.more}</span></div>
+ <div class="area${o.zoom=="125%"?" z125":""}">${o.find||""}${o.toast||""}<div class="page">${o.page||TXT(o.hl)}</div></div>${o.inner||""}</div>`};
+const FIND=(q,c,none,aa)=>`<div class="find${none?" none":""}" role="search" aria-label="Buscar na página"><div class="fq"><b>${q}</b><small>${c}</small></div><button class="fb" title="Anterior (⇧↵)" ${none?'aria-disabled=true':''}>${IC.up}</button><button class="fb" title="Próximo (↵)" ${none?'aria-disabled=true':''}>${IC.dn}</button><span class="fsep"></span><button class="fb aa${aa?" on":""}" title="Diferenciar maiúsculas">Aa</button><button class="fb" title="Fechar (esc)">${IC.x}</button></div>`;
+const ZPOP=`<div class="menu zpop" data-pop role="dialog" aria-label="Zoom da página"><button class="zb" aria-label="Diminuir (⌘−)">−</button><span class="zv">125%</span><button class="zb" aria-label="Aumentar (⌘+)">+</button><button class="rs">Redefinir</button></div>`;
+const MENU=off=>`<div class="menu" data-pop style="width:270px"><div class="mi"><span>Nova aba</span><small>⌘T</small></div><div class="mi${off?" off":" hl"}"><span>Reabrir aba fechada</span><small>⇧⌘T</small></div><hr><div class="mi"><span>Buscar na página…</span><small>⌘F</small></div><div class="mi"><span>Zoom</span><small>100%</small></div><hr><div class="mi"><span>Configurações</span><small>⌘,</small></div></div>`;
+const VPOP=`<div class="menu vpop" data-pop role="dialog" aria-label="Volume da aba"><div class="vh"><span>Volume desta aba</span><b>60%</b></div><div class="vrow"><button class="spk">${IC.spk}</button><div class="vtrack" role="slider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="60"><i></i><u></u></div></div><button class="vmute"><span>Silenciar esta aba</span><span class="spk">${IC.mute}</span></button></div>`;
+const pair=(a,b,ha,hb)=>`<div class="pair"><div><h5>${ha}</h5>${a}</div><div><h5>${hb}</h5>${b}</div></div>`;
+const S=[
+ ["buscar","1 · ⌘F abre a busca","A barra fica presa no topo da área da página, à direita, como uma aba que desce da borda (escolhida: não empurra a página, fica perto do endereço onde o olho já está, e não tampa o começo do texto como uma faixa de largura toda). Campo com a busca e o contador “3 de 6”, ↑ e ↓ (⇧↵ e ↵), Aa para diferenciar maiúsculas, × fecha (esc também). Na página, todas as ocorrências em amarelo e a atual em laranja, como o Chromium pinta. Sem seta: não nasce de um controle. Abrir de novo com ⌘F seleciona o texto do campo.",frame({hl:1,find:FIND("preço","3 de 6")})],
+ ["buscar-nada","2 · Nenhum resultado","Contador vira “Nenhum resultado” e a borda do campo fica vermelha (o vermelho de aviso dos menus). ↑ e ↓ apagados. À direita, o mesmo com Aa ligado: “Preço” com P maiúsculo não aparece no texto.",pair(frame({find:FIND("reajuste","Nenhum resultado",1)}),frame({find:FIND("Preço","Nenhum resultado",1,1)}),"Sem ocorrência","Aa ligado")],
+ ["zoom","3 · Zoom (⌘+ ⌘− ⌘0)","Depois de ⌘+, um aviso curto “Zoom 125%” por 1,5 s no topo da página e a pílula “125%” no fim do campo de endereço. A pílula fica enquanto o zoom deste site for diferente de 100% (vale por site, como no Chrome). Clicada, abre o popover com − / 125% / + e Redefinir, com a seta apontando para ela. Em 100% (ou depois de ⌘0) não há pílula nem nada: o campo volta a ser só o endereço.",
+  frame({zoom:"125%",toast:`<div class="toast" role="status">Zoom 125% <small>⌘0 volta a 100%</small></div>`})+`<div style="height:16px"></div>`+pair(frame({zoom:"125%",zpop:1,inner:ZPOP}),frame({}),"Pílula clicada","Em 100%: nada")],
+ ["reabrir","4 · ⇧⌘T reabre a aba fechada","A aba fechada volta na mesma posição da faixa, ativa, com um contorno quente que some em 1 s (só para o olho achar), e na página onde estava (rolagem e histórico de voltar). Sem aviso extra. Também no menu Arquivo do macOS. No menu ⋯ da barra, “Reabrir aba fechada ⇧⌘T” fica apagado quando não há o que reabrir (na sessão deste ato).",
+  frame({back:1,tabs:TABS,url:"dashboard.stripe.com/payments",page:`<h3>Pagamentos</h3><p>Mesma página e rolagem de quando a aba foi fechada.</p>`})+`<div style="height:16px"></div>`+pair(frame({menu:1,inner:MENU(0)}),frame({menu:1,inner:MENU(1)}),"Tem aba para reabrir","Nada para reabrir: apagado")],
+ ["som","5 · Som da aba","O volume mora na aba. Aba tocando mostra o alto-falante antes do ×; um clique silencia ou devolve o som (vira alto-falante cortado, em laranja claro, e fica assim mesmo quando para de tocar). Parar o ponteiro sobre o alto-falante por 0,5 s abre o volume pendurado nele, com a seta (escolhi passar o ponteiro e não clique direito: o clique direito da aba já é o menu da aba, e assim o volume se descobre sozinho; o atraso evita abrir ao só passar). Volume de 0 a 100% por aba, vale para este ato até fechar a aba. Na aba ativa, enquanto toca ou está silenciada, o mesmo alto-falante aparece no fim do endereço, ao lado da pílula de zoom; ali só silencia, sem volume.",
+  pair(frame({tabs:[["#6FA8FF", "L", "Linear"],["#1DB954", "S", "Spotify"],["#FF4E45", "Y", "YouTube · aula"]],snd:[0,0,"spk"],addr:"spk",url:"youtube.com/watch?v=aula-12"}),frame({tabs:[["#6FA8FF", "L", "Linear"],["#1DB954", "S", "Spotify"],["#FF4E45", "Y", "YouTube · aula"]],snd:[0,0,"spk"],vol:2,addr:"spk",url:"youtube.com/watch?v=aula-12",inner:VPOP}),"Aba tocando","Volume aberto pela aba: 60%")+`<div style="height:16px"></div>`+pair(frame({tabs:[["#6FA8FF", "L", "Linear"],["#1DB954", "S", "Spotify"],["#FF4E45", "Y", "YouTube · aula"]],snd:[0,0,"mute"],addr:"mute",zoom:"125%",url:"youtube.com/watch?v=aula-12"}),frame({tabs:[["#6FA8FF", "L", "Linear"],["#1DB954", "S", "Spotify"],["#FF4E45", "Y", "YouTube · aula"]],snd:[0,"spk","spk"],addr:"spk",url:"youtube.com/watch?v=aula-12"}),"Silenciada: na aba e no endereço (com zoom)","Duas abas tocando")],
+];
+document.getElementById("out").innerHTML=S.map(([id,t,c,h])=>`<section class="v" id="${id}"><h2>${t}</h2><p class="cap">${c}</p>${h}</section>`).join("");
+// popover: 4 px + seta abaixo do controle, desliza dentro do painel, seta no centro do controle
+document.querySelectorAll("[data-pop]").forEach(m=>{const nav=m.closest(".nav"),a=nav.querySelector("[data-anchor]")||nav.querySelector(".zpill")||nav.querySelector("[data-more]"),nb=nav.getBoundingClientRect(),b=a.getBoundingClientRect();
+ const cx=b.left-nb.left+b.width/2,w=m.offsetWidth,x=Math.max(4,Math.min(nb.width-6-w,cx-w/2));
+ m.style.left=x+"px";m.style.top=(b.bottom-nb.top+4+7)+"px";m.style.setProperty("--ax",Math.max(23,Math.min(w-23,cx-x-1))+"px");m.dataset.side="up"});
+</script>
+</body>
+</html>

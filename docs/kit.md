@@ -83,7 +83,7 @@ Navegação: `navigate(tab, to: texto)` (endereço ou busca, como na barra), `ba
 
 ## As abas e os dados delas
 
-`engine.tabs` é um modelo observável com as abas de cada ato: título, URL, carregando, áudio, se dá para voltar e avançar, ícone (PNG) e `control` quando um agente está usando a aba e `agentCursor`, o ponto onde está o ponteiro dele (o app desenha).
+`engine.tabs` é um modelo observável com as abas de cada ato: título, URL, carregando, áudio (`audible`, `muted`), se dá para voltar e avançar, ícone (PNG) e `control` quando um agente está usando a aba e `agentCursor`, o ponto onde está o ponteiro dele (o app desenha).
 
 ```swift
 try await engine.tabs.load(ato: ato)        // as abas que já existem (inclui as do agente)
@@ -226,6 +226,31 @@ let selected = try await engine.connection?.selection(tab)   // o texto selecion
 - `stepPick` sem pai ou filho lança `not_found` e a escolha fica.
 - Motor mais antigo lança `unknown_op` nas três; nada mais muda.
 - Elemento dentro de `iframe` de outra origem não se escolhe nesta versão.
+
+## Buscar, zoom, reabrir aba e som
+
+Os três são do app desenhar (barra de busca, controle de zoom, item do menu); o motor faz o resto ([protocolo.md](protocolo.md), "Passo 5.7").
+
+```swift
+engine.onFind = { result in findBar.show(result.matches, active: result.active) }   // 0 e 0 depois de stopFind
+try await engine.connection?.find("preço", in: tab)                  // recomeça a busca
+try await engine.connection?.find("preço", in: tab, next: true)      // próxima; forward: false volta
+try await engine.connection?.stopFind(in: tab)                       // keepSelection: true deixa a ocorrência selecionada
+
+engine.onZoom = { tab, factor in zoomLabel(tab, factor) }            // 1 é 100%; também quando outra aba do site muda
+let factor = try await engine.connection?.zoom(.zoomIn, in: tab)     // .zoomOut, .reset, .factor(1.5); sem nada, só lê
+
+let count = try await engine.connection?.reopenableCount(ato: ato)  // 0: item cinza
+let reopened = try await engine.connection?.reopenClosedTab(ato: ato)   // o id; chega também como view.tab
+```
+
+- O destaque da busca é a própria página que desenha: a vista não faz nada. `matchCase` diferencia maiúsculas; o texto vai de 1 a 1024 caracteres.
+- O zoom é do site no ato, como no Chrome: outra aba do mesmo site acompanha (e recebe `onZoom`), e ele fica guardado.
+- `reopenClosedTab` traz a aba com o histórico; sem nada para reabrir, lança `not_found`. Aba que um agente usou nunca volta. Só vale o que foi fechado desde que o motor abriu.
+- Com o agente trabalhando na aba, `find` e mudar o zoom lançam `denied`; depois do Assumir, valem.
+- Motor mais antigo lança `unknown_op` em todos.
+
+**Som.** `engine.onAudio = { tab, audible, muted in ... }` avisa quando a aba começa ou para de tocar e quando é silenciada; `try await engine.connection?.mute(in: tab)` silencia e `mute(false, in: tab)` devolve o som, como o ícone de som da aba do Chrome. Vale também na aba do agente. Silenciada, a aba segue `audible` enquanto a página toca. Motor mais antigo: `muted` fica `false` e `mute` lança `unknown_op`.
 
 ## Inspecionar
 

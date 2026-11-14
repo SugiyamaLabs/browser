@@ -284,6 +284,10 @@ extension BrowserConnection {
   public func forward(_ tab: String) async throws(BrowserError) { try await send(op: "view.forward", params: ["tab": .string(tab)]) }
   public func reload(_ tab: String) async throws(BrowserError) { try await send(op: "view.reload", params: ["tab": .string(tab)]) }
   public func stop(_ tab: String) async throws(BrowserError) { try await send(op: "view.stop", params: ["tab": .string(tab)]) }
+  /// Mutes or unmutes the tab, as Chrome's tab audio icon does (also an agent's tab); `onAudio` follows.
+  public func mute(_ muted: Bool = true, in tab: String) async throws(BrowserError) {
+    try await send(op: "view.mute", params: ["tab": .string(tab), "muted": .bool(muted)])
+  }
 
   /// The tab's icon as PNG data.
   public func favicon(_ tab: String) async throws(BrowserError) -> Data? {

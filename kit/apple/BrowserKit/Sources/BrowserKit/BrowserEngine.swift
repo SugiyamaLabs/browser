@@ -147,6 +147,14 @@ public struct HostSettings: Sendable, Equatable {
   @ObservationIgnored public var onUIRequest: ((UIRequest) async -> UIAnswer)?
   /// Picks of the element picker (`connection.pick`), and its ending without one.
   @ObservationIgnored public var onPick: ((PickResult) -> Void)?
+  /// The count of a search (`connection.find`) on a tab, and 0 and 0 after `stopFind`.
+  @ObservationIgnored public var onFind: ((FindResult) -> Void)?
+  /// A tab's zoom factor changed (1 is 100%): from `connection.zoom`, the page, or its site's
+  /// zoom changing in another tab of the ato. Also once for a tab that opens at a factor other than 1.
+  @ObservationIgnored public var onZoom: ((_ tab: String, _ factor: Double) -> Void)?
+  /// A tab started or stopped playing sound, or was muted or unmuted (`connection.mute`); also
+  /// in `tabs`. Not called for a tab's first report.
+  @ObservationIgnored public var onAudio: ((_ tab: String, _ audible: Bool, _ muted: Bool) -> Void)?
   /// The host's own items in the right-click menu `presentDefaultUI` draws: after the engine's
   /// actions, past a separator. Choosing one calls `onContextMenuItem` and answers the engine
   /// with cancel.
@@ -330,7 +338,12 @@ public struct HostSettings: Sendable, Equatable {
   func isDevTools(_ tab: String) -> Bool { devTools.values.contains { $0.devtools == tab } }
 
   private func handle(_ event: String, _ message: [String: JSON]) {
-    if !tabs.handle(event, message) {
+    let before = event == "view.tab" ? message["tab"]?.string.flatMap { tabs[$0] } : nil
+    if tabs.handle(event, message) {
+      if let before, let after = tabs[before.id], (before.audible, before.muted) != (after.audible, after.muted) {
+        onAudio?(after.id, after.audible, after.muted)
+      }
+    } else {
       let view = view(message["tab"]?.string)
       switch event {
       case "view.layer":
@@ -355,6 +368,12 @@ public struct HostSettings: Sendable, Equatable {
         }
       case "view.picked":
         if let result = PickResult(message: message) { onPick?(result) }
+      case "view.find":
+        if let tab = message["tab"]?.string, let matches = message["matches"]?.int, let active = message["active"]?.int {
+          onFind?(FindResult(tab: tab, matches: matches, active: active))
+        }
+      case "view.zoom":
+        if let tab = message["tab"]?.string, let factor = message["factor"]?.double { onZoom?(tab, factor) }
       case "extension.changed":
         if let ato = message["ato"]?.string, let id = message["extension"]?.string, let change = message["change"]?.string {
           onExtensionChange?(ExtensionChange(ato: ato, id: id, kind: ExtensionChange.Kind(change)))

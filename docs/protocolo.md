@@ -13,6 +13,7 @@ Referência para quem escreve um cliente (o time do Agens, em Go). O plano e o p
 | 5 | `host.*`, `view.*`, `ui.*` (a página dentro de outro app), `host.settings`, as partes de `approval.ask` | implementado |
 | 5.4 | `view.pick`, `view.pick.step`, `view.selection`, evento `view.picked` (apontar um elemento) | implementado |
 | 5.5 | `view.inspect`, ação `inspect` do botão direito (o DevTools); DevTools encaixado como vista (`dock`, `view.devtools.*`) | implementado |
+| 5.7 | `view.reopen`, `view.reopenable`, `view.find`, `view.find.stop`, `view.zoom`, `view.mute`, eventos `view.find` e `view.zoom`, campo `muted` em `view.tab` (reabrir aba, buscar na página, zoom, som) | implementado |
 
 Um navegador de fase 1 responde `unknown_op` às demais. Trate `unknown_op` como "este navegador ainda não faz isso".
 
@@ -200,10 +201,10 @@ Quem desenha a interface é o app hospedeiro: barra de endereço, abas, atos, o 
 → {"id": 3, "op": "view.attach", "tab": "v3", "width": 1000, "height": 640, "scale": 2}
 ← {"id": 3, "ok": true}
 ← {"event": "view.layer", "tab": "v3", "context": 3626435823, "width": 1000, "height": 640, "scale": 2}
-← {"event": "view.tab", "tab": "v3", "ato": "Profile 1", "title": "Example Domain", "url": "https://example.com/", "loading": false, "audible": false, "can_back": false, "can_forward": false}
+← {"event": "view.tab", "tab": "v3", "ato": "Profile 1", "title": "Example Domain", "url": "https://example.com/", "loading": false, "audible": false, "muted": false, "can_back": false, "can_forward": false}
 ```
 
-- **Abas.** `view.tabs {ato}` lista as abas do ato: `{tabs: [{tab, ato, title, url, loading, audible, can_back, can_forward, control?}]}`. O id `v…` vale enquanto a aba existir e inclui as abas que um agente abriu. `view.open {ato, url?}`, `view.close {tab}`, `view.navigate {tab, text}` (endereço ou busca, como na barra), `view.back`, `view.forward`, `view.reload`, `view.stop`. Eventos: `view.tab` a cada mudança, `view.closed {tab}` e `view.favicon {tab}` quando o ícone muda (`view.favicon {tab}` como pedido devolve `{png}`).
+- **Abas.** `view.tabs {ato}` lista as abas do ato: `{tabs: [{tab, ato, title, url, loading, audible, muted, can_back, can_forward, control?}]}`. O id `v…` vale enquanto a aba existir e inclui as abas que um agente abriu. `view.open {ato, url?}`, `view.close {tab}`, `view.navigate {tab, text}` (endereço ou busca, como na barra), `view.back`, `view.forward`, `view.reload`, `view.stop`. Eventos: `view.tab` a cada mudança, `view.closed {tab}` e `view.favicon {tab}` quando o ícone muda (`view.favicon {tab}` como pedido devolve `{png}`).
 - **Mostrar.** `view.attach {tab, width, height, scale}` faz a aba desenhar naquele tamanho (em pontos) e manda `view.layer {tab, context, width, height, scale}`: o app mostra o `context` num `CALayerHost`. O `context` muda ao trocar de processo ou de tamanho, e o evento vem de novo. `view.resize {tab, width, height, scale}` e `view.detach {tab}`. Várias abas podem estar ligadas ao mesmo tempo (painéis lado a lado).
 - **Entrada.** O app manda o que a vista recebeu: `view.focus {tab, on}`, `view.mouse {tab, data, x, y}`, `view.mouse.leave {tab}`, `view.wheel {tab, data, x, y}`, `view.key {tab, data, text, commands, marked, sel_start, sel_end, had_marked, unmarked}` e `view.edit {tab, command}` (`cut`, `copy`, `paste`, `selectAll`, `undo`, `redo`). `data` é o `NSEvent` serializado (`CGEventCreateData`, em base64); `x` e `y` contam do canto de cima da vista, em pontos. Sem `id`, o motor não responde.
 - **Aba com agente.** Quando um agente controla a aba, `view.tab` traz `control: {agent, title, detail, state}`, com `state` `"working"` ou `"paused"`, para o app desenhar o aviso. O app manda `view.control {tab, action}` com `take` (Assumir), `give` (Devolver) ou `end` (encerrar). A pessoa pode ver a aba do agente o tempo todo; com `take`, as teclas e os cliques dela passam a valer e os do agente respondem `paused`.
@@ -434,6 +435,41 @@ Também só adições à v1. O hospedeiro lista as extensões de cada ato, desen
 
 **Erros novos.** Nenhum. **Operações novas:** `extensions.list`, `extension.icon`, `extension.enable`, `extension.remove`, `extension.pin`, `extension.options`, `extension.install`, `extension.click`, `extension.popup.close`. **Eventos novos:** `extension.changed`, `extension.action`, `extension.popup`, `extension.popup.closed`. **Campos novos:** `ato`, `id`, `icon`, `atos` no `ui.ask` `extension`; `atos` no `ui.answer` dele.
 
+#### Passo 5.7: reabrir aba, buscar na página, zoom e som
+
+Também só adições à v1. Tudo só da conexão do hospedeiro (de outra, `unauthorized`), com `id` e resposta. Motor mais antigo responde `unknown_op`.
+
+```
+→ {"id": 60, "op": "view.reopenable", "ato": "Profile 1"}
+← {"id": 60, "ok": true, "count": 1}
+→ {"id": 61, "op": "view.reopen", "ato": "Profile 1"}
+← {"id": 61, "ok": true, "tab": "v14"}
+← {"event": "view.tab", "tab": "v14", "ato": "Profile 1", "url": "https://example.com/", ...}
+→ {"id": 62, "op": "view.find", "tab": "v3", "text": "preço"}
+← {"id": 62, "ok": true}
+← {"event": "view.find", "tab": "v3", "matches": 4, "active": 1}
+→ {"id": 63, "op": "view.find", "tab": "v3", "text": "preço", "next": true}
+← {"event": "view.find", "tab": "v3", "matches": 4, "active": 2}
+→ {"id": 64, "op": "view.find.stop", "tab": "v3"}
+← {"event": "view.find", "tab": "v3", "matches": 0, "active": 0}
+→ {"id": 65, "op": "view.zoom", "tab": "v3", "level": "in"}
+← {"id": 65, "ok": true, "factor": 1.1}
+← {"event": "view.zoom", "tab": "v3", "factor": 1.1}
+```
+
+- **`view.reopen {ato}`** → `{ok, tab}`. Traz de volta a aba fechada mais recente do ato, com o histórico de voltar e avançar e a rolagem, como o ⌘⇧T do Chrome. Ela entra na janela escondida do ato (ou numa nova, se ele não tem) e chega como `view.tab`, com id novo. Nada para reabrir: `not_found`. Uma aba que um agente usou nunca volta por aqui, nem quando a pessoa a fechou depois de o agente soltar: fica fora da contagem e é pulada. Vale o que foi fechado desde que o motor abriu; o que ficou da sessão anterior volta por `view.restore`. Ato que não existe: `not_found`; sem `ato`: `bad_request`.
+- **`view.reopenable {ato}`** → `{ok, count}`: quantas abas `view.reopen` ainda traz, para o app deixar o item do menu cinza em `0`. Não acorda um ato dormindo (ele dá `0`).
+- **`view.find {tab, text, forward?, match_case?, next?}`** → `{ok}`. Busca `text` (de 1 a 1024 caracteres) na página e seleciona uma ocorrência; o destaque é o da própria página (o Chromium desenha dentro dela), o hospedeiro só mostra a contagem. `forward` (padrão `true`) diz o sentido; `match_case` (padrão `false`) diferencia maiúsculas. Com `next: true` e o mesmo texto, vai para a próxima ocorrência (ou a anterior, com `forward: false`); sem `next`, a busca recomeça. A contagem chega no evento `view.find`.
+- **Evento `view.find {tab, matches, active}`**: o resultado final de cada busca ou passo (sem as parciais enquanto a página conta). `active` conta de 1; `0` quando nada achado. Depois de `view.find.stop` vem com `0` e `0`.
+- **`view.find.stop {tab, keep_selection?}`** → `{ok}`. Acaba a busca e tira o destaque. Com `keep_selection: true`, a ocorrência ativa fica como seleção normal da página (lida por `view.selection`).
+- **`view.zoom {tab, level?, factor?}`** → `{ok, factor}`. `level` é `"in"`, `"out"` ou `"reset"` (os passos do Chrome: 90%, 110%, 125%…); `factor` é um número de `0.25` a `5`. Os dois juntos, ou fora disso: `bad_request`. Sem nenhum, só lê. O zoom é do site, como no Chrome: fica guardado por endereço (host) no ato e vale para as outras abas do mesmo site nesse ato, também depois de recarregar ou reabrir o motor; outro ato tem o dele. `factor` volta arredondado em centésimos (`1.1` é 110%).
+- **Evento `view.zoom {tab, factor}`** quando o zoom da aba muda: por `view.zoom`, pela página, ou porque o zoom do site mudou em outra aba do ato. Também vem uma vez para a aba que abre com zoom diferente de `1` (site com zoom guardado). Sem evento, vale `1`. O motor não mostra o balão de zoom do Chrome.
+- **Aba com agente.** Com o agente trabalhando, `view.find` e `view.zoom` com `level` ou `factor` dão `denied` (depois do Assumir, valem). `view.find.stop` e ler o zoom valem sempre. Mudar o zoom de um site numa aba da pessoa muda também a aba do agente no mesmo site e ato, como no Chrome.
+
+- **Som da aba.** `view.tab` (e `view.tabs`) traz `audible` (a página está tocando som agora) e `muted` (a aba está silenciada); o evento vem de novo a cada mudança dos dois. Motor mais antigo não manda `muted`: trate como `false`. `view.mute {tab, muted}` → `{ok}` silencia ou devolve o som, como o ícone de som da aba do Chrome (o estado fica com a aba, também numa aba restaurada depois de uma queda). Silenciada, a aba continua `audible: true` enquanto a página toca: nada sai, mas o app pode mostrar o ícone cortado. Vale também na aba de um agente, mesmo com ele trabalhando: a pessoa sempre pode calar uma aba. `muted` que não é booleano: `bad_request`.
+
+**Erros novos.** Nenhum. **Operações novas:** `view.reopen`, `view.reopenable`, `view.find`, `view.find.stop`, `view.zoom`, `view.mute`. **Eventos novos:** `view.find`, `view.zoom`. **Campo novo:** `muted` em `view.tab`.
+
 ## Erros
 
 | Código | Quando |
@@ -467,6 +503,8 @@ Também só adições à v1. O hospedeiro lista as extensões de cada ato, desen
 | `extension.changed` | `ato`, `extension`, `change` | (passo 5.6, só o hospedeiro) Uma extensão foi instalada, atualizada, ligada, desligada, removida ou fixada/desafixada num ato acordado. |
 | `extension.action` | `ato`, `tab?`, `extension`, `title`, `badge`, `badge_color`, `visible`, `popup` | (passo 5.6, só o hospedeiro) O botão da extensão mudou naquela aba (sem `tab`: em todas as abas do ato). |
 | `extension.popup` / `extension.popup.closed` | `popup`, `tab`, `extension`, `width`, `height` / `popup` | (passo 5.6, só o hospedeiro) O popup tem (ou mudou) de tamanho / fechou. |
+| `view.find` | `tab`, `matches`, `active` | (passo 5.7, só o hospedeiro) O resultado final de uma busca na página (`view.find`), ou `0` e `0` depois de `view.find.stop`. |
+| `view.zoom` | `tab`, `factor` | (passo 5.7, só o hospedeiro) O zoom da aba mudou (`view.zoom`, a página, ou o zoom do site em outra aba do ato). |
 | `control.stopped` | `reason` | O controle desta conexão acabou: `"user"` (a pessoa tocou na bolha de parar) ou `"sharing_changed"` (mudou o grupo de atos que compartilham cookies com este). |
 
 ## Regras de segurança que o cliente sente
