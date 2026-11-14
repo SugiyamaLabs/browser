@@ -10810,10 +10810,10 @@ index 9d0bf4646d..e28c93f5d2 100644
  #ifdef __cplusplus
 diff --git a/chrome/browser/agens/embed/agens_embedded.h b/chrome/browser/agens/embed/agens_embedded.h
 new file mode 100644
-index 0000000000..a4b9f7ef74
+index 0000000000..23f21e6fcc
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embedded.h
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,73 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The engine as another app's hidden helper (docs/agens.md, "Um código, dois produtos";
 +// docs/protocolo.md, "host e view"). With --agens-embedded the app that launched the engine draws
@@ -10826,6 +10826,8 @@ index 0000000000..a4b9f7ef74
 +#include <sys/types.h>
 +
 +#include <string>
++
++class Profile;
 +
 +namespace content {
 +class WebContents;
@@ -10866,12 +10868,13 @@ index 0000000000..a4b9f7ef74
 +// restore leaves it out (session_restore.cc), its control session ended with the engine.
 +inline constexpr char kAgentTabKey[] = "agens.agent";
 +
-+// From ChromeBrowserMainPartsMac::PostProfileInit: when the engine crashed or was killed, each ato
-+// that had windows gets its last tabs back (hidden windows; the host sees them as view.tab). After
-+// a normal quit nothing comes back by itself: those atos become restorable instead (view.restore).
-+void RestoreAfterCrash();
++// From ChromeBrowserMainPartsMac::PostProfileInit, with the initial profile: when the engine
++// crashed or was killed, each ato that had windows gets its last tabs back (hidden windows; the
++// host sees them as view.tab). After a normal quit nothing comes back by itself and no ato loads:
++// those atos become restorable instead (Local State; view.restore loads the ato then).
++void RestoreAfterCrash(Profile* initial);
 +// The ato (its folder name) had windows when the engine last quit normally and its tabs were not
-+// brought back yet in this run (atos.list "restorable").
++// brought back yet (atos.list "restorable"). Kept across runs until view.restore.
 +bool IsRestorable(const std::string& ato);
 +// True once per ato and saved session: view.restore takes it, so a second call finds nothing.
 +bool TakeRestorable(const std::string& ato);
@@ -10886,10 +10889,10 @@ index 0000000000..a4b9f7ef74
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EMBEDDED_H_
 diff --git a/chrome/browser/agens/embed/agens_embedded_mac.mm b/chrome/browser/agens/embed/agens_embedded_mac.mm
 new file mode 100644
-index 0000000000..9e64024e36
+index 0000000000..c83633bdb4
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embedded_mac.mm
-@@ -0,0 +1,319 @@
+@@ -0,0 +1,338 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/embed/agens_embedded.h"
@@ -10902,7 +10905,6 @@ index 0000000000..9e64024e36
 +
 +#include <algorithm>
 +#include <optional>
-+#include <set>
 +#include <string>
 +#include <vector>
 +
@@ -10915,6 +10917,8 @@ index 0000000000..9e64024e36
 +#include "chrome/app/chrome_command_ids.h"
 +#include "chrome/browser/agens/bridge/view_input.h"
 +#include "chrome/browser/agens/bridge/view_ops.h"
++#include "chrome/browser/agens/embed/agens_window.h"
++#include "chrome/browser/browser_process.h"
 +#include "chrome/browser/lifetime/application_lifetime.h"
 +#include "chrome/browser/lifetime/browser_shutdown.h"
 +#include "chrome/browser/profiles/profile.h"
@@ -10925,6 +10929,9 @@ index 0000000000..9e64024e36
 +#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 +#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
 +#include "chrome/common/chrome_switches.h"
++#include "chrome/common/pref_names.h"
++#include "components/prefs/pref_service.h"
++#include "components/prefs/scoped_user_pref_update.h"
 +#import "components/remote_cocoa/app_shim/native_widget_mac_nswindow.h"
 +#include "content/public/common/content_switches.h"
 +#include "ui/base/base_window.h"
@@ -11107,32 +11114,47 @@ index 0000000000..9e64024e36
 +  }
 +}
 +
-+std::set<std::string>& Restorable() {
-+  static base::NoDestructor<std::set<std::string>> atos;
-+  return *atos;
-+}
-+
++// agens.atos[<folder>].restorable (Local State, beside the ato's other extras): its last session
++// can come back with view.restore. Read without loading the ato's profile.
 +bool IsRestorable(const std::string& ato) {
-+  return Restorable().contains(ato);
++  const base::DictValue* extras = g_browser_process->local_state()->GetDict(AgensWindow::kAtosPref).FindDict(ato);
++  return extras && extras->FindBool("restorable").value_or(false);
 +}
 +
 +bool TakeRestorable(const std::string& ato) {
-+  return Restorable().erase(ato) > 0;
++  if (!IsRestorable(ato)) return false;
++  ScopedDictPrefUpdate update(g_browser_process->local_state(), AgensWindow::kAtosPref);
++  update->EnsureDict(ato)->Remove("restorable");
++  return true;
 +}
 +
-+void RestoreAfterCrash() {
++void RestoreAfterCrash(Profile* initial) {
 +  if (!IsEmbedded()) return;
-+  // Once the main loop runs: profiles load here, not inside another profile's init.
++  // The initial profile loads in every run, so its exit type is the engine's. A clean end only
++  // comes from the host going away (it starts afresh then), so only a crash or a kill brings tabs
++  // back by itself.
++  if (ExitTypeService::GetLastSessionExitType(initial) != ExitType::kCrashed) {
++    // The atos that had windows at the normal quit become restorable, without loading them; the
++    // list is emptied so Chromium does not load them at start either (chrome_browser_main.cc).
++    PrefService* local = g_browser_process->local_state();
++    ProfileManager* manager = g_browser_process->profile_manager();
++    const base::ListValue last = local->GetList(prefs::kProfilesLastActive).Clone();
++    for (const base::Value& ato : last) {
++      if (ato.is_string() && manager->GetProfileAttributesStorage().GetProfileAttributesWithPath(
++                                 manager->user_data_dir().Append(base::FilePath::FromUTF8Unsafe(ato.GetString())))) {
++        ScopedDictPrefUpdate(local, AgensWindow::kAtosPref)->EnsureDict(ato.GetString())->Set("restorable", true);
++      }
++    }
++    local->ClearPref(prefs::kProfilesLastActive);
++    return;
++  }
++  // Once the main loop runs: profiles load here, not inside another profile's init. Only the atos
++  // that had windows when the engine died.
 +  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE, base::BindOnce([] {
 +    if (browser_shutdown::HasShutdownStarted()) return;
-+    // The atos that had windows when the engine ended. A clean end only comes from the host going
-+    // away (it starts afresh then), so only a crash or a kill brings tabs back by itself.
 +    for (Profile* profile : ProfileManager::GetLastOpenedProfiles()) {
-+      if (ExitTypeService::GetLastSessionExitType(profile) != ExitType::kCrashed) {
-+        Restorable().insert(profile->GetBaseName().AsUTF8Unsafe());  // the person may ask (view.restore)
-+        continue;
-+      }
 +      LOG(ERROR) << "agens: restoring the tabs of " << profile->GetBaseName().value() << " after a crash";
++      TakeRestorable(profile->GetBaseName().AsUTF8Unsafe());  // an older saved session is gone now
 +      SessionRestore::RestoreSession(profile, nullptr, SessionRestore::RESTORE_BROWSER, StartupTabs());
 +    }
 +  }));
@@ -14762,7 +14784,7 @@ index 65c1bcc84f..061bd40902 100644
    // Defense in depth: privileged capability interfaces are not even registered
    // for a frame outside a privileged process, so a non-PWC frame cannot
 diff --git a/chrome/browser/chrome_browser_main_mac.mm b/chrome/browser/chrome_browser_main_mac.mm
-index b269f1610a..fab22c1bbb 100644
+index b269f1610a..d5bd685c6a 100644
 --- a/chrome/browser/chrome_browser_main_mac.mm
 +++ b/chrome/browser/chrome_browser_main_mac.mm
 @@ -21,6 +21,7 @@
@@ -14787,7 +14809,7 @@ index b269f1610a..fab22c1bbb 100644
                                                  bool is_initial_profile) {
    ChromeBrowserMainPartsPosix::PostProfileInit(profile, is_initial_profile);
 +  if (is_initial_profile) {
-+    agens::RestoreAfterCrash();  // SugiyamaLabs: embedded, the atos' tabs after a crash
++    agens::RestoreAfterCrash(profile);  // SugiyamaLabs: embedded, the atos' tabs after a crash
 +  }
  }
  

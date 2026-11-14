@@ -1387,6 +1387,8 @@ def quit_then_restore():
         if a: h.ask("approval.answer", ask=a["ask"], answer="allow")
         agent.wait(rid)
         agent.ask("tab.open", ato=hato, url=SITE + "/login")
+        bato = h.ask("atos.create", name="Gate B").get("ato")   # not the initial profile: nothing loads it at start
+        h.ask("view.open", ato=bato, url=SITE + "/other")
         time.sleep(12)   # the session file and the prefs reach disk
         p.terminate()
         try: p.wait(20)
@@ -1399,6 +1401,9 @@ def quit_then_restore():
         def restorable(): return next((x.get("restorable") for x in h2.ask("atos.list").get("atos", []) if x.get("id") == hato), None)
         check("after a normal quit the engine starts with no tabs, and the ato is restorable",
               h2.ask("view.tabs", ato=hato).get("tabs") == [] and restorable() is True)
+        def ato_b(): return next((x for x in h2.ask("atos.list").get("atos", []) if x.get("id") == bato), {})
+        check("after a normal quit a restorable ato is not loaded at start (asleep: true, restorable: true)",
+              ato_b().get("asleep") is True and ato_b().get("restorable") is True, ato_b())
         check("view.restore from a connection that is not the host is unauthorized",
               err(Conn(sock5).ask("view.restore", ato=hato)) == "unauthorized")
         check("view.restore of an ato that does not exist is not_found", err(h2.ask("view.restore", ato="Nope 9")) == "not_found")
@@ -1414,6 +1419,10 @@ def quit_then_restore():
               {"/form", "/other"} <= {e.get("url", "").split(SITE, 1)[-1] for e in h2.events if e["event"] == "view.tab"})
         check("a second view.restore is not_found (no tab twice)", err(h2.ask("view.restore", ato=hato)) == "not_found")
         check("the ato is not restorable after view.restore", restorable() is False)
+        rb = h2.ask("view.restore", ato=bato)
+        check("view.restore loads the sleeping ato and brings its tab back ({ok, tabs: 1}; then awake, not restorable)",
+              rb.get("ok") and rb.get("tabs") == 1 and ato_b().get("asleep") is False and ato_b().get("restorable") is False,
+              (rb, ato_b()))
         on = subprocess.run([f"{OUT}/onscreen", str(p2.pid)], capture_output=True, text=True).stdout.strip()
         check("no window on screen after view.restore", on == "0", f"on screen: {on}")
     finally:
