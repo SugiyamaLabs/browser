@@ -46,7 +46,7 @@ Os dois saem do mesmo repositório e do mesmo build, empacotados de dois jeitos,
 
 ## O motor ausente ou fechado
 
-- **Dentro do Agens:** o motor vem no próprio `Agens.app`, então não tem como faltar. Se ele cair, o Agens abre de novo e mostra "Reabrindo o navegador…" nos painéis afetados.
+- **Dentro do Agens:** o motor vem no próprio `Agens.app`, então não tem como faltar. Se ele cair, o Agens abre de novo e mostra "Reabrindo o navegador…" nos painéis afetados; as abas de cada ato voltam (menos as de agente), veja [protocolo.md](protocolo.md), "Se o motor cair".
 - **Conexão com o AgensBrowser sozinho:** o Agens procura o app pelo bundle id (`com.sugiyamalabs.agensbrowser`, via `NSWorkspace`).
   - Não instalado: a opção de conectar não aparece.
   - Instalado e fechado: o Agens abre o app em segundo plano e espera o socket.
@@ -61,7 +61,7 @@ Os dois saem do mesmo repositório e do mesmo build, empacotados de dois jeitos,
 | Operação | O que faz |
 |---|---|
 | `hello {client}` | Versão do protocolo e do navegador. |
-| `atos.list` | `{atos: [{id, name, color, tag, asleep, shared}]}`. `shared` diz se o ato compartilha cookies. O `id` é estável (a pasta do perfil). |
+| `atos.list` | `{atos: [{id, name, color, tag, asleep, shared, restorable}]}`. `shared` diz se o ato compartilha cookies. `restorable` (embutido): as abas de antes da última saída normal podem voltar com `view.restore`. O `id` é estável (a pasta do perfil). |
 | `atos.create {name, color, tag}` | Cria o ato e devolve `{ato}`, o id dele (o campo `id` da mensagem já é o da correlação). `tag` é uma etiqueta opaca do cliente (o Agens põe o id do time): o navegador só guarda e devolve. Assim o Agens acha o ato do time mesmo se a pessoa o renomear. |
 | `atos.rename {ato, name}` / `atos.color {ato, color}` | Renomeia e troca a cor. |
 | `atos.open {ato, url?}` | Abre o ato, opcionalmente numa URL. No Agens, num painel. No AgensBrowser, na janela dele. |

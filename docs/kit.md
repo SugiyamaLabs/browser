@@ -79,6 +79,8 @@ A vista manda tamanho, escala, foco, mouse, roda, teclado (com acentos e IME) e 
 
 Navegação: `navigate(tab, to: texto)` (endereço ou busca, como na barra), `back`, `forward`, `reload`, `stop`, `closeTab`.
 
+**Continuar de onde parou.** Depois que o app sai normalmente, o motor abre sem abas. Se `Ato.restorable` for `true`, ofereça o botão; `try await connection.restore(ato: ato)` traz as abas que a pessoa tinha nesse ato (as de agente não), que chegam como as outras (`view.tab`, `engine.tabs`), e devolve quantas vieram. Vale uma vez: a segunda chamada (um clique duplo) dá `not_found`, e `restorable` passa a `false`. Se o motor caiu, as abas voltam sozinhas e o ato não fica `restorable`.
+
 ## As abas e os dados delas
 
 `engine.tabs` é um modelo observável com as abas de cada ato: título, URL, carregando, áudio, se dá para voltar e avançar, ícone (PNG) e `control` quando um agente está usando a aba e `agentCursor`, o ponto onde está o ponteiro dele (o app desenha).

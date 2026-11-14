@@ -56,7 +56,7 @@ EOF
 swiftc -O "$OUT/events.swift" -o "$OUT/events" || { echo "FAIL: could not build the events helper"; exit 1; }
 
 cat >"$OUT/parent.py" <<'EOF'
-import base64, json, os, re, select, socket, struct, subprocess, sys, tempfile, time, zlib
+import base64, json, os, re, select, signal, socket, struct, subprocess, sys, tempfile, time, zlib
 APP, OUT, GATES = os.environ["APP"], os.environ["OUT"], os.environ["GATES"]
 PORT = os.environ["SITE_PORT"]
 SITE = f"http://127.0.0.1:{PORT}"
@@ -70,10 +70,13 @@ profile = tempfile.mkdtemp(prefix="agens-e.", dir="/tmp")   # short: a socket pa
 SOCK = profile + "/agens.sock"
 # The test extension marks /ext pages (" +ext" in the title): --load-extension works in this build.
 EXTENSION = os.environ["REPO"] + "/tools/sites-teste/extensao"
-def launch(profile, *extra):
-    log = open(f"{OUT}/engine{'-' + extra[0].strip('-') if extra else ''}.log", "w")
+# --agens-test-quit-signal (not in official builds): SIGUSR2 makes the engine quit the ways a person
+# can (cmd-Q as the menu bar takes it, then IDC_EXIT); SIGUSR1 sends itself a quit Apple event with
+# no reason, then one for log out. No system input either way.
+def launch(profile, *extra, name=None):
+    log = open(f"{OUT}/engine{'-' + (name or extra[0].strip('-')) if name or extra else ''}.log", "w")
     p = subprocess.Popen([APP, f"--user-data-dir={profile}", "--agens-embedded", *extra, f"--load-extension={EXTENSION}",
-                          "--use-mock-keychain", "--no-first-run"], stdout=log, stderr=log)
+                          "--agens-test-quit-signal", "--use-mock-keychain", "--no-first-run"], stdout=log, stderr=log)
     for _ in range(60):
         if os.path.exists(profile + "/agens.sock"): return p
         time.sleep(0.5)
@@ -1294,6 +1297,134 @@ def virtual_authenticator():
         subprocess.run(["rm", "-rf", profile3])
 virtual_authenticator()
 
+# 14. A restarted engine (killed by PID, started again on the same profile) brings back the ato's
+# tabs as view.tab, and not the tabs an agent had: its control session ended with the engine.
+def restart_keeps_tabs():
+    profile4 = tempfile.mkdtemp(prefix="agens-r.", dir="/tmp")
+    sock4 = profile4 + "/agens.sock"
+    p = launch(profile4, name="before-kill")
+    p2 = None
+    try:
+        h = Conn(sock4)
+        h.ask("host.attach")
+        hato = (h.ask("atos.list").get("atos") or [{}])[0].get("id") or h.ask("atos.create", name="Gate").get("ato")
+        for path in ("/form", "/other"):
+            h.ask("view.open", ato=hato, url=SITE + path)
+        agent = Conn(sock4)
+        rid = agent.send("control.start", ato=hato, reason="gate")
+        a = h.event(lambda e: e["event"] == "approval.ask", 20)
+        if a: h.ask("approval.answer", ask=a["ask"], answer="allow")
+        agent.wait(rid)
+        r = agent.ask("tab.open", ato=hato, url=SITE + "/login")
+        before = h.ask("view.tabs", ato=hato).get("tabs", [])
+        check("before the kill: two tabs of the person and one of the agent",
+              r.get("ok") and len(before) == 3 and sum(1 for t in before if t.get("control")) == 1,
+              [(t.get("url"), bool(t.get("control"))) for t in before])
+        time.sleep(12)   # the session file (2.5 s) and the prefs that say the engine is running (10 s) reach disk
+        p.kill(); p.wait()
+        if os.path.exists(sock4): os.remove(sock4)
+        p2 = launch(profile4, name="restarted")
+        h2 = Conn(sock4)
+        h2.ask("host.attach")
+        urls, end = {}, time.time() + 30
+        while time.time() < end and not {"/form", "/other"} <= {u.split(SITE, 1)[-1] for u in urls}:
+            e = h2.event(lambda e: e["event"] == "view.tab" and e.get("url", "").startswith(SITE), 2)
+            if e: urls[e["url"]] = e
+        paths = {u.split(SITE, 1)[-1] for u in urls}
+        check("a killed engine started again brings back the ato's tabs (view.tab /form and /other, same ato, no control)",
+              {"/form", "/other"} <= paths and all(e.get("ato") == hato and not e.get("control") for e in urls.values()), sorted(paths))
+        time.sleep(2); h2.pump(1)
+        paths |= {e.get("url", "").split(SITE, 1)[-1] for e in h2.events if e["event"] == "view.tab"}
+        listed = [t.get("url", "").split(SITE, 1)[-1] for t in h2.ask("view.tabs", ato=hato).get("tabs", [])]
+        check("the agent's tab does not come back (no /login in view.tab nor view.tabs)",
+              "/login" not in paths and "/login" not in listed, (sorted(paths), listed))
+        t = next((x["tab"] for x in h2.ask("view.tabs", ato=hato).get("tabs", []) if x.get("url", "").endswith("/form")), "")
+        h2.ask("view.attach", tab=t, width=600, height=400, scale=1)
+        layer = h2.event(lambda e: e["event"] == "view.layer" and e.get("tab") == t, 15)
+        time.sleep(2)
+        now = next((x for x in h2.ask("view.tabs", ato=hato).get("tabs", []) if x.get("tab") == t), {})
+        check("after a crash the ato is not restorable (its tabs already came back)",
+              not any(x.get("restorable") for x in h2.ask("atos.list").get("atos", []) if x.get("id") == hato))
+        check("a restored tab, attached, draws its page (view.layer; loaded, its title)",
+              bool(layer) and now.get("title") == "Form (test)" and not now.get("loading"), (layer, now))
+        on = subprocess.run([f"{OUT}/onscreen", str(p2.pid)], capture_output=True, text=True).stdout.strip()
+        check("no window on screen after the restore", on == "0", f"on screen: {on}")
+        # The test switch's SIGUSR1: a quit Apple event to itself, with no reason, then for log out.
+        os.kill(p2.pid, signal.SIGUSR1)
+        try: p2.wait(15); quit_ok = True
+        except subprocess.TimeoutExpired: quit_ok = False
+        log2 = open(f"{OUT}/engine-restarted.log", errors="replace").read()
+        check("a quit Apple event with no reason (Activity Monitor, osascript) is refused",
+              "quit Apple event, no reason" in log2 and log2.count("agens: quit refused (embedded)") == 1)
+        check("a quit Apple event for log out quits the engine (it never blocks the Mac's log out or shutdown)",
+              quit_ok and "agens: quit allowed (embedded)" in log2, p2.returncode)
+    finally:
+        for x in (p, p2):
+            if x and x.poll() is None:
+                x.terminate()
+                try: x.wait(15)
+                except subprocess.TimeoutExpired: x.kill()
+        subprocess.run(["rm", "-rf", profile4])
+restart_keeps_tabs()
+
+# 15. After a normal quit (SIGTERM, as the host does) the engine starts with no tabs; the ato is
+# restorable, and view.restore ("Continuar de onde parou") brings the person's tabs back once.
+def quit_then_restore():
+    profile5 = tempfile.mkdtemp(prefix="agens-q.", dir="/tmp")
+    sock5 = profile5 + "/agens.sock"
+    p = launch(profile5, name="before-quit")
+    p2 = None
+    try:
+        h = Conn(sock5)
+        h.ask("host.attach")
+        hato = (h.ask("atos.list").get("atos") or [{}])[0].get("id") or h.ask("atos.create", name="Gate").get("ato")
+        check("a fresh ato is not restorable", not (h.ask("atos.list").get("atos") or [{}])[0].get("restorable"))
+        for path in ("/form", "/other"):
+            h.ask("view.open", ato=hato, url=SITE + path)
+        agent = Conn(sock5)
+        rid = agent.send("control.start", ato=hato, reason="gate")
+        a = h.event(lambda e: e["event"] == "approval.ask", 20)
+        if a: h.ask("approval.answer", ask=a["ask"], answer="allow")
+        agent.wait(rid)
+        agent.ask("tab.open", ato=hato, url=SITE + "/login")
+        time.sleep(12)   # the session file and the prefs reach disk
+        p.terminate()
+        try: p.wait(20)
+        except subprocess.TimeoutExpired: p.kill()
+        if os.path.exists(sock5): os.remove(sock5)
+        p2 = launch(profile5, name="after-quit")
+        h2 = Conn(sock5)
+        h2.ask("host.attach")
+        time.sleep(3)
+        def restorable(): return next((x.get("restorable") for x in h2.ask("atos.list").get("atos", []) if x.get("id") == hato), None)
+        check("after a normal quit the engine starts with no tabs, and the ato is restorable",
+              h2.ask("view.tabs", ato=hato).get("tabs") == [] and restorable() is True)
+        check("view.restore from a connection that is not the host is unauthorized",
+              err(Conn(sock5).ask("view.restore", ato=hato)) == "unauthorized")
+        check("view.restore of an ato that does not exist is not_found", err(h2.ask("view.restore", ato="Nope 9")) == "not_found")
+        h2.ask("view.open", ato=hato)   # the host's "Nova aba" first: the tabs join its window
+        r = h2.ask("view.restore", ato=hato)
+        time.sleep(2)
+        tabs = h2.ask("view.tabs", ato=hato).get("tabs", [])
+        paths = sorted(t.get("url", "").split(SITE, 1)[-1] for t in tabs if t.get("url"))
+        check("view.restore brings back the person's tabs ({ok, tabs: 2}; /form and /other, no control)",
+              r.get("ok") and r.get("tabs") == 2 and paths == ["/form", "/other"] and not any(t.get("control") for t in tabs), (r, paths))
+        check("view.restore leaves the agent's tab out (no /login)", "/login" not in paths, paths)
+        check("the restored tabs reached the host as view.tab",
+              {"/form", "/other"} <= {e.get("url", "").split(SITE, 1)[-1] for e in h2.events if e["event"] == "view.tab"})
+        check("a second view.restore is not_found (no tab twice)", err(h2.ask("view.restore", ato=hato)) == "not_found")
+        check("the ato is not restorable after view.restore", restorable() is False)
+        on = subprocess.run([f"{OUT}/onscreen", str(p2.pid)], capture_output=True, text=True).stdout.strip()
+        check("no window on screen after view.restore", on == "0", f"on screen: {on}")
+    finally:
+        for x in (p, p2):
+            if x and x.poll() is None:
+                x.terminate()
+                try: x.wait(15)
+                except subprocess.TimeoutExpired: x.kill()
+        subprocess.run(["rm", "-rf", profile5])
+quit_then_restore()
+
 log = open(f"{OUT}/engine.log", errors="replace").read()
 print(f"info: the engine log names {log.count('agens: kept off screen')} window(s) kept off screen by the last net", flush=True)
 
@@ -1380,6 +1511,17 @@ check("permission allow: notifications reach the host", bool(a) and a.get("permi
 answer(a, allow=True)
 check("permission allow shows in the page title", titled(t, "perm geo=skipped notif=granted"))
 c.ask("view.close", tab=t)
+
+# Quitting is the host's: cmd-Q as the menu bar takes it, and IDC_EXIT (the test switch's SIGUSR2,
+# no system input) are refused, and the host keeps its connection.
+os.kill(engine.pid, signal.SIGUSR2)
+time.sleep(3)
+log = open(f"{OUT}/engine.log", errors="replace").read()
+check("cmd-Q reaches the Quit menu item (the main menu takes the key)", "cmd-q to the main menu: taken" in log)
+check("cmd-Q and IDC_EXIT do not quit the embedded engine (two refusals logged, the host still answered)",
+      engine.poll() is None and log.count("agens: quit refused (embedded)") >= 2 and c.ask("hello").get("ok"),
+      log.count("agens: quit refused (embedded)"))
+no_window("cmd-Q and IDC_EXIT")
 check("engine still has no window on screen at the end", on_screen() == "0", f"on screen: {on_screen()}")
 check("engine still running", engine.poll() is None)
 
@@ -1400,6 +1542,13 @@ if os.environ.get("EMBUTIDO_INSPECT") == "1":
     r = c.ask("view.devtools.dock", tab=t, dock="window")
     time.sleep(3)
     check("view.devtools.dock window puts it back in a window", r.get("ok") and on_screen() == "1", (r, on_screen()))
+    os.kill(engine.pid, signal.SIGUSR2)   # cmd-Q as the menu bar takes it, with DevTools the key window
+    e2 = devtools_closed(t, 10)
+    time.sleep(2)
+    check("cmd-Q on the DevTools window closes it (view.devtools.closed, nothing on screen) and the engine stays",
+          bool(e2) and on_screen() == "0" and engine.poll() is None and c.ask("hello").get("ok"), (e2, on_screen()))
+    c.ask("view.inspect", tab=t, dock="window")
+    time.sleep(3)
     c.s.close()   # the host goes away: the DevTools window must go with it
     time.sleep(3)
     check("the DevTools window is gone after the host disconnects", on_screen() == "0", f"on screen: {on_screen()}")

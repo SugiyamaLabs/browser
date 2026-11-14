@@ -31,11 +31,41 @@ import Testing
     let created = try await connection.createAto(name: "Cliente A", color: .blue, tag: "time-123")
     let atos = try await list
     #expect(created == "Profile 2")
-    #expect(atos == [Ato(id: "Default", name: "Pessoal", color: nil, tag: nil, asleep: false, shared: true)])
+    #expect(atos == [Ato(id: "Default", name: "Pessoal", color: nil, tag: nil, asleep: false, shared: true, restorable: false)])
     #expect(await eventually { events.count == 3 })
     #expect(events == ["view.closed v1", "view.closed v2", "view.closed v3"])
     let create = fake.received("atos.create").first!
     #expect(create["name"] == "Cliente A" && create["color"] == "blue" && create["tag"] == "time-123")
+  }
+
+  @Test func restoreBringsTabsBackOnce() async throws {
+    let fake = FakeEngine()
+    defer { fake.stop() }
+    nonisolated(unsafe) var restored = false
+    fake.reply = { request in
+      let id = request["id"]!.int!
+      switch request["op"]?.string {
+      case "atos.list":
+        return [["id": id, "ok": true, "atos": [["id": "Default", "name": "Pessoal", "restorable": !restored],
+                                                ["id": "Profile 1", "name": "Estúdio"]]]]
+      case "view.restore" where !restored && request["ato"] == "Default":
+        restored = true
+        return [["id": id, "ok": true, "tabs": 2]]
+      default:
+        return [["id": id, "ok": false, "error": "not_found", "message": "no saved tabs for this ato"]]
+      }
+    }
+    let connection = try BrowserConnection(socketPath: fake.path)
+    #expect(try await connection.atos().map(\.restorable) == [true, false])
+    #expect(try await connection.restore(ato: "Default") == 2)
+    do {
+      _ = try await connection.restore(ato: "Default")
+      Issue.record("expected not_found")
+    } catch {
+      #expect(error.code == "not_found")
+    }
+    #expect(try await connection.atos().map(\.restorable) == [false, false])
+    #expect(fake.received("view.restore").map { $0["ato"] } == ["Default", "Default"])
   }
 
   @Test func errorReplyIsABrowserError() async throws {

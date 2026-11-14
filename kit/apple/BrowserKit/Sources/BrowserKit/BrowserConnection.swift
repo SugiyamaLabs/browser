@@ -173,6 +173,9 @@ public struct Ato: Sendable, Equatable, Identifiable {
   public let tag: String?
   public let asleep: Bool
   public let shared: Bool
+  /// Its tabs from before the last normal quit can come back: offer "Continuar de onde parou"
+  /// (`restore(ato:)`). False on an engine that does not say.
+  public let restorable: Bool
 }
 
 /// The colors an ato can have.
@@ -202,7 +205,8 @@ extension BrowserConnection {
       guard let item = item.object, let id = item["id"]?.string else { return nil }
       return Ato(
         id: id, name: item["name"]?.string ?? id, color: item["color"]?.string, tag: item["tag"]?.string,
-        asleep: item["asleep"]?.bool ?? false, shared: item["shared"]?.bool ?? false)
+        asleep: item["asleep"]?.bool ?? false, shared: item["shared"]?.bool ?? false,
+        restorable: item["restorable"]?.bool ?? false)
     }
   }
 
@@ -245,6 +249,14 @@ extension BrowserConnection {
     if let url { params["url"] = .string(url) }
     let reply = try await send(op: "view.open", params: params)
     return reply["tab"]?.string ?? ""
+  }
+
+  /// "Continuar de onde parou": brings back the ato's tabs from before the last normal quit (not an
+  /// agent's), which then arrive as `view.tab`. Returns how many. Once per saved session: a second
+  /// call throws `not_found`, as does an ato with nothing saved.
+  public func restore(ato: String) async throws(BrowserError) -> Int {
+    let reply = try await send(op: "view.restore", params: ["ato": .string(ato)])
+    return reply["tabs"]?.int ?? 0
   }
 
   public func closeTab(_ tab: String) async throws(BrowserError) { try await send(op: "view.close", params: ["tab": .string(tab)]) }

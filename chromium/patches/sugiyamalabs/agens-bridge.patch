@@ -1135,10 +1135,10 @@ index 0000000000..178c1cd18f
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_CONTROL_KEYS_H_
 diff --git a/chrome/browser/agens/bridge/control_ops.cc b/chrome/browser/agens/bridge/control_ops.cc
 new file mode 100644
-index 0000000000..306f68a5e6
+index 0000000000..c551742b68
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_ops.cc
-@@ -0,0 +1,924 @@
+@@ -0,0 +1,942 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The control session (docs/protocolo.md, "control, tab, page"): an app, after the person's OK,
 +// drives tabs of one ato. It belongs to the connection and ends on control.stop, when the
@@ -1173,13 +1173,18 @@ index 0000000000..306f68a5e6
 +#include "chrome/browser/agens/bridge/control_page.h"
 +#include "chrome/browser/agens/bridge/ui_ops.h"
 +#include "chrome/browser/agens/embed/agens_controlled.h"
++#include "chrome/browser/agens/embed/agens_embedded.h"
 +#include "chrome/browser/agens/embed/agens_window.h"
 +#include "chrome/browser/agens/embed/native_shell.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/sessions/session_service.h"
++#include "chrome/browser/sessions/session_service_factory.h"
 +#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
 +#include "chrome/browser/ui/navigator/browser_navigator.h"
 +#include "chrome/browser/ui/navigator/browser_navigator_params.h"
 +#include "components/javascript_dialogs/tab_modal_dialog_manager.h"
 +#include "components/prefs/pref_change_registrar.h"
++#include "components/sessions/content/session_tab_helper.h"
 +#include "content/public/browser/global_routing_id.h"
 +#include "content/public/browser/invalidate_type.h"
 +#include "content/public/browser/javascript_dialog_manager.h"
@@ -1229,6 +1234,17 @@ index 0000000000..306f68a5e6
 +  content::JavaScriptDialogManager::DialogClosedCallback done;
 +};
 +
++// The tab's mark in its ato's session (kAgentTabKey): while an agent controls it, the tabs a
++// crashed engine brings back leave it out.
++void MarkInSession(content::WebContents* contents, bool agent) {
++  SessionService* service =
++      IsEmbedded() ? SessionServiceFactory::GetForProfileIfExisting(Profile::FromBrowserContext(contents->GetBrowserContext()))
++                   : nullptr;
++  if (!service) return;
++  service->AddTabExtraData(sessions::SessionTabHelper::IdForWindowContainingTab(contents),
++                           sessions::SessionTabHelper::IdForTab(contents), kAgentTabKey, agent ? "1" : "0");
++}
++
 +// A tab the session opened. Marks it while it lives, and unmarks it when the session lets go.
 +class Tab : public content::WebContentsObserver {
 + public:
@@ -1236,6 +1252,7 @@ index 0000000000..306f68a5e6
 +  Tab(uint64_t connection, std::string id, content::WebContents* contents)
 +      : content::WebContentsObserver(contents), id(std::move(id)), page(contents), connection_(connection) {
 +    AgensControlled::CreateForWebContents(contents);
++    MarkInSession(contents, true);
 +    AgensControlled* mark = AgensControlled::FromWebContents(contents);
 +    mark->stop = base::BindRepeating(&StopByUser, connection);
 +    mark->take_over = base::BindRepeating(&Pause, connection);
@@ -1263,6 +1280,7 @@ index 0000000000..306f68a5e6
 +    if (content::WebContents* contents = web_contents()) {
 +      BlockExtensions(false);
 +      contents->RemoveUserData(AgensControlled::UserDataKey());
++      MarkInSession(contents, false);
 +      contents->NotifyNavigationStateChanged(content::INVALIDATE_TYPE_TAB);
 +    }
 +  }
@@ -3548,10 +3566,10 @@ index 0000000000..d0ec9ca169
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_EXTENSION_OPS_H_
 diff --git a/chrome/browser/agens/bridge/ops.cc b/chrome/browser/agens/bridge/ops.cc
 new file mode 100644
-index 0000000000..6251c6e72c
+index 0000000000..f52ec01300
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ops.cc
-@@ -0,0 +1,214 @@
+@@ -0,0 +1,217 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/ops.h"
@@ -3564,6 +3582,7 @@ index 0000000000..6251c6e72c
 +#include "chrome/browser/agens/bridge/control_ops.h"
 +#include "chrome/browser/agens/bridge/session_ops.h"
 +#include "chrome/browser/agens/bridge/view_ops.h"
++#include "chrome/browser/agens/embed/agens_embedded.h"
 +#include "chrome/browser/agens/embed/agens_window.h"
 +#include "chrome/browser/profiles/profile_window.h"
 +#include "url/gurl.h"
@@ -3611,6 +3630,8 @@ index 0000000000..6251c6e72c
 +    ato.Set("tag", AgensWindow::AtoTag(entries[i]));
 +    ato.Set("shared", AgensWindow::AtoSharesCookies(entries[i]->GetPath()));  // read-only here
 +    ato.Set("asleep", !g_browser_process->profile_manager()->GetProfileByPath(entries[i]->GetPath()));
++    // Embedded: its tabs from before the last normal quit can come back (view.restore).
++    ato.Set("restorable", IsRestorable(entries[i]->GetPath().BaseName().AsUTF8Unsafe()));
 +    atos.Append(std::move(ato));
 +  }
 +  base::DictValue result;
@@ -8093,10 +8114,10 @@ index 0000000000..e98cac0576
 +}
 diff --git a/chrome/browser/agens/bridge/view_ops.cc b/chrome/browser/agens/bridge/view_ops.cc
 new file mode 100644
-index 0000000000..e394ad3e59
+index 0000000000..b92f58a035
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_ops.cc
-@@ -0,0 +1,1314 @@
+@@ -0,0 +1,1393 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The host draws the interface; the engine hands it the pages (docs/protocolo.md, "host e view").
 +// - One host: the connection that sent host.attach (the app that launched the engine).
@@ -8105,6 +8126,8 @@ index 0000000000..e394ad3e59
 +// - An attached tab draws by itself, outside any window (the shell never holds a tab while
 +//   embedded, native_shell_mac.mm), and its CAContext id goes out as view.layer. Several at once.
 +
++#include "base/callback_list.h"
++#include "base/task/single_thread_task_runner.h"
 +#include "chrome/browser/agens/bridge/view_ops.h"
 +
 +#include <unistd.h>
@@ -8147,6 +8170,8 @@ index 0000000000..e394ad3e59
 +#include "components/prefs/pref_service.h"
 +#include "components/omnibox/browser/autocomplete_classifier.h"
 +#include "chrome/browser/profiles/profile_manager.h"
++#include "chrome/browser/sessions/session_restore.h"
++#include "chrome/browser/ui/startup/startup_tab.h"
 +#include "chrome/browser/ui/browser_window/public/create_browser_window.h"
 +#include "chrome/browser/ui/navigator/browser_navigator.h"
 +#include "chrome/browser/ui/navigator/browser_navigator_params.h"
@@ -8716,6 +8741,76 @@ index 0000000000..e394ad3e59
 +                             base::BindOnce(&OpenIn, std::move(request), std::move(reply), url));
 +}
 +
++// Brings back `profile`'s tabs from its last saved session ("Continuar de onde parou"), after
++// TakeRestorable. Into the ato's window when it has one; an agent's tabs stay out (session_restore.cc).
++void RestoreIn(Request request, ReplyCallback reply, Profile* profile) {
++  if (!profile) {
++    std::move(reply).Run(ErrorReply(&request.id, kFailed, "could not load the ato"));
++    return;
++  }
++  if (SessionRestore::IsRestoring(profile)) {
++    std::move(reply).Run(ErrorReply(&request.id, kFailed, "the ato is restoring already"));
++    return;
++  }
++  BrowserWindowInterface* browser = nullptr;
++  for (AgensWindow* window : S().windows) {
++    BrowserWindowInterface* b = window->browser;
++    if (b->GetProfile() == profile && b->GetType() == BrowserWindowInterface::TYPE_NORMAL &&
++        !b->IsDeleteScheduled() && !b->GetTabStripModel()->closing_all()) {
++      browser = b;
++      break;
++    }
++  }
++  // Answers when this profile's restore is done (it always notifies, also with nothing to restore).
++  struct Waiting {
++    Request request;
++    ReplyCallback reply;
++    base::CallbackListSubscription subscription;
++  };
++  auto* waiting = new Waiting{std::move(request), std::move(reply), {}};
++  waiting->subscription = SessionRestore::RegisterOnSessionRestoredCallback(base::BindRepeating(
++      [](Waiting* waiting, Profile* wanted, Profile* profile, int tabs) {
++        if (profile != wanted || !waiting->reply) return;
++        if (tabs == 0) {
++          std::move(waiting->reply).Run(ErrorReply(&waiting->request.id, kNotFound, "no saved tabs for this ato"));
++        } else {
++          base::DictValue result;
++          result.Set("tabs", tabs);
++          std::move(waiting->reply).Run(OkReply(waiting->request.id, std::move(result)));
++        }
++        S().Schedule();
++        // Not from inside the callback list that is running this.
++        base::SingleThreadTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE, waiting);
++      },
++      waiting, profile));
++  SessionRestore::RestoreSession(profile, browser, SessionRestore::RESTORE_BROWSER, StartupTabs());
++}
++
++void ViewRestore(Request request, ReplyCallback reply) {
++  std::optional<std::string> ato = StringParam(request.body, "ato");
++  if (!ato) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs ato"));
++    return;
++  }
++  ProfileAttributesEntry* entry = FindAto(*ato);
++  if (!entry) {
++    std::move(reply).Run(ErrorReply(&request.id, kNotFound, *ato));
++    return;
++  }
++  // Once per saved session: a second call (a double click) finds nothing, so no tab comes twice.
++  if (!TakeRestorable(*ato)) {
++    std::move(reply).Run(ErrorReply(&request.id, kNotFound, "no saved tabs for this ato"));
++    return;
++  }
++  ProfileManager* manager = g_browser_process->profile_manager();
++  if (Profile* profile = manager->GetProfileByPath(entry->GetPath())) {
++    RestoreIn(std::move(request), std::move(reply), profile);
++    return;
++  }
++  manager->LoadProfileByPath(entry->GetPath(), /*incognito=*/false,
++                             base::BindOnce(&RestoreIn, std::move(request), std::move(reply)));
++}
++
 +void ViewNavigate(content::WebContents* contents, const Request& request, ReplyCallback reply) {
 +  std::optional<std::string> text = StringParam(request.body, "text");
 +  std::u16string input;
@@ -9159,7 +9254,10 @@ index 0000000000..e394ad3e59
 +      shown = s.shown.back().get();
 +    }
 +    shown->Resize(gfx::Size(width, height));
-+    if (attaching) SendCurrentLayer(*shown);  // a new size draws anew; the same one may not
++    if (attaching) {
++      controller.LoadIfNecessary();  // a restored tab that was never shown loads now
++      SendCurrentLayer(*shown);      // a new size draws anew; the same one may not
++    }
 +  } else if (op == "view.detach") {
 +    std::erase_if(s.shown, [&](const std::unique_ptr<Shown>& shown) { return shown->n == *n; });
 +  } else if (op == "view.close") {
@@ -9252,6 +9350,8 @@ index 0000000000..e394ad3e59
 +    ViewTabs(request, std::move(reply));
 +  } else if (op == "view.open") {
 +    ViewOpen(std::move(request), std::move(reply));
++  } else if (op == "view.restore") {
++    ViewRestore(std::move(request), std::move(reply));
 +  } else if (extension::Handles(op)) {
 +    extension::HandleOp(client, std::move(request), std::move(reply));
 +  } else {
@@ -10710,10 +10810,10 @@ index 9d0bf4646d..e28c93f5d2 100644
  #ifdef __cplusplus
 diff --git a/chrome/browser/agens/embed/agens_embedded.h b/chrome/browser/agens/embed/agens_embedded.h
 new file mode 100644
-index 0000000000..aef9e1cc9e
+index 0000000000..a4b9f7ef74
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embedded.h
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,70 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The engine as another app's hidden helper (docs/agens.md, "Um código, dois produtos";
 +// docs/protocolo.md, "host e view"). With --agens-embedded the app that launched the engine draws
@@ -10752,6 +10852,30 @@ index 0000000000..aef9e1cc9e
 +// panel (bridge/ui_ops.cc, the host's) reads it, in the same call.
 +void SetFileDialogSource(content::WebContents* contents);
 +
++// The engine quits only when the host goes away or sends SIGTERM (both start the shutdown first:
++// ParentGone, chrome::ExitIgnoreUnloadHandlers). Any other quit (⌘Q, the Quit menu, a quit Apple
++// event, IDC_EXIT, chrome://quit) is refused, and closes the DevTools window when it is the key
++// one: the only window a person can press ⌘Q in. True when refused; false when not embedded.
++bool RefuseQuit();
++
++// The commands a DevTools window may run (its keys and the menu bar): closing, minimizing, full
++// screen and zoom. Nothing that quits, opens a window or a tab, or shows settings.
++bool DevToolsWindowMayRun(int command_id);
++
++// An agent's tab in the ato's session (SessionService tab extra data, "1" while controlled): a
++// restore leaves it out (session_restore.cc), its control session ended with the engine.
++inline constexpr char kAgentTabKey[] = "agens.agent";
++
++// From ChromeBrowserMainPartsMac::PostProfileInit: when the engine crashed or was killed, each ato
++// that had windows gets its last tabs back (hidden windows; the host sees them as view.tab). After
++// a normal quit nothing comes back by itself: those atos become restorable instead (view.restore).
++void RestoreAfterCrash();
++// The ato (its folder name) had windows when the engine last quit normally and its tabs were not
++// brought back yet in this run (atos.list "restorable").
++bool IsRestorable(const std::string& ato);
++// True once per ato and saved session: view.restore takes it, so a second call finds nothing.
++bool TakeRestorable(const std::string& ato);
++
 +// From ChromeBrowserMainPartsMac::PreEarlyInitialization, before any window exists: no Dock
 +// icon, no startup window, no first run, and the watch on the parent. Exits right away when the
 +// parent is already gone. Does nothing when not embedded.
@@ -10762,33 +10886,48 @@ index 0000000000..aef9e1cc9e
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EMBEDDED_H_
 diff --git a/chrome/browser/agens/embed/agens_embedded_mac.mm b/chrome/browser/agens/embed/agens_embedded_mac.mm
 new file mode 100644
-index 0000000000..25424a7af4
+index 0000000000..9e64024e36
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embedded_mac.mm
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,319 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/embed/agens_embedded.h"
 +
 +#import <AppKit/AppKit.h>
++#include <Carbon/Carbon.h>  // kAEQuitReason and its values
 +#include <dispatch/dispatch.h>
++#include <signal.h>
 +#include <unistd.h>
 +
 +#include <algorithm>
++#include <optional>
++#include <set>
++#include <string>
 +#include <vector>
 +
 +#include "base/command_line.h"
++#include "base/functional/bind.h"
 +#include "base/logging.h"
 +#include "base/no_destructor.h"
 +#include "base/strings/sys_string_conversions.h"
++#include "base/task/single_thread_task_runner.h"
++#include "chrome/app/chrome_command_ids.h"
 +#include "chrome/browser/agens/bridge/view_input.h"
 +#include "chrome/browser/agens/bridge/view_ops.h"
 +#include "chrome/browser/lifetime/application_lifetime.h"
++#include "chrome/browser/lifetime/browser_shutdown.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/profiles/profile_manager.h"
++#include "chrome/browser/sessions/exit_type_service.h"
++#include "chrome/browser/sessions/session_restore.h"
++#include "chrome/browser/ui/startup/startup_tab.h"
 +#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 +#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
 +#include "chrome/common/chrome_switches.h"
 +#import "components/remote_cocoa/app_shim/native_widget_mac_nswindow.h"
 +#include "content/public/common/content_switches.h"
++#include "ui/base/base_window.h"
 +#include "ui/views/widget/widget.h"
 +
 +namespace agens {
@@ -10817,14 +10956,26 @@ index 0000000000..25424a7af4
 +// host): a views window goes on
 +// screen only when it belongs to a DevTools window. Anything else stays hidden, with a log line
 +// naming it. Hidden, never closed: whatever made it keeps running, nothing waits on its showing.
-+BOOL MayOrderIn(NSWindow* window) {
++// The top views window `window` belongs to (itself, or what it is a child of).
++views::Widget* TopWidget(NSWindow* window) {
 +  NSWindow* root = window;
 +  while (root.parentWindow) root = root.parentWindow;
 +  views::Widget* widget = views::Widget::GetWidgetForNativeWindow(gfx::NativeWindow(root));
 +  while (widget && widget->parent()) widget = widget->parent();
++  return widget;
++}
++
++// The DevTools window `window` is or belongs to; null for anything else.
++BrowserWindowInterface* DevToolsOf(NSWindow* window) {
++  views::Widget* widget = window ? TopWidget(window) : nullptr;
 +  BrowserWindowInterface* browser =
 +      widget ? GlobalBrowserCollection::GetInstance()->FindBrowserWithWindow(widget->GetNativeWindow()) : nullptr;
-+  if (browser && browser->GetType() == BrowserWindowInterface::TYPE_DEVTOOLS) return YES;
++  return browser && browser->GetType() == BrowserWindowInterface::TYPE_DEVTOOLS ? browser : nullptr;
++}
++
++BOOL MayOrderIn(NSWindow* window) {
++  if (DevToolsOf(window)) return YES;
++  views::Widget* widget = TopWidget(window);
 +  LOG(ERROR) << "agens: kept off screen (embedded): "
 +               << (widget && !widget->GetName().empty() ? widget->GetName()
 +                                                         : base::SysNSStringToUTF8(NSStringFromClass(window.class)));
@@ -10840,7 +10991,152 @@ index 0000000000..25424a7af4
 +// their inline segments (chrome_client_impl.cc). Passkeys (WebAuth) go to the host too.
 +constexpr char kOffBlinkFeatures[] = "PaymentRequest,WebShare,EyeDropperAPI,DocumentPictureInPictureAPI,PagePopup";
 +
++#if !defined(OFFICIAL_BUILD)
++// Gates only (tools/gates/embutido.sh): SIGUSR2 makes the engine quit the ways a person can, with no
++// system input. ⌘Q as the menu bar takes it from the key window (a built event handed to the main
++// menu, never posted), then IDC_EXIT. Both must be refused (RefuseQuit).
++// SIGUSR1: a quit Apple event sent to itself (dispatched in process, as Activity Monitor's or
++// osascript's would arrive), first with no reason (refused), then with kAEReallyLogOut (quits).
++constexpr char kTestQuitSignalSwitch[] = "agens-test-quit-signal";
++dispatch_source_t g_test_quit;
++dispatch_source_t g_test_system_quit;
++
++void SendQuitToSelf(std::optional<OSType> reason) {
++  NSAppleEventDescriptor* quit =
++      [NSAppleEventDescriptor appleEventWithEventClass:kCoreEventClass
++                                               eventID:kAEQuitApplication
++                                      targetDescriptor:[NSAppleEventDescriptor currentProcessDescriptor]
++                                              returnID:kAutoGenerateReturnID
++                                         transactionID:kAnyTransactionID];
++  if (reason) {
++    [quit setAttributeDescriptor:[NSAppleEventDescriptor descriptorWithEnumCode:*reason] forKeyword:kAEQuitReason];
++  }
++  AppleEvent reply = {typeNull, nullptr};
++  AESendMessage(quit.aeDesc, &reply, kAENoReply, kAEDefaultTimeout);
++  AEDisposeDesc(&reply);
++}
++
++void WatchTestQuitSignal() {
++  if (!base::CommandLine::ForCurrentProcess()->HasSwitch(kTestQuitSignalSwitch)) return;
++  signal(SIGUSR2, SIG_IGN);  // the source below gets it instead of the default (terminate)
++  g_test_quit = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, SIGUSR2, 0, dispatch_get_main_queue());
++  dispatch_source_set_event_handler(g_test_quit, ^{
++    NSEvent* q = [NSEvent keyEventWithType:NSEventTypeKeyDown
++                                  location:NSZeroPoint
++                             modifierFlags:NSEventModifierFlagCommand
++                                 timestamp:0
++                              windowNumber:NSApp.keyWindow.windowNumber
++                                   context:nil
++                                characters:@"q"
++                charactersIgnoringModifiers:@"q"
++                                 isARepeat:NO
++                                   keyCode:12];  // kVK_ANSI_Q
++    LOG(ERROR) << "agens: test quit: cmd-q to the main menu: "
++                 << ([NSApp.mainMenu performKeyEquivalent:q] ? "taken" : "not taken");
++    LOG(ERROR) << "agens: test quit: IDC_EXIT";
++    chrome::AttemptUserExit();
++  });
++  dispatch_resume(g_test_quit);
++
++  signal(SIGUSR1, SIG_IGN);
++  g_test_system_quit = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, SIGUSR1, 0, dispatch_get_main_queue());
++  dispatch_source_set_event_handler(g_test_system_quit, ^{
++    LOG(ERROR) << "agens: test quit: quit Apple event, no reason";
++    SendQuitToSelf(std::nullopt);
++    // Later, so the first is handled on its own (sent to itself, each waits for the run loop).
++    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
++      LOG(ERROR) << "agens: test quit: quit Apple event, log out";
++      SendQuitToSelf(kAEReallyLogOut);
++    });
++  });
++  dispatch_resume(g_test_system_quit);
++}
++#endif
++
++bool g_powering_off = false;  // NSWorkspaceWillPowerOffNotification fired: log out, restart, shut down
++
++// A quit from the system (log out, restart, shut down) must go through, or macOS shows "cancelled
++// log out" and stops there: which app gets the quit first is not up to the host.
++bool SystemQuit() {
++  if (g_powering_off) return true;
++  NSAppleEventDescriptor* event = NSAppleEventManager.sharedAppleEventManager.currentAppleEvent;
++  if (event.eventClass != kCoreEventClass || event.eventID != kAEQuitApplication) return false;
++  NSAppleEventDescriptor* why = [event attributeDescriptorForKeyword:kAEQuitReason]
++                                    ?: [event paramDescriptorForKeyword:kAEQuitReason];
++  switch (why.enumCodeValue) {
++    case kAELogOut:
++    case kAEReallyLogOut:
++    case kAEShowRestartDialog:
++    case kAEShowShutdownDialog:
++    case kAERestart:
++    case kAEShutDown:
++      return true;
++    default:
++      return false;
++  }
++}
++
 +}  // namespace
++
++bool RefuseQuit() {
++  if (!IsEmbedded() || browser_shutdown::HasShutdownStarted()) return false;
++  if (SystemQuit()) {
++    LOG(ERROR) << "agens: quit allowed (embedded): the system is logging out, restarting or shutting down";
++    return false;
++  }
++  BrowserWindowInterface* devtools = DevToolsOf(NSApp.keyWindow);
++  LOG(ERROR) << "agens: quit refused (embedded): the host decides when the engine quits"
++               << (devtools ? "; closing the DevTools window instead" : "");
++  if (devtools) devtools->GetWindow()->Close();  // what ⌘W does there
++  return true;
++}
++
++bool DevToolsWindowMayRun(int command_id) {
++  switch (command_id) {
++    case IDC_CLOSE_TAB:
++    case IDC_CLOSE_WINDOW:
++    case IDC_EXIT:  // goes on to RefuseQuit, which closes the window
++    case IDC_MINIMIZE_WINDOW:
++    case IDC_FULLSCREEN:
++    case IDC_ZOOM_PLUS:
++    case IDC_ZOOM_MINUS:
++    case IDC_ZOOM_NORMAL:
++      return true;
++    default:
++      return false;
++  }
++}
++
++std::set<std::string>& Restorable() {
++  static base::NoDestructor<std::set<std::string>> atos;
++  return *atos;
++}
++
++bool IsRestorable(const std::string& ato) {
++  return Restorable().contains(ato);
++}
++
++bool TakeRestorable(const std::string& ato) {
++  return Restorable().erase(ato) > 0;
++}
++
++void RestoreAfterCrash() {
++  if (!IsEmbedded()) return;
++  // Once the main loop runs: profiles load here, not inside another profile's init.
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE, base::BindOnce([] {
++    if (browser_shutdown::HasShutdownStarted()) return;
++    // The atos that had windows when the engine ended. A clean end only comes from the host going
++    // away (it starts afresh then), so only a crash or a kill brings tabs back by itself.
++    for (Profile* profile : ProfileManager::GetLastOpenedProfiles()) {
++      if (ExitTypeService::GetLastSessionExitType(profile) != ExitType::kCrashed) {
++        Restorable().insert(profile->GetBaseName().AsUTF8Unsafe());  // the person may ask (view.restore)
++        continue;
++      }
++      LOG(ERROR) << "agens: restoring the tabs of " << profile->GetBaseName().value() << " after a crash";
++      SessionRestore::RestoreSession(profile, nullptr, SessionRestore::RESTORE_BROWSER, StartupTabs());
++    }
++  }));
++}
 +
 +bool IsEmbedded() {
 +  static const bool embedded = base::CommandLine::ForCurrentProcess()->HasSwitch(kEmbeddedSwitch);
@@ -10901,6 +11197,15 @@ index 0000000000..25424a7af4
 +  });
 +  dispatch_resume(g_parent_watch);
 +  if (getppid() != g_parent) _exit(0);  // it went away before the watch was set
++  [NSWorkspace.sharedWorkspace.notificationCenter addObserverForName:NSWorkspaceWillPowerOffNotification
++                                                              object:nil
++                                                               queue:nil
++                                                          usingBlock:^(NSNotification*) {
++                                                            g_powering_off = true;
++                                                          }];
++#if !defined(OFFICIAL_BUILD)
++  WatchTestQuitSignal();
++#endif
 +}
 +
 +}  // namespace agens
@@ -14293,6 +14598,30 @@ index 3c18c4eab1..f319b1f1f5 100644
  void agens_ui_permission_prompt_close(void* chrome) {
    [(__bridge AgensChrome*)chrome permissionGone];
  }
+diff --git a/chrome/browser/app_controller_mac.mm b/chrome/browser/app_controller_mac.mm
+index e496cb7ab4..f921d60a24 100644
+--- a/chrome/browser/app_controller_mac.mm
++++ b/chrome/browser/app_controller_mac.mm
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #import "chrome/browser/app_controller_mac.h"
++#include "chrome/browser/agens/embed/agens_embedded.h"
+ #include "chrome/browser/agens/embed/native_shell.h"
+ 
+ #include <AppKit/AppKit.h>
+@@ -1584,6 +1585,11 @@ - (BOOL)canOpenNewBrowser {
+ // browser).
+ - (BOOL)validateUserInterfaceItem:(id<NSValidatedUserInterfaceItem>)item {
+   SEL action = [item action];
++  // agens: embedded (agens_embedded.h), the menu bar shows while DevTools is key: nothing here may
++  // open a window, settings or the about panel. Quit stays on: RefuseQuit makes it close DevTools.
++  if (agens::IsEmbedded()) {
++    return action == @selector(terminate:);
++  }
+   BOOL enable = NO;
+   // Whether the profile is loaded and opening a new browser window is allowed.
+   BOOL canOpenNewBrowser = [self canOpenNewBrowser];
 diff --git a/chrome/browser/browser_process_impl.cc b/chrome/browser/browser_process_impl.cc
 index 433fa42fa4..db8969bb41 100644
 --- a/chrome/browser/browser_process_impl.cc
@@ -14352,6 +14681,54 @@ index 433fa42fa4..db8969bb41 100644
  
    InitializeNetworkTimeTracker();
  
+diff --git a/chrome/browser/browser_process_platform_part_mac.mm b/chrome/browser/browser_process_platform_part_mac.mm
+index 05dd81cbf0..5005e8a0e1 100644
+--- a/chrome/browser/browser_process_platform_part_mac.mm
++++ b/chrome/browser/browser_process_platform_part_mac.mm
+@@ -6,6 +6,7 @@
+ 
+ #include "base/apple/foundation_util.h"
+ #include "base/time/time.h"
++#include "chrome/browser/agens/embed/agens_embedded.h"  // agens
+ #import "chrome/browser/app_controller_mac.h"
+ #include "chrome/browser/apps/app_shim/app_shim_manager_mac.h"
+ #include "chrome/browser/apps/app_shim/web_app_shim_manager_delegate_mac.h"
+@@ -35,6 +36,12 @@
+   // |try_to_quit_application| set to true; keyboard menu invocations have it
+   // set to false.
+ 
++  // agens: embedded (agens_embedded.h), only the host ends the engine (IDC_EXIT, chrome://quit).
++  if (agens::RefuseQuit()) {
++    chrome::OnClosingAllBrowsers(false);
++    return;
++  }
++
+   if (!try_to_quit_application) {
+     // A keyboard menu invocation.
+     if ([AppController.sharedController confirmQuitIfNeeded] ==
+diff --git a/chrome/browser/chrome_browser_application_mac.mm b/chrome/browser/chrome_browser_application_mac.mm
+index e3194afac1..a86a6de91c 100644
+--- a/chrome/browser/chrome_browser_application_mac.mm
++++ b/chrome/browser/chrome_browser_application_mac.mm
+@@ -15,6 +15,7 @@
+ #include "base/strings/stringprintf.h"
+ #include "base/strings/sys_string_conversions.h"
+ #include "base/trace_event/trace_event.h"
++#include "chrome/browser/agens/embed/agens_embedded.h"  // agens
+ #import "chrome/browser/app_controller_mac.h"
+ #import "chrome/browser/mac/exception_processor.h"
+ #include "chrome/browser/ui/cocoa/l10n_util.h"
+@@ -316,6 +317,10 @@ - (void)_customizeFileMenuIfNeeded {
+ // NSApplication event loop, so final post- MessageLoop::Run() work is done
+ // before exiting.
+ - (void)terminate:(id)sender {
++  // agens: embedded (agens_embedded.h), only the host ends the engine; ⌘Q closes DevTools.
++  if (agens::RefuseQuit()) {
++    return;
++  }
+   [AppController.sharedController tryToTerminateApplication];
+   // Return, don't exit. The application is responsible for exiting on its own.
+ }
 diff --git a/chrome/browser/chrome_browser_interface_binders.cc b/chrome/browser/chrome_browser_interface_binders.cc
 index 65c1bcc84f..061bd40902 100644
 --- a/chrome/browser/chrome_browser_interface_binders.cc
@@ -14385,7 +14762,7 @@ index 65c1bcc84f..061bd40902 100644
    // Defense in depth: privileged capability interfaces are not even registered
    // for a frame outside a privileged process, so a non-PWC frame cannot
 diff --git a/chrome/browser/chrome_browser_main_mac.mm b/chrome/browser/chrome_browser_main_mac.mm
-index b269f1610a..ae3535a3d1 100644
+index b269f1610a..fab22c1bbb 100644
 --- a/chrome/browser/chrome_browser_main_mac.mm
 +++ b/chrome/browser/chrome_browser_main_mac.mm
 @@ -21,6 +21,7 @@
@@ -14405,6 +14782,16 @@ index b269f1610a..ae3535a3d1 100644
    [ChromeSwizzleServicesMenuUpdater install];
  
    return ChromeBrowserMainPartsPosix::PreEarlyInitialization();
+@@ -179,6 +182,9 @@
+ void ChromeBrowserMainPartsMac::PostProfileInit(Profile* profile,
+                                                 bool is_initial_profile) {
+   ChromeBrowserMainPartsPosix::PostProfileInit(profile, is_initial_profile);
++  if (is_initial_profile) {
++    agens::RestoreAfterCrash();  // SugiyamaLabs: embedded, the atos' tabs after a crash
++  }
+ }
+ 
+ void ChromeBrowserMainPartsMac::DidEndMainMessageLoop() {
 diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
 index 002d492ffe..d399397341 100644
 --- a/chrome/browser/chrome_content_browser_client.cc
@@ -14931,6 +15318,72 @@ index b673362fe8..567e2c1ccf 100644
  
    content::RenderFrameHost& render_frame_host = CurrentTargetFrame();
    if (!render_frame_host.IsActive()) {
+diff --git a/chrome/browser/sessions/session_restore.cc b/chrome/browser/sessions/session_restore.cc
+index e21bf8de37..a896a86d0d 100644
+--- a/chrome/browser/sessions/session_restore.cc
++++ b/chrome/browser/sessions/session_restore.cc
+@@ -38,6 +38,9 @@
+ #include "base/time/time.h"
+ #include "base/token.h"
+ #include "build/build_config.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/agens/embed/agens_embedded.h"  // agens
++#endif
+ #include "chrome/browser/after_startup_task_utils.h"
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/buildflags.h"
+@@ -625,6 +628,20 @@ class SessionRestoreImpl : public BrowserCollectionObserver {
+       read_error_ = read_error;
+     }
+ 
++#if BUILDFLAG(IS_MAC)
++    // agens: embedded (agens_embedded.h), an agent's tabs belonged to its control session, which
++    // ended with the engine: they do not come back, nor a window left with none.
++    if (agens::IsEmbedded()) {
++      for (auto& window : windows) {
++        std::erase_if(window->tabs, [](const auto& tab) {
++          auto mark = tab->extra_data.find(agens::kAgentTabKey);
++          return mark != tab->extra_data.end() && mark->second == "1";
++        });
++      }
++      std::erase_if(windows, [](const auto& window) { return window->tabs.empty(); });
++    }
++#endif
++
+     // Copy windows into windows_ so that we can combine both app and browser
+     // windows together before doing a one-pass restore.
+     std::ranges::move(windows, std::back_inserter(windows_));
+diff --git a/chrome/browser/sessions/session_service.cc b/chrome/browser/sessions/session_service.cc
+index 2293349695..0e5e21ecda 100644
+--- a/chrome/browser/sessions/session_service.cc
++++ b/chrome/browser/sessions/session_service.cc
+@@ -19,6 +19,10 @@
+ #include "base/metrics/histogram_functions.h"
+ #include "base/values.h"
+ #include "build/build_config.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/agens/embed/agens_controlled.h"  // agens
++#include "chrome/browser/agens/embed/agens_embedded.h"    // agens
++#endif
+ #include "chrome/browser/apps/app_service/launch_utils.h"
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/buildflags.h"
+@@ -681,6 +685,15 @@ void SessionService::BuildCommandsForTab(
+     command_storage_manager()->AppendRebuildCommand(
+         sessions::CreateSplitTabCommand(session_id, std::move(split)));
+   }
++
++#if BUILDFLAG(IS_MAC)
++  // agens: embedded (agens_embedded.h), an agent's tab keeps its mark when the file is rewritten.
++  if (agens::IsEmbedded() && AgensControlled::Is(tab)) {
++    command_storage_manager()->AppendRebuildCommand(
++        sessions::CreateAddTabExtraDataCommand(session_id, agens::kAgentTabKey,
++                                               "1"));
++  }
++#endif
+ }
+ 
+ void SessionService::ScheduleResetCommands() {
 diff --git a/chrome/browser/ui/autofill/chrome_autofill_client.cc b/chrome/browser/ui/autofill/chrome_autofill_client.cc
 index 242bac51ca..9b04fdb59f 100644
 --- a/chrome/browser/ui/autofill/chrome_autofill_client.cc
@@ -14988,6 +15441,35 @@ index 07de580deb..2cfb905bd1 100644
    Profile* const profile_ptr = &*params.profile;
    std::unique_ptr<Browser> browser =
        base::WrapUnique(new Browser(std::move(params)));
+diff --git a/chrome/browser/ui/browser_command_controller.cc b/chrome/browser/ui/browser_command_controller.cc
+index cd3d1c68d9..d9978115a3 100644
+--- a/chrome/browser/ui/browser_command_controller.cc
++++ b/chrome/browser/ui/browser_command_controller.cc
+@@ -25,6 +25,9 @@
+ #include "build/branding_buildflags.h"
+ #include "build/build_config.h"
+ #include "chrome/browser/agens/embed/native_shell.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/agens/embed/agens_embedded.h"  // agens
++#endif
+ #include "chrome/app/chrome_command_ids.h"
+ #include "chrome/browser/actor/ui/actor_overlay_web_view.h"
+ #include "chrome/browser/bookmarks/bookmark_model_factory.h"
+@@ -640,6 +643,14 @@ bool BrowserCommandController::ExecuteCommandWithDispositionAndContext(
+     WindowOpenDisposition disposition,
+     std::optional<actions::ActionInvocationContext> context,
+     base::TimeTicks time_stamp) {
++#if BUILDFLAG(IS_MAC)
++  // agens: embedded (agens_embedded.h), the DevTools window's keys and the menu bar only close or
++  // tidy it: no new window or tab, no settings.
++  if (agens::IsEmbedded() && browser_->GetType() == BrowserWindowInterface::TYPE_DEVTOOLS &&
++      !agens::DevToolsWindowMayRun(id)) {
++    return false;
++  }
++#endif
+   // agens: before the enabled check; some (the password prompt) stay disabled in our window.
+   if (agens::HandleNativeCommand(browser_, id)) return true;
+   if (!SupportsCommand(id) || !IsCommandEnabled(id)) {
 diff --git a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc b/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
 index 9e4154d594..ce89b2bcaa 100644
 --- a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
