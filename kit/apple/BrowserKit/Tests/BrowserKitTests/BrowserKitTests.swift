@@ -46,7 +46,12 @@ import Testing
       let id = request["id"]!.int!
       switch request["op"]?.string {
       case "atos.list":
-        return [["id": id, "ok": true, "atos": [["id": "Default", "name": "Pessoal", "restorable": !restored],
+        let summary: [String: Any] = restored ? [:] : [
+          "restorable_tabs": 4, "closed_at": 1_763_100_000,
+          "restorable_preview": [["title": "Inbox", "url": "https://mail.example/"],
+                                 ["title": "Docs", "url": "https://docs.example/a"]]]
+        return [["id": id, "ok": true, "atos": [["id": "Default", "name": "Pessoal", "restorable": !restored]
+                                                  .merging(summary) { a, _ in a },
                                                 ["id": "Profile 1", "name": "Estúdio"]]]]
       case "view.restore" where !restored && request["ato"] == "Default":
         restored = true
@@ -56,7 +61,12 @@ import Testing
       }
     }
     let connection = try BrowserConnection(socketPath: fake.path)
-    #expect(try await connection.atos().map(\.restorable) == [true, false])
+    let before = try await connection.atos()
+    #expect(before.map(\.restorable) == [true, false])
+    #expect(before[0].restorableTabs == 4 && before[0].closedAt == Date(timeIntervalSince1970: 1_763_100_000))
+    #expect(before[0].restorablePreview == [RestorableTab(title: "Inbox", url: "https://mail.example/"),
+                                            RestorableTab(title: "Docs", url: "https://docs.example/a")])
+    #expect(before[1].restorableTabs == 0 && before[1].restorablePreview.isEmpty && before[1].closedAt == nil)
     #expect(try await connection.restore(ato: "Default") == 2)
     do {
       _ = try await connection.restore(ato: "Default")
@@ -64,7 +74,8 @@ import Testing
     } catch {
       #expect(error.code == "not_found")
     }
-    #expect(try await connection.atos().map(\.restorable) == [false, false])
+    let after = try await connection.atos()
+    #expect(after.map(\.restorable) == [false, false] && after[0].restorablePreview.isEmpty && after[0].closedAt == nil)
     #expect(fake.received("view.restore").map { $0["ato"] } == ["Default", "Default"])
   }
 

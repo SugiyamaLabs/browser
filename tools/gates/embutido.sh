@@ -1379,7 +1379,7 @@ def quit_then_restore():
         h.ask("host.attach")
         hato = (h.ask("atos.list").get("atos") or [{}])[0].get("id") or h.ask("atos.create", name="Gate").get("ato")
         check("a fresh ato is not restorable", not (h.ask("atos.list").get("atos") or [{}])[0].get("restorable"))
-        for path in ("/form", "/other"):
+        for path in ("/form", "/other", "/post"):
             h.ask("view.open", ato=hato, url=SITE + path)
         agent = Conn(sock5)
         rid = agent.send("control.start", ato=hato, reason="gate")
@@ -1388,6 +1388,13 @@ def quit_then_restore():
         agent.wait(rid)
         agent.ask("tab.open", ato=hato, url=SITE + "/login")
         bato = h.ask("atos.create", name="Gate B").get("ato")   # not the initial profile: nothing loads it at start
+        cato = h.ask("atos.create", name="Gate C").get("ato")   # only an agent's tab: nothing to continue
+        agent_c = Conn(sock5)
+        rid = agent_c.send("control.start", ato=cato, reason="gate")
+        a = h.event(lambda e: e["event"] == "approval.ask", 20)
+        if a: h.ask("approval.answer", ask=a["ask"], answer="allow")
+        agent_c.wait(rid)
+        agent_c.ask("tab.open", ato=cato, url=SITE + "/login")
         h.ask("view.open", ato=bato, url=SITE + "/other")
         time.sleep(12)   # the session file and the prefs reach disk
         p.terminate()
@@ -1404,6 +1411,24 @@ def quit_then_restore():
         def ato_b(): return next((x for x in h2.ask("atos.list").get("atos", []) if x.get("id") == bato), {})
         check("after a normal quit a restorable ato is not loaded at start (asleep: true, restorable: true)",
               ato_b().get("asleep") is True and ato_b().get("restorable") is True, ato_b())
+        # What comes back, for the host's card: recorded at the quit, read with no ato loaded.
+        def summary(ato, conn=h2): return next((x for x in conn.ask("atos.list").get("atos", []) if x.get("id") == ato), {})
+        sa = summary(hato)
+        want = [{"title": "Form (test)", "url": SITE + "/form"}, {"title": "Other (test)", "url": SITE + "/other"},
+                {"title": "Post (test)", "url": SITE + "/post"}]
+        check("after a normal quit atos.list says what comes back (restorable_tabs: 3; the 3 person tabs' titles and urls, no agent tab)",
+              sa.get("restorable_tabs") == 3 and sa.get("restorable_preview") == want, sa)
+        check("closed_at is the normal quit (within the last minute)",
+              isinstance(sa.get("closed_at"), (int, float)) and 0 <= time.time() - sa["closed_at"] < 60, sa.get("closed_at"))
+        sb = summary(bato)
+        check("a sleeping ato's summary is there and it stays asleep (restorable_tabs: 1, /other; asleep: true)",
+              sb.get("restorable_tabs") == 1 and [t.get("url") for t in sb.get("restorable_preview", [])] == [SITE + "/other"]
+              and sb.get("asleep") is True, sb)
+        check("a connection that is not the host gets no summary (no titles or urls)",
+              not ({"restorable_tabs", "restorable_preview", "closed_at"} & set(summary(hato, Conn(sock5)))))
+        sc = summary(cato)
+        check("an ato whose only tab was an agent's is not restorable (no summary; view.restore not_found)",
+              sc.get("restorable") is False and "restorable_tabs" not in sc and err(h2.ask("view.restore", ato=cato)) == "not_found", sc)
         check("view.restore from a connection that is not the host is unauthorized",
               err(Conn(sock5).ask("view.restore", ato=hato)) == "unauthorized")
         check("view.restore of an ato that does not exist is not_found", err(h2.ask("view.restore", ato="Nope 9")) == "not_found")
@@ -1412,13 +1437,14 @@ def quit_then_restore():
         time.sleep(2)
         tabs = h2.ask("view.tabs", ato=hato).get("tabs", [])
         paths = sorted(t.get("url", "").split(SITE, 1)[-1] for t in tabs if t.get("url"))
-        check("view.restore brings back the person's tabs ({ok, tabs: 2}; /form and /other, no control)",
-              r.get("ok") and r.get("tabs") == 2 and paths == ["/form", "/other"] and not any(t.get("control") for t in tabs), (r, paths))
+        check("view.restore brings back the person's tabs ({ok, tabs: 3}; /form, /other and /post, no control)",
+              r.get("ok") and r.get("tabs") == 3 and paths == ["/form", "/other", "/post"] and not any(t.get("control") for t in tabs), (r, paths))
         check("view.restore leaves the agent's tab out (no /login)", "/login" not in paths, paths)
         check("the restored tabs reached the host as view.tab",
               {"/form", "/other"} <= {e.get("url", "").split(SITE, 1)[-1] for e in h2.events if e["event"] == "view.tab"})
         check("a second view.restore is not_found (no tab twice)", err(h2.ask("view.restore", ato=hato)) == "not_found")
-        check("the ato is not restorable after view.restore", restorable() is False)
+        check("the ato is not restorable after view.restore, and its summary is gone",
+              restorable() is False and "restorable_preview" not in summary(hato))
         rb = h2.ask("view.restore", ato=bato)
         check("view.restore loads the sleeping ato and brings its tab back ({ok, tabs: 1}; then awake, not restorable)",
               rb.get("ok") and rb.get("tabs") == 1 and ato_b().get("asleep") is False and ato_b().get("restorable") is False,

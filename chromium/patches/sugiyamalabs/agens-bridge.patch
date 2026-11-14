@@ -3566,10 +3566,10 @@ index 0000000000..d0ec9ca169
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_EXTENSION_OPS_H_
 diff --git a/chrome/browser/agens/bridge/ops.cc b/chrome/browser/agens/bridge/ops.cc
 new file mode 100644
-index 0000000000..f52ec01300
+index 0000000000..1761cbb0be
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ops.cc
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,225 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/ops.h"
@@ -3619,7 +3619,7 @@ index 0000000000..f52ec01300
 +  return true;
 +}
 +
-+void AtosList(const Request& request, ReplyCallback reply) {
++void AtosList(const Client& client, const Request& request, ReplyCallback reply) {
 +  std::vector<ProfileAttributesEntry*> entries = AgensWindow::Atos();
 +  base::ListValue atos;
 +  for (size_t i = 0; i < entries.size(); ++i) {
@@ -3631,7 +3631,15 @@ index 0000000000..f52ec01300
 +    ato.Set("shared", AgensWindow::AtoSharesCookies(entries[i]->GetPath()));  // read-only here
 +    ato.Set("asleep", !g_browser_process->profile_manager()->GetProfileByPath(entries[i]->GetPath()));
 +    // Embedded: its tabs from before the last normal quit can come back (view.restore).
-+    ato.Set("restorable", IsRestorable(entries[i]->GetPath().BaseName().AsUTF8Unsafe()));
++    const bool restorable = IsRestorable(entries[i]->GetPath().BaseName().AsUTF8Unsafe());
++    ato.Set("restorable", restorable);
++    // What comes back, for the host's card only: titles and urls of the person's tabs.
++    const base::DictValue* extras = AgensWindow::AtoExtras(entries[i]);
++    if (restorable && extras && client.connection == view::Host()) {
++      for (const char* key : {"restorable_tabs", "restorable_preview", "closed_at"}) {
++        if (const base::Value* value = extras->Find(key)) ato.Set(key, value->Clone());
++      }
++    }
 +    atos.Append(std::move(ato));
 +  }
 +  base::DictValue result;
@@ -3759,7 +3767,7 @@ index 0000000000..f52ec01300
 +  } else if (!g_browser_process || !g_browser_process->profile_manager()) {
 +    std::move(reply).Run(ErrorReply(&request.id, kFailed, "the browser is shutting down"));
 +  } else if (op == "atos.list") {
-+    AtosList(request, std::move(reply));
++    AtosList(client, request, std::move(reply));
 +  } else if (op == "atos.create") {
 +    AtosCreate(std::move(request), std::move(reply));
 +  } else if (op == "atos.rename") {
@@ -10810,10 +10818,10 @@ index 9d0bf4646d..e28c93f5d2 100644
  #ifdef __cplusplus
 diff --git a/chrome/browser/agens/embed/agens_embedded.h b/chrome/browser/agens/embed/agens_embedded.h
 new file mode 100644
-index 0000000000..23f21e6fcc
+index 0000000000..6269a63b7a
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embedded.h
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,78 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The engine as another app's hidden helper (docs/agens.md, "Um código, dois produtos";
 +// docs/protocolo.md, "host e view"). With --agens-embedded the app that launched the engine draws
@@ -10858,7 +10866,11 @@ index 0000000000..23f21e6fcc
 +// ParentGone, chrome::ExitIgnoreUnloadHandlers). Any other quit (⌘Q, the Quit menu, a quit Apple
 +// event, IDC_EXIT, chrome://quit) is refused, and closes the DevTools window when it is the key
 +// one: the only window a person can press ⌘Q in. True when refused; false when not embedded.
++// A quit it lets through first records, per ato with windows, a summary of the person's tabs for
++// atos.list (restorable_tabs, restorable_preview, closed_at; Local State, beside "restorable").
 +bool RefuseQuit();
++// That summary, also from BrowserProcessImpl::EndSession (SIGTERM, logout: no RefuseQuit there).
++void RememberRestorableTabs();
 +
 +// The commands a DevTools window may run (its keys and the menu bar): closing, minimizing, full
 +// screen and zoom. Nothing that quits, opens a window or a tab, or shows settings.
@@ -10876,7 +10888,8 @@ index 0000000000..23f21e6fcc
 +// The ato (its folder name) had windows when the engine last quit normally and its tabs were not
 +// brought back yet (atos.list "restorable"). Kept across runs until view.restore.
 +bool IsRestorable(const std::string& ato);
-+// True once per ato and saved session: view.restore takes it, so a second call finds nothing.
++// True once per ato and saved session: view.restore takes it (and its summary), so a second
++// call finds nothing.
 +bool TakeRestorable(const std::string& ato);
 +
 +// From ChromeBrowserMainPartsMac::PreEarlyInitialization, before any window exists: no Dock
@@ -10889,10 +10902,10 @@ index 0000000000..23f21e6fcc
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EMBEDDED_H_
 diff --git a/chrome/browser/agens/embed/agens_embedded_mac.mm b/chrome/browser/agens/embed/agens_embedded_mac.mm
 new file mode 100644
-index 0000000000..c83633bdb4
+index 0000000000..740fd8b11d
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embedded_mac.mm
-@@ -0,0 +1,338 @@
+@@ -0,0 +1,417 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/embed/agens_embedded.h"
@@ -10904,19 +10917,25 @@ index 0000000000..c83633bdb4
 +#include <unistd.h>
 +
 +#include <algorithm>
++#include <cmath>
 +#include <optional>
 +#include <string>
 +#include <vector>
 +
 +#include "base/command_line.h"
++#include "base/containers/flat_map.h"
 +#include "base/functional/bind.h"
 +#include "base/logging.h"
 +#include "base/no_destructor.h"
 +#include "base/strings/sys_string_conversions.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/third_party/icu/icu_utf.h"
++#include "base/time/time.h"
 +#include "base/task/single_thread_task_runner.h"
 +#include "chrome/app/chrome_command_ids.h"
 +#include "chrome/browser/agens/bridge/view_input.h"
 +#include "chrome/browser/agens/bridge/view_ops.h"
++#include "chrome/browser/agens/embed/agens_controlled.h"
 +#include "chrome/browser/agens/embed/agens_window.h"
 +#include "chrome/browser/browser_process.h"
 +#include "chrome/browser/lifetime/application_lifetime.h"
@@ -10928,12 +10947,18 @@ index 0000000000..c83633bdb4
 +#include "chrome/browser/ui/startup/startup_tab.h"
 +#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 +#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
++#include "chrome/browser/ui/tabs/tab_strip_model.h"
 +#include "chrome/common/chrome_switches.h"
 +#include "chrome/common/pref_names.h"
++#include "chrome/common/webui_url_constants.h"
 +#include "components/prefs/pref_service.h"
 +#include "components/prefs/scoped_user_pref_update.h"
 +#import "components/remote_cocoa/app_shim/native_widget_mac_nswindow.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/navigation_entry.h"
++#include "content/public/browser/web_contents.h"
 +#include "content/public/common/content_switches.h"
++#include "content/public/common/url_constants.h"
 +#include "ui/base/base_window.h"
 +#include "ui/views/widget/widget.h"
 +
@@ -11085,10 +11110,68 @@ index 0000000000..c83633bdb4
 +
 +}  // namespace
 +
++// At a quit that goes through, while the tabs still live: for each ato with windows, what
++// view.restore will bring back, for the host's "Continuar de onde parou" card (atos.list, beside
++// "restorable"): restorable_tabs, restorable_preview (the first 3, {title, url}) and closed_at.
++// From the live tabs: the session file cannot be read safely without loading the ato (its reader
++// is private to components/sessions and its init deletes files). The person's tabs only, as the
++// session marks them for restore (kAgentTabKey, session_restore.cc), and only tabs with a page other than the new tab page.
++
++void RememberRestorableTabs() {
++  if (!IsEmbedded()) return;
++  constexpr size_t kPreviewTabs = 3, kTitleChars = 120, kUrlBytes = 2048;
++  base::flat_map<std::string, base::DictValue> summaries;
++  GlobalBrowserCollection::GetInstance()->ForEach([&](BrowserWindowInterface* browser) {
++    if (browser->GetType() != BrowserWindowInterface::TYPE_NORMAL || browser->GetProfile()->IsOffTheRecord()) {
++      return true;
++    }
++    base::DictValue& summary = summaries[browser->GetProfile()->GetBaseName().AsUTF8Unsafe()];
++    TabStripModel* model = browser->GetTabStripModel();
++    for (int i = 0; i < model->count(); ++i) {
++      content::WebContents* contents = model->GetWebContentsAt(i);
++      content::NavigationEntry* entry = contents->GetController().GetLastCommittedEntry();
++      if (AgensControlled::Is(contents) || !entry || entry->IsInitialEntry()) continue;
++      // A blank "Nova aba" (the one a window opens with) is nothing to continue.
++      if (entry->GetVirtualURL().SchemeIs(content::kChromeUIScheme) &&
++          entry->GetVirtualURL().host() == chrome::kChromeUINewTabHost) {
++        continue;
++      }
++      const int tabs = summary.FindInt("restorable_tabs").value_or(0);
++      summary.Set("restorable_tabs", tabs + 1);
++      base::ListValue* preview = summary.EnsureList("restorable_preview");
++      if (preview->size() >= kPreviewTabs) continue;
++      std::u16string title = contents->GetTitle();
++      if (title.size() > kTitleChars) {
++        title.resize(kTitleChars);
++        if (CBU16_IS_LEAD(title.back())) title.pop_back();  // never half a character
++      }
++      base::DictValue tab;
++      tab.Set("title", base::UTF16ToUTF8(title));
++      tab.Set("url", entry->GetVirtualURL().spec().substr(0, kUrlBytes));  // a spec is ASCII
++      preview->Append(std::move(tab));
++    }
++    return true;
++  });
++  const double now = std::floor(base::Time::Now().InSecondsFSinceUnixEpoch());
++  ScopedDictPrefUpdate update(g_browser_process->local_state(), AgensWindow::kAtosPref);
++  for (auto& [ato, summary] : summaries) {
++    base::DictValue* extras = update->EnsureDict(ato);
++    extras->Set("restorable_tabs", summary.FindInt("restorable_tabs").value_or(0));
++    base::ListValue* preview = summary.FindList("restorable_preview");
++    extras->Set("restorable_preview", preview ? std::move(*preview) : base::ListValue());
++    extras->Set("closed_at", now);
++  }
++}
++
 +bool RefuseQuit() {
-+  if (!IsEmbedded() || browser_shutdown::HasShutdownStarted()) return false;
++  if (!IsEmbedded()) return false;
++  if (browser_shutdown::HasShutdownStarted()) {
++    RememberRestorableTabs();
++    return false;
++  }
 +  if (SystemQuit()) {
 +    LOG(ERROR) << "agens: quit allowed (embedded): the system is logging out, restarting or shutting down";
++    RememberRestorableTabs();
 +    return false;
 +  }
 +  BrowserWindowInterface* devtools = DevToolsOf(NSApp.keyWindow);
@@ -11124,7 +11207,8 @@ index 0000000000..c83633bdb4
 +bool TakeRestorable(const std::string& ato) {
 +  if (!IsRestorable(ato)) return false;
 +  ScopedDictPrefUpdate update(g_browser_process->local_state(), AgensWindow::kAtosPref);
-+  update->EnsureDict(ato)->Remove("restorable");
++  base::DictValue* extras = update->EnsureDict(ato);
++  for (const char* key : {"restorable", "restorable_tabs", "restorable_preview", "closed_at"}) extras->Remove(key);
 +  return true;
 +}
 +
@@ -11142,7 +11226,15 @@ index 0000000000..c83633bdb4
 +    for (const base::Value& ato : last) {
 +      if (ato.is_string() && manager->GetProfileAttributesStorage().GetProfileAttributesWithPath(
 +                                 manager->user_data_dir().Append(base::FilePath::FromUTF8Unsafe(ato.GetString())))) {
-+        ScopedDictPrefUpdate(local, AgensWindow::kAtosPref)->EnsureDict(ato.GetString())->Set("restorable", true);
++        // Only with tabs of the person to bring back (the summary of the quit, RememberRestorableTabs):
++        // an ato that had only an agent's tabs offers nothing, and its older session is gone.
++        ScopedDictPrefUpdate update(local, AgensWindow::kAtosPref);
++        base::DictValue* extras = update->EnsureDict(ato.GetString());
++        if (extras->FindInt("restorable_tabs").value_or(1) > 0) {
++          extras->Set("restorable", true);
++        } else {
++          for (const char* key : {"restorable", "restorable_tabs", "restorable_preview", "closed_at"}) extras->Remove(key);
++        }
 +      }
 +    }
 +    local->ClearPref(prefs::kProfilesLastActive);
@@ -14645,21 +14737,22 @@ index e496cb7ab4..f921d60a24 100644
    // Whether the profile is loaded and opening a new browser window is allowed.
    BOOL canOpenNewBrowser = [self canOpenNewBrowser];
 diff --git a/chrome/browser/browser_process_impl.cc b/chrome/browser/browser_process_impl.cc
-index 433fa42fa4..db8969bb41 100644
+index 433fa42fa4..648da6c65d 100644
 --- a/chrome/browser/browser_process_impl.cc
 +++ b/chrome/browser/browser_process_impl.cc
-@@ -85,6 +85,10 @@
+@@ -85,6 +85,11 @@
  #include "chrome/browser/printing/print_job_manager.h"
  #include "chrome/browser/profiles/profile_manager.h"
  #include "chrome/browser/sugiyamalabs/adblock.h"
 +#if BUILDFLAG(IS_MAC)
 +#include "chrome/browser/agens/bridge/bridge.h"  // SugiyamaLabs
 +#include "chrome/browser/agens/embed/agens_cookie_pool.h"  // SugiyamaLabs
++#include "chrome/browser/agens/embed/agens_embedded.h"  // SugiyamaLabs
 +#endif
  #include "chrome/browser/resource_coordinator/resource_coordinator_parts.h"
  #include "chrome/browser/serial/serial_policy_allowed_ports.h"
  #include "chrome/browser/shell_integration.h"
-@@ -628,6 +632,9 @@ void BrowserProcessImpl::StartTearDown() {
+@@ -628,6 +633,9 @@ void BrowserProcessImpl::StartTearDown() {
    // |tearing_down_| necessary in IsShuttingDown().
    tearing_down_ = true;
    DCHECK(IsShuttingDown());
@@ -14669,7 +14762,7 @@ index 433fa42fa4..db8969bb41 100644
  
    features_->PostMainMessageLoopRun();
    metrics_services_manager_client_ = nullptr;
-@@ -882,6 +889,11 @@ void RequestProxyResolvingSocketFactory(
+@@ -882,6 +890,12 @@ void RequestProxyResolvingSocketFactory(
  }  // namespace
  
  void BrowserProcessImpl::EndSession() {
@@ -14677,11 +14770,12 @@ index 433fa42fa4..db8969bb41 100644
 +  // SugiyamaLabs: SIGTERM and logout end here and exit without StartTearDown.
 +  agens::bridge::Stop();
 +  agens::EndCookiePoolSession();  // before Local State's write below
++  agens::RememberRestorableTabs();  // the tabs still live; also before that write
 +#endif
    // Mark all the profiles as clean.
    ProfileManager* pm = profile_manager();
    scoped_refptr<RundownTaskCounter> rundown_counter =
-@@ -1345,6 +1357,11 @@ BuildState* BrowserProcessImpl::GetBuildState() {
+@@ -1345,6 +1359,11 @@ BuildState* BrowserProcessImpl::GetBuildState() {
  // static
  void BrowserProcessImpl::RegisterPrefs(PrefRegistrySimple* registry) {
    sugiyamalabs::adblock::RegisterPrefs(registry);  // SugiyamaLabs
@@ -14693,7 +14787,7 @@ index 433fa42fa4..db8969bb41 100644
  
    registry->RegisterBooleanPref(prefs::kDefaultBrowserSettingEnabled, false);
  
-@@ -1706,6 +1723,9 @@ void BrowserProcessImpl::PreMainMessageLoopRun() {
+@@ -1706,6 +1725,9 @@ void BrowserProcessImpl::PreMainMessageLoopRun() {
  
    features_->PreMainMessageLoopRun();
    platform_part_->PreMainMessageLoopRun();

@@ -79,7 +79,7 @@ A vista manda tamanho, escala, foco, mouse, roda, teclado (com acentos e IME) e 
 
 Navegação: `navigate(tab, to: texto)` (endereço ou busca, como na barra), `back`, `forward`, `reload`, `stop`, `closeTab`.
 
-**Continuar de onde parou.** Depois que o app sai normalmente, o motor abre sem abas. Se `Ato.restorable` for `true`, ofereça o botão; `try await connection.restore(ato: ato)` traz as abas que a pessoa tinha nesse ato (as de agente não), que chegam como as outras (`view.tab`, `engine.tabs`), e devolve quantas vieram. Vale uma vez: a segunda chamada (um clique duplo) dá `not_found`, e `restorable` passa a `false`. Se o motor caiu, as abas voltam sozinhas e o ato não fica `restorable`.
+**Continuar de onde parou.** Depois que o app sai normalmente, o motor abre sem abas. Se `Ato.restorable` for `true` (só quando há abas da pessoa para voltar), ofereça o botão; `try await connection.restore(ato: ato)` traz as abas que a pessoa tinha nesse ato (as de agente não), que chegam como as outras (`view.tab`, `engine.tabs`), e devolve quantas vieram. Vale uma vez: a segunda chamada (um clique duplo) dá `not_found`, e `restorable` passa a `false`. Se o motor caiu, as abas voltam sozinhas e o ato não fica `restorable`. Para montar o cartão, o mesmo `Ato` traz `restorableTabs` (quantas voltam), `restorablePreview` (até 3 `RestorableTab` com `title` e `url`) e `closedAt` (`Date` da saída), sem acordar o ato; fora do `restorable` (ou numa conexão que não é o hospedeiro) vêm `0`, vazio e `nil`. Não há ícone de site: mostre a inicial do domínio.
 
 ## As abas e os dados delas
 

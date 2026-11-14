@@ -176,6 +176,18 @@ public struct Ato: Sendable, Equatable, Identifiable {
   /// Its tabs from before the last normal quit can come back: offer "Continuar de onde parou"
   /// (`restore(ato:)`). False on an engine that does not say.
   public let restorable: Bool
+  /// When `restorable`, for the "Continuar de onde parou" card (host only; 0, empty and nil
+  /// otherwise): how many tabs come back, the first ones (at most 3) and when the app quit.
+  /// No favicons: show the site's initial.
+  public var restorableTabs: Int = 0
+  public var restorablePreview: [RestorableTab] = []
+  public var closedAt: Date? = nil
+}
+
+/// One of the tabs `restore(ato:)` will bring back: its title (up to 120 characters) and url.
+public struct RestorableTab: Sendable, Equatable {
+  public let title: String
+  public let url: String
 }
 
 /// The colors an ato can have.
@@ -206,7 +218,11 @@ extension BrowserConnection {
       return Ato(
         id: id, name: item["name"]?.string ?? id, color: item["color"]?.string, tag: item["tag"]?.string,
         asleep: item["asleep"]?.bool ?? false, shared: item["shared"]?.bool ?? false,
-        restorable: item["restorable"]?.bool ?? false)
+        restorable: item["restorable"]?.bool ?? false, restorableTabs: item["restorable_tabs"]?.int ?? 0,
+        restorablePreview: (item["restorable_preview"]?.array ?? []).compactMap { tab in
+          tab.object.map { RestorableTab(title: $0["title"]?.string ?? "", url: $0["url"]?.string ?? "") }
+        },
+        closedAt: item["closed_at"]?.double.map { Date(timeIntervalSince1970: $0) })
     }
   }
 
