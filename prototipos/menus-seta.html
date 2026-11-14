@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Menus com seta · navegador</title>
+<style>
+/* tokens de janela.html (Grafite escuro); seta igual a Agens-Prototipos/menus-seta.html */
+:root{--bg:#0B0B0D;--side:#111114;--raise:#16161A;--sunk:#0F0F12;--line:#24242A;--line-strong:#3A3A42;--ink:#F2F2F4;--mute:#9A9AA4;--dim:#8A8A94;--hi:#F4F4F6;--float:#1A1A1F;--raise-2:#26262D;--light-3:#FFC98A;
+  --ui:-apple-system,"SF Pro Text",BlinkMacSystemFont,system-ui,sans-serif;--mono:ui-monospace,"SF Mono",Menlo,monospace;
+  /* seta: quadrado girado 45°; lado 10 => 14×7 */
+  --s:10px}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 var(--ui);-webkit-font-smoothing:antialiased}
+main{max-width:1240px;margin:0 auto;padding:40px 16px 80px}
+h1{font-size:24px;margin:0 0 6px}h2{font-size:17px;margin:48px 0 4px}
+p.cap{color:var(--mute);margin:0 0 16px;max-width:820px}
+.row{display:flex;gap:20px;flex-wrap:wrap}
+/* palco = pedaço da janela do navegador */
+.stage{position:relative;flex:1 1 380px;min-height:340px;background:var(--side);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.stage .lbl{position:absolute;left:12px;bottom:10px;font-size:12px;color:var(--dim)}
+.bar{display:flex;align-items:center;gap:2px;padding:8px 10px 10px}
+.lights{display:flex;gap:8px;padding:0 10px 0 4px}.lights i{width:12px;height:12px;border-radius:50%;background:#2A2A30}
+.tbtn{width:28px;height:28px;border-radius:8px;display:grid;place-items:center;color:var(--dim);flex:none}
+.tbtn.on{background:var(--raise);color:var(--ink)}
+.omni{flex:1;min-width:0;height:34px;margin:0 8px;display:flex;align-items:center;gap:7px;padding:0 12px;border-radius:10px;background:var(--sunk);border:1px solid var(--line);font-size:13px;color:var(--dim);white-space:nowrap;overflow:hidden}
+.icon{width:18px;height:18px;flex:none;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.profiles{display:flex;gap:2px;padding:2px;margin-left:4px;border:1px solid var(--line);border-radius:9px;flex:none}
+.profiles>span{display:flex;align-items:center;gap:6px;height:26px;padding:0 6px;border-radius:7px;color:var(--mute);font-size:12.5px}
+.profiles>span.cur{background:var(--raise);color:var(--ink);padding-right:9px}
+.logo{width:16px;height:16px;border-radius:4px;display:inline-grid;place-items:center;font:700 9.5px/1 var(--ui);color:#0B0B0D;flex:none}
+.bm{height:26px;display:flex;align-items:center;gap:7px;padding:0 9px;border-radius:7px;color:var(--mute);font-size:12.5px}.bm.on{background:var(--raise);color:var(--ink)}
+.xi{width:18px;height:18px;border-radius:5px;display:inline-grid;place-items:center;font:700 10px/1 var(--ui);color:#fff;flex:none}
+.side{position:absolute;left:0;top:0;bottom:0;width:200px;border-right:1px solid var(--line);display:flex;flex-direction:column;padding:10px 8px 0}
+.side .t{padding:6px 8px;font-size:13px;color:var(--mute)}.side .t.cur{background:var(--raise);color:var(--ink);border-radius:8px}
+.spaces{margin-top:auto;display:flex;justify-content:center;gap:2px;padding:8px 0 6px;border-top:1px solid var(--line)}
+.space{width:30px;height:28px;border-radius:8px;display:grid;place-items:center;color:var(--dim)}.space.cur{background:var(--raise)}
+.set{padding:16px 18px}.set h3{margin:0 0 10px;font-size:15px}
+.opt{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--raise);font-size:13px}
+.opt small{display:block;color:var(--dim);font-size:12px}.opt .sp{flex:1}
+.lnk{color:var(--mute);font-size:12.5px;padding:3px 6px;border-radius:6px}.lnk.on{background:var(--raise-2);color:var(--ink)}
+/* menu do navegador (janela.html .menu) + drop-shadow para a sombra seguir a seta */
+.menu{position:absolute;z-index:2;min-width:240px;padding:5px;border-radius:12px;background:var(--float);border:1px solid var(--line-strong);filter:drop-shadow(0 10px 24px rgba(0,0,0,.45))}
+.menu .mh{padding:8px 10px 3px;font-size:11.5px;color:var(--dim)}
+.menu .mi{display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:7px;color:var(--mute);font-size:13px;white-space:nowrap}
+.menu .mi.hl{background:var(--raise);color:var(--ink)}.menu .mi.warn{color:#F28B82}
+.menu .k{margin-left:auto;font-family:var(--mono);font-size:11.5px;color:var(--dim)}.menu .st{margin-left:auto;color:var(--dim);font-size:12px}.menu .st.on{color:var(--light-3)}
+.menu .mi.ck::after{content:"";width:6px;height:6px;border-radius:50%;background:var(--light-3);margin-left:8px}
+.menu hr{border:0;border-top:1px solid var(--line);margin:5px 4px}
+/* a seta (mesma geometria do Agens) */
+.menu[data-side]::after{content:"";position:absolute;width:var(--s);height:var(--s);background:var(--float);border:1px solid var(--line-strong);border-right:0;border-bottom:0;border-top-left-radius:2px;
+  clip-path:polygon(-2px -2px,calc(100% + 2px) -2px,-2px calc(100% + 2px))}
+.menu[data-side=up]::after{left:var(--ax);top:0;transform:translate(-50%,-50%) rotate(45deg)}
+.menu[data-side=down]::after{left:var(--ax);top:100%;transform:translate(-50%,-50%) rotate(225deg)}
+/* popup da extensão: página branca, seta branca */
+.menu.pop{--float:#fff;width:300px;padding:0;color:#15151A}
+.pop-h{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid #EDEDF1;font-weight:600;font-size:13px}.pop-h small{margin-left:auto;color:#6B6B75;font-weight:400}
+.pop-r{display:flex;align-items:center;gap:10px;padding:9px 12px;font-size:13px}.pop-r+.pop-r{border-top:1px solid #F2F2F5}
+.pop-r b{font-weight:500;display:block}.pop-r small{color:#6B6B75}.pop-r .kk{width:28px;height:28px;border-radius:7px;background:#EEF4FF;display:grid;place-items:center;font-size:12px;color:#1A56C7;font-weight:700}
+.pop-r i{margin-left:auto;font-style:normal;font-size:12px;color:#1A56C7;font-weight:600}
+.no{margin-top:14px;color:var(--mute);font-size:13px;max-width:900px}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <symbol id="i-menu" viewBox="0 0 20 20"><path d="M5 10h.01M10 10h.01M15 10h.01" stroke-width="2.4"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 20 20"><rect x="4.5" y="9" width="11" height="8" rx="2.5"/><path d="M7 9V6.5a3 3 0 0 1 6 0V9"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 20 20"><path d="M10 4.5v11M4.5 10h11"/></symbol>
+  <symbol id="i-back" viewBox="0 0 20 20"><path d="M12 5l-5 5 5 5"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 20 20"><path d="M3.5 6.5a2 2 0 0 1 2-2h3l1.5 1.5h4.5a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="i-puzzle" viewBox="0 0 20 20"><path d="M3.3 7.2h3.4a2.1 2.1 0 1 1 3.2 0h3.4v2.9a2.1 2.1 0 1 1 0 3.2v2.9H3.3z"/></symbol>
+</svg>
+<main>
+<h1>Menus com seta · navegador sozinho</h1>
+<p class="cap">A seta aprovada para o Agens (14×7 px, mesma superfície e borda de 1 px do menu, sem emenda, ponta arredondada) aplicada à casca do navegador: aponta para o controle de onde o menu veio, desliza perto da borda e vira quando o menu abre para o outro lado.</p>
+
+<section id="antes-depois">
+<h2>1. Antes e depois</h2>
+<p class="cap">O menu ⋯ da barra (janela.html) hoje e com a seta.</p>
+<div class="row">
+  <div class="stage">TOOLBAR_DOTS<div class="menu" data-noarrow>MENU_DOTS</div><span class="lbl">Hoje</span></div>
+  <div class="stage">TOOLBAR_DOTS<div class="menu" data-place="down">MENU_DOTS</div><span class="lbl">Com seta</span></div>
+</div>
+</section>
+
+<section id="onde">
+<h2>2. Onde entra</h2>
+<p class="cap">Todo menu e popover da casca que nasce de um controle, cada um apontando para o seu.</p>
+<div class="row">
+  <div class="stage">TOOLBAR_DOTS<div class="menu" data-place="down">MENU_DOTS</div><span class="lbl">Menu ⋯ da barra</span></div>
+  <div class="stage">TOOLBAR_ATOS<div class="menu" data-place="down">MENU_ATOS</div><span class="lbl">Ladrilhos do ato na barra (⌘⇧P)</span></div>
+  <div class="stage">TOOLBAR_EXT<div class="menu" data-place="down">MENU_EXT</div><span class="lbl">Quebra-cabeça (extensões do ato)</span></div>
+  <div class="stage" style="min-height:360px">TOOLBAR_POP<div class="menu pop" data-place="down">MENU_POP</div><span class="lbl">Popup de extensão, preso ao ícone</span></div>
+  <div class="stage" style="min-height:300px"><div class="set"><h3>Configurações › Extensões</h3><div class="opt"><span class="xi" style="background:#1A56C7">1</span><span class="sp">1Password<small>8.10.48 · Estúdio, Pessoal</small></span><span class="lnk">Opções</span><span class="lnk on" data-anchor>Remover</span></div></div><div class="menu" data-place="down" style="min-width:220px"><div class="mi warn hl">Remover do ato Estúdio</div><div class="mi warn">Remover de todos os atos<span class="st">2</span></div></div><span class="lbl">Remover, em Configurações › Extensões</span></div>
+  <div class="stage" style="min-height:360px">SIDEBAR<div class="menu" data-place="up">MENU_ATOS</div><span class="lbl" style="left:auto;right:12px">Atos no pé da lateral: abre para cima</span></div>
+  <div class="stage" style="min-height:300px">TOOLBAR_DOTS<div class="bar" style="padding-top:0" data-bm><span class="bm">GitHub</span><span class="bm on" data-anchor><svg class="icon" style="width:15px;height:15px"><use href="#i-folder"/></svg>Trabalho</span><span class="bm">Notícias</span></div><div class="menu" data-place="down" style="min-width:200px"><div class="mi hl">Vercel</div><div class="mi">Stripe · painel</div><div class="mi">Linear</div></div><span class="lbl">Pasta da barra de favoritos</span></div>
+</div>
+<p class="no"><b>Ficam sem seta:</b> menu de clique direito (abre no ponteiro, não há controle para apontar); sugestões da barra de endereço (grudadas no próprio campo, da largura dele); toasts e a barra de menus do macOS (não vêm de um controle). O controle de dock do DevTools é um seletor de três botões, sem menu: nada muda nele.</p>
+<p class="no"><b>Não existem hoje em janela.html</b>, por isso não foram desenhados: um "⋯" de mais atos no pé da lateral (lá só há os ladrilhos e o +; o menu de atos acima é o que abre dali), o popover do cadeado e um popover de downloads. Quando nascerem, ganham a seta.</p>
+</section>
+
+<section id="bordas">
+<h2>3. Perto das bordas</h2>
+<p class="cap">Na borda direita o menu desliza para dentro e a seta continua no controle (nunca a menos de raio + 4 px do canto). No fim da janela o menu abre para cima e a seta vira.</p>
+<div class="row">
+  <div class="stage" style="min-height:320px"><div class="bar" style="justify-content:flex-end;padding-right:4px"><span class="tbtn">‹</span><span class="tbtn on" data-anchor><svg class="icon"><use href="#i-menu"/></svg></span></div><div class="menu" data-place="down">MENU_DOTS</div><span class="lbl">⋯ colado na borda direita</span></div>
+  <div class="stage" style="min-height:320px">SIDEBAR_RIGHT<div class="menu" data-place="down">MENU_ATOS</div><span class="lbl" style="left:auto;right:12px">Pediu para baixo, no fim da janela: abre para cima</span></div>
+</div>
+</section>
+</main>
+<script>
+const I=id=>`<svg class="icon"><use href="#${id}"/></svg>`;
+const ATOS=[["#7F9BC7","P","Pessoal"],["#FF9D5C","E","Estúdio"],["#2BC7C0","C","Cliente A"]];
+const T={
+ TOOLBAR_DOTS:`<div class="bar"><div class="lights"><i></i><i></i><i></i></div><span class="tbtn">${I("i-back")}</span><div class="omni">${I("i-lock")}github.com/sugiyamalabs</div><span class="tbtn on" data-anchor>${I("i-menu")}</span></div>`,
+ TOOLBAR_ATOS:`<div class="bar"><div class="lights"><i></i><i></i><i></i></div><div class="omni">${I("i-lock")}linear.app</div><div class="profiles" data-anchor>${ATOS.map((a,i)=>`<span class="${i==1?"cur":""}"><span class="logo" style="background:${a[0]}">${a[1]}</span>${i==1?a[2]:""}</span>`).join("")}</div><span class="tbtn">${I("i-menu")}</span></div>`,
+ TOOLBAR_EXT:`<div class="bar"><div class="lights"><i></i><i></i><i></i></div><div class="omni">${I("i-lock")}stripe.com</div><span class="tbtn"><span class="xi" style="background:#1A56C7">1</span></span><span class="tbtn on" data-anchor>${I("i-puzzle")}</span><span class="tbtn">${I("i-menu")}</span></div>`,
+ TOOLBAR_POP:`<div class="bar"><div class="lights"><i></i><i></i><i></i></div><div class="omni">${I("i-lock")}dashboard.stripe.com</div><span class="tbtn on" data-anchor><span class="xi" style="background:#1A56C7">1</span></span><span class="tbtn">${I("i-puzzle")}</span><span class="tbtn">${I("i-menu")}</span></div>`,
+ SIDEBAR:`<div class="side"><div class="t cur">Linear</div><div class="t">GitHub</div><div class="t">Vercel</div><div class="spaces">${ATOS.map((a,i)=>`<span class="space${i==1?" cur":""}"${i==1?" data-anchor":""}><span class="logo" style="background:${a[0]}">${a[1]}</span></span>`).join("")}<span class="space">${I("i-plus")}</span></div></div>`,
+ MENU_DOTS:[["Nova aba","⌘T","i-plus"],["Favoritos","⌘⌥B","i-folder"],["Histórico","⌘Y","i-back"],["Configurações","⌘,","i-menu"]].map(([n,k,ic],i)=>`<div class="mi${i==0?" hl":""}">${I(ic)}${n}<span class="k">${k}</span></div>`).join("")+`<hr><div class="mi ck">${I("i-folder")}Ocultar barra de favoritos<span class="k">⌘⇧B</span></div>`,
+ MENU_ATOS:ATOS.map((a,i)=>`<div class="mi${i==1?" ck hl":""}"><span class="logo" style="background:${a[0]}">${a[1]}</span>${a[2]}<span class="${i==2?"st":"k"}">${i==2?"dormindo":"⌘⇧"+(i+1)}</span></div>`).join("")+`<hr><div class="mi">${I("i-plus")}Novo ato</div>`,
+ MENU_EXT:`<div class="mh">Extensões do ato Estúdio</div>`+[["#1A56C7","1","1Password",1],["#C0392B","u","uBlock Origin",0],["#6E86FF","R","React DevTools",0]].map(x=>`<div class="mi"><span class="xi" style="background:${x[0]}">${x[1]}</span>${x[2]}<span class="st${x[3]?" on":""}">${x[3]?"fixada":"fixar"}</span></div>`).join("")+`<hr><div class="mi">${I("i-puzzle")}Gerenciar extensões…</div>`,
+ MENU_POP:`<div class="pop-h"><span class="xi" style="background:#1A56C7">1</span>1Password<small>Cofre Estúdio</small></div><div class="pop-r"><span class="kk">S</span><span><b>Stripe · painel</b><small>willian@estudio.test</small></span><i>Preencher</i></div><div class="pop-r"><span class="kk">V</span><span><b>Vercel</b><small>estudio-dev</small></span><i>Preencher</i></div><div class="pop-r"><span class="kk">G</span><span><b>GitHub</b><small>código · 482 913</small></span><i>Copiar</i></div>`};
+T.SIDEBAR_RIGHT=T.SIDEBAR;
+document.querySelectorAll('.stage').forEach(s=>s.innerHTML=s.innerHTML.replace(/[A-Z_]{5,}/g,k=>T[k]??k));
+
+document.querySelectorAll('[data-bm]').forEach(b=>{const t=b.previousElementSibling.querySelector('[data-anchor]');t.removeAttribute('data-anchor');t.classList.remove('on')});
+// mesma regra do Agens: GAP 4 + altura da seta, vira se não cabe, desliza nas bordas
+const GAP=4,PAD=4,FLIP={down:'up',up:'down'};
+function place(m){
+  const st=m.parentElement,a=[...st.querySelectorAll('[data-anchor]')].pop(),W=st.clientWidth,H=st.clientHeight,sb=st.getBoundingClientRect(),b=a.getBoundingClientRect();
+  const ar={l:b.left-sb.left-st.clientLeft,t:b.top-sb.top-st.clientTop,w:b.width,h:b.height},cx=ar.l+ar.w/2;
+  const mw=m.offsetWidth,mh=m.offsetHeight,ah=10*Math.SQRT1_2,r=12,cl=(v,lo,hi)=>Math.max(lo,Math.min(hi,v));
+  if('noarrow' in m.dataset){m.style.left=cl(ar.l+ar.w-mw,PAD,W-PAD-mw)+'px';m.style.top=(ar.t+ar.h+6)+'px';return}
+  const gap=GAP+ah;let side=m.dataset.place;
+  const fits={down:ar.t+ar.h+gap+mh<=H-PAD,up:ar.t-gap-mh>=PAD};
+  if(!fits[side]&&fits[FLIP[side]])side=FLIP[side];
+  const x=cl(cx-mw/2,PAD,W-PAD-mw),y=side==='down'?ar.t+ar.h+gap:ar.t-gap-mh;
+  m.style.left=x+'px';m.style.top=y+'px';m.style.setProperty('--ax',cl(cx-x-1,r+4+ah,mw-2-r-4-ah)+'px');
+  m.dataset.side=side==='down'?'up':'down';
+}
+const all=()=>document.querySelectorAll('.menu').forEach(place);
+all();addEventListener('resize',all);
+</script>
+</body>
+</html>
