@@ -12,6 +12,13 @@
 <input id="k" type="color" value="#336699" style="top:320px;width:60px;height:40px">
 <script>
 const say = t => { document.title = t; };
+// "Fuga ready" once painted: until the first contentful paint Chromium holds commits and drops
+// clicks (paint holding), and the title above arrives before that.
+new PerformanceObserver((list, observer) => {
+  if (!list.getEntriesByName("first-contentful-paint").length) return;
+  observer.disconnect();
+  if (document.title === "Fuga (test)") say("Fuga ready");
+}).observe({type: "paint", buffered: true});
 const on = (id, f) => { document.getElementById(id).onclick = f; };
 // window.print() returns at once embedded: the host prints (view.print_pdf).
 on("print", () => { window.print(); say("print:returned"); });

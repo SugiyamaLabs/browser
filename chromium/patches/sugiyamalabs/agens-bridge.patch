@@ -10602,10 +10602,10 @@ index e62a9f607e..07183c509e 100644
  #endif
 diff --git a/chrome/browser/agens/embed/agens_ato_sleep.cc b/chrome/browser/agens/embed/agens_ato_sleep.cc
 new file mode 100644
-index 0000000000..3e6441f407
+index 0000000000..aea085d455
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_ato_sleep.cc
-@@ -0,0 +1,157 @@
+@@ -0,0 +1,208 @@
 +// Copyright 2026 SugiyamaLabs.
 +#include "chrome/browser/agens/embed/agens_ato_sleep.h"
 +
@@ -10622,6 +10622,9 @@ index 0000000000..3e6441f407
 +#include "chrome/browser/agens/embed/agens_controlled.h"
 +#include "chrome/browser/agens/embed/agens_embedded.h"
 +#include "chrome/browser/browser_process.h"
++#include "chrome/browser/download/download_core_service.h"
++#include "chrome/browser/download/download_core_service_factory.h"
++#include "chrome/browser/lifetime/application_lifetime_desktop.h"
 +#include "chrome/browser/performance_manager/policies/cannot_discard_reason.h"
 +#include "chrome/browser/performance_manager/policies/discard_eligibility_policy.h"
 +#include "chrome/browser/profiles/profile.h"
@@ -10634,6 +10637,8 @@ index 0000000000..3e6441f407
 +#include "components/tabs/public/tab_interface.h"
 +#include "components/performance_manager/public/graph/page_node.h"
 +#include "components/performance_manager/public/performance_manager.h"
++#include "components/prefs/pref_service.h"
++#include "components/prefs/scoped_user_pref_update.h"
 +#include "content/public/browser/navigation_controller.h"
 +#include "content/public/browser/render_frame_host.h"
 +#include "content/public/browser/visibility.h"
@@ -10699,6 +10704,24 @@ index 0000000000..3e6441f407
 +  }
 +}
 +
++constexpr char kAtosPref[] = "agens.atos";  // AgensWindow::kAtosPref
++
++const base::DictValue* Extras(const base::FilePath& dir) {
++  return g_browser_process->local_state()->GetDict(kAtosPref).FindDict(dir.BaseName().AsUTF8Unsafe());
++}
++
++// "Atos fora de uso dormem inteiros": the windows close (no beforeunload: every tab is asleep
++// already), and with them the profile (DestroyProfileOnBrowserClose). The session keeps the
++// tabs: closing an ato's last window is a pending close (SessionService::WindowClosing).
++void Unload(Profile* profile) {
++  // A download still running would ask before its window closes.
++  if (DownloadCoreServiceFactory::GetForBrowserContext(profile)->BlockingShutdownCount() > 0) return;
++  ScopedDictPrefUpdate(g_browser_process->local_state(), kAtosPref)
++      ->EnsureDict(profile->GetPath().BaseName().AsUTF8Unsafe())
++      ->Set("unloaded", true);
++  chrome::CloseAllBrowsersWithProfile(profile);
++}
++
 +class AtoSleep {
 + public:
 +  void Start() {
@@ -10727,8 +10750,12 @@ index 0000000000..3e6441f407
 +      auto it = last_used_.find(path);
 +      const base::TimeTicks last = in_use || it == last_used_.end() ? now : it->second;
 +      seen[path] = last;
-+      if (now - last < kAgensAtoSleepAfter.Get()) continue;
++      if (now - last < kAgensAtoSleepAfter.Get() || AtoNeverSleeps(path)) continue;
 +      SleepTabs(tabs, ::mojom::LifecycleUnitDiscardReason::PROACTIVE);
++      if (!IsEmbedded() && g_browser_process->local_state()->GetBoolean(kAtosSleepWholePref) &&
++          IsAtoSleeping(profile)) {
++        Unload(profile);
++      }
 +    }
 +    last_used_ = std::move(seen);  // forgets atos that unloaded
 +  }
@@ -10762,13 +10789,37 @@ index 0000000000..3e6441f407
 +  contents->GetController().LoadIfNecessary();
 +}
 +
++bool AtoNeverSleeps(const base::FilePath& dir) {
++  const base::DictValue* extras = Extras(dir);
++  return extras && extras->FindBool("never_sleep").value_or(false);
++}
++
++void SetAtoNeverSleeps(const base::FilePath& dir, bool never) {
++  ScopedDictPrefUpdate update(g_browser_process->local_state(), kAtosPref);
++  base::DictValue* extras = update->EnsureDict(dir.BaseName().AsUTF8Unsafe());
++  if (never) {
++    extras->Set("never_sleep", true);
++  } else {
++    extras->Remove("never_sleep");
++  }
++}
++
++bool TakeUnloaded(const base::FilePath& dir) {
++  const base::DictValue* extras = Extras(dir);
++  if (!extras || !extras->FindBool("unloaded").value_or(false)) return false;
++  ScopedDictPrefUpdate(g_browser_process->local_state(), kAtosPref)
++      ->EnsureDict(dir.BaseName().AsUTF8Unsafe())
++      ->Remove("unloaded");
++  return true;
++}
++
 +}  // namespace agens
 diff --git a/chrome/browser/agens/embed/agens_ato_sleep.h b/chrome/browser/agens/embed/agens_ato_sleep.h
 new file mode 100644
-index 0000000000..cddbbd3604
+index 0000000000..b32fb4d2af
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_ato_sleep.h
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,43 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Atos that sleep (#9, docs/performance.md): an ato with no visible tab and no agent tab for
 +// AgensAtoSleep's `after` (10 min) discards its tabs, so its renderers go away; each tab keeps
@@ -10779,6 +10830,9 @@ index 0000000000..cddbbd3604
 +#define CHROME_BROWSER_AGENS_EMBED_AGENS_ATO_SLEEP_H_
 +
 +class Profile;
++namespace base {
++class FilePath;
++}
 +namespace content {
 +class WebContents;
 +}
@@ -10793,6 +10847,18 @@ index 0000000000..cddbbd3604
 +void SleepAto(Profile* profile);
 +// A sleeping tab being shown again: reloads it (a discard leaves "needs reload" off).
 +void WakeTab(content::WebContents* contents);
++
++// "Nunca pôr para dormir" (the ato's menu): the rule leaves this ato alone (agens.atos[<folder>]
++// .never_sleep in Local State). "Pôr o ato para dormir" still works on it.
++bool AtoNeverSleeps(const base::FilePath& dir);
++void SetAtoNeverSleeps(const base::FilePath& dir, bool never);
++
++// Configurações › Abas que dormem › "Atos fora de uso dormem inteiros" (Local State, on): an ato
++// the rule put to sleep also unloads (its windows close, the profile goes; atos "asleep"). Only in
++// the AgensBrowser on its own: embedded, the host owns the windows and atos stay loaded.
++inline constexpr char kAtosSleepWholePref[] = "agens.atos_sleep_whole";
++// True once after the rule unloaded the ato: its next window brings the tabs back (AgensWindow).
++bool TakeUnloaded(const base::FilePath& dir);
 +
 +}  // namespace agens
 +
@@ -11309,7 +11375,7 @@ index 0000000000..48063dd9a1
 +
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_COOKIE_POOL_H_
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
-index 9d0bf4646d..7fb5e14932 100644
+index 9d0bf4646d..4fe1799b5b 100644
 --- a/chrome/browser/agens/embed/agens_embed.h
 +++ b/chrome/browser/agens/embed/agens_embed.h
 @@ -36,6 +36,16 @@ typedef struct {
@@ -11382,7 +11448,7 @@ index 9d0bf4646d..7fb5e14932 100644
  
  // Address suggestions, from local sources only (history, bookmarks, the typed search); remote
  // search suggestions stay off. Call suggest on every edit, with "" to stop.
-@@ -109,12 +143,22 @@ typedef struct {
+@@ -109,18 +143,38 @@ typedef struct {
    const char* name;  // UTF-8
    int active;        // this window's ato
    int asleep;        // not loaded in memory right now
@@ -11391,6 +11457,7 @@ index 9d0bf4646d..7fb5e14932 100644
 +  const char* id;    // the profile folder name: stable while the list moves
 +  int tabs;          // its tabs in open windows, -1 when not loaded (unknown)
 +  long long memory_kb;  // what its awake tabs use; 0 asleep
++  int never_sleep;      // "Nunca pôr para dormir": the 10-min rule leaves it awake
  } AgensAto;
  typedef void (*AgensAtosChanged)(void* context, const AgensAto* atos, int count);
  void agens_window_set_atos_observer(AgensWindow* window, AgensAtosChanged observer, void* context);
@@ -11402,10 +11469,26 @@ index 9d0bf4646d..7fb5e14932 100644
 +// "Pôr o ato para dormir" (not this window's ato): every tab of that ato goes to sleep. The ato
 +// then reports `asleep`; switching to it wakes only the front tab.
 +void agens_window_sleep_ato(AgensWindow* window, int index);
++// "Nunca pôr para dormir" on the ato with that id (AgensAto.id); 0 lets it sleep again.
++void agens_window_set_ato_never_sleep(AgensWindow* window, const char* id, int never);
++// "Apagar ato…", after the person confirmed: its tabs, logins, history and the rest of its data go
++// (Chromium's profile deletion). Never the last ato. This window's own ato: its neighbor's window
++// opens in its place first.
++void agens_window_delete_ato(AgensWindow* window, const char* id);
++// This window's ato's folder (the Chromium profile), absolute, UTF-8 (agens://sobre "Perfil").
++void agens_window_ato_path(AgensWindow* window, char* out, int size);
  
  // The status line: the URL of the link under the pointer, or a page status. "" hides it.
  typedef void (*AgensStatusChanged)(void* context, const char* text);
-@@ -132,6 +176,12 @@ typedef struct {
+ void agens_window_set_status_observer(AgensWindow* window, AgensStatusChanged observer, void* context);
+ 
+-// Downloads of this session, newest first. `started` is 1 on the update that adds a new one.
++// The ato's downloads, newest first: this window's (since it opened) and, after them, the older
++// ones from Chromium's download history (`past`). `started` is 1 on the update that adds a new one.
+ typedef enum {
+   kAgensDownloading,
+   kAgensDownloaded,
+@@ -132,6 +186,13 @@ typedef struct {
    long long received, total;  // bytes; total is 0 when unknown
    AgensDownloadState state;
    int paused;
@@ -11415,10 +11498,11 @@ index 9d0bf4646d..7fb5e14932 100644
 +  int can_retry;         // failed and Chromium can resume or restart it
 +  int dangerous;         // held until the person decides: delete (remove) or keep
 +  int kept;              // kept although it was marked dangerous
++  int past;              // started before this window opened (history; only agens://downloads lists it)
  } AgensDownload;
  typedef void (*AgensDownloadsChanged)(void* context, const AgensDownload* downloads, int count,
                                        int started);
-@@ -140,6 +190,13 @@ void agens_window_set_downloads_observer(AgensWindow* window, AgensDownloadsChan
+@@ -140,6 +201,13 @@ void agens_window_set_downloads_observer(AgensWindow* window, AgensDownloadsChan
  void agens_window_download_open(AgensWindow* window, int index);       // the file
  void agens_window_download_show(AgensWindow* window, int index);       // in the Finder
  void agens_window_download_cancel(AgensWindow* window, int index);
@@ -11428,11 +11512,11 @@ index 9d0bf4646d..7fb5e14932 100644
 +// file stays on disk.
 +void agens_window_download_remove(AgensWindow* window, int index);
 +void agens_window_download_keep(AgensWindow* window, int index);  // a dangerous one, on purpose
-+void agens_window_downloads_clear(AgensWindow* window);  // "Limpar lista": all but the running ones
++void agens_window_downloads_clear(AgensWindow* window);  // "Limpar lista": this window's, but the running ones
  
  // --- Settings (the browser's own; not part of what the Agens app embeds).
  
-@@ -219,11 +276,24 @@ typedef struct {
+@@ -219,11 +287,24 @@ typedef struct {
    const char* name;
    const char* version;
    int enabled;
@@ -11458,7 +11542,7 @@ index 9d0bf4646d..7fb5e14932 100644
  
  // Senhas salvas. The list carries no passwords; agens_password_get copies one (the UI asks for
  // Touch ID first). Indexes refer to the last list delivered.
-@@ -255,7 +325,7 @@ void agens_bookmark_add_folder(AgensWindow* window, const char* title);  // at t
+@@ -255,7 +336,7 @@ void agens_bookmark_add_folder(AgensWindow* window, const char* title);  // at t
  // Results arrive through the observer: the current match (1-based, 0 for none) and the total.
  typedef void (*AgensFindChanged)(void* context, int current, int total);
  void agens_window_set_find_observer(AgensWindow* window, AgensFindChanged observer, void* context);
@@ -11467,7 +11551,7 @@ index 9d0bf4646d..7fb5e14932 100644
  void agens_find_stop(AgensWindow* window);
  
  // Saving a password the person just used on the active page. Fills `out` (strings valid until
-@@ -266,7 +336,9 @@ typedef struct {
+@@ -266,7 +347,9 @@ typedef struct {
    int update;  // a new password for a login already saved
  } AgensPasswordPrompt;
  int agens_password_prompt(AgensWindow* window, AgensPasswordPrompt* out);
@@ -11478,7 +11562,7 @@ index 9d0bf4646d..7fb5e14932 100644
  void agens_password_answer(AgensWindow* window, AgensPasswordAnswer answer);
  
  // A site asks for permissions (camera, location…): agens_ui_permission_prompt shows them, the
-@@ -279,6 +351,16 @@ typedef enum {
+@@ -279,6 +362,16 @@ typedef enum {
  } AgensPermissionAnswer;
  void agens_window_permission_answer(AgensWindow* window, AgensPermissionAnswer answer);
  
@@ -11495,7 +11579,7 @@ index 9d0bf4646d..7fb5e14932 100644
  // The site of the active page, for the panel behind the site icon. `pattern` is what
  // agens_site_exception_set takes for this site. Strings valid until the next call.
  typedef struct {
-@@ -291,13 +373,20 @@ AgensPermission agens_site_permission(AgensWindow* window, const char* kind);  /
+@@ -291,13 +384,20 @@ AgensPermission agens_site_permission(AgensWindow* window, const char* kind);  /
  // Cookies and storage of the active page's site only.
  void agens_site_clear_data(AgensWindow* window, AgensDoneFn done, void* context);
  
@@ -11519,7 +11603,7 @@ index 9d0bf4646d..7fb5e14932 100644
  } AgensExtensionButton;
  typedef void (*AgensExtensionButtonsChanged)(void* context, const AgensExtensionButton* list, int count,
                                               const char* installed);
-@@ -340,6 +429,7 @@ typedef enum {
+@@ -340,6 +440,7 @@ typedef enum {
    kAgensCommandFindNext,     // ⌘G
    kAgensCommandFindPrevious, // ⌘⇧G
    kAgensCommandPasswordPrompt,  // the page has a password to save or update: ask (see below)
@@ -11527,7 +11611,7 @@ index 9d0bf4646d..7fb5e14932 100644
  } AgensCommand;
  int agens_ui_command(void* chrome, AgensCommand command);
  // Opens Settings on a section ("senhas", "extensoes", "sobre"...; "" keeps the current one), or the
-@@ -354,10 +444,28 @@ void agens_ui_colors(void* chrome, unsigned* window, unsigned* page, unsigned* l
+@@ -354,10 +455,28 @@ void agens_ui_colors(void* chrome, unsigned* window, unsigned* page, unsigned* l
  // lights center on it; it follows the density).
  // Where the extensions button is (extension popups hang from it).
  AgensRect agens_ui_extensions_anchor(void* chrome);
@@ -12659,7 +12743,7 @@ index 0000000000..9787b1d770
 +
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EXTENSIONS_H_
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
-index 268d4dc7bd..ecc4933d88 100644
+index 268d4dc7bd..644fb1f3c1 100644
 --- a/chrome/browser/agens/embed/agens_window.h
 +++ b/chrome/browser/agens/embed/agens_window.h
 @@ -5,6 +5,7 @@
@@ -12693,8 +12777,15 @@ index 268d4dc7bd..ecc4933d88 100644
  #include "chrome/browser/browser_process.h"
  #include "components/bookmarks/browser/bookmark_model.h"
  #include "components/bookmarks/browser/base_bookmark_model_observer.h"
-@@ -48,7 +57,9 @@
+@@ -46,9 +55,16 @@
+ #include "chrome/browser/profiles/profile_attributes_entry.h"
+ #include "chrome/browser/profiles/profile_attributes_storage.h"
  #include "chrome/browser/profiles/profile_manager.h"
++#include "chrome/browser/profiles/delete_profile_helper.h"
++#include "chrome/browser/profiles/profile_metrics.h"
++#include "chrome/browser/prefs/session_startup_pref.h"
++#include "chrome/browser/sessions/session_restore.h"
++#include "chrome/browser/ui/startup/startup_tab.h"
  #include "chrome/browser/profiles/profile_window.h"
  #include "chrome/browser/search_engines/template_url_service_factory.h"
 +#include "components/prefs/pref_change_registrar.h"
@@ -12703,7 +12794,7 @@ index 268d4dc7bd..ecc4933d88 100644
  #include "components/search_engines/default_search_manager.h"
  #include "components/search_engines/template_url.h"
  #include "components/search_engines/template_url_data_util.h"
-@@ -60,6 +71,12 @@
+@@ -60,6 +76,12 @@
  #include "chrome/browser/ui/browser_element_identifiers.h"
  #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
  #include "chrome/browser/ui/tabs/tab_strip_model.h"
@@ -12716,7 +12807,7 @@ index 268d4dc7bd..ecc4933d88 100644
  #include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
  #include "components/favicon/content/content_favicon_driver.h"
  #include "chrome/browser/favicon/favicon_service_factory.h"
-@@ -69,6 +86,7 @@
+@@ -69,6 +91,7 @@
  #include "components/omnibox/browser/autocomplete_controller.h"
  #include "components/omnibox/browser/autocomplete_input.h"
  #include "components/omnibox/browser/autocomplete_match.h"
@@ -12724,7 +12815,7 @@ index 268d4dc7bd..ecc4933d88 100644
  #include "content/public/browser/navigation_controller.h"
  #include "content/public/browser/web_contents.h"
  #include "content/public/browser/navigation_handle.h"
-@@ -189,10 +207,18 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -189,15 +212,48 @@ struct AgensWindow : public TabStripModelObserver,
                       public download::DownloadItem::Observer,
                       public bookmarks::BaseBookmarkModelObserver,
                       public find_in_page::FindResultObserver,
@@ -12744,7 +12835,37 @@ index 268d4dc7bd..ecc4933d88 100644
      PreferDuckDuckGo();
      if (content::DownloadManager* manager = browser->GetProfile()->GetDownloadManager()) {
        downloads_manager = manager;
-@@ -230,7 +256,14 @@ struct AgensWindow : public TabStripModelObserver,
+       manager->AddObserver(this);
++      // What the history already loaded (older sessions); the rest arrives as OnDownloadCreated.
++      content::DownloadManager::DownloadVector all;
++      manager->GetAllDownloads(&all);
++      for (download::DownloadItem* item : all) AddDownload(item);
+     }
++    // After the window is in place (Chromium's own restore, if any, runs as it opens).
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE, base::BindOnce(&AgensWindow::RestoreUnloaded, weak.GetWeakPtr()));
++  }
++
++  // "Atos fora de uso dormem inteiros" closed this ato's windows (agens_ato_sleep.cc): its tabs
++  // come back into this one from the session, as "Continuar de onde parou" does (which Chromium
++  // already did when that is this ato's choice). The blank new tab the window opened with goes.
++  void RestoreUnloaded() {
++    Profile* profile = browser->GetProfile()->GetOriginalProfile();
++    if (!agens::TakeUnloaded(profile->GetPath()) || SessionRestore::IsRestoring(profile) ||
++        SessionStartupPref::GetStartupPref(profile->GetPrefs()).ShouldRestoreLastSession()) {
++      return;
++    }
++    content::WebContents* only = model()->count() == 1 ? model()->GetWebContentsAt(0) : nullptr;
++    const GURL url = only ? only->GetVisibleURL() : GURL();
++    const bool blank = only && (url.is_empty() || url.IsAboutBlank() ||
++                                (url.SchemeIs(content::kChromeUIScheme) && url.host() == chrome::kChromeUINewTabHost));
++    SessionRestore::RestoreSession(profile, browser,
++                                   SessionRestore::RESTORE_BROWSER | (blank ? SessionRestore::CLOBBER_CURRENT_TAB : 0),
++                                   StartupTabs());
+   }
+ 
+   // Each ato starts searching with DuckDuckGo. Only while nobody has picked a default yet: once
+@@ -230,18 +286,32 @@ struct AgensWindow : public TabStripModelObserver,
      }
    }
    ~AgensWindow() override {
@@ -12759,7 +12880,30 @@ index 268d4dc7bd..ecc4933d88 100644
      Storage().RemoveObserver(this);
      for (download::DownloadItem* item : downloads) item->RemoveObserver(this);
      if (downloads_manager) downloads_manager->RemoveObserver(this);
-@@ -274,8 +307,15 @@ struct AgensWindow : public TabStripModelObserver,
+   }
+ 
+-  // --- Downloads: this session's, newest first.
+-  void OnDownloadCreated(content::DownloadManager*, download::DownloadItem* item) override {
+-    if (item->IsTemporary() || item->IsTransient()) return;
++  // --- Downloads: the ato's, newest first; the ones before `opened` come from the history.
++  bool AddDownload(download::DownloadItem* item) {
++    if (item->IsTemporary() || item->IsTransient() || std::ranges::find(downloads, item) != downloads.end()) {
++      return false;
++    }
+     item->AddObserver(this);
+-    downloads.insert(downloads.begin(), item);
+-    NotifyDownloads(/*started=*/true);
++    auto newer = [](download::DownloadItem* a, download::DownloadItem* b) { return a->GetStartTime() > b->GetStartTime(); };
++    downloads.insert(std::ranges::upper_bound(downloads, item, newer, [](auto& p) { return p.get(); }), item);
++    return true;
++  }
++  void OnDownloadCreated(content::DownloadManager*, download::DownloadItem* item) override {
++    if (!AddDownload(item)) return;
++    NotifyDownloads(/*started=*/item->GetStartTime() >= opened);
+   }
+   void ManagerGoingDown(content::DownloadManager* manager) override {
+     for (download::DownloadItem* item : downloads) item->RemoveObserver(this);
+@@ -274,8 +344,16 @@ struct AgensWindow : public TabStripModelObserver,
          case download::DownloadItem::INTERRUPTED: state = kAgensDownloadFailed; break;
          default: break;
        }
@@ -12772,11 +12916,12 @@ index 268d4dc7bd..ecc4933d88 100644
 +                     item->GetEndTime().is_null() ? 0 : item->GetEndTime().InSecondsFSinceUnixEpoch(),
 +                     failed ? static_cast<int>(item->GetLastReason()) : 0, failed && item->CanResume(),
 +                     item->IsDangerous() && state == kAgensDownloading,
-+                     item->GetDangerType() == download::DOWNLOAD_DANGER_TYPE_USER_VALIDATED});
++                     item->GetDangerType() == download::DOWNLOAD_DANGER_TYPE_USER_VALIDATED,
++                     item->GetStartTime() < opened});
      }
      downloads_observer(downloads_context, out.data(), static_cast<int>(out.size()), started);
    }
-@@ -284,7 +324,81 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -284,7 +362,81 @@ struct AgensWindow : public TabStripModelObserver,
      return g_browser_process->profile_manager()->GetProfileAttributesStorage();
    }
  
@@ -12859,7 +13004,7 @@ index 268d4dc7bd..ecc4933d88 100644
      // Creation order, so an ato keeps its place and color: Chromium names profile folders
      // "Default", then "Profile 1", "Profile 2"…
      std::vector<ProfileAttributesEntry*> atos;
-@@ -304,40 +418,141 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -304,40 +456,163 @@ struct AgensWindow : public TabStripModelObserver,
    void NotifyAtos() {
      if (!atos_observer) return;
      std::vector<ProfileAttributesEntry*> entries = Atos();
@@ -12892,7 +13037,7 @@ index 268d4dc7bd..ecc4933d88 100644
 +      const bool active = entries[i]->GetPath() == current;
 +      atos.push_back({names[i].c_str(), active, !profile || (!active && agens::IsAtoSleeping(profile)),
 +                      AtoColor(entries[i], static_cast<int>(i)), AtoSharesCookies(entries[i]->GetPath()),
-+                      ids[i].c_str(), tabs, memory_kb});
++                      ids[i].c_str(), tabs, memory_kb, agens::AtoNeverSleeps(entries[i]->GetPath())});
      }
      atos_observer(atos_context, atos.data(), static_cast<int>(atos.size()));
    }
@@ -12942,6 +13087,28 @@ index 268d4dc7bd..ecc4933d88 100644
 +    if (!profile || profile->GetOriginalProfile() == browser->GetProfile()->GetOriginalProfile()) return;
 +    agens::SleepAto(profile);
 +    NotifyAtos();
++  }
++  // "Apagar ato…" (the chrome asked first): Chromium's profile deletion, which closes its windows
++  // and wipes the folder. This window's own ato: the neighbor's window opens over it first.
++  void DeleteAto(const std::string& id) {
++    std::vector<ProfileAttributesEntry*> atos = Atos();
++    auto it = std::ranges::find_if(atos, [&](auto* e) { return e->GetPath().BaseName().AsUTF8Unsafe() == id; });
++    if (atos.size() < 2 || it == atos.end()) return;  // the last ato stays
++    const base::FilePath path = (*it)->GetPath();
++    auto remove = [](const base::FilePath& path) {
++      g_browser_process->profile_manager()->GetDeleteProfileHelper().MaybeScheduleProfileForDeletion(
++          path, base::DoNothing(), ProfileMetrics::DELETE_PROFILE_SETTINGS);
++    };
++    if (path != browser->GetProfile()->GetOriginalProfile()->GetPath()) return remove(path);
++    const base::FilePath next = (it == atos.begin() ? atos[1] : *(it - 1))->GetPath();
++    profiles::SwitchToProfile(next, /*always_create=*/false,
++                              base::BindOnce(
++                                  [](decltype(remove) remove, const gfx::Rect& bounds, const base::FilePath& path,
++                                     BrowserWindowInterface* other) {
++                                    PlaceOver(bounds, other);
++                                    if (other) remove(path);  // not when the neighbor did not open
++                                  },
++                                  remove, browser->GetWindow()->GetBounds(), path));
 +  }
 +  // The address goes to the other ato in a new tab (no session: that ato has its own cookies).
 +  void MoveTabToAto(int index, int ato) {
@@ -13017,7 +13184,7 @@ index 268d4dc7bd..ecc4933d88 100644
      const gfx::Rect bounds = browser->GetWindow()->GetBounds();
      const std::u16string name = base::UTF8ToUTF16(base::StringPrintf("Ato %zu", Atos().size() + 1));
      manager->CreateProfileAsync(
-@@ -362,7 +577,10 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -362,7 +637,10 @@ struct AgensWindow : public TabStripModelObserver,
  
    // ProfileAttributesStorage::Observer:
    void OnProfileAdded(const base::FilePath&) override { NotifyAtos(); }
@@ -13029,7 +13196,7 @@ index 268d4dc7bd..ecc4933d88 100644
    void OnProfileNameChanged(const base::FilePath&, const std::u16string&) override { NotifyAtos(); }
  
    TabStripModel* model() { return browser->GetTabStripModel(); }
-@@ -370,6 +588,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -370,6 +648,7 @@ struct AgensWindow : public TabStripModelObserver,
    // Loading pages change a tab many times a frame (title, URL, favicon, loading); the UI gets one
    // update per run of the message loop instead of one per change.
    void Notify() {
@@ -13037,7 +13204,7 @@ index 268d4dc7bd..ecc4933d88 100644
      if (notify_pending) return;
      notify_pending = true;
      base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
-@@ -406,7 +625,8 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -406,7 +685,8 @@ struct AgensWindow : public TabStripModelObserver,
      const int count = model()->count();
      bookmarks::BookmarkModel* bookmarks =
          BookmarkModelFactory::GetForBrowserContextIfExists(browser->GetProfile());
@@ -13047,7 +13214,7 @@ index 268d4dc7bd..ecc4933d88 100644
      std::vector<std::vector<uint8_t>> icons(count);
      std::vector<AgensTab> tabs(count);
      struct Split { int layout = 0, first = 0; double ratio = 0.5; };
-@@ -455,6 +675,25 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -455,6 +735,25 @@ struct AgensWindow : public TabStripModelObserver,
                   zoom::ZoomController::FromWebContents(contents)
                       ? zoom::ZoomController::FromWebContents(contents)->GetZoomPercent()
                       : 100};
@@ -13073,7 +13240,7 @@ index 268d4dc7bd..ecc4933d88 100644
      }
      observer(context, tabs.data(), static_cast<int>(tabs.size()));
    }
-@@ -466,6 +705,11 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -466,6 +765,11 @@ struct AgensWindow : public TabStripModelObserver,
      NotifyAtos();  // cheap; keeps "asleep" fresh as atos load and unload
    }
    void OnTabChangedAt(tabs::TabInterface*, TabChangeType) override { Notify(); }
@@ -13085,7 +13252,13 @@ index 268d4dc7bd..ecc4933d88 100644
    void OnSplitTabChanged(const SplitTabChange&) override { Notify(); }
  
    void Suggest(const std::string& text) {
-@@ -582,6 +826,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -577,11 +881,13 @@ struct AgensWindow : public TabStripModelObserver,
+   bool notify_pending = false;
+   AgensStatusBubble status_bubble;
+   raw_ptr<content::DownloadManager> downloads_manager = nullptr;
++  const base::Time opened = base::Time::Now();  // downloads before it are past ones
+   std::vector<raw_ptr<download::DownloadItem>> downloads;
+   AgensDownloadsChanged downloads_observer = nullptr;
    raw_ptr<void> downloads_context = nullptr;
    base::CallbackListSubscription search_loaded_;
    base::CancelableTaskTracker history_tracker;
@@ -13093,7 +13266,7 @@ index 268d4dc7bd..ecc4933d88 100644
    raw_ptr<void> ui = nullptr;  // the chrome (agens_ui_*), set by the platform shell
    raw_ptr<views::View> extensions_anchor = nullptr;  // under the UI's extensions button
    AgensExtensionButtonsChanged extension_buttons_observer = nullptr;
-@@ -591,62 +836,99 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -591,62 +897,99 @@ struct AgensWindow : public TabStripModelObserver,
    base::ScopedObservation<extensions::ExtensionRegistry, extensions::ExtensionRegistryObserver>
        extensions_observation{this};
  
@@ -13212,7 +13385,7 @@ index 268d4dc7bd..ecc4933d88 100644
    AgensFindChanged find_observer = nullptr;
    raw_ptr<void> find_context = nullptr;
    base::ScopedObservation<find_in_page::FindTabHelper, find_in_page::FindResultObserver> find_observation{this};
-@@ -655,7 +937,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -655,7 +998,7 @@ struct AgensWindow : public TabStripModelObserver,
      content::WebContents* active = model()->GetActiveWebContents();
      return active ? find_in_page::FindTabHelper::FromWebContents(active) : nullptr;
    }
@@ -13221,7 +13394,7 @@ index 268d4dc7bd..ecc4933d88 100644
      find_in_page::FindTabHelper* helper = ActiveFind();
      if (!helper) return;
      if (!find_observation.IsObservingSource(helper)) {
-@@ -667,7 +949,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -667,7 +1010,7 @@ struct AgensWindow : public TabStripModelObserver,
        if (find_observer) find_observer(find_context, 0, 0);
        return;
      }
@@ -13263,7 +13436,7 @@ index 4eb24ab895..436be6abd7 100644
      progress_.Run(0, created ? "Criando o ato " + ato + "…" : "Usando o ato " + ato + "…");
      manager->CreateProfileAsync(
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
-index cfdc014cf4..363e3f3770 100644
+index cfdc014cf4..939468d7f4 100644
 --- a/chrome/browser/agens/embed/native_shell.cc
 +++ b/chrome/browser/agens/embed/native_shell.cc
 @@ -4,6 +4,8 @@
@@ -13295,7 +13468,7 @@ index cfdc014cf4..363e3f3770 100644
  
  namespace {
  base::flat_set<const StatusBubble*>& NativeBubbles() {
-@@ -93,6 +99,13 @@ void agens_window_set_atos_observer(AgensWindow* w, AgensAtosChanged observer, v
+@@ -93,12 +99,34 @@ void agens_window_set_atos_observer(AgensWindow* w, AgensAtosChanged observer, v
    w->atos_context = context;
    w->NotifyAtos();
  }
@@ -13309,7 +13482,28 @@ index cfdc014cf4..363e3f3770 100644
  void agens_window_switch_ato(AgensWindow* w, int index) {
    w->SwitchAto(index);
  }
-@@ -117,6 +130,33 @@ void agens_window_download_show(AgensWindow* w, int index) {
+ void agens_window_new_ato(AgensWindow* w) {
+   w->NewAto();
+ }
++void agens_window_set_ato_never_sleep(AgensWindow* w, const char* id, int never) {
++  for (ProfileAttributesEntry* entry : AgensWindow::Atos()) {
++    if (entry->GetPath().BaseName().AsUTF8Unsafe() == id) agens::SetAtoNeverSleeps(entry->GetPath(), never);
++  }
++}
++void agens_window_delete_ato(AgensWindow* w, const char* id) {
++  w->DeleteAto(id);
++}
++void agens_window_ato_path(AgensWindow* w, char* out, int size) {
++  if (size <= 0) return;
++  const std::string v = w->browser->GetProfile()->GetOriginalProfile()->GetPath().AsUTF8Unsafe();
++  const size_t n = std::min(v.size(), static_cast<size_t>(size - 1));
++  std::copy_n(v.data(), n, out);
++  out[n] = 0;
++}
+ void agens_window_set_status_observer(AgensWindow* w, AgensStatusChanged observer, void* context) {
+   w->status_bubble.observer = observer;
+   w->status_bubble.context = context;
+@@ -117,6 +145,35 @@ void agens_window_download_show(AgensWindow* w, int index) {
  void agens_window_download_cancel(AgensWindow* w, int index) {
    if (download::DownloadItem* item = w->DownloadAt(index)) item->Cancel(/*user_cancel=*/true);
  }
@@ -13336,14 +13530,16 @@ index cfdc014cf4..363e3f3770 100644
 +void agens_window_downloads_clear(AgensWindow* w) {
 +  std::vector<download::DownloadItem*> done;
 +  for (download::DownloadItem* item : w->downloads) {
-+    if (item->GetState() != download::DownloadItem::IN_PROGRESS) done.push_back(item);
++    if (item->GetState() != download::DownloadItem::IN_PROGRESS && item->GetStartTime() >= w->opened) {
++      done.push_back(item);
++    }
 +  }
 +  for (download::DownloadItem* item : done) item->Remove();  // each Remove changes w->downloads
 +}
  void agens_window_set_color_mode(AgensWindow* w, AgensColorMode mode) {
    const auto scheme = mode == kAgensModeLight  ? ThemeService::BrowserColorScheme::kLight
                        : mode == kAgensModeDark ? ThemeService::BrowserColorScheme::kDark
-@@ -370,12 +410,23 @@ void agens_extensions(AgensWindow* w, AgensExtensionsFn fn, void* context) {
+@@ -370,12 +427,23 @@ void agens_extensions(AgensWindow* w, AgensExtensionsFn fn, void* context) {
    extensions::ExtensionRegistry* registry = extensions::ExtensionRegistry::Get(profile);
    std::vector<scoped_refptr<const extensions::Extension>> shown;
    for (const auto& e : registry->GenerateInstalledExtensionsSet()) {
@@ -13371,7 +13567,7 @@ index cfdc014cf4..363e3f3770 100644
    }
    fn(context, out.data(), static_cast<int>(out.size()));
  }
-@@ -388,11 +439,21 @@ void agens_extension_set_enabled(AgensWindow* w, const char* id, int enabled) {
+@@ -388,11 +456,21 @@ void agens_extension_set_enabled(AgensWindow* w, const char* id, int enabled) {
      registrar->DisableExtension(id, {extensions::disable_reason::DISABLE_USER_ACTION});
    }
  }
@@ -13397,7 +13593,7 @@ index cfdc014cf4..363e3f3770 100644
  }
  
  namespace {
-@@ -473,13 +534,23 @@ void agens_password_remove(AgensWindow* w, int index) {
+@@ -473,13 +551,23 @@ void agens_password_remove(AgensWindow* w, int index) {
    saved->logins.erase(saved->logins.begin() + index);
  }
  
@@ -13422,7 +13618,7 @@ index cfdc014cf4..363e3f3770 100644
      case kAgensPermissionDeny: delegate->Deny(options); break;
      case kAgensPermissionDismiss: delegate->Dismiss(options); break;
    }
-@@ -535,6 +606,7 @@ void agens_extension_click(AgensWindow* w, const char* id) {
+@@ -535,6 +623,7 @@ void agens_extension_click(AgensWindow* w, const char* id) {
    const extensions::Extension* extension =
        extensions::ExtensionRegistry::Get(profile)->enabled_extensions().GetByID(id ? id : "");
    content::WebContents* active = w->model()->GetActiveWebContents();
@@ -13430,7 +13626,7 @@ index cfdc014cf4..363e3f3770 100644
    auto* runner = active ? extensions::ExtensionActionRunner::GetForWebContents(active) : nullptr;
    if (!extension || !runner) return;
    if (runner->RunAction(extension, /*grant_tab_permissions=*/true) != extensions::ExtensionAction::ShowAction::kShowPopup) {
-@@ -559,8 +631,8 @@ void agens_window_set_find_observer(AgensWindow* w, AgensFindChanged observer, v
+@@ -559,8 +648,8 @@ void agens_window_set_find_observer(AgensWindow* w, AgensFindChanged observer, v
    w->find_observer = observer;
    w->find_context = context;
  }
@@ -13441,7 +13637,7 @@ index cfdc014cf4..363e3f3770 100644
  }
  void agens_find_stop(AgensWindow* w) {
    w->StopFind();
-@@ -608,9 +680,13 @@ int agens_password_prompt(AgensWindow* w, AgensPasswordPrompt* out) {
+@@ -608,9 +697,13 @@ int agens_password_prompt(AgensWindow* w, AgensPasswordPrompt* out) {
    controller->OnBubbleShown();  // our panel is the bubble
    return 1;
  }
@@ -13455,7 +13651,7 @@ index cfdc014cf4..363e3f3770 100644
    const bool update = controller->GetState() == password_manager::ui::PENDING_PASSWORD_UPDATE_STATE;
    if (answer == kAgensPasswordSave) {
      const password_manager::PasswordForm& form = controller->GetPendingPassword();
-@@ -688,6 +764,27 @@ void agens_window_move_tab(AgensWindow* w, int from, int to) {
+@@ -688,6 +781,27 @@ void agens_window_move_tab(AgensWindow* w, int from, int to) {
      w->model()->MoveWebContentsAt(from, to, /*select_after_move=*/false);
    }
  }
@@ -13483,7 +13679,7 @@ index cfdc014cf4..363e3f3770 100644
  void agens_window_split(AgensWindow* w, int index, int layout) {
    TabStripModel* m = w->model();
    const int active = m->active_index();
-@@ -707,11 +804,44 @@ void agens_window_unsplit(AgensWindow* w, int index) {
+@@ -707,11 +821,44 @@ void agens_window_unsplit(AgensWindow* w, int index) {
  void agens_window_set_pinned(AgensWindow* w, int index, int pinned) {
    if (w->model()->ContainsIndex(index)) w->model()->SetTabPinned(index, pinned);
  }
@@ -13528,7 +13724,7 @@ index cfdc014cf4..363e3f3770 100644
  void agens_window_navigate(AgensWindow* w, const char* text) {
    content::WebContents* active = w->model()->GetActiveWebContents();
    std::u16string input = base::UTF8ToUTF16(text ? text : "");
-@@ -760,8 +890,14 @@ void agens_window_show_site_info(AgensWindow* w) {
+@@ -760,8 +907,14 @@ void agens_window_show_site_info(AgensWindow* w) {
      ShowPageInfoDialog(active, base::DoNothing(), bubble_anchor_util::Anchor::kLocationBar);
    }
  }
@@ -13545,7 +13741,7 @@ index cfdc014cf4..363e3f3770 100644
  }
  void agens_window_stop(AgensWindow* w) {
    chrome::ExecuteCommand(w->browser, IDC_STOP);
-@@ -814,6 +950,13 @@ void NativeTabStateChanged(views::Widget*) {}
+@@ -814,6 +967,13 @@ void NativeTabStateChanged(views::Widget*) {}
  void ConfirmCloseWithDownloads(views::Widget*, int, base::OnceCallback<void(bool)> callback) {
    std::move(callback).Run(true);
  }
@@ -13559,7 +13755,7 @@ index cfdc014cf4..363e3f3770 100644
  #endif
  
  bool IsNativeStatusBubble(const StatusBubble* bubble) {
-@@ -840,6 +983,12 @@ const char* NativeSectionFor(const GURL& url) {
+@@ -840,6 +1000,12 @@ const char* NativeSectionFor(const GURL& url) {
    if (host == "help") return "sobre";
    if (host != "settings") return nullptr;
    if (path == "/help") return "sobre";
@@ -13572,7 +13768,7 @@ index cfdc014cf4..363e3f3770 100644
    if (path == "/passwords") return "senhas";
    if (path == "/content" || path == "/privacy" || path == "/security" || path == "/clearBrowserData") return "privacidade";
    if (path == "/searchEngines") return "busca";
-@@ -872,6 +1021,12 @@ class NativePageThrottle : public content::NavigationThrottle {
+@@ -872,6 +1038,12 @@ class NativePageThrottle : public content::NavigationThrottle {
      if (IsBlockedHost(url.host())) return {BLOCK_REQUEST, net::ERR_BLOCKED_BY_CLIENT};
      const char* section = NativeSectionFor(url);
      if (!section || !navigation_handle()->IsInPrimaryMainFrame()) return PROCEED;
@@ -14454,7 +14650,7 @@ index 5d7ca90415..40e1e27207 100644
    auto* shell = widget && widget->GetRootView()
                      ? views::AsViewClass<NativeShellView>(
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
-index 3c18c4eab1..048e445418 100644
+index 3c18c4eab1..0a7c5c377e 100644
 --- a/chrome/browser/agens/ui/chrome_mac.mm
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
 @@ -21,6 +21,8 @@
@@ -14891,7 +15087,7 @@ index 3c18c4eab1..048e445418 100644
  @end
  
  // One suggestion (prototype .sug): icon, text, detail on the right.
-@@ -747,30 +976,90 @@ - (void)refresh {
+@@ -747,30 +976,93 @@ - (void)refresh {
  // One ato in the foot row: a 30x28 button (same box as "+") with the monogram tile centered.
  // The chrome draws the warm dot under the current one, outside the box (prototype .space::after).
  @interface AgensAtoButton : AgensHoverView
@@ -14900,6 +15096,7 @@ index 3c18c4eab1..048e445418 100644
 +@property(nonatomic, readonly) int tabs;  // -1 unknown
 +@property(nonatomic, readonly) long long memoryKb;
 +@property(nonatomic, readonly) NSString* name;
++@property(nonatomic, readonly) BOOL neverSleep;  // "Nunca pôr para dormir"
 +@property(nonatomic, copy) void (^onHover)(BOOL inside);
 +@property(nonatomic, copy) NSMenu* (^menuBuilder)(void);
  - (void)updateWith:(const AgensAto&)ato index:(int)index;
@@ -14914,6 +15111,7 @@ index 3c18c4eab1..048e445418 100644
 +@synthesize tabs = _tabs;
 +@synthesize memoryKb = _memoryKb;
 +@synthesize name = _name;
++@synthesize neverSleep = _neverSleep;
 +@synthesize onHover = _onHover;
 +@synthesize menuBuilder = _menuBuilder;
 +- (void)mouseEntered:(NSEvent*)event {
@@ -14971,6 +15169,7 @@ index 3c18c4eab1..048e445418 100644
 +  _asleep = ato.asleep && !ato.active;  // the ato in use never sleeps
 +  _tabs = ato.tabs;
 +  _memoryKb = ato.memory_kb;
++  _neverSleep = ato.never_sleep != 0;
 +  _tile.alphaValue = _asleep ? 0.4 : 1;
 +  _moon.hidden = !_asleep;
 +  self.toolTip = nil;  // the chrome's balloon says it (prototype .tip): name, state, memory, tabs
@@ -14986,7 +15185,7 @@ index 3c18c4eab1..048e445418 100644
  }
  @end
  
-@@ -856,12 +1145,14 @@ - (void)layout {
+@@ -856,12 +1148,14 @@ - (void)layout {
  @interface AgensMenuRow : AgensHoverView
  - (instancetype)initWithIcon:(NSString*)icon title:(NSString*)title key:(NSString*)key;
  - (void)setIconImage:(NSImage*)image;
@@ -15001,7 +15200,7 @@ index 3c18c4eab1..048e445418 100644
  - (instancetype)initWithIcon:(NSString*)icon title:(NSString*)title key:(NSString*)key {
    if ((self = [super initWithFrame:NSZeroRect])) {
      self.radius = 7;
-@@ -889,9 +1180,22 @@ - (void)layout {
+@@ -889,9 +1183,22 @@ - (void)layout {
    _title.frame = NSMakeRect(37, 8, w - 37 - (_key.stringValue.length ? 70 : 10), 18);
  }
  - (void)refresh {
@@ -15026,7 +15225,7 @@ index 3c18c4eab1..048e445418 100644
  }
  - (void)setIconImage:(NSImage*)image {  // a picture of its own (an extension's icon), not tinted
    _icon.image = image;
-@@ -899,98 +1203,382 @@ - (void)setIconImage:(NSImage*)image {  // a picture of its own (an extension's
+@@ -899,98 +1206,382 @@ - (void)setIconImage:(NSImage*)image {  // a picture of its own (an extension's
  }
  @end
  
@@ -15470,7 +15669,7 @@ index 3c18c4eab1..048e445418 100644
  }
  @end
  
-@@ -1003,6 +1591,258 @@ - (NSView*)hitTest:(NSPoint)point {
+@@ -1003,6 +1594,258 @@ - (NSView*)hitTest:(NSPoint)point {
  }
  @end
  
@@ -15729,7 +15928,7 @@ index 3c18c4eab1..048e445418 100644
  // ---------------------------------------------------------------------------------------------
  // Configurações (prototype .settings): a window with the section list on the left (252 pt, 36 pt
  // rows, Agens icons) and the section on the right. v1 has Aparência, Busca and Atos of our own;
-@@ -1015,6 +1855,9 @@ - (void)toggleSidebar;
+@@ -1015,6 +1858,9 @@ - (void)toggleSidebar;
  - (BOOL)tabsOnTop;
  - (void)toggleTabsPosition;
  - (NSArray<NSString*>*)atoNamesForSettings;
@@ -15739,7 +15938,7 @@ index 3c18c4eab1..048e445418 100644
  - (NSImage*)extensionIcon:(NSString*)extensionId;
  @end
  
-@@ -1032,6 +1875,43 @@ - (BOOL)isFlipped {
+@@ -1032,6 +1878,43 @@ - (BOOL)isFlipped {
  }
  @end
  
@@ -15783,7 +15982,7 @@ index 3c18c4eab1..048e445418 100644
  static AgensSettings* g_settings;
  
  @implementation AgensSettings {
-@@ -1052,12 +1932,15 @@ @implementation AgensSettings {
+@@ -1052,12 +1935,15 @@ @implementation AgensSettings {
    // Exceções por site and extensions, as last listed (rows address them by tag)
    std::vector<std::pair<std::string, std::string>> _exceptions;  // site, kind
    std::vector<std::string> _extensionIds, _extensionNames;
@@ -15799,7 +15998,7 @@ index 3c18c4eab1..048e445418 100644
    NSSearchField* _loginSearch;
    CGFloat _loginsY;
    NSString* _passwordStatus;
-@@ -1128,6 +2011,7 @@ + (void)showFor:(AgensWindow*)window collapsed:(BOOL)collapsed chrome:(id<AgensS
+@@ -1128,6 +2014,7 @@ + (void)showFor:(AgensWindow*)window collapsed:(BOOL)collapsed chrome:(id<AgensS
  }
  + (void)forget:(AgensWindow*)window {
    if (g_settings && g_settings->_browser == window) {
@@ -15807,7 +16006,7 @@ index 3c18c4eab1..048e445418 100644
      g_settings->_browser = nullptr;
      [g_settings close];
    }
-@@ -1152,6 +2036,7 @@ - (instancetype)init {
+@@ -1152,6 +2039,7 @@ - (instancetype)init {
      _clearWhat = kAgensClearHistory | kAgensClearCookies | kAgensClearCache;
      _importWhat = kAgensImportBookmarks | kAgensImportHistory | kAgensImportPasswords | kAgensImportCookies |
                    kAgensImportExtensions;
@@ -15815,7 +16014,7 @@ index 3c18c4eab1..048e445418 100644
      _revealed = -1;
      AgensFlippedView* root = [[AgensFlippedView alloc] init];
      root.wantsLayer = YES;
-@@ -1291,6 +2176,7 @@ - (NSSegmentedControl*)segments:(NSArray<NSString*>*)labels selected:(NSInteger)
+@@ -1291,6 +2179,7 @@ - (NSSegmentedControl*)segments:(NSArray<NSString*>*)labels selected:(NSInteger)
  - (void)showSection:(NSString*)key {
    if (![key isEqualToString:_section]) {  // leaving a page forgets what it showed
      _loginsFresh = NO;
@@ -15823,7 +16022,7 @@ index 3c18c4eab1..048e445418 100644
      _revealed = -1;
      _revealedPassword.clear();
      _clearStatus = _resetStatus = _passwordStatus = nil;
-@@ -1356,6 +2242,12 @@ - (void)showSection:(NSString*)key {
+@@ -1356,6 +2245,17 @@ - (void)showSection:(NSString*)key {
                                     values:{1, 2, 5, 15, 30, 60, 120}];
      if (minutes == 120 && ![self sleepTimeChosen]) [after selectItemWithTag:5];  // never chosen: our 5 minutes apply
      y = [self option:@"Dormir depois de" detail:@"Áudio, câmera, upload, formulário e abas fixadas não dormem." control:after y:y];
@@ -15833,10 +16032,15 @@ index 3c18c4eab1..048e445418 100644
 +    card.target = self;
 +    card.action = @selector(setCardMemory:);
 +    y = [self option:@"Mostrar a memória no cartão da aba" detail:@"Ao parar o ponteiro numa aba." control:card y:y];
++    // agens::kAtosSleepWholePref (Local State): an ato the 10-min rule put to sleep also unloads.
++    y = [self option:@"Atos fora de uso dormem inteiros"
++              detail:@"Só o ato aberto fica carregado. Ao abrir de novo, as abas voltam."
++             control:[self prefSwitch:"agens.atos_sleep_whole"]
++                   y:y];
      y = [self neverSleepList:y];
    } else if ([key isEqualToString:@"atos"]) {
      y = [self fillAtos:y];
-@@ -1421,8 +2313,15 @@ - (void)showSection:(NSString*)key {
+@@ -1421,8 +2321,15 @@ - (void)showSection:(NSString*)key {
    } else if ([key isEqualToString:@"extensoes"]) {
      y = [self fillExtensions:y];
      // Like Brave: installs and updates come from Google's store (the only Google service we use).
@@ -15854,7 +16058,7 @@ index 3c18c4eab1..048e445418 100644
                     y:y];
      y = [self option:@"Atualizar extensões sozinhas" detail:@"Pergunta à loja do Google por versões novas de tempos em tempos."
               control:[self prefSwitch:"agens.extensions.auto_update"]
-@@ -1432,10 +2331,11 @@ - (void)showSection:(NSString*)key {
+@@ -1432,10 +2339,11 @@ - (void)showSection:(NSString*)key {
      NSButton* proxy = [NSButton buttonWithTitle:@"Abrir…" target:self action:@selector(openProxy:)];
      y = [self option:@"Configurações de proxy" detail:@"Usa as do macOS." control:proxy y:y];
      y = [self option:@"Restaurar as configurações originais" detail:nil control:[self subButton:@"Restaurar…" key:@"restaurar"] y:y];
@@ -15867,7 +16071,7 @@ index 3c18c4eab1..048e445418 100644
      y = [self option:@"Licença" detail:@"BSD-3-Clause" control:[self linkButton:@"github.com/SugiyamaLabs/browser" url:@"https://github.com/SugiyamaLabs/browser"] y:y];
      y = [self option:@"Avisos de código aberto" detail:@"Chromium, ungoogled-chromium e as listas do bloqueador." control:[self subButton:@"Ver…" key:@"avisos"] y:y];
    }
-@@ -1602,7 +2502,10 @@ static void EnginesListed(void* context, const AgensSearchEngine* engines, int c
+@@ -1602,7 +2510,10 @@ static void EnginesListed(void* context, const AgensSearchEngine* engines, int c
  - (CGFloat)fillAtos:(CGFloat)y {
    // The atos list comes from the chrome (it already observes them); rename in place.
    NSArray<NSString*>* names = [_chrome atoNamesForSettings];
@@ -15879,7 +16083,7 @@ index 3c18c4eab1..048e445418 100644
      NSTextField* field = [NSTextField textFieldWithString:names[i]];
      field.tag = i;
      field.delegate = self;
-@@ -1610,12 +2513,18 @@ - (CGFloat)fillAtos:(CGFloat)y {
+@@ -1610,12 +2521,18 @@ - (CGFloat)fillAtos:(CGFloat)y {
      field.action = @selector(renameAto:);
      field.frame = NSMakeRect(0, 0, 220, 24);
      y = [self option:[NSString stringWithFormat:@"Ato %lu", (unsigned long)i + 1] detail:nil control:field y:y];
@@ -15899,7 +16103,7 @@ index 3c18c4eab1..048e445418 100644
    note.frame = NSMakeRect(32, y + 44, NSWidth(_pane.bounds) - 64, 16);
    [_pane addSubview:note];
    return y + 70;
-@@ -1772,6 +2681,9 @@ - (CGFloat)neverSleepList:(CGFloat)y {
+@@ -1772,6 +2689,9 @@ - (CGFloat)neverSleepList:(CGFloat)y {
    }
    return y;
  }
@@ -15909,7 +16113,7 @@ index 3c18c4eab1..048e445418 100644
  - (void)addNeverSleepButton:(NSButton*)button {
    [self addNeverSleep:objc_getAssociatedObject(button, "field")];
  }
-@@ -1818,6 +2730,48 @@ - (void)setEngine:(NSPopUpButton*)popup {
+@@ -1818,6 +2738,48 @@ - (void)setEngine:(NSPopUpButton*)popup {
  - (void)renameAto:(NSTextField*)field {
    if (_browser && field.stringValue.length) agens_window_rename_ato(_browser, (int)field.tag, field.stringValue.UTF8String);
  }
@@ -15958,7 +16162,7 @@ index 3c18c4eab1..048e445418 100644
  - (void)newAto:(id)sender {
    if (_browser) agens_window_new_ato(_browser);
  }
-@@ -1926,7 +2880,16 @@ - (CGFloat)adblockSection:(CGFloat)y {
+@@ -1926,7 +2888,16 @@ - (CGFloat)adblockSection:(CGFloat)y {
    y = [self option:@"Listas"
              detail:_adblockStatus ?: last
             control:[self buttons:@[ now ]] y:y];
@@ -15976,7 +16180,7 @@ index 3c18c4eab1..048e445418 100644
  }
  - (void)setAdblockLevel:(NSSegmentedControl*)seg {
    agens_adblock_set_level((int)seg.selectedSegment);
-@@ -2265,39 +3228,68 @@ - (void)removeException:(NSButton*)button {
+@@ -2265,39 +3236,68 @@ - (void)removeException:(NSButton*)button {
    [self showSection:@"excecoes"];
  }
  
@@ -16057,7 +16261,7 @@ index 3c18c4eab1..048e445418 100644
    }
    return y;
  }
-@@ -2305,11 +3297,34 @@ - (void)toggleExtension:(NSSwitch*)sw {
+@@ -2305,11 +3305,34 @@ - (void)toggleExtension:(NSSwitch*)sw {
    const size_t i = sw.tag;
    if (_browser && i < _extensionIds.size()) {
      agens_extension_set_enabled(_browser, _extensionIds[i].c_str(), sw.state == NSControlStateValueOn);
@@ -16092,7 +16296,7 @@ index 3c18c4eab1..048e445418 100644
    NSAlert* alert = [[NSAlert alloc] init];
    alert.messageText = [NSString stringWithFormat:@"Remover %@?", @(_extensionNames[i].c_str())];
    alert.informativeText = @"Sai deste ato junto com os dados dela.";
-@@ -2320,17 +3335,39 @@ - (void)confirmRemoveExtension:(NSButton*)button {
+@@ -2320,16 +3343,38 @@ - (void)confirmRemoveExtension:(NSButton*)button {
    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
      AgensSettings* strong = weak;
      if (r != NSAlertFirstButtonReturn || !strong || !strong->_browser) return;
@@ -16107,7 +16311,6 @@ index 3c18c4eab1..048e445418 100644
 -- (CGFloat)passwordsPage:(CGFloat)y {
 -  if (!_loginsFresh && _browser) {
 -    _loginsFresh = YES;
--    agens_passwords(_browser, LoginsListed, (__bridge void*)self);
 +- (void)removeExtensionFromMenu:(NSMenuItem*)item {
 +  if (!_browser) return;
 +  agens_extension_remove(_browser, [item.representedObject UTF8String], item.tag == 1);
@@ -16136,11 +16339,10 @@ index 3c18c4eab1..048e445418 100644
 +- (CGFloat)passwordsPage:(CGFloat)y {
 +  if (!_loginsFresh && _browser) {
 +    _loginsFresh = YES;
-+    agens_passwords(_browser, LoginsListed, (__bridge void*)self);
+     agens_passwords(_browser, LoginsListed, (__bridge void*)self);
      return [self info:@"Carregando…" detail:nil note:@"" y:y];
    }
-   if (!_loginSearch) {
-@@ -2340,6 +3377,10 @@ - (CGFloat)passwordsPage:(CGFloat)y {
+@@ -2340,6 +3385,10 @@ - (CGFloat)passwordsPage:(CGFloat)y {
      _loginSearch.action = @selector(searchLogins:);
      _loginSearch.sendsSearchStringImmediately = YES;
    }
@@ -16151,7 +16353,7 @@ index 3c18c4eab1..048e445418 100644
    _loginSearch.frame = NSMakeRect(32, y, NSWidth(_pane.bounds) - 64, 28);
    [_pane addSubview:_loginSearch];
    _loginsY = y + 40;
-@@ -2360,15 +3401,23 @@ - (CGFloat)fillLogins {
+@@ -2360,15 +3409,23 @@ - (CGFloat)fillLogins {
      NSString* site = @(_logins[i].first.c_str());
      NSString* user = _logins[i].second.empty() ? @"(sem usuário)" : @(_logins[i].second.c_str());
      if (q.length && ![site.lowercaseString containsString:q] && ![user.lowercaseString containsString:q]) continue;
@@ -16176,7 +16378,7 @@ index 3c18c4eab1..048e445418 100644
    for (NSUInteger k = before; k < _pane.subviews.count; ++k) _pane.subviews[k].identifier = @"login";
    NSRect f = _pane.frame;
    f.size.height = MAX(y + 40, NSHeight(_paneScroll.frame));
-@@ -2396,7 +3445,7 @@ - (void)unlockThen:(void (^)(void))then {
+@@ -2396,7 +3453,7 @@ - (void)unlockThen:(void (^)(void))then {
                        dispatch_async(dispatch_get_main_queue(), ^{
                          AgensSettings* strong = weak;
                          if (!ok || !strong) return;
@@ -16185,7 +16387,7 @@ index 3c18c4eab1..048e445418 100644
                          then();
                        });
                      }];
-@@ -2423,6 +3472,15 @@ - (void)revealPassword:(NSButton*)button {
+@@ -2423,6 +3480,15 @@ - (void)revealPassword:(NSButton*)button {
      strong->_revealed = i;
      strong->_revealedPassword = [strong passwordAt:i];
      [strong fillLogins];
@@ -16201,7 +16403,7 @@ index 3c18c4eab1..048e445418 100644
    }];
  }
  - (void)copyPassword:(NSButton*)button {
-@@ -2432,31 +3490,45 @@ - (void)copyPassword:(NSButton*)button {
+@@ -2432,31 +3498,45 @@ - (void)copyPassword:(NSButton*)button {
      AgensSettings* strong = weak;
      if (!strong) return;
      const std::string password = [strong passwordAt:i];
@@ -16267,7 +16469,7 @@ index 3c18c4eab1..048e445418 100644
  }
  @end
  
-@@ -2634,7 +3706,7 @@ - (void)showStep:(int)step {
+@@ -2634,7 +3714,7 @@ - (void)showStep:(int)step {
        _atoName = [NSTextField textFieldWithString:@"Pessoal"];
        _atoName.frame = NSMakeRect(170, y + 30, 300, 26);
        NSTextField* cookies = Label(12, NSFontWeightRegular, kDim);
@@ -16276,7 +16478,7 @@ index 3c18c4eab1..048e445418 100644
        cookies.frame = NSMakeRect(90, y + 76, 460, 16);
        cookies.alignment = NSTextAlignmentCenter;
        for (NSView* v in @[ label, _atoName, cookies ]) [_body addSubview:v];
-@@ -3116,6 +4188,9 @@ - (void)layout {
+@@ -3116,6 +4196,9 @@ - (void)layout {
      if ([v isKindOfClass:AgensListRow.class]) {
        v.frame = NSMakeRect(x0 - 10, y, cw + 20, 32);  // the hover box reaches past the text, like .row's padding
        y += 33;
@@ -16286,12 +16488,12 @@ index 3c18c4eab1..048e445418 100644
      } else {  // a group's header, or the empty text
        y += 22;
        v.frame = NSMakeRect(x0, y, cw, 25);
-@@ -3192,6 +4267,149 @@ - (void)setVisits:(const AgensVisit*)visits count:(int)count {
+@@ -3192,6 +4275,180 @@ - (void)setVisits:(const AgensVisit*)visits count:(int)count {
  }
  @end
  
 +// agens://downloads (prototype #paginas "Downloads"): this ato's downloads as the panel has them,
-+// in full, with search. The chrome fills it (fillDownloadsPage).
++// in full, plus the older ones from the download history, with search. The chrome fills it (fillDownloadsPage).
 +@interface AgensDownloadsPage : AgensListPage
 +@property(nonatomic, copy) void (^filler)(void);
 +@end
@@ -16299,7 +16501,7 @@ index 3c18c4eab1..048e445418 100644
 +@synthesize filler = _filler;
 +- (instancetype)init {
 +  return [super initWithTitle:@"Downloads" search:@"Buscar downloads" action:@"Abrir a pasta"
-+                         note:@"Pasta: ~/Downloads · desde que a janela abriu; os arquivos ficam lá."];
++                         note:@"Pasta: ~/Downloads · os de antes desta janela vêm do histórico; os arquivos ficam lá."];
 +}
 +- (void)reload {
 +  if (_filler) _filler();
@@ -16311,12 +16513,14 @@ index 3c18c4eab1..048e445418 100644
 +@interface AgensAboutView : AgensFlippedView
 +@property(nonatomic, copy) void (^onLicenses)(void);
 +@property(nonatomic, copy) void (^onBlocker)(void);  // Configurações › Bloqueador, where the credits also are
++@property(nonatomic, copy) NSString* profilePath;  // the window's ato's folder ("Perfil")
 +- (void)refreshTheme;
 +@end
 +@implementation AgensAboutView {
 +  NSImageView* _mark;
 +  NSTextField* _name;
 +  NSTextField* _maker;
++  NSTextField* _pill;
 +  NSTextField* _table;
 +  NSTextField* _lists;
 +  NSButton* _copy;
@@ -16325,6 +16529,12 @@ index 3c18c4eab1..048e445418 100644
 +}
 +@synthesize onLicenses = _onLicenses;
 +@synthesize onBlocker = _onBlocker;
++@synthesize profilePath = _profilePath;
++- (void)setProfilePath:(NSString*)path {
++  _profilePath = [path.stringByAbbreviatingWithTildeInPath copy];
++  [self refreshTheme];
++  self.needsLayout = YES;
++}
 +- (instancetype)initWithFrame:(NSRect)frame {
 +  if ((self = [super initWithFrame:frame])) {
 +    self.wantsLayer = YES;
@@ -16334,6 +16544,9 @@ index 3c18c4eab1..048e445418 100644
 +    _name.stringValue = @"Navegador Agens";
 +    _maker = Label(13, NSFontWeightRegular, kDim);
 +    _maker.stringValue = @"SugiyamaLabs";
++    // Prototype .pill says "Atualizado"; with no updater yet that could be false, so it says so.
++    _pill = Label(12, NSFontWeightRegular, kMute);
++    _pill.alignment = NSTextAlignmentCenter;
 +    _table = [NSTextField wrappingLabelWithString:@""];
 +    _table.selectable = YES;
 +    _lists = [NSTextField wrappingLabelWithString:@(agens_adblock_credits())];
@@ -16345,7 +16558,7 @@ index 3c18c4eab1..048e445418 100644
 +    _blocker = [NSButton buttonWithTitle:@"Ver no Bloqueador" target:self action:@selector(blocker:)];
 +    for (NSButton* b in @[ _copy, _licenses, _blocker ]) b.controlSize = NSControlSizeSmall;
 +    for (NSTextField* t in @[ _name, _maker, _lists ]) t.alignment = NSTextAlignmentCenter;
-+    for (NSView* v in @[ _mark, _name, _maker, _table, _lists, _copy, _licenses, _blocker ]) [self addSubview:v];
++    for (NSView* v in @[ _mark, _name, _maker, _pill, _table, _lists, _copy, _licenses, _blocker ]) [self addSubview:v];
 +    [self refreshTheme];
 +  }
 +  return self;
@@ -16359,16 +16572,34 @@ index 3c18c4eab1..048e445418 100644
 +#else
 +  NSString* arch = @"x86_64";
 +#endif
-+  return @[
++  // The build's date (prototype "0.9.0 (2026.11.16)"): when the executable was linked.
++  NSDate* built = [NSFileManager.defaultManager attributesOfItemAtPath:b.executablePath error:nil].fileModificationDate;
++  if (built) {
++    NSDateFormatter* f = [[NSDateFormatter alloc] init];
++    f.dateFormat = @"yyyy.MM.dd";
++    version = [NSString stringWithFormat:@"%@ (%@)", version, [f stringFromDate:built]];
++  }
++  NSMutableArray<NSArray<NSString*>*>* rows = [NSMutableArray arrayWithArray:@[
 +    @[ @"Versão", version ], @[ @"Chromium", [kChromiumVersion stringByAppendingString:@" · ungoogled-chromium"] ],
 +    @[ @"Sistema", [NSString stringWithFormat:@"macOS %ld.%ld · %@", (long)os.majorVersion, (long)os.minorVersion, arch] ]
-+  ];
++  ]];
++  if (_profilePath.length) [rows addObject:@[ @"Perfil", _profilePath ]];
++  return rows;
 +}
 +- (void)refreshTheme {
 +  self.layer.backgroundColor = CG(kBg, self);
 +  self.layer.cornerRadius = 12 * Round() - 1;
 +  const char* svg = IsDark(self.effectiveAppearance) ? kAgensMarkDarkSvg : kAgensMarkLightSvg;
 +  _mark.image = [[NSImage alloc] initWithData:[NSData dataWithBytes:svg length:strlen(svg)]];
++  // Prototype .pill: a 7 pt dot and the text, in the mute tone.
++  NSMutableAttributedString* pill = [[NSMutableAttributedString alloc]
++      initWithString:@"● "
++          attributes:@{NSFontAttributeName : [NSFont systemFontOfSize:7], NSForegroundColorAttributeName : kMute.color(),
++                       NSBaselineOffsetAttributeName : @2}];
++  [pill appendAttributedString:[[NSAttributedString alloc]
++                                   initWithString:@"Sem atualização automática ainda"
++                                       attributes:@{NSFontAttributeName : [NSFont systemFontOfSize:12], NSForegroundColorAttributeName : kMute.color()}]];
++  _pill.attributedStringValue = pill;
 +  // Labels dim, values in ink and mono (prototype .about td).
 +  NSMutableAttributedString* t = [[NSMutableAttributedString alloc] init];
 +  NSMutableParagraphStyle* tabs = [[NSMutableParagraphStyle alloc] init];
@@ -16399,7 +16630,7 @@ index 3c18c4eab1..048e445418 100644
 +  const NSSize table = [_table sizeThatFits:NSMakeSize(420, 200)];
 +  const CGFloat listsW = MIN(w - 48, 560);
 +  const CGFloat listsH = ceil([_lists sizeThatFits:NSMakeSize(listsW, 400)].height);
-+  const CGFloat total = 64 + 14 + 26 + 18 + 16 + table.height + 16 + NSHeight(_copy.frame) + 14 + listsH + 8 +
++  const CGFloat total = 64 + 14 + 26 + 18 + 8 + 16 + 16 + table.height + 16 + NSHeight(_copy.frame) + 14 + listsH + 8 +
 +                        NSHeight(_blocker.frame);
 +  CGFloat y = MAX(24, (h - total) / 2);
 +  _mark.frame = NSMakeRect((w - 64) / 2, y, 64, 64);
@@ -16407,7 +16638,9 @@ index 3c18c4eab1..048e445418 100644
 +  _name.frame = NSMakeRect(24, y, w - 48, 26);
 +  y += 26;
 +  _maker.frame = NSMakeRect(24, y, w - 48, 18);
-+  y += 18 + 16;
++  y += 18 + 8;
++  _pill.frame = NSMakeRect(24, y, w - 48, 16);
++  y += 16 + 16;
 +  _table.frame = NSMakeRect(round((w - table.width) / 2), y, ceil(table.width), ceil(table.height));
 +  y += table.height + 16;
 +  const CGFloat bw = NSWidth(_copy.frame) + 8 + NSWidth(_licenses.frame);
@@ -16436,7 +16669,7 @@ index 3c18c4eab1..048e445418 100644
  // Favoritos: what the engine last sent, grouped by folder (its path), filtered here.
  struct BookmarkItem {
    long long id, parent;
-@@ -3316,7 +4534,10 @@ - (void)refresh {
+@@ -3316,7 +4573,10 @@ - (void)refresh {
  @interface AgensErrorView : NSView
  @property(nonatomic, copy) void (^onRetry)(void);
  @property(nonatomic, copy) void (^onProceed)(void);  // security stops: go on anyway
@@ -16447,7 +16680,7 @@ index 3c18c4eab1..048e445418 100644
  - (void)refreshTheme;
  @end
  @implementation AgensErrorView {
-@@ -3326,10 +4547,14 @@ @implementation AgensErrorView {
+@@ -3326,10 +4586,14 @@ @implementation AgensErrorView {
    NSTextField* _code;
    NSButton* _retry;
    NSButton* _proceed;
@@ -16462,7 +16695,7 @@ index 3c18c4eab1..048e445418 100644
  - (instancetype)initWithFrame:(NSRect)frame {
    if ((self = [super initWithFrame:frame])) {
      self.wantsLayer = YES;
-@@ -3347,7 +4572,9 @@ - (instancetype)initWithFrame:(NSRect)frame {
+@@ -3347,7 +4611,9 @@ - (instancetype)initWithFrame:(NSRect)frame {
      _proceed.bordered = NO;
      _proceed.font = [NSFont systemFontOfSize:12];
      _proceed.contentTintColor = kDim.color();
@@ -16473,7 +16706,7 @@ index 3c18c4eab1..048e445418 100644
      [self refreshTheme];
    }
    return self;
-@@ -3371,7 +4598,7 @@ - (void)showError:(int)error name:(NSString*)name stop:(BOOL)stop {
+@@ -3371,7 +4637,7 @@ - (void)showError:(int)error name:(NSString*)name stop:(BOOL)stop {
    switch (error) {
      case -106:  // ERR_INTERNET_DISCONNECTED
        title = @"Sem conexão com a internet";
@@ -16482,7 +16715,7 @@ index 3c18c4eab1..048e445418 100644
        offline = YES;
        break;
      case -105:  // ERR_NAME_NOT_RESOLVED
-@@ -3407,6 +4634,8 @@ - (void)showError:(int)error name:(NSString*)name stop:(BOOL)stop {
+@@ -3407,6 +4673,8 @@ - (void)showError:(int)error name:(NSString*)name stop:(BOOL)stop {
    }
    _retry.title = stop ? @"Voltar" : @"Tentar de novo";
    _proceed.hidden = !stop;
@@ -16491,7 +16724,7 @@ index 3c18c4eab1..048e445418 100644
    _icon.image = AgensIcon(stop || certificate ? kIconLock : offline ? kIconWifiOff : kIconAbout, 40);
    _title.stringValue = title;
    _detail.stringValue = detail;
-@@ -3414,10 +4643,44 @@ - (void)showError:(int)error name:(NSString*)name stop:(BOOL)stop {
+@@ -3414,10 +4682,44 @@ - (void)showError:(int)error name:(NSString*)name stop:(BOOL)stop {
    self.accessibilityLabel = [NSString stringWithFormat:@"%@. %@", title, detail];
    self.needsLayout = YES;
  }
@@ -16536,7 +16769,7 @@ index 3c18c4eab1..048e445418 100644
    const CGFloat total = 40 + 14 + 28 + 6 + 18 + 4 + 16 + 18 + NSHeight(_retry.frame);
    CGFloat y = MAX(24, (h - total) / 2);
    _icon.frame = NSMakeRect((w - 40) / 2, y, 40, 40);
-@@ -3428,7 +4691,9 @@ - (void)layout {
+@@ -3428,7 +4730,9 @@ - (void)layout {
    y += 18 + 4;
    _code.frame = NSMakeRect(24, y, w - 48, 16);
    y += 16 + 18;
@@ -16547,7 +16780,7 @@ index 3c18c4eab1..048e445418 100644
    [_proceed sizeToFit];
    _proceed.frame = NSMakeRect((w - NSWidth(_proceed.frame)) / 2, NSMaxY(_retry.frame) + 14, NSWidth(_proceed.frame), 18);
  }
-@@ -3436,12 +4701,14 @@ - (void)proceed:(id)sender {
+@@ -3436,12 +4740,14 @@ - (void)proceed:(id)sender {
    if (_onProceed) _onProceed();
  }
  - (void)retry:(id)sender {
@@ -16564,7 +16797,7 @@ index 3c18c4eab1..048e445418 100644
  @interface AgensFindBar : NSView <NSTextFieldDelegate>
  @property(nonatomic) AgensWindow* engine;
  - (void)open;
-@@ -3451,33 +4718,55 @@ - (void)setCurrent:(int)current total:(int)total;
+@@ -3451,33 +4757,55 @@ - (void)setCurrent:(int)current total:(int)total;
  - (void)refreshTheme;
  @end
  @implementation AgensFindBar {
@@ -16625,7 +16858,7 @@ index 3c18c4eab1..048e445418 100644
      [self refreshTheme];
    }
    return self;
-@@ -3486,24 +4775,53 @@ - (BOOL)isFlipped {
+@@ -3486,24 +4814,53 @@ - (BOOL)isFlipped {
    return YES;
  }
  - (void)refreshTheme {
@@ -16690,7 +16923,7 @@ index 3c18c4eab1..048e445418 100644
  }
  - (void)open {
    self.hidden = NO;
-@@ -3516,8 +4834,7 @@ - (void)close {
+@@ -3516,8 +4873,7 @@ - (void)close {
    if (_engine) agens_find_stop(_engine);
  }
  - (void)search:(BOOL)forward {
@@ -16700,7 +16933,7 @@ index 3c18c4eab1..048e445418 100644
  }
  - (void)step:(BOOL)forward {
    if (self.hidden) {
-@@ -3526,11 +4843,25 @@ - (void)step:(BOOL)forward {
+@@ -3526,11 +4882,25 @@ - (void)step:(BOOL)forward {
    }
    [self search:forward];
  }
@@ -16730,7 +16963,7 @@ index 3c18c4eab1..048e445418 100644
  }
  - (void)controlTextDidChange:(NSNotification*)note {
    [self search:YES];
-@@ -3549,13 +4880,223 @@ - (BOOL)control:(NSControl*)control textView:(NSTextView*)textView doCommandBySe
+@@ -3549,13 +4919,223 @@ - (BOOL)control:(NSControl*)control textView:(NSTextView*)textView doCommandBySe
  @end
  
  static void SiteDataCleared(void* context) {
@@ -16956,7 +17189,7 @@ index 3c18c4eab1..048e445418 100644
  // ---------------------------------------------------------------------------------------------
  // The chrome.
  
-@@ -3602,6 +5143,14 @@ static void SuggestionsChanged(void* context, const AgensSuggestion* suggestions
+@@ -3602,6 +5182,14 @@ static void SuggestionsChanged(void* context, const AgensSuggestion* suggestions
    [(__bridge AgensChrome*)context setSuggestions:suggestions count:count];
  }
  
@@ -16971,7 +17204,7 @@ index 3c18c4eab1..048e445418 100644
  @implementation AgensChrome {
    AgensWindow* _window;  // owned by the engine; null after detach
    AgensToolButton* _back;
-@@ -3620,11 +5169,30 @@ @implementation AgensChrome {
+@@ -3620,11 +5208,30 @@ @implementation AgensChrome {
    AgensHoverView* _newTab;
    NSMutableArray<AgensTabRow*>* _rows;
    NSScrollView* _tabsScroll;  // the tab list scrolls between "Nova aba" and the atos
@@ -17004,7 +17237,7 @@ index 3c18c4eab1..048e445418 100644
    int _activeAto;
    NSView* _atosLine;
    NSMutableArray<AgensAtoButton*>* _atoButtons;
-@@ -3633,10 +5201,29 @@ @implementation AgensChrome {
+@@ -3633,10 +5240,29 @@ @implementation AgensChrome {
    AgensToolButton* _toggle;
    AgensToolButton* _star;  // in the address, right side (prototype .star)
    AgensToolButton* _sound;  // in the address, left of the star, while the page plays or is muted
@@ -17037,7 +17270,7 @@ index 3c18c4eab1..048e445418 100644
    AgensToolButton* _newTabTop;  // "+" at the end of the top strip
    AgensStripView* _strip;       // holds the tabs on top; scrolls when they don't fit
    CGFloat _stripOffset;
-@@ -3648,16 +5235,21 @@ @implementation AgensChrome {
+@@ -3648,16 +5274,22 @@ @implementation AgensChrome {
    AgensToolButton* _menu;  // "⋯" after the address
    NSView* _menuView;       // the open panel (menu or downloads), shown under its button
    __weak NSView* _popoverAnchor;
@@ -17048,7 +17281,9 @@ index 3c18c4eab1..048e445418 100644
 +  AgensDownloadsButton* _downloadsButton;  // shows up once there is a download this session
 +  NSString* _keepArmed;  // the dangerous download whose Manter was clicked once
    NSView* _downloadsPanel;            // the open downloads panel, refreshed live
-   std::vector<AgensDownload> _downloads;
+-  std::vector<AgensDownload> _downloads;
++  std::vector<AgensDownload> _downloads;  // this window's first, then the past ones (agens://downloads only)
++  int _sessionDownloads;                   // how many of them are this window's (the panel and the button)
    std::vector<std::string> _downloadNames;
    NSView* _loadbar;  // prototype .loadbar: a warm glow running over a 2 pt line while the page loads
    CAGradientLayer* _loadGlow;
@@ -17062,7 +17297,7 @@ index 3c18c4eab1..048e445418 100644
    BOOL _bookmarked;
    NSImageView* _newTabPlus;
    NSTextField* _newTabLabel;
-@@ -3670,11 +5262,18 @@ @implementation AgensChrome {
+@@ -3670,11 +5302,18 @@ @implementation AgensChrome {
    // shortcut: Chromium's history page still loads under ours (one renderer more); serve a blank page for chrome://history if memory needs it.
    AgensHistoryView* _history;
    AgensBookmarksView* _bookmarksPage;  // same shortcut as the history page
@@ -17083,7 +17318,7 @@ index 3c18c4eab1..048e445418 100644
    AgensErrorView* _error;
    BOOL _stopPage;  // the active tab shows a security stop page
    int _split;            // the active tab's split (0 none, 1 side by side, 2 stacked)
-@@ -3691,6 +5290,27 @@ @implementation AgensChrome {
+@@ -3691,6 +5330,27 @@ @implementation AgensChrome {
    NSString* _url;
    BOOL _loading;
    NSRect _page;
@@ -17111,7 +17346,7 @@ index 3c18c4eab1..048e445418 100644
  }
  
  - (instancetype)initWithWindow:(AgensWindow*)window {
-@@ -3737,12 +5357,27 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3737,12 +5397,27 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
      [_omni addSubview:_omniIcon];
      [_omni addSubview:_address];
      [_omni addSubview:_sound];
@@ -17142,7 +17377,7 @@ index 3c18c4eab1..048e445418 100644
      {
        // One small icon per Chromium address-bar indicator; they all open the site panel.
        struct { NSString* symbol; NSString* label; } kInd[] = {
-@@ -3762,20 +5397,13 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3762,20 +5437,13 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
          [list addObject:b];
        }
        _indicators = list;
@@ -17168,7 +17403,7 @@ index 3c18c4eab1..048e445418 100644
        [_omni addSubview:_zoom];
      }
      [_omni addSubview:_star];
-@@ -3786,11 +5414,12 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3786,11 +5454,12 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
      _siteButton.onPress = ^{ [weak showSiteInfo]; };
      [_omni addSubview:_siteButton positioned:NSWindowBelow relativeTo:_omniIcon];
      _extensions = [NSMutableArray array];
@@ -17182,7 +17417,7 @@ index 3c18c4eab1..048e445418 100644
      [_downloadsButton setImage:AgensIcon(kIconDown)];
      _downloadsButton.hidden = YES;
      _downloadsButton.onPress = ^{ [weak toggleDownloads]; };
-@@ -3803,12 +5432,13 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3803,12 +5472,13 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
      _loadGlow.endPoint = CGPointMake(1, 0.5);
      _loadGlow.cornerRadius = 1;
      [_loadbar.layer addSublayer:_loadGlow];
@@ -17201,7 +17436,7 @@ index 3c18c4eab1..048e445418 100644
      _menu = [[AgensToolButton alloc] initWithSymbol:@"ellipsis" label:@"Menu"];
      _menu.onPress = ^{ [weak showMenu]; };
  
-@@ -3858,7 +5488,25 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3858,7 +5528,25 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
      _tabsScroll.borderType = NSNoBorder;
      _tabsDoc = [[AgensDragView alloc] init];
      _tabsScroll.documentView = _tabsDoc;
@@ -17227,7 +17462,7 @@ index 3c18c4eab1..048e445418 100644
      _moreAtos = [[AgensToolButton alloc] initWithSymbol:@"ellipsis" label:@"Todos os atos" size:13];
      _moreAtos.onPress = ^{ [weak showAtosMenu]; };
      _addAto = [[AgensToolButton alloc] initWithSymbol:@"plus" label:@"Novo ato"];
-@@ -3875,6 +5523,13 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3875,6 +5563,13 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
                                         AgensChrome* strong = weak;
                                         NSEventModifierFlags mods = event.modifierFlags &
                                             NSEventModifierFlagDeviceIndependentFlagsMask;
@@ -17241,7 +17476,7 @@ index 3c18c4eab1..048e445418 100644
                                         if (!strong || event.window != strong.window ||
                                             ![event.charactersIgnoringModifiers.lowercaseString isEqualToString:@"s"]) {
                                           return event;
-@@ -3902,7 +5557,9 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3902,7 +5597,9 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
                                         }
                                         NSPoint p = [strong.superview convertPoint:event.locationInWindow fromView:nil];
                                         NSView* hit = [strong hitTest:p];
@@ -17252,7 +17487,7 @@ index 3c18c4eab1..048e445418 100644
                                         NSMenu* menu = [hit menuForEvent:event];
                                         if (!menu) return event;
                                         [NSMenu popUpContextMenu:menu withEvent:event forView:hit];
-@@ -3936,18 +5593,37 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3936,18 +5633,37 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
          agens_window_reload(strong->_window);
        }
      };
@@ -17290,7 +17525,7 @@ index 3c18c4eab1..048e445418 100644
      _bar = [[NSView alloc] init];
      _bar.accessibilityRole = NSAccessibilityToolbarRole;
      _bar.accessibilityLabel = @"Barra de favoritos";
-@@ -3966,9 +5642,47 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3966,9 +5682,47 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
      _ntp.field.delegate = self;
  
      for (NSView* v in @[ _toggle, _back, _forward, _reload, _omni, _extButton, _downloadsButton, _menu, _tabsScroll, _moreAtos, _atoTile, _atoName, _separator, _newTab, _newTabTop,
@@ -17339,7 +17574,7 @@ index 3c18c4eab1..048e445418 100644
      [self refreshTheme];
      ApplyAppearance(agens_window_color_mode(_window));  // the saved choice, from the first window on
      agens_window_set_tabs_observer(_window, TabsChanged, (__bridge void*)self);
-@@ -3998,7 +5712,6 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3998,7 +5752,6 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
  - (void)refreshTheme {
    _omni.layer.cornerRadius = 10 * Round();
    _suggest.layer.cornerRadius = 12 * Round();
@@ -17347,7 +17582,7 @@ index 3c18c4eab1..048e445418 100644
    _omni.layer.backgroundColor = CG(kSunk, self);
    _omni.layer.borderColor = CG(_address.currentEditor ? kLineStrong : kLine, self);
    _suggest.layer.backgroundColor = CG(kFloat, self);
-@@ -4007,8 +5720,12 @@ - (void)refreshTheme {
+@@ -4007,8 +5760,12 @@ - (void)refreshTheme {
    _separator.layer.backgroundColor = CG(kLine, self);
    _atosLine.layer.backgroundColor = CG(kLine, self);
    _atoDot.layer.backgroundColor = CG(kLight3, self);
@@ -17362,7 +17597,7 @@ index 3c18c4eab1..048e445418 100644
    SyncGlass(_suggest, 12 * Round());
    [self runLoadbar];  // the glow's color
  }
-@@ -4028,6 +5745,13 @@ static void RefreshTree(NSView* v) {
+@@ -4028,6 +5785,13 @@ static void RefreshTree(NSView* v) {
  // window color with alpha over it, the chrome draws on top.
  - (void)viewDidMoveToWindow {
    [super viewDidMoveToWindow];
@@ -17376,7 +17611,7 @@ index 3c18c4eab1..048e445418 100644
    if (!self.window || _backdrop) return;
    _backdrop = [[NSView alloc] initWithFrame:self.window.contentView.superview.bounds];
    _backdrop.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-@@ -4138,6 +5862,7 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4138,6 +5902,7 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
    _strip.hidden = !top;
    for (AgensTabRow* row in _rows) {
      NSView* parent = top ? _strip : row.pinned ? self : _tabsDoc;
@@ -17384,7 +17619,7 @@ index 3c18c4eab1..048e445418 100644
      if (row.superview != parent) {
        if (parent == self) {
          [self addSubview:row positioned:NSWindowBelow relativeTo:_ntp];
-@@ -4160,13 +5885,21 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4160,13 +5925,21 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
    CGFloat omniX = top ? NSMaxX(_reload.frame) + 10 : MAX(columnEnd + kGap, navX + 126);
    _menu.frame = NSMakeRect(width - kPad - 28, btnY, 28, 28);
    CGFloat omniEnd = NSMinX(_menu.frame) - 4;
@@ -17409,7 +17644,7 @@ index 3c18c4eab1..048e445418 100644
    }
  
    // Atos: only what fits (6 in the open column, 5 collapsed, 4 on the bar); past that the last
-@@ -4193,6 +5926,7 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4193,6 +5966,7 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
        v.frame = NSMakeRect(x, btnY, 30, 28);
        x += 32;
      }
@@ -17417,7 +17652,7 @@ index 3c18c4eab1..048e445418 100644
    }
    _omni.frame = NSMakeRect(omniX, barY + (bar - omniH) / 2, omniEnd - omniX, omniH);
    _omniIcon.frame = NSMakeRect(12, (omniH - 14) / 2, 14, 14);
-@@ -4200,17 +5934,23 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4200,17 +5974,23 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
    _star.frame = NSMakeRect(NSWidth(_omni.frame) - 4 - 26, (omniH - 26) / 2, 26, 26);
    _sound.frame = NSMakeRect(NSMinX(_star.frame) - 26, (omniH - 26) / 2, 26, 26);
    const CGFloat afterSound = _sound.hidden ? NSMinX(_star.frame) : NSMinX(_sound.frame);
@@ -17446,7 +17681,7 @@ index 3c18c4eab1..048e445418 100644
    }
    _address.frame = NSMakeRect(33, (omniH - 18) / 2, addressEnd - 6 - 33, 18);
  
-@@ -4254,7 +5994,7 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4254,7 +6034,7 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
      int slot = 0;
      for (AgensTabRow* row in list) {
        if (row == _dragged) continue;  // it follows the pointer (dragRow:by:)
@@ -17455,7 +17690,7 @@ index 3c18c4eab1..048e445418 100644
        row.frame = NSMakeRect(x, (strip - rowH) / 2, w, rowH);
        row.hidden = NO;
        x += w + 4;
-@@ -4272,14 +6012,29 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4272,14 +6052,29 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
      y += rowH + 6;
      // Pinned (prototype .pinned): a grid of four 36 pt tiles; one per line in the rail.
      const CGFloat tileW = narrow ? side : (side - 12) / 4, tileH = narrow ? rowH : (Dense() ? 32 : 36);
@@ -17491,7 +17726,7 @@ index 3c18c4eab1..048e445418 100644
      _separator.frame = NSMakeRect(kPad + (narrow ? 6 : 8), y, side - (narrow ? 12 : 16), 1);
      y += 7;
      _newTab.frame = NSMakeRect(kPad, y, side, rowH);
-@@ -4324,15 +6079,23 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4324,15 +6119,23 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
      _tabsScroll.frame = NSMakeRect(kPad, y, side, MAX(0, footY - 6 - y));
      CGFloat rowY = 0;
      int slot = 0;
@@ -17517,7 +17752,7 @@ index 3c18c4eab1..048e445418 100644
      _tabsDoc.frame = NSMakeRect(0, 0, side, MAX(rowY, NSHeight(_tabsScroll.frame)));
      page = NSMakeRect(columnEnd + kGap, bar, width - (columnEnd + kGap) - kPad, height - bar - kPad);
      page = [self roomForBar:page];
-@@ -4340,8 +6103,13 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4340,8 +6143,13 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
  
    _page = page;
    // Our pages over the card (new tab, errors…) cover the active tab's pane only; the engine splits
@@ -17532,7 +17767,7 @@ index 3c18c4eab1..048e445418 100644
    if (_split) {
      const CGFloat gap = 8;
      if (_split == 2) {
-@@ -4367,15 +6135,25 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4367,15 +6175,25 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
      _ntp2.frame = NSInsetRect(other, 1, 1);
      _ntp2Click.frame = _ntp2.frame;
    }
@@ -17562,7 +17797,7 @@ index 3c18c4eab1..048e445418 100644
  
    NSRect anchor = [self editingField] == _ntp.field ? [_ntp convertRect:_ntp.well.frame toView:self]
                                                       : _omni.frame;
-@@ -4384,11 +6162,38 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4384,11 +6202,38 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
    for (NSUInteger i = 0; i < _suggestionRows.count; ++i) {
      _suggestionRows[i].frame = NSMakeRect(5, 5 + i * 34, NSWidth(anchor) - 10, 34);
    }
@@ -17603,15 +17838,41 @@ index 3c18c4eab1..048e445418 100644
  }
  - (AgensRect)siteIconRect {
    NSRect r = [_omni convertRect:_omniIcon.frame toView:self];
-@@ -4398,13 +6203,185 @@ - (void)relayout {
+@@ -4398,45 +6243,219 @@ - (void)relayout {
    [self layoutForWidth:(int)NSWidth(self.bounds) height:(int)NSHeight(self.bounds)];
  }
  
+-- (void)setTabs:(const AgensTab*)tabs count:(int)count {
 +// --- DevTools in the card.
 +
 +- (void)makeDevToolsViews {
 +  if (_devtoolsBar) return;
-+  __weak AgensChrome* weak = self;
+   __weak AgensChrome* weak = self;
+-  while ((int)_rows.count < count) {
+-    AgensTabRow* row = [[AgensTabRow alloc] initWithFrame:NSMakeRect(0, 0, kSide, RowH())];
+-    __weak AgensTabRow* weakRow = row;
+-    row.onPress = ^{ [weak activate:weakRow.index]; };
+-    row.onDrag = ^(NSPoint delta) { [weak dragRow:weakRow by:delta]; };
+-    row.onDrop = ^{ [weak dropRow:weakRow]; };
+-    row.onClose = ^{ [weak close:weakRow.index]; };
+-    row.onPin = ^{
+-      AgensChrome* strong = weak;
+-      if (strong && strong->_window) agens_window_set_pinned(strong->_window, weakRow.index, !weakRow.pinned);
+-    };
+-    row.onMute = ^{
+-      AgensChrome* strong = weak;
+-      if (strong && strong->_window) agens_window_toggle_mute(strong->_window, weakRow.index);
+-    };
+-    row.onSplit = ^(int layout) {
+-      AgensChrome* strong = weak;
+-      if (strong && strong->_window) agens_window_split(strong->_window, weakRow.index, layout);
+-    };
+-    row.onUnsplit = ^{
+-      AgensChrome* strong = weak;
+-      if (strong && strong->_window) agens_window_unsplit(strong->_window, weakRow.index);
+-    };
+-    [_tabsDoc addSubview:row];
+-    [_rows addObject:row];
 +  _devtoolsDivider = [[AgensDevToolsDivider alloc] initWithFrame:NSZeroRect];
 +  _devtoolsDivider.onDrag = ^(NSPoint p, BOOL done) { [weak dragDevTools:p done:done]; };
 +  _devtoolsBar = [[AgensDevToolsBar alloc] initWithFrame:NSZeroRect];
@@ -17645,7 +17906,10 @@ index 3c18c4eab1..048e445418 100644
 +    line = NSMakeRect(NSMinX(inner), NSMaxY(_devtoolsPage), NSWidth(inner), 1);
 +    _devtoolsDivider.frame = NSInsetRect(line, 0, -4);
 +    _devtoolsBar.frame = NSMakeRect(NSMinX(inner), NSMaxY(line), NSWidth(inner), kDevToolsBar);
-+  }
+   }
+-  while ((int)_rows.count > count) {
+-    [_rows.lastObject removeFromSuperview];
+-    [_rows removeLastObject];
 +  if (_devtoolsDivider.vertical != right) _devtoolsDivider.vertical = right;
 +  _devtoolsTools = NSMakeRect(NSMinX(_devtoolsBar.frame), NSMaxY(_devtoolsBar.frame), NSWidth(_devtoolsBar.frame),
 +                              NSMaxY(inner) - NSMaxY(_devtoolsBar.frame));
@@ -17661,7 +17925,14 @@ index 3c18c4eab1..048e445418 100644
 +  if (!shown) {
 +    _devtoolsSize.hidden = YES;
 +    return;
-+  }
+   }
+-  int activeTab = -1;
+-  _pinnedCount = 0;
+-  _partner = -1;
+-  BOOL partnerIsNewTab = NO;
+-  for (int i = 0; i < count; ++i) {  // a split's tabs sit next to each other
+-    if (!tabs[i].active || !tabs[i].split) continue;
+-    const int j = tabs[i].split_first ? i + 1 : i - 1;
 +  [self splitDevTools];
 +  auto rect = [](NSRect r) {
 +    return AgensRect{(int)NSMinX(r), (int)NSMinY(r), (int)NSWidth(r), (int)NSHeight(r)};
@@ -17712,7 +17983,7 @@ index 3c18c4eab1..048e445418 100644
 +  }
 +}
 +
- - (void)setTabs:(const AgensTab*)tabs count:(int)count {
++- (void)setTabs:(const AgensTab*)tabs count:(int)count {
 +  // Rows follow their tab (AgensTab.id), so what hangs on a row (the volume popover, a drag) stays
 +  // with that tab when others open, close or move.
 +  NSMutableDictionary<NSNumber*, AgensTabRow*>* old = [NSMutableDictionary dictionary];
@@ -17780,46 +18051,50 @@ index 3c18c4eab1..048e445418 100644
 +  }];
 +}
 +- (AgensTabRow*)makeTabRow {
-   __weak AgensChrome* weak = self;
--  while ((int)_rows.count < count) {
++  __weak AgensChrome* weak = self;
 +  {
-     AgensTabRow* row = [[AgensTabRow alloc] initWithFrame:NSMakeRect(0, 0, kSide, RowH())];
-     __weak AgensTabRow* weakRow = row;
-     row.onPress = ^{ [weak activate:weakRow.index]; };
--    row.onDrag = ^(NSPoint delta) { [weak dragRow:weakRow by:delta]; };
++    AgensTabRow* row = [[AgensTabRow alloc] initWithFrame:NSMakeRect(0, 0, kSide, RowH())];
++    __weak AgensTabRow* weakRow = row;
++    row.onPress = ^{ [weak activate:weakRow.index]; };
 +    row.onDrag = ^(NSPoint delta, NSPoint where) { [weak dragRow:weakRow by:delta at:where]; };
-     row.onDrop = ^{ [weak dropRow:weakRow]; };
-     row.onClose = ^{ [weak close:weakRow.index]; };
-     row.onPin = ^{
-@@ -4415,6 +6392,9 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
-       AgensChrome* strong = weak;
-       if (strong && strong->_window) agens_window_toggle_mute(strong->_window, weakRow.index);
-     };
++    row.onDrop = ^{ [weak dropRow:weakRow]; };
++    row.onClose = ^{ [weak close:weakRow.index]; };
++    row.onPin = ^{
++      AgensChrome* strong = weak;
++      if (strong && strong->_window) agens_window_set_pinned(strong->_window, weakRow.index, !weakRow.pinned);
++    };
++    row.onMute = ^{
++      AgensChrome* strong = weak;
++      if (strong && strong->_window) agens_window_toggle_mute(strong->_window, weakRow.index);
++    };
 +    row.onVolume = ^(NSView* sound) { [weak showVolume:weakRow sound:sound]; };
 +    row.onHoverCard = ^(BOOL show) { [weak tabCard:weakRow show:show]; };
 +    row.extendMenu = ^(NSMenu* menu) { [weak extendTabMenu:menu row:weakRow]; };
-     row.onSplit = ^(int layout) {
-       AgensChrome* strong = weak;
-       if (strong && strong->_window) agens_window_split(strong->_window, weakRow.index, layout);
-@@ -4424,13 +6404,12 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
-       if (strong && strong->_window) agens_window_unsplit(strong->_window, weakRow.index);
-     };
-     [_tabsDoc addSubview:row];
--    [_rows addObject:row];
--  }
--  while ((int)_rows.count > count) {
--    [_rows.lastObject removeFromSuperview];
--    [_rows removeLastObject];
++    row.onSplit = ^(int layout) {
++      AgensChrome* strong = weak;
++      if (strong && strong->_window) agens_window_split(strong->_window, weakRow.index, layout);
++    };
++    row.onUnsplit = ^{
++      AgensChrome* strong = weak;
++      if (strong && strong->_window) agens_window_unsplit(strong->_window, weakRow.index);
++    };
++    [_tabsDoc addSubview:row];
 +    return row;
-   }
++  }
 +}
 +- (void)setTabsRest:(const AgensTab*)tabs count:(int)count opened:(NSArray<AgensTabRow*>*)opened {
-   int activeTab = -1;
++  int activeTab = -1;
 +  _controller = nil;
-   _pinnedCount = 0;
-   _partner = -1;
-   BOOL partnerIsNewTab = NO;
-@@ -4448,6 +6427,7 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
++  _pinnedCount = 0;
++  _partner = -1;
++  BOOL partnerIsNewTab = NO;
++  for (int i = 0; i < count; ++i) {  // a split's tabs sit next to each other
++    if (!tabs[i].active || !tabs[i].split) continue;
++    const int j = tabs[i].split_first ? i + 1 : i - 1;
+     if (j >= 0 && j < count && tabs[j].split) {
+       _partner = j;
+       partnerIsNewTab = !tabs[j].url[0];
+@@ -4448,6 +6467,7 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
      if (tabs[i].pinned) ++_pinnedCount;
      if (tabs[i].active) activeTab = i;
      if (!tabs[i].active) continue;
@@ -17827,7 +18102,7 @@ index 3c18c4eab1..048e445418 100644
      if (_activeIndex != i) {
        [_find close];  // a find belongs to the page it ran on
        _stripFollowActive = YES;
-@@ -4458,33 +6438,60 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+@@ -4458,33 +6478,60 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
      [_sound setTint:tabs[i].muted ? kLight3 : kDim];
      _sound.accessibilityLabel = tabs[i].muted ? @"Ativar o som da aba" : @"Silenciar a aba";
      _sound.toolTip = _sound.accessibilityLabel;
@@ -17898,7 +18173,7 @@ index 3c18c4eab1..048e445418 100644
    [_reload setSymbol:_loading ? @"xmark" : @"arrow.clockwise"];
    [_star setSymbol:_bookmarked ? @"star.fill" : @"star"];
    [_star setTint:_bookmarked ? kLight3 : kDim];
-@@ -4493,29 +6500,65 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+@@ -4493,29 +6540,70 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
    _siteButton.hidden = _url.length == 0;
    _reload.accessibilityLabel = _loading ? @"Parar" : @"Recarregar";
    BOOL secure = [_url hasPrefix:@"https://"];
@@ -17923,6 +18198,11 @@ index 3c18c4eab1..048e445418 100644
 +  _downloadsPage.hidden = ![_url hasPrefix:@"chrome://downloads"];
 +  if (!_downloadsPage.hidden && !wasDownloads) [self fillDownloadsPage];
 +  _about.hidden = ![_url hasPrefix:@"chrome://version"];
++  if (!_about.hidden && !_about.profilePath && _window) {  // a window's ato never changes
++    char path[2048] = "";
++    agens_window_ato_path(_window, path, sizeof path);
++    _about.profilePath = @(path);
++  }
    _ntp2.hidden = _ntp2Click.hidden = !partnerIsNewTab;
    BOOL wasNTP = !_ntp.hidden;
    _ntp.hidden = _url.length > 0;
@@ -17969,7 +18249,7 @@ index 3c18c4eab1..048e445418 100644
    NSString* s = AgensScheme(_url);
    for (NSString* p in @[ @"https://", @"www." ]) {
      if ([s hasPrefix:p]) s = [s substringFromIndex:p.length];
-@@ -4531,6 +6574,8 @@ - (void)setAtos:(const AgensAto*)atos count:(int)count {
+@@ -4531,6 +6619,8 @@ - (void)setAtos:(const AgensAto*)atos count:(int)count {
      AgensAtoButton* b = [[AgensAtoButton alloc] initWithFrame:NSZeroRect];
      int index = (int)_atoButtons.count;
      b.onPress = ^{ [weak switchAto:index]; };
@@ -17978,7 +18258,7 @@ index 3c18c4eab1..048e445418 100644
      [self addSubview:b positioned:NSWindowBelow relativeTo:_ntp];
      [_atoButtons addObject:b];
    }
-@@ -4539,14 +6584,18 @@ - (void)setAtos:(const AgensAto*)atos count:(int)count {
+@@ -4539,14 +6629,18 @@ - (void)setAtos:(const AgensAto*)atos count:(int)count {
      [_atoButtons removeLastObject];
    }
    [_atoNames removeAllObjects];
@@ -17998,7 +18278,7 @@ index 3c18c4eab1..048e445418 100644
    }
    [self relayout];
  }
-@@ -4571,7 +6620,147 @@ - (void)newAtoFromMenu:(id)sender {
+@@ -4571,7 +6665,191 @@ - (void)newAtoFromMenu:(id)sender {
    [self run:agens_window_new_ato];
  }
  - (void)switchAto:(int)index {
@@ -18121,8 +18401,52 @@ index 3c18c4eab1..048e445418 100644
 +    sleep.target = self;
 +    sleep.tag = index;
 +    sleep.enabled = !b.selected;
++  } else {
++    [menu addItem:NSMenuItem.separatorItem];
 +  }
++  // Checked while on; the 10-min rule (and "dormem inteiros") leave the ato awake.
++  NSMenuItem* never = [menu addItemWithTitle:@"Nunca pôr para dormir" action:@selector(atoNeverSleepItem:) keyEquivalent:@""];
++  never.target = self;
++  never.tag = index;
++  never.state = b.neverSleep ? NSControlStateValueOn : NSControlStateValueOff;
++  [menu addItem:NSMenuItem.separatorItem];
++  const BOOL last = _atoButtons.count < 2;
++  NSMenuItem* remove = [menu addItemWithTitle:last ? @"Apagar ato… · é o único ato" : @"Apagar ato…"
++                                       action:last ? nil : @selector(atoDeleteItem:)
++                                keyEquivalent:@""];
++  remove.target = self;
++  remove.tag = index;
++  remove.enabled = !last;
 +  return menu;
++}
++- (void)atoNeverSleepItem:(NSMenuItem*)item {
++  const int index = (int)item.tag;
++  if (_window && index < (int)_atoIds.count) {
++    agens_window_set_ato_never_sleep(_window, _atoIds[index].UTF8String, !_atoButtons[index].neverSleep);
++  }
++}
++// Deleting erases data: always this sheet first, with Cancelar as the default (Return).
++- (void)atoDeleteItem:(NSMenuItem*)item {
++  const int index = (int)item.tag;
++  if (!_window || index >= (int)_atoIds.count || _atoIds.count < 2) return;
++  NSString* name = _atoButtons[index].name;
++  NSString* atoId = _atoIds[index];
++  NSAlert* alert = [[NSAlert alloc] init];
++  alert.alertStyle = NSAlertStyleCritical;
++  alert.messageText = [NSString stringWithFormat:@"Apagar o ato %@?", name];
++  alert.informativeText = [NSString
++      stringWithFormat:@"As abas, os logins, as senhas, o histórico, os favoritos, os downloads da lista e as extensões do ato %@ "
++                       @"serão apagados deste Mac. Os arquivos baixados ficam na pasta. Não dá para desfazer.",
++                       name];
++  [alert addButtonWithTitle:@"Cancelar"];
++  NSButton* erase = [alert addButtonWithTitle:@"Apagar ato"];
++  erase.hasDestructiveAction = YES;
++  erase.keyEquivalent = @"";
++  __weak AgensChrome* weak = self;
++  [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
++    AgensChrome* strong = weak;
++    if (r == NSAlertSecondButtonReturn && strong && strong->_window) agens_window_delete_ato(strong->_window, atoId.UTF8String);
++  }];
 +}
 +- (void)atoOpenItem:(NSMenuItem*)item {
 +  [self switchAto:(int)item.tag];
@@ -18147,7 +18471,7 @@ index 3c18c4eab1..048e445418 100644
  }
  
  // --- Address and suggestions.
-@@ -4671,13 +6860,25 @@ - (void)showMenu {
+@@ -4671,13 +6949,25 @@ - (void)showMenu {
      NSString* title;
      NSString* key;
      void (^action)(void);
@@ -18174,7 +18498,7 @@ index 3c18c4eab1..048e445418 100644
    const CGFloat w = 280, rowH = 33;
    NSView* panel = [self popoverWidth:w height:std::size(items) * rowH + 10 under:_menu];
    panel.accessibilityRole = NSAccessibilityMenuRole;
-@@ -4685,6 +6886,7 @@ - (void)showMenu {
+@@ -4685,6 +6975,7 @@ - (void)showMenu {
    CGFloat y = NSHeight(panel.frame) - 5 - rowH;  // the panel isn't flipped
    for (const Item& it : items) {
      AgensMenuRow* row = [[AgensMenuRow alloc] initWithIcon:it.icon title:it.title key:it.key];
@@ -18182,7 +18506,7 @@ index 3c18c4eab1..048e445418 100644
      void (^action)(void) = it.action;
      row.onPress = ^{
        [weak closeMenu];
-@@ -4694,7 +6896,7 @@ - (void)showMenu {
+@@ -4694,7 +6985,7 @@ - (void)showMenu {
      [panel addSubview:row];
      y -= rowH;
    }
@@ -18191,7 +18515,7 @@ index 3c18c4eab1..048e445418 100644
  }
  
  // Our floating panels (prototype .menu): float background, strong border, 12 pt corners.
-@@ -4709,11 +6911,18 @@ - (NSView*)popoverWidth:(CGFloat)w height:(CGFloat)h under:(NSView*)anchor {
+@@ -4709,11 +7000,18 @@ - (NSView*)popoverWidth:(CGFloat)w height:(CGFloat)h under:(NSView*)anchor {
    return panel;
  }
  - (void)presentPopover:(NSView*)panel anchor:(NSView*)anchor {
@@ -18210,7 +18534,7 @@ index 3c18c4eab1..048e445418 100644
    // Rise in, as the prototype (.2s); a click anywhere else or Esc closes it.
    _menuView.alphaValue = 0;
    [NSAnimationContext runAnimationGroup:^(NSAnimationContext* ctx) {
-@@ -4735,16 +6944,61 @@ - (void)presentPopover:(NSView*)panel anchor:(NSView*)anchor {
+@@ -4735,16 +7033,61 @@ - (void)presentPopover:(NSView*)panel anchor:(NSView*)anchor {
                                       NSPoint p = [strong convertPoint:event.locationInWindow fromView:nil];
                                       if (event.window != strong.window ||
                                           (!NSPointInRect(p, strong->_menuView.frame) &&
@@ -18276,7 +18600,7 @@ index 3c18c4eab1..048e445418 100644
  }
  
  - (void)setDownloads:(const AgensDownload*)downloads count:(int)count started:(BOOL)started {
-@@ -4752,16 +7006,48 @@ - (void)setDownloads:(const AgensDownload*)downloads count:(int)count started:(B
+@@ -4752,16 +7095,50 @@ - (void)setDownloads:(const AgensDownload*)downloads count:(int)count started:(B
    for (int i = 0; i < count; ++i) _downloadNames.push_back(downloads[i].name);
    _downloads.assign(downloads, downloads + count);
    for (int i = 0; i < count; ++i) _downloads[i].name = _downloadNames[i].c_str();  // keep our copies
@@ -18289,6 +18613,7 @@ index 3c18c4eab1..048e445418 100644
 -    [self showDownloads];  // like Chrome: a new download opens the list
 -  } else if (_downloadsPanel) {
 -    [self fillDownloads];
++  _sessionDownloads = (int)std::count_if(_downloads.begin(), _downloads.end(), [](const AgensDownload& d) { return !d.past; });
 +  const BOOL appear = _downloadsButton.hidden;
 +  [self paintDownloadsButton];
 +  // Nothing opens by itself (prototype "Download novo"): the button arrives and its arrow drops.
@@ -18310,21 +18635,22 @@ index 3c18c4eab1..048e445418 100644
 +    [row updateWith:d];
 +    [items addObject:row];
    }
-+  [_downloadsPage setItems:items empty:q.length ? @"Nada encontrado." : @"Nenhum download neste ato desde que a janela abriu."];
++  [_downloadsPage setItems:items empty:q.length ? @"Nada encontrado." : @"Nenhum download neste ato."];
 +}
 +// The button exists while there is a download this session, or while its panel is open (after
 +// Limpar lista the panel shows the empty list; closing it takes the button away).
 +- (void)paintDownloadsButton {
 +  long long got = 0, total = 0;
 +  BOOL running = NO, attention = NO;
-+  for (const AgensDownload& d : _downloads) {
++  for (int i = 0; i < _sessionDownloads; ++i) {
++    const AgensDownload& d = _downloads[i];
 +    if (d.dangerous || (d.state == kAgensDownloadFailed && d.interrupt_reason != 40)) attention = YES;
 +    if (d.state != kAgensDownloading || d.dangerous) continue;
 +    running = YES;
 +    got += d.received;
 +    total += d.total;
 +  }
-+  const BOOL hide = _downloads.empty() && !_downloadsPanel;
++  const BOOL hide = !_sessionDownloads && !_downloadsPanel;
 +  const BOOL moved = hide != _downloadsButton.hidden;
 +  _downloadsButton.hidden = hide;
 +  [_downloadsButton setProgress:running ? (total > 0 ? (double)got / total : 0) : -1 attention:attention];
@@ -18334,7 +18660,7 @@ index 3c18c4eab1..048e445418 100644
  }
  - (void)toggleDownloads {
    if (_downloadsPanel) {
-@@ -4771,62 +7057,311 @@ - (void)toggleDownloads {
+@@ -4771,62 +7148,311 @@ - (void)toggleDownloads {
    }
  }
  - (void)showDownloads {
@@ -18363,8 +18689,9 @@ index 3c18c4eab1..048e445418 100644
 +// "Abrir a pasta Downloads". Rebuilt on every update; its buttons act on mouse down.
  - (void)fillDownloads {
 -  const CGFloat w = NSWidth(_downloadsPanel.frame), rowH = 48;
+-  const int count = (int)MIN(_downloads.size(), (size_t)6);
 +  const CGFloat w = NSWidth(_downloadsPanel.frame), pad = 6, headH = 34, footH = 11 + 31;
-   const int count = (int)MIN(_downloads.size(), (size_t)6);
++  const int count = MIN(_sessionDownloads, 6);
 +  CGFloat listH = 0;
 +  for (int i = 0; i < count; ++i) listH += [AgensDownloadRow heightFor:_downloads[i]];
 +  if (!count) listH = 92;
@@ -18673,7 +19000,7 @@ index 3c18c4eab1..048e445418 100644
  - (void)menuBookmarks:(id)sender {
    if (_window) agens_window_open_page(_window, kAgensBookmarks);
  }
-@@ -4839,14 +7374,18 @@ - (void)menuSettings:(id)sender {
+@@ -4839,14 +7465,18 @@ - (void)menuSettings:(id)sender {
  // chrome://settings, extensions, downloads... land here (native_shell.cc): a Settings section, or
  // the downloads panel.
  - (void)openSection:(NSString*)key {
@@ -18695,7 +19022,7 @@ index 3c18c4eab1..048e445418 100644
  // "Reduzir movimento". Each frame lays out the chrome and asks the engine to move the page.
  - (BOOL)collapsed {
    return _collapsed;
-@@ -4854,6 +7393,15 @@ - (BOOL)collapsed {
+@@ -4854,6 +7484,15 @@ - (BOOL)collapsed {
  - (NSArray<NSString*>*)atoNamesForSettings {
    return [_atoNames copy];
  }
@@ -18711,7 +19038,7 @@ index 3c18c4eab1..048e445418 100644
  - (void)toggleSidebar {
    _collapsed = !_collapsed;
    [NSUserDefaults.standardUserDefaults setBool:_collapsed forKey:kCollapsedKey];
-@@ -4863,7 +7411,7 @@ - (void)toggleSidebar {
+@@ -4863,7 +7502,7 @@ - (void)toggleSidebar {
      [self setSideWidth:to];
      return;
    }
@@ -18720,7 +19047,7 @@ index 3c18c4eab1..048e445418 100644
    __weak AgensChrome* weak = self;
    _sideTimer = [NSTimer timerWithTimeInterval:1.0 / 120 repeats:YES block:^(NSTimer* timer) {
      AgensChrome* strong = weak;
-@@ -4888,38 +7436,399 @@ - (void)run:(void (*)(AgensWindow*))action {
+@@ -4888,38 +7527,399 @@ - (void)run:(void (*)(AgensWindow*))action {
  - (void)reloadOrStop {
    [self run:_loading ? agens_window_stop : agens_window_reload];
  }
@@ -19140,7 +19467,7 @@ index 3c18c4eab1..048e445418 100644
  }
  // Tabs on top or in the column (⌘⇧S and Configurações › Aparência), for every window.
  - (BOOL)tabsOnTop {
-@@ -4945,7 +7854,7 @@ - (void)close:(int)index {
+@@ -4945,7 +7945,7 @@ - (void)close:(int)index {
    if (_window) agens_window_close_tab(_window, index);
  }
  - (void)go:(NSTextField*)sender {
@@ -19149,7 +19476,7 @@ index 3c18c4eab1..048e445418 100644
    [self closeSuggestions];
  }
  - (void)detach {
-@@ -4959,6 +7868,9 @@ - (void)detach {
+@@ -4959,6 +7959,9 @@ - (void)detach {
    _keyMonitor = nil;
    if (_menuMonitor) [NSEvent removeMonitor:_menuMonitor];
    _menuMonitor = nil;
@@ -19159,7 +19486,7 @@ index 3c18c4eab1..048e445418 100644
    if (_window) {
      agens_window_set_tabs_observer(_window, nullptr, nullptr);
      agens_window_set_atos_observer(_window, nullptr, nullptr);
-@@ -4975,22 +7887,36 @@ - (void)detach {
+@@ -4975,22 +7978,36 @@ - (void)detach {
  // popup hangs from the button), and the "installed" notice.
  - (void)setExtensions:(const AgensExtensionButton*)list count:(int)count installed:(const char*)installed {
    [_extensions removeAllObjects];
@@ -19202,7 +19529,7 @@ index 3c18c4eab1..048e445418 100644
    }
  }
  - (NSImage*)extensionIcon:(NSString*)extensionId {
-@@ -4999,43 +7925,128 @@ - (NSImage*)extensionIcon:(NSString*)extensionId {
+@@ -4999,43 +8016,128 @@ - (NSImage*)extensionIcon:(NSString*)extensionId {
    }
    return nil;
  }
@@ -19346,7 +19673,7 @@ index 3c18c4eab1..048e445418 100644
    manage.frame = NSMakeRect(5, y, w - 10, rowH);
    manage.onPress = ^{
      AgensChrome* strong = weak;
-@@ -5044,7 +8055,62 @@ - (void)showExtensions:(NSString*)notice {
+@@ -5044,7 +8146,62 @@ - (void)showExtensions:(NSString*)notice {
      [g_settings showSection:@"extensoes"];
    };
    [panel addSubview:manage];
@@ -19409,7 +19736,7 @@ index 3c18c4eab1..048e445418 100644
  }
  
  // --- Favoritos: the page, the bar and its menus.
-@@ -5094,6 +8160,89 @@ - (NSRect)roomForBar:(NSRect)page {
+@@ -5094,6 +8251,89 @@ - (NSRect)roomForBar:(NSRect)page {
    page.size.height -= 32;
    return page;
  }
@@ -19499,7 +19826,7 @@ index 3c18c4eab1..048e445418 100644
  - (void)toggleBookmarkBar {
    [NSUserDefaults.standardUserDefaults setBool:!_barShown forKey:kBookmarkBarKey];
    [NSNotificationCenter.defaultCenter postNotificationName:kThemeChanged object:nil];  // every window
-@@ -5135,7 +8284,7 @@ - (void)showFolder:(long long)folder under:(NSView*)button {
+@@ -5135,7 +8375,7 @@ - (void)showFolder:(long long)folder under:(NSView*)button {
      none.frame = NSMakeRect(14, 11, w - 28, 18);
      [panel addSubview:none];
    }
@@ -19508,7 +19835,7 @@ index 3c18c4eab1..048e445418 100644
  }
  - (void)openBookmark:(NSString*)url {
    if (_window && url.length) agens_window_navigate(_window, url.UTF8String);
-@@ -5160,201 +8309,623 @@ - (void)newBookmarkFolder {
+@@ -5160,201 +8400,623 @@ - (void)newBookmarkFolder {
  }
  // "Salvar a senha?" under the address bar, on its right (where Chrome shows its key). Closing the
  // panel any other way counts as "Agora não".
@@ -20284,7 +20611,7 @@ index 3c18c4eab1..048e445418 100644
  }
  - (int)command:(AgensCommand)command {
    switch (command) {
-@@ -5376,6 +8947,9 @@ - (int)command:(AgensCommand)command {
+@@ -5376,6 +9038,9 @@ - (int)command:(AgensCommand)command {
      case kAgensCommandFindPrevious:
        [_find step:NO];
        return 1;
@@ -20294,7 +20621,7 @@ index 3c18c4eab1..048e445418 100644
      default:
        return 0;
    }
-@@ -5398,6 +8972,12 @@ - (void)focusAddress {
+@@ -5398,6 +9063,12 @@ - (void)focusAddress {
  AgensRect agens_ui_layout(void* chrome, int width, int height) {
    return [(__bridge AgensChrome*)chrome layoutForWidth:width height:height];
  }
@@ -20307,7 +20634,7 @@ index 3c18c4eab1..048e445418 100644
  AgensRect agens_ui_site_icon_rect(void* chrome) {
    return [(__bridge AgensChrome*)chrome siteIconRect];
  }
-@@ -5407,10 +8987,17 @@ void agens_ui_focus_address(void* chrome) {
+@@ -5407,10 +9078,17 @@ void agens_ui_focus_address(void* chrome) {
  void agens_ui_colors(void* chrome, unsigned* window, unsigned* page, unsigned* line) {
    [(__bridge AgensChrome*)chrome colorsWindow:window page:page line:line];
  }
@@ -20327,7 +20654,7 @@ index 3c18c4eab1..048e445418 100644
  }
  void agens_ui_permission_prompt_close(void* chrome) {
    [(__bridge AgensChrome*)chrome permissionGone];
-@@ -5418,6 +9005,9 @@ void agens_ui_permission_prompt_close(void* chrome) {
+@@ -5418,6 +9096,9 @@ void agens_ui_permission_prompt_close(void* chrome) {
  AgensRect agens_ui_extensions_anchor(void* chrome) {
    return [(__bridge AgensChrome*)chrome extensionsAnchor];
  }
@@ -21178,7 +21505,7 @@ index e496cb7ab4..f921d60a24 100644
    // Whether the profile is loaded and opening a new browser window is allowed.
    BOOL canOpenNewBrowser = [self canOpenNewBrowser];
 diff --git a/chrome/browser/browser_process_impl.cc b/chrome/browser/browser_process_impl.cc
-index 433fa42fa4..648da6c65d 100644
+index 433fa42fa4..06fe18f9d1 100644
 --- a/chrome/browser/browser_process_impl.cc
 +++ b/chrome/browser/browser_process_impl.cc
 @@ -85,6 +85,11 @@
@@ -21216,7 +21543,7 @@ index 433fa42fa4..648da6c65d 100644
    // Mark all the profiles as clean.
    ProfileManager* pm = profile_manager();
    scoped_refptr<RundownTaskCounter> rundown_counter =
-@@ -1345,6 +1359,11 @@ BuildState* BrowserProcessImpl::GetBuildState() {
+@@ -1345,6 +1359,13 @@ BuildState* BrowserProcessImpl::GetBuildState() {
  // static
  void BrowserProcessImpl::RegisterPrefs(PrefRegistrySimple* registry) {
    sugiyamalabs::adblock::RegisterPrefs(registry);  // SugiyamaLabs
@@ -21225,10 +21552,12 @@ index 433fa42fa4..648da6c65d 100644
 +#endif
 +  // SugiyamaLabs: each ato's color and the socket client's tag (AgensWindow::kAtosPref).
 +  registry->RegisterDictionaryPref("agens.atos");
++  // SugiyamaLabs: "Atos fora de uso dormem inteiros" (agens::kAtosSleepWholePref; on, as in the prototype).
++  registry->RegisterBooleanPref("agens.atos_sleep_whole", true);
  
    registry->RegisterBooleanPref(prefs::kDefaultBrowserSettingEnabled, false);
  
-@@ -1706,6 +1725,9 @@ void BrowserProcessImpl::PreMainMessageLoopRun() {
+@@ -1706,6 +1727,9 @@ void BrowserProcessImpl::PreMainMessageLoopRun() {
  
    features_->PreMainMessageLoopRun();
    platform_part_->PreMainMessageLoopRun();
