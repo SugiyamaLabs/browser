@@ -164,6 +164,41 @@ try: engine2.wait(15)
 except subprocess.TimeoutExpired: engine2.kill()
 subprocess.run(["rm", "-rf", profile2])
 
+# Atos that sleep (#9), on a short launch with a 6 s wait: an ato with no tab shown lets its pages
+# go (atos.list "sleeping"), and showing one of its tabs wakes it.
+def renderers(pid):
+    ps = subprocess.run(["ps", "-A", "-o", "ppid=,command="], capture_output=True, text=True).stdout.split("\n")
+    return sum(1 for l in ps if l.strip().startswith(str(pid) + " ") and "--type=renderer" in l and "--extension-process" not in l)
+def sleeping(conn, ato):
+    return next((a.get("sleeping") for a in conn.ask("atos.list").get("atos") or [] if a["id"] == ato), None)
+profile3 = tempfile.mkdtemp(prefix="agens-s.", dir="/tmp")
+engine3 = launch(profile3, "--enable-features=AgensAtoSleep:after/6s", name="sleep")
+s3 = Conn(profile3 + "/agens.sock")
+s3.ask("hello", client="embutido-gate"); s3.ask("host.attach")
+ato3 = (s3.ask("atos.list").get("atos") or [{}])[0].get("id")
+tabs3 = [s3.ask("view.open", ato=ato3, url=SITE + "/other" + q).get("tab") for q in ("", "?2")]
+time.sleep(2)
+awake_renderers = renderers(engine3.pid)
+check("a fresh ato with pages is not sleeping (sleeping: false)", sleeping(s3, ato3) is False)
+end = time.time() + 30
+while time.time() < end and not sleeping(s3, ato3): time.sleep(1)
+asleep_renderers = renderers(engine3.pid)
+check("an ato with no tab shown for the wait sleeps (sleeping: true, fewer renderers)",
+      sleeping(s3, ato3) is True and asleep_renderers < awake_renderers, f"renderers {awake_renderers} -> {asleep_renderers}")
+check("its tabs keep their ids while it sleeps (view.tabs)",
+      sorted(t.get("tab") for t in s3.ask("view.tabs", ato=ato3).get("tabs") or []) == sorted(tabs3))
+check("a sleeping ato is still loaded (asleep: false)",
+      next((a.get("asleep") for a in s3.ask("atos.list").get("atos") or [] if a["id"] == ato3), None) is False)
+s3.ask("view.attach", tab=tabs3[0], width=640, height=480, scale=1)
+end = time.time() + 20
+while time.time() < end and sleeping(s3, ato3) is not False: time.sleep(0.5)
+check("showing one of its tabs wakes the ato (sleeping: false, the page is back)",
+      sleeping(s3, ato3) is False and renderers(engine3.pid) > asleep_renderers)
+engine3.terminate()
+try: engine3.wait(15)
+except subprocess.TimeoutExpired: engine3.kill()
+subprocess.run(["rm", "-rf", profile3])
+
 check("host.attach from the parent", c.ask("host.attach").get("ok"))
 r = c.ask("host.attach")
 check("a second host.attach on the same connection is refused", not r.get("ok"), r)

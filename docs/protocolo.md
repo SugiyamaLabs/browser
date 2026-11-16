@@ -30,7 +30,7 @@ Os dois produtos têm dados e sockets separados.
 
 O navegador lê o processo do outro lado (`LOCAL_PEERTOKEN`) e confere a assinatura de código.
 
-- AgensBrowser sozinho: qualquer app, nosso ou de terceiros, depois da folha "<app> quer usar o AgensBrowser" (**Permitir**, **Permitir sempre**, **Não permitir**). A folha não fala de assinatura; **Permitir sempre** vale para aquele app. O motor embutido não muda (abaixo). *Ainda não implementado: hoje o motor recusa quem não tem o nosso Team ID.*
+- AgensBrowser sozinho: qualquer app, nosso ou de terceiros, depois da folha "<app> quer usar o AgensBrowser" (**Permitir**, **Permitir sempre**, **Não permitir**). A folha não fala de assinatura; **Permitir sempre** vale para aquele app e fica guardado pelo bundle id dele (sem bundle, pelo caminho do executável). App assinado por um time da Apple é guardado com o Team ID junto (`<team>/<bundle id>`), conferido no processo que roda: uma cópia sem assinatura que diga o mesmo bundle id não herda o **Permitir sempre** do original. Os nossos apps continuam guardados como `<team>/<identificador de assinatura>`. O motor embutido não muda (abaixo).
 - Motor embutido (dentro do Agens, aberto com `--agens-embedded`): não há folha de conexão. Entra sempre o processo que abriu o motor (o hospedeiro). Outro app entra só se for assinado com o nosso Team ID e o hospedeiro tiver passado o identificador de assinatura dele ao abrir o motor (`--agens-allowed-clients=<id>,<id>`). Ninguém mais.
 - Desenvolvimento, sem assinatura: no AgensBrowser sozinho, **Configurações › Sistema › Aceitar apps sem assinatura** (vem desligado; o `agensctl` precisa dele enquanto não estiver assinado). No motor embutido, o hospedeiro abre o motor com `--agens-accept-unsigned`, que só vale em build que não é a oficial.
 
@@ -72,13 +72,14 @@ Um pedido para um ato dormindo acorda o ato. `tag` é uma etiqueta opaca do clie
 - `color` é uma de `orange`, `blue`, `pink`, `purple`, `teal`. Outra dá `bad_request`.
 - Em `atos.create`, `color` e `tag` são opcionais. O ato é criado sem abrir janela.
 - `atos.open` só aceita `url` com `http` ou `https`.
+- `asleep: true`: o ato não está carregado (nada dele na memória). `sleeping: true`: o ato está carregado, tem abas e nenhuma delas tem página viva: o ato dormiu porque ficou sem aba à vista e sem aba de agente pelo tempo do motor (10 min, [performance.md](performance.md#atos-que-dormem-9)). As abas continuam na lista com URL e título; mostrar uma (`view.attach`) recarrega a página e o ato volta a `sleeping: false`. Não há evento: quem quer saber pergunta `atos.list`. No motor sozinho vale o mesmo.
 
 ```
 → {"id": 2, "op": "atos.create", "name": "Cliente A", "color": "blue", "tag": "time-123"}
 ← {"id": 2, "ok": true, "ato": "Profile 1"}
 
 → {"id": 3, "op": "atos.list"}
-← {"id": 3, "ok": true, "atos": [{"id": "Profile 1", "name": "Cliente A", "color": "blue", "tag": "time-123", "asleep": false, "shared": false, "restorable": false}]}
+← {"id": 3, "ok": true, "atos": [{"id": "Profile 1", "name": "Cliente A", "color": "blue", "tag": "time-123", "asleep": false, "sleeping": false, "shared": false, "restorable": false}]}
 
 → {"id": 4, "op": "atos.rename", "ato": "Profile 1", "name": "Cliente B"}
 → {"id": 5, "op": "atos.color", "ato": "Profile 1", "color": "teal"}
@@ -211,6 +212,7 @@ Quem desenha a interface é o app hospedeiro: barra de endereço, abas, atos, o 
 - **Aprovações.** Embutido, o motor não mostra folha: manda `approval.ask {ask, title, detail, offer_always, ...}` ao hospedeiro, que desenha e responde `approval.answer {ask, answer}` com `allow`, `always` ou `deny`. Sem hospedeiro ligado, a resposta é `denied`. `title` e `detail` vêm sempre, prontos para mostrar (o texto da folha do AgensBrowser sozinho). Para quem desenha a própria folha, vêm também as partes, quando o motor as conhece (motor mais antigo não manda nenhuma; `kind` desconhecido: mostre `title` e `detail`):
   - `kind`: `"control"` (`control.start`) ou `"session"` (`session`). Existe também `"connect"` (a folha de conexão), que embutido não chega ao hospedeiro, porque ali não há folha de conexão.
   - `ato` (id) e `ato_name`.
+  - `app`: o nome do app que pede (do bundle dele).
   - `agent` (só `control`): o nome que as abas vão mostrar, o `agent` do `control.start` ou, sem ele, o nome do app.
   - `reason`: o motivo que o app deu; ausente quando vazio.
   - `allow` (só `control`): a lista de permissões extras pedidas (`passwords`, `clipboard`, `eval`); vazia quando nenhuma.
