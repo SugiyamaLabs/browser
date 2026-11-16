@@ -13,7 +13,7 @@ Referência para quem escreve um cliente (o time do Agens, em Go). O plano e o p
 | 5 | `host.*`, `view.*`, `ui.*` (a página dentro de outro app), `host.settings`, as partes de `approval.ask` | implementado |
 | 5.4 | `view.pick`, `view.pick.step`, `view.selection`, evento `view.picked` (apontar um elemento) | implementado |
 | 5.5 | `view.inspect`, ação `inspect` do botão direito (o DevTools); DevTools encaixado como vista (`dock`, `view.devtools.*`) | implementado |
-| 5.7 | `view.reopen`, `view.reopenable`, `view.find`, `view.find.stop`, `view.zoom`, `view.mute`, eventos `view.find` e `view.zoom`, campo `muted` em `view.tab` (reabrir aba, buscar na página, zoom, som) | implementado |
+| 5.7 | `view.reopen`, `view.reopenable`, `view.find`, `view.find.stop`, `view.zoom`, `view.mute`, `view.volume`, eventos `view.find` e `view.zoom`, campos `muted` e `volume` em `view.tab` (reabrir aba, buscar na página, zoom, som) | implementado |
 
 Um navegador de fase 1 responde `unknown_op` às demais. Trate `unknown_op` como "este navegador ainda não faz isso".
 
@@ -30,7 +30,7 @@ Os dois produtos têm dados e sockets separados.
 
 O navegador lê o processo do outro lado (`LOCAL_PEERTOKEN`) e confere a assinatura de código.
 
-- AgensBrowser sozinho: apps assinados com o nosso Team ID (o mesmo da assinatura do próprio motor), depois da folha "O Agens quer usar o AgensBrowser" (**Permitir**, **Permitir sempre**, **Não permitir**).
+- AgensBrowser sozinho: qualquer app, nosso ou de terceiros, depois da folha "<app> quer usar o AgensBrowser" (**Permitir**, **Permitir sempre**, **Não permitir**). A folha não fala de assinatura; **Permitir sempre** vale para aquele app. O motor embutido não muda (abaixo). *Ainda não implementado: hoje o motor recusa quem não tem o nosso Team ID.*
 - Motor embutido (dentro do Agens, aberto com `--agens-embedded`): não há folha de conexão. Entra sempre o processo que abriu o motor (o hospedeiro). Outro app entra só se for assinado com o nosso Team ID e o hospedeiro tiver passado o identificador de assinatura dele ao abrir o motor (`--agens-allowed-clients=<id>,<id>`). Ninguém mais.
 - Desenvolvimento, sem assinatura: no AgensBrowser sozinho, **Configurações › Sistema › Aceitar apps sem assinatura** (vem desligado; o `agensctl` precisa dele enquanto não estiver assinado). No motor embutido, o hospedeiro abre o motor com `--agens-accept-unsigned`, que só vale em build que não é a oficial.
 
@@ -201,10 +201,10 @@ Quem desenha a interface é o app hospedeiro: barra de endereço, abas, atos, o 
 → {"id": 3, "op": "view.attach", "tab": "v3", "width": 1000, "height": 640, "scale": 2}
 ← {"id": 3, "ok": true}
 ← {"event": "view.layer", "tab": "v3", "context": 3626435823, "width": 1000, "height": 640, "scale": 2}
-← {"event": "view.tab", "tab": "v3", "ato": "Profile 1", "title": "Example Domain", "url": "https://example.com/", "loading": false, "audible": false, "muted": false, "can_back": false, "can_forward": false}
+← {"event": "view.tab", "tab": "v3", "ato": "Profile 1", "title": "Example Domain", "url": "https://example.com/", "loading": false, "audible": false, "muted": false, "volume": 100, "can_back": false, "can_forward": false}
 ```
 
-- **Abas.** `view.tabs {ato}` lista as abas do ato: `{tabs: [{tab, ato, title, url, loading, audible, muted, can_back, can_forward, control?}]}`. O id `v…` vale enquanto a aba existir e inclui as abas que um agente abriu. `view.open {ato, url?}`, `view.close {tab}`, `view.navigate {tab, text}` (endereço ou busca, como na barra), `view.back`, `view.forward`, `view.reload`, `view.stop`. Eventos: `view.tab` a cada mudança, `view.closed {tab}` e `view.favicon {tab}` quando o ícone muda (`view.favicon {tab}` como pedido devolve `{png}`).
+- **Abas.** `view.tabs {ato}` lista as abas do ato: `{tabs: [{tab, ato, title, url, loading, audible, muted, volume, can_back, can_forward, control?}]}`. O id `v…` vale enquanto a aba existir e inclui as abas que um agente abriu. `view.open {ato, url?}`, `view.close {tab}`, `view.navigate {tab, text}` (endereço ou busca, como na barra), `view.back`, `view.forward`, `view.reload`, `view.stop`. Eventos: `view.tab` a cada mudança, `view.closed {tab}` e `view.favicon {tab}` quando o ícone muda (`view.favicon {tab}` como pedido devolve `{png}`).
 - **Mostrar.** `view.attach {tab, width, height, scale}` faz a aba desenhar naquele tamanho (em pontos) e manda `view.layer {tab, context, width, height, scale}`: o app mostra o `context` num `CALayerHost`. O `context` muda ao trocar de processo ou de tamanho, e o evento vem de novo. `view.resize {tab, width, height, scale}` e `view.detach {tab}`. Várias abas podem estar ligadas ao mesmo tempo (painéis lado a lado).
 - **Entrada.** O app manda o que a vista recebeu: `view.focus {tab, on}`, `view.mouse {tab, data, x, y}`, `view.mouse.leave {tab}`, `view.wheel {tab, data, x, y}`, `view.key {tab, data, text, commands, marked, sel_start, sel_end, had_marked, unmarked}` e `view.edit {tab, command}` (`cut`, `copy`, `paste`, `selectAll`, `undo`, `redo`). `data` é o `NSEvent` serializado (`CGEventCreateData`, em base64); `x` e `y` contam do canto de cima da vista, em pontos. Sem `id`, o motor não responde.
 - **Aba com agente.** Quando um agente controla a aba, `view.tab` traz `control: {agent, title, detail, state}`, com `state` `"working"` ou `"paused"`, para o app desenhar o aviso. O app manda `view.control {tab, action}` com `take` (Assumir), `give` (Devolver) ou `end` (encerrar). A pessoa pode ver a aba do agente o tempo todo; com `take`, as teclas e os cliques dela passam a valer e os do agente respondem `paused`.
@@ -467,8 +467,9 @@ Também só adições à v1. Tudo só da conexão do hospedeiro (de outra, `unau
 - **Aba com agente.** Com o agente trabalhando, `view.find` e `view.zoom` com `level` ou `factor` dão `denied` (depois do Assumir, valem). `view.find.stop` e ler o zoom valem sempre. Mudar o zoom de um site numa aba da pessoa muda também a aba do agente no mesmo site e ato, como no Chrome.
 
 - **Som da aba.** `view.tab` (e `view.tabs`) traz `audible` (a página está tocando som agora) e `muted` (a aba está silenciada); o evento vem de novo a cada mudança dos dois. Motor mais antigo não manda `muted`: trate como `false`. `view.mute {tab, muted}` → `{ok}` silencia ou devolve o som, como o ícone de som da aba do Chrome (o estado fica com a aba, também numa aba restaurada depois de uma queda). Silenciada, a aba continua `audible: true` enquanto a página toca: nada sai, mas o app pode mostrar o ícone cortado. Vale também na aba de um agente, mesmo com ele trabalhando: a pessoa sempre pode calar uma aba. `muted` que não é booleano: `bad_request`.
+- **Volume da aba.** `view.tab` (e `view.tabs`) traz `volume`, de `0` a `100` (padrão `100`), e o evento vem de novo quando ele muda. Motor mais antigo não manda: trate como `100`. `view.volume {tab, volume}` → `{ok}` muda o volume só desta aba, como o popover do alto-falante da aba na casca. Vale para todo som da página (vídeo, áudio, Web Audio) e fica com a aba enquanto ela existir, também depois de recarregar ou navegar; não é guardado (aba restaurada ou reaberta volta a `100`). É separado de `muted`: `volume: 0` não silencia a aba, e silenciar não muda o volume. Não muda o que a captura da aba recebe. Vale também na aba de um agente. `volume` que não é inteiro de `0` a `100`: `bad_request`.
 
-**Erros novos.** Nenhum. **Operações novas:** `view.reopen`, `view.reopenable`, `view.find`, `view.find.stop`, `view.zoom`, `view.mute`. **Eventos novos:** `view.find`, `view.zoom`. **Campo novo:** `muted` em `view.tab`.
+**Erros novos.** Nenhum. **Operações novas:** `view.reopen`, `view.reopenable`, `view.find`, `view.find.stop`, `view.zoom`, `view.mute`, `view.volume`. **Eventos novos:** `view.find`, `view.zoom`. **Campos novos:** `muted` e `volume` em `view.tab`.
 
 ## Erros
 

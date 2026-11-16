@@ -16,11 +16,11 @@ EMBUTIDO_INSPECT="${EMBUTIDO_INSPECT:-0}"
 export APP OUT GATES REPO SITE_PORT EMBUTIDO_INSPECT
 
 SITE_PID=""
-if ! curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/som"; then   # /som: the newest page, so an older site is not reused
+if ! curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/camera"; then   # /camera: the newest page, so an older site is not reused
   python3 "$REPO/tools/sites-teste/serve.py" "$SITE_PORT" >"$OUT/site.log" 2>&1 &
   SITE_PID=$!
-  for _ in $(seq 20); do curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/som" && break; sleep 0.25; done
-  curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/som" || { echo "FAIL: the test site has no /som (an older serve.py on port $SITE_PORT? try SITE_PORT=8766)"; exit 1; }
+  for _ in $(seq 20); do curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/camera" && break; sleep 0.25; done
+  curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/camera" || { echo "FAIL: the test site has no /camera (an older serve.py on port $SITE_PORT? try SITE_PORT=8766)"; exit 1; }
 fi
 
 # winids lists every normal window of a pid, also the ones off screen; this one counts only those
@@ -1667,7 +1667,7 @@ check("view.zoom with a bad level, a factor past 5 or both is bad_request",
       err(c.ask("view.zoom", tab=ft, level="huge")) == "bad_request" and err(c.ask("view.zoom", tab=ft, factor=9)) == "bad_request"
       and err(c.ask("view.zoom", tab=ft, level="in", factor=2)) == "bad_request")
 
-# Sound per tab: view.tab's audible and muted, view.mute. The tone is very quiet (gain 0.003).
+# Sound per tab: view.tab's audible, muted and volume, view.mute, view.volume. The tone is very quiet (gain 0.003).
 st = c.ask("view.open", ato=rato, url=SITE + "/som").get("tab", "")
 c.ask("view.attach", tab=st, width=600, height=400, scale=1)
 e = tab_event(st, loaded("/som"))
@@ -1684,10 +1684,78 @@ check("muted, the tab still reports audible (as Chromium does: the page plays, n
 r = c.ask("view.mute", tab=st, muted=False)
 check("view.mute false unmutes", r.get("ok") and bool(tab_event(st, lambda e: e.get("muted") is False, 10)), r)
 check("view.mute without a boolean muted is bad_request", err(c.ask("view.mute", tab=st, muted="yes")) == "bad_request")
+check("view.tab carries volume 100 by default", tabs.get(st, {}).get("volume") == 100, tabs.get(st))
+drop(st); r = c.ask("view.volume", tab=st, volume=30)
+check("view.volume 30: ok, view.tab volume 30", r.get("ok") and bool(tab_event(st, lambda e: e.get("volume") == 30, 10)), r)
+drop(st); c.ask("view.reload", tab=st)
+tab_event(st, lambda e: e.get("loading"), 10); tab_event(st, loaded("/som"))
+tabs = {x["tab"]: x for x in c.ask("view.tabs", ato=rato).get("tabs", [])}
+check("the volume stays with the tab after a reload (view.tabs volume 30, not muted)",
+      tabs.get(st, {}).get("volume") == 30 and tabs.get(st, {}).get("muted") is False, tabs.get(st))
+click(st, 100, 100); time.sleep(3)
+tabs = {x["tab"]: x for x in c.ask("view.tabs", ato=rato).get("tabs", [])}
+check("at 30% the page still plays: audible true", tabs.get(st, {}).get("audible") is True, tabs.get(st))
+drop(st); r = c.ask("view.volume", tab=st, volume=0)
+check("view.volume 0 is not muting: volume 0, muted false",
+      r.get("ok") and bool(tab_event(st, lambda e: e.get("volume") == 0 and e.get("muted") is False, 10)), r)
+check("view.volume past 100, below 0 or not a number is bad_request",
+      err(c.ask("view.volume", tab=st, volume=101)) == "bad_request" and err(c.ask("view.volume", tab=st, volume=-1)) == "bad_request"
+      and err(c.ask("view.volume", tab=st, volume="alto")) == "bad_request")
+drop(st); r = c.ask("view.volume", tab=st, volume=100)
+check("view.volume 100 gives the volume back", r.get("ok") and bool(tab_event(st, lambda e: e.get("volume") == 100, 10)), r)
 c.ask("view.close", tab=st)
 no_window("view.reopen, find, zoom and sound")
 c.ask("view.close", tab=t)
 c.ask("view.close", tab=ft)
+
+# Issue #54: a new tab with no address loads nothing (no chrome://newtab page) and so starts no
+# renderer until it navigates.
+def renderers(pid):
+    return len(subprocess.run(["pgrep", "-P", str(pid), "-f", "type=renderer"], capture_output=True, text=True).stdout.split())
+time.sleep(3)
+before = renderers(engine.pid)
+new_tabs = [c.ask("view.open", ato=rato).get("tab", "") for _ in range(3)]
+es = [tab_event(nt) for nt in new_tabs]
+time.sleep(3)
+after = renderers(engine.pid)
+# Three tabs, at most one process more: Chromium may start its spare renderer meanwhile.
+check("view.open with no url: three new tabs (url \"\") start no renderer of their own",
+      all(e and e.get("url") == "" for e in es) and after - before <= 1, (es, before, after))
+nt = new_tabs[0]
+c.ask("view.navigate", tab=nt, text=SITE + "/other")
+check("that new tab navigates as usual (/other loads)", bool(tab_event(nt, loaded("/other"))))
+for nt in new_tabs: c.ask("view.close", tab=nt)
+
+# Issue #34: the video capture service exits when no page uses the camera. Its own short launch:
+# a fake camera that needs no permission prompt, and the release after 2 s instead of 60 s.
+profile4 = tempfile.mkdtemp(prefix="agens-v.", dir="/tmp")
+engine4 = launch(profile4, "--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream",
+                 "--enable-features=ReleaseVideoSourceProviderIfNotInUse:release_video_source_provider_timeout/2s", name="camera")
+c4 = Conn(profile4 + "/agens.sock")
+c4.ask("hello"); c4.ask("host.attach")
+def capture_service(pid):
+    return len(subprocess.run(["pgrep", "-P", str(pid), "-f", "VideoCaptureService"], capture_output=True, text=True).stdout.split())
+def titled4(tab, prefix, timeout=20):
+    return c4.event(lambda e: e["event"] == "view.tab" and e.get("tab") == tab and e.get("title", "").startswith(prefix), timeout)
+def until(pred, timeout):
+    end = time.time() + timeout
+    while time.time() < end and not pred(): c4.pump(0.5)
+    return pred()
+ato4 = (c4.ask("atos.list").get("atos") or [{}])[0].get("id")
+vt = c4.ask("view.open", ato=ato4, url=SITE + "/camera").get("tab", "")
+e = titled4(vt, "camera:live")
+check("a page using the (fake) camera starts the video capture service", bool(e) and capture_service(engine4.pid) == 1,
+      (e, capture_service(engine4.pid)))
+e = titled4(vt, "camera:stopped")
+gone_open = until(lambda: capture_service(engine4.pid) == 0, 20)
+print("INFO: camera stopped, tab still open: the service " + ("exited" if gone_open else "is still up (kept while the page's capture host lives)"), flush=True)
+c4.ask("view.close", tab=vt)
+check("no tab uses the camera: the video capture service exits", until(lambda: capture_service(engine4.pid) == 0, 30),
+      capture_service(engine4.pid))
+engine4.terminate()
+try: engine4.wait(15)
+except subprocess.TimeoutExpired: engine4.kill()
+subprocess.run(["rm", "-rf", profile4])
 
 check("engine still has no window on screen at the end", on_screen() == "0", f"on screen: {on_screen()}")
 check("engine still running", engine.poll() is None)
@@ -1729,7 +1797,7 @@ EOF
 
 python3 "$OUT/parent.py" &
 PARENT=$!
-for _ in $(seq 700); do [ -f "$OUT/done" ] && break; sleep 0.5; done
+for _ in $(seq 900); do [ -f "$OUT/done" ] && break; sleep 0.5; done
 ENGINE_PID="$(cat "$OUT/engine.pid" 2>/dev/null)"
 PROFILE_E="$(cat "$OUT/profile" 2>/dev/null)"
 fail=0

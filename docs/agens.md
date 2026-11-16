@@ -39,7 +39,7 @@ Os dois saem do mesmo repositório e do mesmo build, empacotados de dois jeitos,
 - **Formato:** uma mensagem JSON por linha. Pedido: `{"id": 1, "op": "atos.list", ...}`. Resposta: `{"id": 1, "ok": true, ...}` ou `{"id": 1, "ok": false, "error": "..."}`. Evento, sem `id`: `{"event": "session.lost", ...}`. O `id` é a correlação do pedido; o id de um ato viaja no campo `ato`.
 - **Quem pode conectar:** o navegador lê o processo do outro lado (`LOCAL_PEERTOKEN`) e confere a assinatura de código.
   - Dentro do Agens: só o próprio Agens (o mesmo Team ID e o bundle id do Agens).
-  - No AgensBrowser sozinho: apps com o nosso Team ID, depois da aprovação "O Agens quer usar o AgensBrowser", com **Permitir**, **Permitir sempre** e **Não permitir**.
+  - No AgensBrowser sozinho: qualquer app, nosso ou de terceiros (decisão do Willian, 16/11/2026), depois da folha "<app> quer usar o AgensBrowser", com **Permitir**, **Permitir sempre** e **Não permitir**. A folha mostra o nome do app, o ato e o que ele vai poder fazer, sem falar de assinatura; **Permitir sempre** vale para aquele app.
   - Para desenvolvimento, "Aceitar apps sem assinatura" em Configurações › Sistema, que vem desligado.
   - No motor embutido não há folha de conexão: entra o processo que abriu o motor, mais os apps assinados com o nosso Team ID cujo identificador de assinatura o hospedeiro lista ao abrir (`--agens-allowed-clients`). Em desenvolvimento, `--agens-accept-unsigned`.
 - **Versão:** `hello` devolve a versão do protocolo. Mudança que quebra cliente sobe a versão. Navegador velho demais responde e o cliente avisa "Atualize".
@@ -140,6 +140,6 @@ Fica registrado aqui só para combinar a fronteira:
 
 ## Decisões para o Willian
 
-1. **Quem pode conectar no AgensBrowser sozinho:** só apps assinados com o nosso Team ID (recomendado), ou também um token em arquivo para scripts?
+1. **Quem pode conectar no AgensBrowser sozinho:** decidido em 16/11/2026: apps de terceiros também, sempre pela folha (veja "O socket").
 2. **"Permitir sempre":** vale para app + ato + itens exatos (recomendado), ou para app + ato?
 3. **Aviso de controle:** decidido como pílula sobre o cartão da página, com **Assumir**, **Devolver** e a bolha de parar (no lugar da borda e da faixa).

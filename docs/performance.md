@@ -95,3 +95,12 @@ Patch [`chromium/patches/sugiyamalabs/sleeping-tabs.patch`](../chromium/patches/
 - Valem as proteções do Chromium. **Não dorme:** aba visível, aba ativa de qualquer janela, aba fixada, aba tocando áudio (e até 1 min depois), com formulário editado, usando câmera, microfone ou tela, em Picture-in-Picture, com DevTools aberto, ou que mudou título ou ícone em segundo plano. Também não dorme aba revisitada mais de 15 vezes.
 - **Upload em andamento também não dorme** (patch [`upload-protection.patch`](../chromium/patches/sugiyamalabs/upload-protection.patch), #37). Vale para upload por script (`fetch`/XHR com corpo, como Gmail, Drive e WhatsApp), em que o Blink avisa o performance manager do primeiro envio que começa e do último que termina, e para formulário POST, enquanto a navegação espera a resposta.
 - **Nova tentativa:** se a aba estava protegida quando o tempo acabou (upload, áudio, câmera…), o timer tenta de novo depois do mesmo intervalo, enquanto ela continuar escondida. No Chromium original, essa aba só voltava a ter chance depois de ser vista e escondida outra vez.
+
+## Nova aba sem página por baixo (#54)
+
+A casca desenha a nova aba, então a aba nova para `chrome://newtab` (⌘T, "+", a primeira aba da janela, `view.open` sem `url`) não carrega nada: fica no documento vazio inicial, sem renderer, até a pessoa navegar. Antes, cada nova aba subia um renderer com a página do Chromium por baixo da nossa. Patch em `browser_navigator.cc`, só com `AgensNativeShell` ligada. Diferença para o Chrome: a primeira página aberta nessa aba não tem "voltar" para a nova aba. Uma aba que navega para `chrome://newtab` (sem ser aba nova) continua carregando a página.
+
+## Captura de vídeo só com câmera em uso (#34)
+
+O serviço de captura de vídeo (27 MB na medição de 09/11) ficava vivo para sempre depois que uma página listava os dispositivos, porque o navegador ficava ouvindo as mudanças de câmera nele. Ligamos no Mac a feature do Chromium `ReleaseVideoSourceProviderIfNotInUse` (vinha desligada): sem página usando câmera nem ouvindo `devicechange`, o navegador solta o serviço depois de **60 s** e ele fecha 5 s depois. Ao soltar, a lista de câmeras guardada é jogada fora, para a próxima página pedir a lista nova (era o motivo de a feature vir desligada, crbug 377749384). Mudar o tempo: `--enable-features=ReleaseVideoSourceProviderIfNotInUse:release_video_source_provider_timeout/10s`; desligar: `--disable-features=ReleaseVideoSourceProviderIfNotInUse`. Uma página que ouve `devicechange` segura o serviço enquanto estiver aberta.
+

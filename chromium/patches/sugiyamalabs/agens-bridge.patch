@@ -8123,10 +8123,10 @@ index 0000000000..e98cac0576
 +}
 diff --git a/chrome/browser/agens/bridge/view_ops.cc b/chrome/browser/agens/bridge/view_ops.cc
 new file mode 100644
-index 0000000000..6c95ae0a6b
+index 0000000000..01482913b0
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_ops.cc
-@@ -0,0 +1,1682 @@
+@@ -0,0 +1,1697 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The host draws the interface; the engine hands it the pages (docs/protocolo.md, "host e view").
 +// - One host: the connection that sent host.attach (the app that launched the engine).
@@ -8201,6 +8201,7 @@ index 0000000000..6c95ae0a6b
 +#include "components/zoom/page_zoom.h"
 +#include "components/zoom/zoom_controller.h"
 +#include "components/zoom/zoom_observer.h"
++#include "content/public/browser/agens_audio.h"
 +#include "content/public/browser/agens_embed_mac.h"
 +#include "content/public/browser/navigation_handle.h"
 +#include "content/public/browser/render_frame_host.h"
@@ -8453,6 +8454,7 @@ index 0000000000..6c95ae0a6b
 +  tab.Set("loading", contents->IsLoading());
 +  tab.Set("audible", contents->IsCurrentlyAudible());
 +  tab.Set("muted", contents->IsAudioMuted());
++  tab.Set("volume", static_cast<int>(std::lround(content::AgensGetAudioVolume(contents) * 100)));
 +  tab.Set("can_back", contents->GetController().CanGoBack());
 +  tab.Set("can_forward", contents->GetController().CanGoForward());
 +  if (const AgensControlled* controlled = AgensControlled::FromWebContents(contents)) {
@@ -9592,6 +9594,19 @@ index 0000000000..6c95ae0a6b
 +      return;
 +    }
 +    SetTabAudioMuted(contents, *muted, TabMutedReason::kAudioIndicator, std::string());
++  } else if (op == "view.volume") {
++    // The tab's own volume, 0..100, as the casca's popover on the tab; kept until the tab closes.
++    std::optional<int> volume = request.body.FindInt("volume");
++    if (!volume || *volume < 0 || *volume > 100) {
++      std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs tab and volume (0 to 100)"));
++      return;
++    }
++    content::AgensSetAudioVolume(contents, *volume / 100.0);
++    for (AgensWindow* window : S().windows) {  // nothing in Chromium watches it: send view.tab
++      if (window->model()->GetIndexOfWebContents(contents) != TabStripModel::kNoTab) {
++        window->model()->UpdateWebContentsState(contents, TabChangeType::kAll);
++      }
++    }
 +  } else if (op == "view.print_pdf") {
 +    ui_ask::PrintPdf(contents, request, std::move(reply));
 +    return;
@@ -10984,10 +10999,10 @@ index 0000000000..48063dd9a1
 +
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_COOKIE_POOL_H_
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
-index 9d0bf4646d..2b9eb6abbe 100644
+index 9d0bf4646d..c5bf888e54 100644
 --- a/chrome/browser/agens/embed/agens_embed.h
 +++ b/chrome/browser/agens/embed/agens_embed.h
-@@ -36,6 +36,12 @@ typedef struct {
+@@ -36,6 +36,13 @@ typedef struct {
    int microphone;  // the page is using the microphone now
    int indicators;  // kAgensInd* mask: Chromium's address-bar icons for this tab (active tab only)
    int zoom_percent;  // the page's zoom, 100 by default
@@ -10997,10 +11012,20 @@ index 9d0bf4646d..2b9eb6abbe 100644
 +  int control_paused;          // the person took over: "Você está no controle"
 +  double cursor_x, cursor_y;   // the agent's last click or hover, DIPs from the page's top-left; x < 0 when none
 +  int devtools;  // its DevTools: 0 none, 1 in the page card (agens_ui_devtools_layout), 2 in its own window
++  int volume_percent;  // the tab's own volume, 0..100 (100 by default); muting is separate
  } AgensTab;
  
  // What `AgensTab.indicators` carries (camera and microphone have their own fields above).
-@@ -79,14 +85,26 @@ void agens_window_reload(AgensWindow* window);
+@@ -71,6 +78,8 @@ void agens_window_split(AgensWindow* window, int index, int layout);
+ void agens_window_unsplit(AgensWindow* window, int index);
+ void agens_window_set_pinned(AgensWindow* window, int index, int pinned);
+ void agens_window_toggle_mute(AgensWindow* window, int index);
++// The tab's volume, 0..100; kept with the tab until it closes (not saved).
++void agens_window_set_volume(AgensWindow* window, int index, int percent);
+ // Address or search text, as typed; the engine decides which it is.
+ void agens_window_navigate(AgensWindow* window, const char* text);
+ void agens_window_back(AgensWindow* window);
+@@ -79,14 +88,26 @@ void agens_window_reload(AgensWindow* window);
  void agens_window_stop(AgensWindow* window);
  // Adds the active page to Favoritos, or removes it if it's there.
  void agens_window_toggle_bookmark(AgensWindow* window);
@@ -11029,7 +11054,7 @@ index 9d0bf4646d..2b9eb6abbe 100644
  
  // Address suggestions, from local sources only (history, bookmarks, the typed search); remote
  // search suggestions stay off. Call suggest on every edit, with "" to stop.
-@@ -109,9 +127,14 @@ typedef struct {
+@@ -109,9 +130,14 @@ typedef struct {
    const char* name;  // UTF-8
    int active;        // this window's ato
    int asleep;        // not loaded in memory right now
@@ -11044,7 +11069,7 @@ index 9d0bf4646d..2b9eb6abbe 100644
  // Opens that ato's window over this one (each ato keeps its own window and tabs).
  void agens_window_switch_ato(AgensWindow* window, int index);
  void agens_window_new_ato(AgensWindow* window);
-@@ -219,11 +242,24 @@ typedef struct {
+@@ -219,11 +245,24 @@ typedef struct {
    const char* name;
    const char* version;
    int enabled;
@@ -11070,7 +11095,7 @@ index 9d0bf4646d..2b9eb6abbe 100644
  
  // Senhas salvas. The list carries no passwords; agens_password_get copies one (the UI asks for
  // Touch ID first). Indexes refer to the last list delivered.
-@@ -255,7 +291,7 @@ void agens_bookmark_add_folder(AgensWindow* window, const char* title);  // at t
+@@ -255,7 +294,7 @@ void agens_bookmark_add_folder(AgensWindow* window, const char* title);  // at t
  // Results arrive through the observer: the current match (1-based, 0 for none) and the total.
  typedef void (*AgensFindChanged)(void* context, int current, int total);
  void agens_window_set_find_observer(AgensWindow* window, AgensFindChanged observer, void* context);
@@ -11079,7 +11104,7 @@ index 9d0bf4646d..2b9eb6abbe 100644
  void agens_find_stop(AgensWindow* window);
  
  // Saving a password the person just used on the active page. Fills `out` (strings valid until
-@@ -279,6 +315,16 @@ typedef enum {
+@@ -279,6 +318,16 @@ typedef enum {
  } AgensPermissionAnswer;
  void agens_window_permission_answer(AgensWindow* window, AgensPermissionAnswer answer);
  
@@ -11096,7 +11121,7 @@ index 9d0bf4646d..2b9eb6abbe 100644
  // The site of the active page, for the panel behind the site icon. `pattern` is what
  // agens_site_exception_set takes for this site. Strings valid until the next call.
  typedef struct {
-@@ -291,13 +337,20 @@ AgensPermission agens_site_permission(AgensWindow* window, const char* kind);  /
+@@ -291,13 +340,20 @@ AgensPermission agens_site_permission(AgensWindow* window, const char* kind);  /
  // Cookies and storage of the active page's site only.
  void agens_site_clear_data(AgensWindow* window, AgensDoneFn done, void* context);
  
@@ -11120,7 +11145,7 @@ index 9d0bf4646d..2b9eb6abbe 100644
  } AgensExtensionButton;
  typedef void (*AgensExtensionButtonsChanged)(void* context, const AgensExtensionButton* list, int count,
                                               const char* installed);
-@@ -340,6 +393,7 @@ typedef enum {
+@@ -340,6 +396,7 @@ typedef enum {
    kAgensCommandFindNext,     // ⌘G
    kAgensCommandFindPrevious, // ⌘⇧G
    kAgensCommandPasswordPrompt,  // the page has a password to save or update: ask (see below)
@@ -11128,7 +11153,7 @@ index 9d0bf4646d..2b9eb6abbe 100644
  } AgensCommand;
  int agens_ui_command(void* chrome, AgensCommand command);
  // Opens Settings on a section ("senhas", "extensoes", "sobre"...; "" keeps the current one), or the
-@@ -354,10 +408,23 @@ void agens_ui_colors(void* chrome, unsigned* window, unsigned* page, unsigned* l
+@@ -354,10 +411,23 @@ void agens_ui_colors(void* chrome, unsigned* window, unsigned* page, unsigned* l
  // lights center on it; it follows the density).
  // Where the extensions button is (extension popups hang from it).
  AgensRect agens_ui_extensions_anchor(void* chrome);
@@ -12254,10 +12279,18 @@ index 0000000000..9787b1d770
 +
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EXTENSIONS_H_
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
-index 268d4dc7bd..aa15e0ed3c 100644
+index 268d4dc7bd..a259856506 100644
 --- a/chrome/browser/agens/embed/agens_window.h
 +++ b/chrome/browser/agens/embed/agens_window.h
-@@ -15,7 +15,13 @@
+@@ -5,6 +5,7 @@
+ #ifndef CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
+ #define CHROME_BROWSER_AGENS_EMBED_AGENS_WINDOW_H_
+ 
++#include <cmath>
+ #include <map>
+ #include <set>
+ #include <string>
+@@ -15,7 +16,13 @@
  #include "base/task/sequenced_task_runner.h"
  #include "base/strings/utf_string_conversions.h"
  #include "chrome/app/chrome_command_ids.h"
@@ -12271,7 +12304,7 @@ index 268d4dc7bd..aa15e0ed3c 100644
  #include "chrome/browser/autocomplete/autocomplete_classifier_factory.h"
  #include "chrome/browser/autocomplete/chrome_autocomplete_provider_client.h"
  #include "chrome/browser/autocomplete/chrome_autocomplete_scheme_classifier.h"
-@@ -25,6 +31,7 @@
+@@ -25,6 +32,7 @@
  #include "base/strings/stringprintf.h"
  #include "chrome/common/chrome_constants.h"
  #include "chrome/browser/bookmarks/bookmark_model_factory.h"
@@ -12279,7 +12312,7 @@ index 268d4dc7bd..aa15e0ed3c 100644
  #include "chrome/browser/browser_process.h"
  #include "components/bookmarks/browser/bookmark_model.h"
  #include "components/bookmarks/browser/base_bookmark_model_observer.h"
-@@ -48,7 +55,9 @@
+@@ -48,7 +56,9 @@
  #include "chrome/browser/profiles/profile_manager.h"
  #include "chrome/browser/profiles/profile_window.h"
  #include "chrome/browser/search_engines/template_url_service_factory.h"
@@ -12289,7 +12322,15 @@ index 268d4dc7bd..aa15e0ed3c 100644
  #include "components/search_engines/default_search_manager.h"
  #include "components/search_engines/template_url.h"
  #include "components/search_engines/template_url_data_util.h"
-@@ -189,10 +198,16 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -69,6 +79,7 @@
+ #include "components/omnibox/browser/autocomplete_controller.h"
+ #include "components/omnibox/browser/autocomplete_input.h"
+ #include "components/omnibox/browser/autocomplete_match.h"
++#include "content/public/browser/agens_audio.h"
+ #include "content/public/browser/navigation_controller.h"
+ #include "content/public/browser/web_contents.h"
+ #include "content/public/browser/navigation_handle.h"
+@@ -189,10 +200,16 @@ struct AgensWindow : public TabStripModelObserver,
                       public download::DownloadItem::Observer,
                       public bookmarks::BaseBookmarkModelObserver,
                       public find_in_page::FindResultObserver,
@@ -12307,7 +12348,7 @@ index 268d4dc7bd..aa15e0ed3c 100644
      PreferDuckDuckGo();
      if (content::DownloadManager* manager = browser->GetProfile()->GetDownloadManager()) {
        downloads_manager = manager;
-@@ -230,7 +245,13 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -230,7 +247,13 @@ struct AgensWindow : public TabStripModelObserver,
      }
    }
    ~AgensWindow() override {
@@ -12321,7 +12362,7 @@ index 268d4dc7bd..aa15e0ed3c 100644
      Storage().RemoveObserver(this);
      for (download::DownloadItem* item : downloads) item->RemoveObserver(this);
      if (downloads_manager) downloads_manager->RemoveObserver(this);
-@@ -284,7 +305,81 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -284,7 +307,81 @@ struct AgensWindow : public TabStripModelObserver,
      return g_browser_process->profile_manager()->GetProfileAttributesStorage();
    }
  
@@ -12404,7 +12445,7 @@ index 268d4dc7bd..aa15e0ed3c 100644
      // Creation order, so an ato keeps its place and color: Chromium names profile folders
      // "Default", then "Profile 1", "Profile 2"…
      std::vector<ProfileAttributesEntry*> atos;
-@@ -304,19 +399,18 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -304,19 +401,18 @@ struct AgensWindow : public TabStripModelObserver,
    void NotifyAtos() {
      if (!atos_observer) return;
      std::vector<ProfileAttributesEntry*> entries = Atos();
@@ -12430,7 +12471,7 @@ index 268d4dc7bd..aa15e0ed3c 100644
      }
      atos_observer(atos_context, atos.data(), static_cast<int>(atos.size()));
    }
-@@ -330,14 +424,9 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -330,14 +426,9 @@ struct AgensWindow : public TabStripModelObserver,
    }
  
    void NewAto() {
@@ -12447,7 +12488,7 @@ index 268d4dc7bd..aa15e0ed3c 100644
      const gfx::Rect bounds = browser->GetWindow()->GetBounds();
      const std::u16string name = base::UTF8ToUTF16(base::StringPrintf("Ato %zu", Atos().size() + 1));
      manager->CreateProfileAsync(
-@@ -362,7 +451,10 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -362,7 +453,10 @@ struct AgensWindow : public TabStripModelObserver,
  
    // ProfileAttributesStorage::Observer:
    void OnProfileAdded(const base::FilePath&) override { NotifyAtos(); }
@@ -12459,7 +12500,7 @@ index 268d4dc7bd..aa15e0ed3c 100644
    void OnProfileNameChanged(const base::FilePath&, const std::u16string&) override { NotifyAtos(); }
  
    TabStripModel* model() { return browser->GetTabStripModel(); }
-@@ -370,6 +462,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -370,6 +464,7 @@ struct AgensWindow : public TabStripModelObserver,
    // Loading pages change a tab many times a frame (title, URL, favicon, loading); the UI gets one
    // update per run of the message loop instead of one per change.
    void Notify() {
@@ -12467,7 +12508,7 @@ index 268d4dc7bd..aa15e0ed3c 100644
      if (notify_pending) return;
      notify_pending = true;
      base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
-@@ -406,7 +499,8 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -406,7 +501,8 @@ struct AgensWindow : public TabStripModelObserver,
      const int count = model()->count();
      bookmarks::BookmarkModel* bookmarks =
          BookmarkModelFactory::GetForBrowserContextIfExists(browser->GetProfile());
@@ -12477,11 +12518,12 @@ index 268d4dc7bd..aa15e0ed3c 100644
      std::vector<std::vector<uint8_t>> icons(count);
      std::vector<AgensTab> tabs(count);
      struct Split { int layout = 0, first = 0; double ratio = 0.5; };
-@@ -455,6 +549,21 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -455,6 +551,22 @@ struct AgensWindow : public TabStripModelObserver,
                   zoom::ZoomController::FromWebContents(contents)
                       ? zoom::ZoomController::FromWebContents(contents)->GetZoomPercent()
                       : 100};
 +      tabs[i].cursor_x = tabs[i].cursor_y = -1;
++      tabs[i].volume_percent = static_cast<int>(std::lround(content::AgensGetAudioVolume(contents) * 100));
 +      if (const AgensControlled* controlled = AgensControlled::FromWebContents(contents)) {
 +        controllers[i] = controlled->by;
 +        control_titles[i] = controlled->title;
@@ -12499,7 +12541,7 @@ index 268d4dc7bd..aa15e0ed3c 100644
      }
      observer(context, tabs.data(), static_cast<int>(tabs.size()));
    }
-@@ -582,6 +691,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -582,6 +694,7 @@ struct AgensWindow : public TabStripModelObserver,
    raw_ptr<void> downloads_context = nullptr;
    base::CallbackListSubscription search_loaded_;
    base::CancelableTaskTracker history_tracker;
@@ -12507,7 +12549,7 @@ index 268d4dc7bd..aa15e0ed3c 100644
    raw_ptr<void> ui = nullptr;  // the chrome (agens_ui_*), set by the platform shell
    raw_ptr<views::View> extensions_anchor = nullptr;  // under the UI's extensions button
    AgensExtensionButtonsChanged extension_buttons_observer = nullptr;
-@@ -591,62 +701,99 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -591,62 +704,99 @@ struct AgensWindow : public TabStripModelObserver,
    base::ScopedObservation<extensions::ExtensionRegistry, extensions::ExtensionRegistryObserver>
        extensions_observation{this};
  
@@ -12626,7 +12668,7 @@ index 268d4dc7bd..aa15e0ed3c 100644
    AgensFindChanged find_observer = nullptr;
    raw_ptr<void> find_context = nullptr;
    base::ScopedObservation<find_in_page::FindTabHelper, find_in_page::FindResultObserver> find_observation{this};
-@@ -655,7 +802,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -655,7 +805,7 @@ struct AgensWindow : public TabStripModelObserver,
      content::WebContents* active = model()->GetActiveWebContents();
      return active ? find_in_page::FindTabHelper::FromWebContents(active) : nullptr;
    }
@@ -12635,7 +12677,7 @@ index 268d4dc7bd..aa15e0ed3c 100644
      find_in_page::FindTabHelper* helper = ActiveFind();
      if (!helper) return;
      if (!find_observation.IsObservingSource(helper)) {
-@@ -667,7 +814,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -667,7 +817,7 @@ struct AgensWindow : public TabStripModelObserver,
        if (find_observer) find_observer(find_context, 0, 0);
        return;
      }
@@ -12677,7 +12719,7 @@ index 4eb24ab895..436be6abd7 100644
      progress_.Run(0, created ? "Criando o ato " + ato + "…" : "Usando o ato " + ato + "…");
      manager->CreateProfileAsync(
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
-index cfdc014cf4..18448da354 100644
+index cfdc014cf4..31b6e9cc5e 100644
 --- a/chrome/browser/agens/embed/native_shell.cc
 +++ b/chrome/browser/agens/embed/native_shell.cc
 @@ -52,6 +52,8 @@
@@ -12794,7 +12836,7 @@ index cfdc014cf4..18448da354 100644
  }
  void agens_find_stop(AgensWindow* w) {
    w->StopFind();
-@@ -707,6 +742,32 @@ void agens_window_unsplit(AgensWindow* w, int index) {
+@@ -707,11 +742,44 @@ void agens_window_unsplit(AgensWindow* w, int index) {
  void agens_window_set_pinned(AgensWindow* w, int index, int pinned) {
    if (w->model()->ContainsIndex(index)) w->model()->SetTabPinned(index, pinned);
  }
@@ -12827,7 +12869,19 @@ index cfdc014cf4..18448da354 100644
  void agens_window_toggle_mute(AgensWindow* w, int index) {
    if (!w->model()->ContainsIndex(index)) return;
    content::WebContents* contents = w->model()->GetWebContentsAt(index);
-@@ -760,8 +821,14 @@ void agens_window_show_site_info(AgensWindow* w) {
+   contents->SetAudioMuted(!contents->IsAudioMuted());
+ }
++void agens_window_set_volume(AgensWindow* w, int index, int percent) {
++  if (!w->model()->ContainsIndex(index)) return;
++  content::WebContents* contents = w->model()->GetWebContentsAt(index);
++  content::AgensSetAudioVolume(contents, std::clamp(percent, 0, 100) / 100.0);
++  // Nothing in Chromium watches the volume: say it changed, for the casca and view.tab.
++  w->model()->UpdateWebContentsState(contents, TabChangeType::kAll);
++}
+ void agens_window_navigate(AgensWindow* w, const char* text) {
+   content::WebContents* active = w->model()->GetActiveWebContents();
+   std::u16string input = base::UTF8ToUTF16(text ? text : "");
+@@ -760,8 +828,14 @@ void agens_window_show_site_info(AgensWindow* w) {
      ShowPageInfoDialog(active, base::DoNothing(), bubble_anchor_util::Anchor::kLocationBar);
    }
  }
@@ -12844,7 +12898,7 @@ index cfdc014cf4..18448da354 100644
  }
  void agens_window_stop(AgensWindow* w) {
    chrome::ExecuteCommand(w->browser, IDC_STOP);
-@@ -814,6 +881,12 @@ void NativeTabStateChanged(views::Widget*) {}
+@@ -814,6 +888,12 @@ void NativeTabStateChanged(views::Widget*) {}
  void ConfirmCloseWithDownloads(views::Widget*, int, base::OnceCallback<void(bool)> callback) {
    std::move(callback).Run(true);
  }
@@ -13708,7 +13762,7 @@ index 5d7ca90415..8ee2d5c3dd 100644
    auto* shell = widget && widget->GetRootView()
                      ? views::AsViewClass<NativeShellView>(
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
-index 3c18c4eab1..34a4bf797f 100644
+index 3c18c4eab1..017cc80371 100644
 --- a/chrome/browser/agens/ui/chrome_mac.mm
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
 @@ -21,6 +21,8 @@
@@ -13820,7 +13874,16 @@ index 3c18c4eab1..34a4bf797f 100644
  static NSString* const kIconInicio = @"<rect x='3' y='4.5' width='14' height='11' rx='3'/><path d='M8.6 7.8l3.4 2.2-3.4 2.2z'/>";
  static NSString* const kIconMoon = @"<path d='M15.5 12.5A6.5 6.5 0 0 1 7.5 4.5a6.5 6.5 0 1 0 8 8z'/>";
  static NSString* const kIconWifiOff = @"<path d='M3 8.2a10 10 0 0 1 14 0 M5.6 11a6.3 6.3 0 0 1 8.8 0 M8.3 13.8a2.4 2.4 0 0 1 3.4 0 M10 16.4h.01 M3.5 3.5l13 13'/>";
-@@ -513,6 +583,7 @@ @interface AgensTabRow : AgensHoverView
+@@ -507,24 +577,31 @@ @interface AgensTabRow : AgensHoverView
+ @property(nonatomic, copy) void (^onClose)(void);
+ @property(nonatomic, copy) void (^onPin)(void);
+ @property(nonatomic, copy) void (^onMute)(void);
++@property(nonatomic, copy) void (^onVolume)(NSView* sound);  // the pointer rested on the speaker
++@property(nonatomic, readonly) BOOL muted;
++@property(nonatomic, readonly) int volume;  // 0..100
+ @property(nonatomic, copy) void (^onSplit)(int layout);  // with the active tab: 1 side by side, 2 stacked
+ @property(nonatomic, copy) void (^onUnsplit)(void);
+ @property(nonatomic, readonly) BOOL inSplit;
  @property(nonatomic, copy) void (^onDrag)(NSPoint delta);  // pointer moved this much since mouse down
  @property(nonatomic, copy) void (^onDrop)(void);
  - (void)updateWith:(const AgensTab&)tab;
@@ -13828,11 +13891,13 @@ index 3c18c4eab1..34a4bf797f 100644
  @end
  @implementation AgensTabRow {
    NSPoint _down;
-@@ -520,11 +591,13 @@ @implementation AgensTabRow {
-   BOOL _muted;
+   BOOL _dragging;
+-  BOOL _muted;
    BOOL _audible;
    BOOL _capturing;
 +  BOOL _reopened;
++  NSTrackingArea* _soundArea;
++  int _soundHoverSeq;
    NSImageView* _favicon;
    NSProgressIndicator* _spinner;
    NSTextField* _title;
@@ -13842,7 +13907,34 @@ index 3c18c4eab1..34a4bf797f 100644
  }
  @synthesize index = _index;
  @synthesize look = _look;
-@@ -611,6 +684,12 @@ - (void)updateWith:(const AgensTab&)tab {
+@@ -532,6 +609,9 @@ @implementation AgensTabRow {
+ @synthesize onClose = _onClose;
+ @synthesize onPin = _onPin;
+ @synthesize onMute = _onMute;
++@synthesize onVolume = _onVolume;
++@synthesize muted = _muted;
++@synthesize volume = _volume;
+ @synthesize onSplit = _onSplit;
+ @synthesize onUnsplit = _onUnsplit;
+ @synthesize inSplit = _inSplit;
+@@ -567,6 +647,16 @@ - (instancetype)initWithFrame:(NSRect)frame {
+     _title = Label(13, NSFontWeightRegular, kMute);
+     _sound = [NSButton buttonWithImage:Symbol(@"speaker.wave.2.fill", 10) target:self action:@selector(mute:)];
+     _sound.bordered = NO;
++    _soundArea = [[NSTrackingArea alloc]
++        initWithRect:NSZeroRect
++             options:NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect
++               owner:self
++            userInfo:nil];
++    [_sound addTrackingArea:_soundArea];
++    // The volume opens on hover (prototype #som); VoiceOver gets it as an action on the speaker.
++    _sound.accessibilityCustomActions = @[ [[NSAccessibilityCustomAction alloc] initWithName:@"Volume da aba"
++                                                                                       target:self
++                                                                                     selector:@selector(volumeAction)] ];
+     _close = [NSButton buttonWithImage:Symbol(@"xmark", 10) target:self action:@selector(closeTab:)];
+     _close.bordered = NO;
+     _close.contentTintColor = kDim.color();
+@@ -611,6 +701,12 @@ - (void)updateWith:(const AgensTab&)tab {
    _title.stringValue = title;
    self.toolTip = title;
    self.accessibilityLabel = tab.sleeping ? [title stringByAppendingString:@", dormindo"] : title;
@@ -13855,7 +13947,15 @@ index 3c18c4eab1..34a4bf797f 100644
    NSImage* icon = nil;
    if (tab.favicon_png) {
      icon = [[NSImage alloc] initWithData:[NSData dataWithBytes:tab.favicon_png
-@@ -654,6 +733,23 @@ - (void)refresh {
+@@ -629,6 +725,7 @@ - (void)updateWith:(const AgensTab&)tab {
+   _pinned = tab.pinned;
+   _inSplit = tab.split != 0;
+   _muted = tab.muted;
++  _volume = tab.volume_percent;
+   _audible = tab.audible;
+   _capturing = tab.camera || tab.microphone;
+   if (_capturing) {  // camera or microphone in use outranks sound: it's what you'd want to know
+@@ -654,6 +751,23 @@ - (void)refresh {
    const BOOL border = _look == kLookPin || (_look == kLookTop && self.selected);
    self.layer.borderWidth = border ? 1 : 0;
    self.layer.borderColor = CG(kLine, self);
@@ -13879,7 +13979,33 @@ index 3c18c4eab1..34a4bf797f 100644
  }
  - (NSMenu*)menuForEvent:(NSEvent*)event {
    NSMenu* menu = [[NSMenu alloc] initWithTitle:@"Aba"];
-@@ -766,9 +862,10 @@ - (void)layout {
+@@ -695,6 +809,25 @@ - (void)mute:(id)sender {
+   if (_capturing) return;  // the badge only tells; the site panel changes permissions
+   if (_onMute) _onMute();
+ }
++// Resting 0.5 s on the speaker opens the tab's volume (prototype #som): a pass over it doesn't.
++- (void)mouseEntered:(NSEvent*)event {
++  if (event.trackingArea != _soundArea) return [super mouseEntered:event];
++  const int seq = ++_soundHoverSeq;
++  __weak AgensTabRow* weak = self;
++  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 2), dispatch_get_main_queue(), ^{
++    AgensTabRow* strong = weak;
++    if (strong && seq == strong->_soundHoverSeq) [strong volumeAction];
++  });
++}
++- (void)mouseExited:(NSEvent*)event {
++  if (event.trackingArea != _soundArea) return [super mouseExited:event];
++  ++_soundHoverSeq;
++}
++- (BOOL)volumeAction {
++  if (_sound.hidden || _capturing || !_onVolume) return NO;
++  _onVolume(_sound);
++  return YES;
++}
+ @end
+ 
+ // One suggestion (prototype .sug): icon, text, detail on the right.
+@@ -766,9 +899,10 @@ - (void)layout {
  - (void)updateWith:(const AgensAto&)ato index:(int)index {
    NSString* name = @(ato.name);
    _tile.stringValue = Monogram(name);
@@ -13891,7 +14017,7 @@ index 3c18c4eab1..34a4bf797f 100644
    self.accessibilityLabel = self.toolTip;
    self.selected = ato.active;
  }
-@@ -856,12 +953,14 @@ - (void)layout {
+@@ -856,12 +990,14 @@ - (void)layout {
  @interface AgensMenuRow : AgensHoverView
  - (instancetype)initWithIcon:(NSString*)icon title:(NSString*)title key:(NSString*)key;
  - (void)setIconImage:(NSImage*)image;
@@ -13906,7 +14032,7 @@ index 3c18c4eab1..34a4bf797f 100644
  - (instancetype)initWithIcon:(NSString*)icon title:(NSString*)title key:(NSString*)key {
    if ((self = [super initWithFrame:NSZeroRect])) {
      self.radius = 7;
-@@ -889,9 +988,22 @@ - (void)layout {
+@@ -889,9 +1025,22 @@ - (void)layout {
    _title.frame = NSMakeRect(37, 8, w - 37 - (_key.stringValue.length ? 70 : 10), 18);
  }
  - (void)refresh {
@@ -13931,7 +14057,7 @@ index 3c18c4eab1..34a4bf797f 100644
  }
  - (void)setIconImage:(NSImage*)image {  // a picture of its own (an extension's icon), not tinted
    _icon.image = image;
-@@ -1015,6 +1127,9 @@ - (void)toggleSidebar;
+@@ -1015,6 +1164,9 @@ - (void)toggleSidebar;
  - (BOOL)tabsOnTop;
  - (void)toggleTabsPosition;
  - (NSArray<NSString*>*)atoNamesForSettings;
@@ -13941,7 +14067,7 @@ index 3c18c4eab1..34a4bf797f 100644
  - (NSImage*)extensionIcon:(NSString*)extensionId;
  @end
  
-@@ -1032,6 +1147,96 @@ - (BOOL)isFlipped {
+@@ -1032,6 +1184,96 @@ - (BOOL)isFlipped {
  }
  @end
  
@@ -14038,7 +14164,7 @@ index 3c18c4eab1..34a4bf797f 100644
  static AgensSettings* g_settings;
  
  @implementation AgensSettings {
-@@ -1052,6 +1257,7 @@ @implementation AgensSettings {
+@@ -1052,6 +1294,7 @@ @implementation AgensSettings {
    // Exceções por site and extensions, as last listed (rows address them by tag)
    std::vector<std::pair<std::string, std::string>> _exceptions;  // site, kind
    std::vector<std::string> _extensionIds, _extensionNames;
@@ -14046,7 +14172,7 @@ index 3c18c4eab1..34a4bf797f 100644
    // Senhas salvas
    std::vector<std::pair<std::string, std::string>> _logins;  // site, username
    BOOL _loginsFresh;
-@@ -1421,8 +1627,15 @@ - (void)showSection:(NSString*)key {
+@@ -1421,8 +1664,15 @@ - (void)showSection:(NSString*)key {
    } else if ([key isEqualToString:@"extensoes"]) {
      y = [self fillExtensions:y];
      // Like Brave: installs and updates come from Google's store (the only Google service we use).
@@ -14064,7 +14190,7 @@ index 3c18c4eab1..34a4bf797f 100644
                     y:y];
      y = [self option:@"Atualizar extensões sozinhas" detail:@"Pergunta à loja do Google por versões novas de tempos em tempos."
               control:[self prefSwitch:"agens.extensions.auto_update"]
-@@ -1432,6 +1645,7 @@ - (void)showSection:(NSString*)key {
+@@ -1432,6 +1682,7 @@ - (void)showSection:(NSString*)key {
      NSButton* proxy = [NSButton buttonWithTitle:@"Abrir…" target:self action:@selector(openProxy:)];
      y = [self option:@"Configurações de proxy" detail:@"Usa as do macOS." control:proxy y:y];
      y = [self option:@"Restaurar as configurações originais" detail:nil control:[self subButton:@"Restaurar…" key:@"restaurar"] y:y];
@@ -14072,7 +14198,7 @@ index 3c18c4eab1..34a4bf797f 100644
    } else if ([key isEqualToString:@"sobre"]) {
      NSString* version = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"";
      y = [self info:product detail:[NSString stringWithFormat:@"Versão %@ · SugiyamaLabs", version] note:@"" y:y];
-@@ -1602,7 +1816,10 @@ static void EnginesListed(void* context, const AgensSearchEngine* engines, int c
+@@ -1602,7 +1853,10 @@ static void EnginesListed(void* context, const AgensSearchEngine* engines, int c
  - (CGFloat)fillAtos:(CGFloat)y {
    // The atos list comes from the chrome (it already observes them); rename in place.
    NSArray<NSString*>* names = [_chrome atoNamesForSettings];
@@ -14084,7 +14210,7 @@ index 3c18c4eab1..34a4bf797f 100644
      NSTextField* field = [NSTextField textFieldWithString:names[i]];
      field.tag = i;
      field.delegate = self;
-@@ -1610,12 +1827,18 @@ - (CGFloat)fillAtos:(CGFloat)y {
+@@ -1610,12 +1864,18 @@ - (CGFloat)fillAtos:(CGFloat)y {
      field.action = @selector(renameAto:);
      field.frame = NSMakeRect(0, 0, 220, 24);
      y = [self option:[NSString stringWithFormat:@"Ato %lu", (unsigned long)i + 1] detail:nil control:field y:y];
@@ -14104,7 +14230,7 @@ index 3c18c4eab1..34a4bf797f 100644
    note.frame = NSMakeRect(32, y + 44, NSWidth(_pane.bounds) - 64, 16);
    [_pane addSubview:note];
    return y + 70;
-@@ -1818,6 +2041,48 @@ - (void)setEngine:(NSPopUpButton*)popup {
+@@ -1818,6 +2078,48 @@ - (void)setEngine:(NSPopUpButton*)popup {
  - (void)renameAto:(NSTextField*)field {
    if (_browser && field.stringValue.length) agens_window_rename_ato(_browser, (int)field.tag, field.stringValue.UTF8String);
  }
@@ -14153,7 +14279,7 @@ index 3c18c4eab1..34a4bf797f 100644
  - (void)newAto:(id)sender {
    if (_browser) agens_window_new_ato(_browser);
  }
-@@ -2265,39 +2530,68 @@ - (void)removeException:(NSButton*)button {
+@@ -2265,39 +2567,68 @@ - (void)removeException:(NSButton*)button {
    [self showSection:@"excecoes"];
  }
  
@@ -14234,7 +14360,7 @@ index 3c18c4eab1..34a4bf797f 100644
    }
    return y;
  }
-@@ -2305,11 +2599,34 @@ - (void)toggleExtension:(NSSwitch*)sw {
+@@ -2305,11 +2636,34 @@ - (void)toggleExtension:(NSSwitch*)sw {
    const size_t i = sw.tag;
    if (_browser && i < _extensionIds.size()) {
      agens_extension_set_enabled(_browser, _extensionIds[i].c_str(), sw.state == NSControlStateValueOn);
@@ -14269,7 +14395,7 @@ index 3c18c4eab1..34a4bf797f 100644
    NSAlert* alert = [[NSAlert alloc] init];
    alert.messageText = [NSString stringWithFormat:@"Remover %@?", @(_extensionNames[i].c_str())];
    alert.informativeText = @"Sai deste ato junto com os dados dela.";
-@@ -2320,10 +2637,31 @@ - (void)confirmRemoveExtension:(NSButton*)button {
+@@ -2320,10 +2674,31 @@ - (void)confirmRemoveExtension:(NSButton*)button {
    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
      AgensSettings* strong = weak;
      if (r != NSAlertFirstButtonReturn || !strong || !strong->_browser) return;
@@ -14302,7 +14428,7 @@ index 3c18c4eab1..34a4bf797f 100644
  
  // Senhas salvas: search, then one row per login. Seeing or copying a password asks for Touch ID
  // (or the Mac's password), good for a minute.
-@@ -2634,7 +2972,7 @@ - (void)showStep:(int)step {
+@@ -2634,7 +3009,7 @@ - (void)showStep:(int)step {
        _atoName = [NSTextField textFieldWithString:@"Pessoal"];
        _atoName.frame = NSMakeRect(170, y + 30, 300, 26);
        NSTextField* cookies = Label(12, NSFontWeightRegular, kDim);
@@ -14311,7 +14437,7 @@ index 3c18c4eab1..34a4bf797f 100644
        cookies.frame = NSMakeRect(90, y + 76, 460, 16);
        cookies.alignment = NSTextAlignmentCenter;
        for (NSView* v in @[ label, _atoName, cookies ]) [_body addSubview:v];
-@@ -3440,8 +3778,9 @@ - (void)retry:(id)sender {
+@@ -3440,8 +3815,9 @@ - (void)retry:(id)sender {
  }
  @end
  
@@ -14323,7 +14449,7 @@ index 3c18c4eab1..34a4bf797f 100644
  @interface AgensFindBar : NSView <NSTextFieldDelegate>
  @property(nonatomic) AgensWindow* engine;
  - (void)open;
-@@ -3451,33 +3790,55 @@ - (void)setCurrent:(int)current total:(int)total;
+@@ -3451,33 +3827,55 @@ - (void)setCurrent:(int)current total:(int)total;
  - (void)refreshTheme;
  @end
  @implementation AgensFindBar {
@@ -14384,7 +14510,7 @@ index 3c18c4eab1..34a4bf797f 100644
      [self refreshTheme];
    }
    return self;
-@@ -3486,24 +3847,53 @@ - (BOOL)isFlipped {
+@@ -3486,24 +3884,53 @@ - (BOOL)isFlipped {
    return YES;
  }
  - (void)refreshTheme {
@@ -14449,7 +14575,7 @@ index 3c18c4eab1..34a4bf797f 100644
  }
  - (void)open {
    self.hidden = NO;
-@@ -3516,8 +3906,7 @@ - (void)close {
+@@ -3516,8 +3943,7 @@ - (void)close {
    if (_engine) agens_find_stop(_engine);
  }
  - (void)search:(BOOL)forward {
@@ -14459,7 +14585,7 @@ index 3c18c4eab1..34a4bf797f 100644
  }
  - (void)step:(BOOL)forward {
    if (self.hidden) {
-@@ -3526,11 +3915,25 @@ - (void)step:(BOOL)forward {
+@@ -3526,11 +3952,25 @@ - (void)step:(BOOL)forward {
    }
    [self search:forward];
  }
@@ -14489,7 +14615,7 @@ index 3c18c4eab1..34a4bf797f 100644
  }
  - (void)controlTextDidChange:(NSNotification*)note {
    [self search:YES];
-@@ -3556,6 +3959,216 @@ static void FindChanged(void* context, int current, int total) {
+@@ -3556,6 +3996,216 @@ static void FindChanged(void* context, int current, int total) {
    [(__bridge AgensFindBar*)context setCurrent:current total:total];
  }
  
@@ -14706,7 +14832,7 @@ index 3c18c4eab1..34a4bf797f 100644
  // ---------------------------------------------------------------------------------------------
  // The chrome.
  
-@@ -3625,6 +4238,8 @@ @implementation AgensChrome {
+@@ -3625,6 +4275,8 @@ @implementation AgensChrome {
    AgensDragView* _tabsDoc;
    AgensToolButton* _moreAtos;  // "⋯" when the atos don't fit
    NSMutableArray<NSString*>* _atoNames;
@@ -14715,7 +14841,7 @@ index 3c18c4eab1..34a4bf797f 100644
    int _activeAto;
    NSView* _atosLine;
    NSMutableArray<AgensAtoButton*>* _atoButtons;
-@@ -3635,8 +4250,14 @@ @implementation AgensChrome {
+@@ -3635,8 +4287,19 @@ @implementation AgensChrome {
    AgensToolButton* _sound;  // in the address, left of the star, while the page plays or is muted
    AgensToolButton* _capture;  // in the address: camera/microphone in use (opens the site panel)
    NSArray<AgensToolButton*>* _indicators;  // pop-ups, location, notifications, downloads (kAgensInd*)
@@ -14724,6 +14850,11 @@ index 3c18c4eab1..34a4bf797f 100644
 +  AgensPillButton* _zoom;  // "125%" at the address's end while the page isn't at 100% (click: the zoom popover)
 +  int _zoomPercent;        // the active page's, 0 before the first report
 +  NSTextField* _zoomValue;  // the open zoom popover's "125%"
++  AgensTabRow* _volumeRow;  // the tab whose volume popover is open (prototype #som .vpop)
++  NSTextField* _volumeValue;
++  NSTextField* _volumeMute;
++  NSImageView* _volumeMuteIcon;
++  NSButton* _volumeSpeaker;
 +  NSView* _zoomNotice;      // "Zoom 125%" for 1.5 s over the page's top (prototype .toast)
 +  NSTextField* _zoomNoticeText;
 +  int _zoomNoticeSeq;
@@ -14732,7 +14863,7 @@ index 3c18c4eab1..34a4bf797f 100644
    AgensToolButton* _newTabTop;  // "+" at the end of the top strip
    AgensStripView* _strip;       // holds the tabs on top; scrolls when they don't fit
    CGFloat _stripOffset;
-@@ -3648,6 +4269,8 @@ @implementation AgensChrome {
+@@ -3648,6 +4311,8 @@ @implementation AgensChrome {
    AgensToolButton* _menu;  // "⋯" after the address
    NSView* _menuView;       // the open panel (menu or downloads), shown under its button
    __weak NSView* _popoverAnchor;
@@ -14741,7 +14872,7 @@ index 3c18c4eab1..34a4bf797f 100644
    id _clickMonitor;
    AgensToolButton* _downloadsButton;  // shows up once there is a download this session
    NSView* _downloadsPanel;            // the open downloads panel, refreshed live
-@@ -3673,8 +4296,13 @@ @implementation AgensChrome {
+@@ -3673,8 +4338,13 @@ @implementation AgensChrome {
    std::vector<BookmarkItem> _bookmarks;
    long long _barId;
    AgensFindBar* _find;
@@ -14757,7 +14888,7 @@ index 3c18c4eab1..34a4bf797f 100644
    AgensErrorView* _error;
    BOOL _stopPage;  // the active tab shows a security stop page
    int _split;            // the active tab's split (0 none, 1 side by side, 2 stacked)
-@@ -3691,6 +4319,26 @@ @implementation AgensChrome {
+@@ -3691,6 +4361,26 @@ @implementation AgensChrome {
    NSString* _url;
    BOOL _loading;
    NSRect _page;
@@ -14784,7 +14915,7 @@ index 3c18c4eab1..34a4bf797f 100644
  }
  
  - (instancetype)initWithWindow:(AgensWindow*)window {
-@@ -3762,20 +4410,13 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3762,20 +4452,13 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
          [list addObject:b];
        }
        _indicators = list;
@@ -14810,7 +14941,7 @@ index 3c18c4eab1..34a4bf797f 100644
        [_omni addSubview:_zoom];
      }
      [_omni addSubview:_star];
-@@ -3786,6 +4427,7 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3786,6 +4469,7 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
      _siteButton.onPress = ^{ [weak showSiteInfo]; };
      [_omni addSubview:_siteButton positioned:NSWindowBelow relativeTo:_omniIcon];
      _extensions = [NSMutableArray array];
@@ -14818,7 +14949,7 @@ index 3c18c4eab1..34a4bf797f 100644
      _extButton = [[AgensToolButton alloc] initWithSymbol:@"puzzlepiece" label:@"Extensões"];
      [_extButton setImage:AgensIcon(kIconExtensions)];
      _extButton.hidden = YES;
-@@ -3859,6 +4501,8 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3859,6 +4543,8 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
      _tabsDoc = [[AgensDragView alloc] init];
      _tabsScroll.documentView = _tabsDoc;
      _atoNames = [NSMutableArray array];
@@ -14827,7 +14958,7 @@ index 3c18c4eab1..34a4bf797f 100644
      _moreAtos = [[AgensToolButton alloc] initWithSymbol:@"ellipsis" label:@"Todos os atos" size:13];
      _moreAtos.onPress = ^{ [weak showAtosMenu]; };
      _addAto = [[AgensToolButton alloc] initWithSymbol:@"plus" label:@"Novo ato"];
-@@ -3942,6 +4586,13 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3942,6 +4628,13 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
      };
      _find = [[AgensFindBar alloc] initWithFrame:NSZeroRect];
      _find.engine = window;
@@ -14841,7 +14972,7 @@ index 3c18c4eab1..34a4bf797f 100644
      agens_window_set_find_observer(window, FindChanged, (__bridge void*)_find);
      _bookmarksPage = [[AgensBookmarksView alloc] init];
      _bookmarksPage.hidden = YES;
-@@ -3966,9 +4617,47 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3966,9 +4659,47 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
      _ntp.field.delegate = self;
  
      for (NSView* v in @[ _toggle, _back, _forward, _reload, _omni, _extButton, _downloadsButton, _menu, _tabsScroll, _moreAtos, _atoTile, _atoName, _separator, _newTab, _newTabTop,
@@ -14890,7 +15021,7 @@ index 3c18c4eab1..34a4bf797f 100644
      [self refreshTheme];
      ApplyAppearance(agens_window_color_mode(_window));  // the saved choice, from the first window on
      agens_window_set_tabs_observer(_window, TabsChanged, (__bridge void*)self);
-@@ -4009,6 +4698,10 @@ - (void)refreshTheme {
+@@ -4009,6 +4740,10 @@ - (void)refreshTheme {
    _atoDot.layer.backgroundColor = CG(kLight3, self);
    _statusPill.layer.backgroundColor = CG(kFloat, self);
    _statusPill.layer.borderColor = CG(kLine, self);
@@ -14901,7 +15032,7 @@ index 3c18c4eab1..34a4bf797f 100644
    SyncGlass(_suggest, 12 * Round());
    [self runLoadbar];  // the glow's color
  }
-@@ -4167,6 +4860,11 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4167,6 +4902,11 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
    if (!_extButton.hidden) {
      _extButton.frame = NSMakeRect(omniEnd + 4 - 30, btnY, 28, 28);
      omniEnd = NSMinX(_extButton.frame) - 4;
@@ -14913,7 +15044,7 @@ index 3c18c4eab1..34a4bf797f 100644
    }
  
    // Atos: only what fits (6 in the open column, 5 collapsed, 4 on the bar); past that the last
-@@ -4208,9 +4906,9 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4208,9 +4948,9 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
      b.frame = NSMakeRect(addressEnd, (omniH - 26) / 2, 26, 26);
    }
    if (!_zoom.hidden) {
@@ -14926,7 +15057,7 @@ index 3c18c4eab1..34a4bf797f 100644
    }
    _address.frame = NSMakeRect(33, (omniH - 18) / 2, addressEnd - 6 - 33, 18);
  
-@@ -4340,8 +5038,13 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4340,8 +5080,13 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
  
    _page = page;
    // Our pages over the card (new tab, errors…) cover the active tab's pane only; the engine splits
@@ -14941,7 +15072,7 @@ index 3c18c4eab1..34a4bf797f 100644
    if (_split) {
      const CGFloat gap = 8;
      if (_split == 2) {
-@@ -4367,14 +5070,23 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4367,14 +5112,23 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
      _ntp2.frame = NSInsetRect(other, 1, 1);
      _ntp2Click.frame = _ntp2.frame;
    }
@@ -14968,7 +15099,7 @@ index 3c18c4eab1..34a4bf797f 100644
    _statusText.frame = NSMakeRect(10, 3, statusW - 20, 16);
  
    NSRect anchor = [self editingField] == _ntp.field ? [_ntp convertRect:_ntp.well.frame toView:self]
-@@ -4384,11 +5096,38 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4384,11 +5138,38 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
    for (NSUInteger i = 0; i < _suggestionRows.count; ++i) {
      _suggestionRows[i].frame = NSMakeRect(5, 5 + i * 34, NSWidth(anchor) - 10, 34);
    }
@@ -15009,7 +15140,7 @@ index 3c18c4eab1..34a4bf797f 100644
  }
  - (AgensRect)siteIconRect {
    NSRect r = [_omni convertRect:_omniIcon.frame toView:self];
-@@ -4398,6 +5137,111 @@ - (void)relayout {
+@@ -4398,6 +5179,111 @@ - (void)relayout {
    [self layoutForWidth:(int)NSWidth(self.bounds) height:(int)NSHeight(self.bounds)];
  }
  
@@ -15121,7 +15252,15 @@ index 3c18c4eab1..34a4bf797f 100644
  - (void)setTabs:(const AgensTab*)tabs count:(int)count {
    __weak AgensChrome* weak = self;
    while ((int)_rows.count < count) {
-@@ -4431,6 +5275,7 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+@@ -4415,6 +5301,7 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+       AgensChrome* strong = weak;
+       if (strong && strong->_window) agens_window_toggle_mute(strong->_window, weakRow.index);
+     };
++    row.onVolume = ^(NSView* sound) { [weak showVolume:weakRow sound:sound]; };
+     row.onSplit = ^(int layout) {
+       AgensChrome* strong = weak;
+       if (strong && strong->_window) agens_window_split(strong->_window, weakRow.index, layout);
+@@ -4431,6 +5318,7 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
      [_rows removeLastObject];
    }
    int activeTab = -1;
@@ -15129,7 +15268,7 @@ index 3c18c4eab1..34a4bf797f 100644
    _pinnedCount = 0;
    _partner = -1;
    BOOL partnerIsNewTab = NO;
-@@ -4448,6 +5293,7 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+@@ -4448,6 +5336,7 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
      if (tabs[i].pinned) ++_pinnedCount;
      if (tabs[i].active) activeTab = i;
      if (!tabs[i].active) continue;
@@ -15137,7 +15276,7 @@ index 3c18c4eab1..34a4bf797f 100644
      if (_activeIndex != i) {
        [_find close];  // a find belongs to the page it ran on
        _stripFollowActive = YES;
-@@ -4466,13 +5312,25 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+@@ -4466,13 +5355,25 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
                                                                         : @"Usando o microfone";
      _capture.toolTip = _capture.accessibilityLabel;
      for (NSUInteger k = 0; k < _indicators.count; ++k) _indicators[k].hidden = !(tabs[i].indicators & (1 << k));
@@ -15165,7 +15304,7 @@ index 3c18c4eab1..34a4bf797f 100644
      _error.hidden = !(tabs[i].error || _stopPage) || tabs[i].loading || !tabs[i].url[0];
      if (!_error.hidden) [_error showError:tabs[i].error name:@(tabs[i].error_name) stop:_stopPage];
      _url = @(tabs[i].url);
-@@ -4480,6 +5338,14 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+@@ -4480,6 +5381,14 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
      _bookmarked = tabs[i].bookmarked;
      _back.enabled = tabs[i].can_go_back;
      _forward.enabled = tabs[i].can_go_forward;
@@ -15180,7 +15319,19 @@ index 3c18c4eab1..34a4bf797f 100644
    }
    if (_loadbar.hidden == _loading) {
      _loadbar.hidden = !_loading;
-@@ -4539,14 +5405,18 @@ - (void)setAtos:(const AgensAto*)atos count:(int)count {
+@@ -4506,6 +5415,11 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+   if (!_ntp.hidden && !wasNTP) _ntp.field.stringValue = @"";
+   [self relayout];
+   if (activeTab >= 0 && _rows[activeTab].superview == _tabsDoc) [_tabsDoc scrollRectToVisible:_rows[activeTab].frame];
++  if (_volumeRow && !_volumeRow.window) {
++    [self closeMenu];  // its tab closed
++  } else {
++    [self fillVolume];
++  }
+ }
+ 
+ // Chromium's internal pages show as agens:// (typing agens:// opens them: url_fixer, agens-scheme.patch).
+@@ -4539,14 +5453,18 @@ - (void)setAtos:(const AgensAto*)atos count:(int)count {
      [_atoButtons removeLastObject];
    }
    [_atoNames removeAllObjects];
@@ -15200,7 +15351,7 @@ index 3c18c4eab1..34a4bf797f 100644
    }
    [self relayout];
  }
-@@ -4671,13 +5541,25 @@ - (void)showMenu {
+@@ -4671,13 +5589,25 @@ - (void)showMenu {
      NSString* title;
      NSString* key;
      void (^action)(void);
@@ -15227,7 +15378,7 @@ index 3c18c4eab1..34a4bf797f 100644
    const CGFloat w = 280, rowH = 33;
    NSView* panel = [self popoverWidth:w height:std::size(items) * rowH + 10 under:_menu];
    panel.accessibilityRole = NSAccessibilityMenuRole;
-@@ -4685,6 +5567,7 @@ - (void)showMenu {
+@@ -4685,6 +5615,7 @@ - (void)showMenu {
    CGFloat y = NSHeight(panel.frame) - 5 - rowH;  // the panel isn't flipped
    for (const Item& it : items) {
      AgensMenuRow* row = [[AgensMenuRow alloc] initWithIcon:it.icon title:it.title key:it.key];
@@ -15235,7 +15386,7 @@ index 3c18c4eab1..34a4bf797f 100644
      void (^action)(void) = it.action;
      row.onPress = ^{
        [weak closeMenu];
-@@ -4694,7 +5577,7 @@ - (void)showMenu {
+@@ -4694,7 +5625,7 @@ - (void)showMenu {
      [panel addSubview:row];
      y -= rowH;
    }
@@ -15244,7 +15395,7 @@ index 3c18c4eab1..34a4bf797f 100644
  }
  
  // Our floating panels (prototype .menu): float background, strong border, 12 pt corners.
-@@ -4709,11 +5592,18 @@ - (NSView*)popoverWidth:(CGFloat)w height:(CGFloat)h under:(NSView*)anchor {
+@@ -4709,11 +5640,18 @@ - (NSView*)popoverWidth:(CGFloat)w height:(CGFloat)h under:(NSView*)anchor {
    return panel;
  }
  - (void)presentPopover:(NSView*)panel anchor:(NSView*)anchor {
@@ -15263,7 +15414,7 @@ index 3c18c4eab1..34a4bf797f 100644
    // Rise in, as the prototype (.2s); a click anywhere else or Esc closes it.
    _menuView.alphaValue = 0;
    [NSAnimationContext runAnimationGroup:^(NSAnimationContext* ctx) {
-@@ -4735,12 +5625,24 @@ - (void)presentPopover:(NSView*)panel anchor:(NSView*)anchor {
+@@ -4735,12 +5673,24 @@ - (void)presentPopover:(NSView*)panel anchor:(NSView*)anchor {
                                       NSPoint p = [strong convertPoint:event.locationInWindow fromView:nil];
                                       if (event.window != strong.window ||
                                           (!NSPointInRect(p, strong->_menuView.frame) &&
@@ -15289,7 +15440,7 @@ index 3c18c4eab1..34a4bf797f 100644
  - (void)setStatus:(const char*)text {
    _statusText.stringValue = @(text);
    _statusPill.hidden = _statusText.stringValue.length == 0;
-@@ -4775,7 +5677,7 @@ - (void)showDownloads {
+@@ -4775,7 +5725,7 @@ - (void)showDownloads {
    NSView* panel = [self popoverWidth:w height:10 under:_downloadsButton];
    panel.accessibilityRole = NSAccessibilityListRole;
    panel.accessibilityLabel = @"Downloads";
@@ -15298,7 +15449,7 @@ index 3c18c4eab1..34a4bf797f 100644
    _downloadsPanel = panel;
    [self fillDownloads];
  }
-@@ -4807,6 +5709,7 @@ - (void)fillDownloads {
+@@ -4807,6 +5757,7 @@ - (void)fillDownloads {
      [_downloadsPanel addSubview:row];
      y -= rowH;
    }
@@ -15306,7 +15457,7 @@ index 3c18c4eab1..34a4bf797f 100644
  }
  - (void)closeMenu {
    if (_permissionAsked) {  // closed without an answer
-@@ -4820,13 +5723,111 @@ - (void)closeMenu {
+@@ -4820,13 +5771,178 @@ - (void)closeMenu {
    [_menuView removeFromSuperview];
    _menuView = nil;
    _popoverAnchor = nil;
@@ -15314,6 +15465,8 @@ index 3c18c4eab1..34a4bf797f 100644
    _downloadsPanel = nil;
 +  _zoomValue = nil;
 +  _zoom.selected = NO;
++  _volumeRow = nil;
++  _volumeValue = nil;
    if (_clickMonitor) [NSEvent removeMonitor:_clickMonitor];
    _clickMonitor = nil;
  }
@@ -15338,6 +15491,71 @@ index 3c18c4eab1..34a4bf797f 100644
 +// The zoom popover (prototype #zoom .zpop): − / 125% / + and Redefinir, its arrow on the pill (on
 +// "⋯" when the page is at 100% and there is no pill). It stays open while the zoom changes.
 +// shortcut: no per-tab volume yet (Chromium only mutes); the prototype's volume popover waits for it.
++// The tab's volume (prototype #som .vpop), hung on its speaker: "Volume desta aba 60%", the
++// speaker and the slider, and "Silenciar esta aba". 0..100, kept with the tab until it closes.
++- (void)showVolume:(AgensTabRow*)row sound:(NSView*)sound {
++  if (_volumeRow == row || !row.window) return;
++  const CGFloat w = 220, h = 98;
++  NSView* panel = [self popoverWidth:w height:h under:sound];
++  panel.accessibilityRole = NSAccessibilityGroupRole;
++  panel.accessibilityLabel = @"Volume da aba";
++  __weak AgensChrome* weak = self;
++  NSTextField* title = Label(12.5, NSFontWeightRegular, kMute);
++  title.stringValue = @"Volume desta aba";
++  title.frame = NSMakeRect(12, 72, 140, 16);
++  NSTextField* value = Label(12.5, NSFontWeightMedium, kInk);
++  value.font = [NSFont monospacedDigitSystemFontOfSize:12.5 weight:NSFontWeightMedium];
++  value.alignment = NSTextAlignmentRight;
++  value.frame = NSMakeRect(w - 12 - 50, 72, 50, 16);
++  NSButton* speaker = [NSButton buttonWithImage:Symbol(@"speaker.wave.2.fill", 11) target:nil action:nil];
++  speaker.bordered = NO;
++  speaker.contentTintColor = kMute.color();
++  speaker.frame = NSMakeRect(10, 44, 20, 20);
++  NSSlider* slider = [NSSlider sliderWithValue:row.volume minValue:0 maxValue:100 target:nil action:nil];
++  slider.controlSize = NSControlSizeSmall;
++  slider.trackFillColor = kLight3.color();
++  slider.frame = NSMakeRect(36, 44, w - 36 - 12, 20);
++  slider.accessibilityLabel = @"Volume desta aba";
++  AgensHoverView* mute = [[AgensHoverView alloc] initWithFrame:NSMakeRect(6, 10, w - 12, 26)];
++  mute.radius = 7;
++  mute.accessibilityRole = NSAccessibilityButtonRole;
++  NSTextField* muteText = Label(12.5, NSFontWeightRegular, kInk);
++  muteText.frame = NSMakeRect(6, 4, w - 12 - 36, 17);
++  NSImageView* muteIcon = [[NSImageView alloc] initWithFrame:NSMakeRect(w - 12 - 24, 4, 18, 18)];
++  muteIcon.contentTintColor = kLight3.color();
++  [mute addSubview:muteText];
++  [mute addSubview:muteIcon];
++  mute.onPress = ^{ [weak volumeSpeaker:nil]; };
++  speaker.target = self;
++  speaker.action = @selector(volumeSpeaker:);
++  slider.target = self;
++  slider.action = @selector(volumeSlid:);
++  for (NSView* v in @[ title, value, speaker, slider, mute ]) [panel addSubview:v];
++  [self presentPopover:panel anchor:sound pointingAt:sound];
++  _volumeRow = row;
++  _volumeValue = value;
++  _volumeMute = muteText;
++  _volumeMuteIcon = muteIcon;
++  _volumeSpeaker = speaker;
++  [self fillVolume];
++}
++- (void)fillVolume {
++  if (!_volumeValue) return;
++  _volumeValue.stringValue = [NSString stringWithFormat:@"%d%%", _volumeRow.volume];
++  const BOOL muted = _volumeRow.muted;
++  _volumeMute.stringValue = muted ? @"Ativar o som desta aba" : @"Silenciar esta aba";
++  _volumeMute.superview.accessibilityLabel = _volumeMute.stringValue;
++  _volumeMuteIcon.image = Symbol(muted ? @"speaker.wave.2.fill" : @"speaker.slash.fill", 11);
++  _volumeSpeaker.image = Symbol(muted ? @"speaker.slash.fill" : @"speaker.wave.2.fill", 11);
++  _volumeSpeaker.contentTintColor = muted ? kLight3.color() : kMute.color();
++  _volumeSpeaker.accessibilityLabel = _volumeMute.stringValue;
++}
++- (void)volumeSpeaker:(id)sender {
++  if (_window && _volumeRow) agens_window_toggle_mute(_window, _volumeRow.index);
++}
++- (void)volumeSlid:(NSSlider*)slider {
++  if (_window && _volumeRow) agens_window_set_volume(_window, _volumeRow.index, (int)lround(slider.doubleValue));
++}
 +- (void)toggleZoom {
 +  if (_menuView && _zoomValue) {
 +    [self closeMenu];
@@ -15418,7 +15636,7 @@ index 3c18c4eab1..34a4bf797f 100644
  - (void)menuBookmarks:(id)sender {
    if (_window) agens_window_open_page(_window, kAgensBookmarks);
  }
-@@ -4854,6 +5855,15 @@ - (BOOL)collapsed {
+@@ -4854,6 +5970,15 @@ - (BOOL)collapsed {
  - (NSArray<NSString*>*)atoNamesForSettings {
    return [_atoNames copy];
  }
@@ -15434,7 +15652,7 @@ index 3c18c4eab1..34a4bf797f 100644
  - (void)toggleSidebar {
    _collapsed = !_collapsed;
    [NSUserDefaults.standardUserDefaults setBool:_collapsed forKey:kCollapsedKey];
-@@ -4975,22 +5985,36 @@ - (void)detach {
+@@ -4975,22 +6100,36 @@ - (void)detach {
  // popup hangs from the button), and the "installed" notice.
  - (void)setExtensions:(const AgensExtensionButton*)list count:(int)count installed:(const char*)installed {
    [_extensions removeAllObjects];
@@ -15477,7 +15695,7 @@ index 3c18c4eab1..34a4bf797f 100644
    }
  }
  - (NSImage*)extensionIcon:(NSString*)extensionId {
-@@ -4999,43 +6023,128 @@ - (NSImage*)extensionIcon:(NSString*)extensionId {
+@@ -4999,43 +6138,128 @@ - (NSImage*)extensionIcon:(NSString*)extensionId {
    }
    return nil;
  }
@@ -15621,7 +15839,7 @@ index 3c18c4eab1..34a4bf797f 100644
    manage.frame = NSMakeRect(5, y, w - 10, rowH);
    manage.onPress = ^{
      AgensChrome* strong = weak;
-@@ -5044,7 +6153,62 @@ - (void)showExtensions:(NSString*)notice {
+@@ -5044,7 +6268,62 @@ - (void)showExtensions:(NSString*)notice {
      [g_settings showSection:@"extensoes"];
    };
    [panel addSubview:manage];
@@ -15684,7 +15902,7 @@ index 3c18c4eab1..34a4bf797f 100644
  }
  
  // --- Favoritos: the page, the bar and its menus.
-@@ -5094,6 +6258,89 @@ - (NSRect)roomForBar:(NSRect)page {
+@@ -5094,6 +6373,89 @@ - (NSRect)roomForBar:(NSRect)page {
    page.size.height -= 32;
    return page;
  }
@@ -15774,7 +15992,7 @@ index 3c18c4eab1..34a4bf797f 100644
  - (void)toggleBookmarkBar {
    [NSUserDefaults.standardUserDefaults setBool:!_barShown forKey:kBookmarkBarKey];
    [NSNotificationCenter.defaultCenter postNotificationName:kThemeChanged object:nil];  // every window
-@@ -5135,7 +6382,7 @@ - (void)showFolder:(long long)folder under:(NSView*)button {
+@@ -5135,7 +6497,7 @@ - (void)showFolder:(long long)folder under:(NSView*)button {
      none.frame = NSMakeRect(14, 11, w - 28, 18);
      [panel addSubview:none];
    }
@@ -15783,7 +16001,7 @@ index 3c18c4eab1..34a4bf797f 100644
  }
  - (void)openBookmark:(NSString*)url {
    if (_window && url.length) agens_window_navigate(_window, url.UTF8String);
-@@ -5204,6 +6451,31 @@ - (void)answerPermission:(NSButton*)button {
+@@ -5204,6 +6566,31 @@ - (void)answerPermission:(NSButton*)button {
    if (_window) agens_window_permission_answer(_window, (AgensPermissionAnswer)button.tag);
    [self closeMenu];
  }
@@ -15815,7 +16033,7 @@ index 3c18c4eab1..34a4bf797f 100644
  - (void)permissionGone {
    if (!_permissionAsked) return;
    _permissionAsked = NO;  // nothing to answer any more
-@@ -5294,7 +6566,7 @@ - (void)showSiteInfo {
+@@ -5294,7 +6681,7 @@ - (void)showSiteInfo {
    all.frame = NSMakeRect(w - 16 - NSWidth(all.frame), 14, NSWidth(all.frame), NSHeight(all.frame));
    [panel addSubview:clear];
    [panel addSubview:all];
@@ -15824,7 +16042,7 @@ index 3c18c4eab1..34a4bf797f 100644
  }
  - (void)setSitePermission:(NSPopUpButton*)popup {
    AgensSiteInfo info;
-@@ -5376,6 +6648,9 @@ - (int)command:(AgensCommand)command {
+@@ -5376,6 +6763,9 @@ - (int)command:(AgensCommand)command {
      case kAgensCommandFindPrevious:
        [_find step:NO];
        return 1;
@@ -15834,7 +16052,7 @@ index 3c18c4eab1..34a4bf797f 100644
      default:
        return 0;
    }
-@@ -5398,6 +6673,12 @@ - (void)focusAddress {
+@@ -5398,6 +6788,12 @@ - (void)focusAddress {
  AgensRect agens_ui_layout(void* chrome, int width, int height) {
    return [(__bridge AgensChrome*)chrome layoutForWidth:width height:height];
  }
@@ -15847,7 +16065,7 @@ index 3c18c4eab1..34a4bf797f 100644
  AgensRect agens_ui_site_icon_rect(void* chrome) {
    return [(__bridge AgensChrome*)chrome siteIconRect];
  }
-@@ -5412,12 +6693,18 @@ void agens_ui_permission_prompt(void* chrome, const char* site, const char* cons
+@@ -5412,12 +6808,18 @@ void agens_ui_permission_prompt(void* chrome, const char* site, const char* cons
    for (int i = 0; i < count; ++i) [list addObject:@(asks[i])];
    [(__bridge AgensChrome*)chrome askPermission:@(site) asks:list];
  }
@@ -16805,6 +17023,37 @@ index 2293349695..0e5e21ecda 100644
  }
  
  void SessionService::ScheduleResetCommands() {
+diff --git a/chrome/browser/speech/extension_api/tts_audio_output_stream_factory.cc b/chrome/browser/speech/extension_api/tts_audio_output_stream_factory.cc
+index e4ca7195b3..beacb0679e 100644
+--- a/chrome/browser/speech/extension_api/tts_audio_output_stream_factory.cc
++++ b/chrome/browser/speech/extension_api/tts_audio_output_stream_factory.cc
+@@ -113,6 +113,13 @@ void TtsAudioOutputStreamFactory::AssociateInputAndOutputForAec(
+       "rejected");
+ }
+ 
++void TtsAudioOutputStreamFactory::SetGroupVolume(
++    const base::UnguessableToken& group_id,
++    double volume) {
++  mojo::ReportBadMessage(
++      "TtsAudioOutputStreamFactory: SetGroupVolume is rejected");
++}
++
+ void TtsAudioOutputStreamFactory::BindMuter(
+     mojo::PendingAssociatedReceiver<media::mojom::LocalMuter> receiver,
+     const base::UnguessableToken& group_id) {
+diff --git a/chrome/browser/speech/extension_api/tts_audio_output_stream_factory.h b/chrome/browser/speech/extension_api/tts_audio_output_stream_factory.h
+index e20ec3ac9e..c0045267b5 100644
+--- a/chrome/browser/speech/extension_api/tts_audio_output_stream_factory.h
++++ b/chrome/browser/speech/extension_api/tts_audio_output_stream_factory.h
+@@ -78,6 +78,8 @@ class TtsAudioOutputStreamFactory : public media::mojom::AudioStreamFactory {
+       const base::UnguessableToken& input_stream_id,
+       const std::string& output_device_id) override;
+ 
++  void SetGroupVolume(const base::UnguessableToken& group_id,
++                      double volume) override;
+   void BindMuter(
+       mojo::PendingAssociatedReceiver<media::mojom::LocalMuter> receiver,
+       const base::UnguessableToken& group_id) override;
 diff --git a/chrome/browser/ui/autofill/chrome_autofill_client.cc b/chrome/browser/ui/autofill/chrome_autofill_client.cc
 index 242bac51ca..9b04fdb59f 100644
 --- a/chrome/browser/ui/autofill/chrome_autofill_client.cc
@@ -16941,22 +17190,44 @@ index 9e4154d594..ce89b2bcaa 100644
  }
  
 diff --git a/chrome/browser/ui/navigator/browser_navigator.cc b/chrome/browser/ui/navigator/browser_navigator.cc
-index b95a279fab..9f039a0242 100644
+index b95a279fab..86e8df1333 100644
 --- a/chrome/browser/ui/navigator/browser_navigator.cc
 +++ b/chrome/browser/ui/navigator/browser_navigator.cc
-@@ -4,6 +4,11 @@
+@@ -4,6 +4,12 @@
  
  #include "chrome/browser/ui/navigator/browser_navigator.h"
  
 +#include "build/build_config.h"
 +#if BUILDFLAG(IS_MAC)
 +#include "chrome/browser/agens/embed/agens_embedded.h"  // agens
++#include "chrome/browser/agens/embed/native_shell.h"    // agens
 +#endif
 +
  #include <algorithm>
  #include <memory>
  #include <optional>
-@@ -632,6 +637,14 @@ base::WeakPtr<content::NavigationHandle> NavigateImpl(
+@@ -74,6 +80,7 @@
+ #include "content/public/browser/render_view_host.h"
+ #include "content/public/browser/site_isolation_policy.h"
+ #include "content/public/browser/web_contents.h"
++#include "content/public/common/url_constants.h"
+ #include "extensions/buildflags/buildflags.h"
+ #include "ui/base/page_transition_types.h"
+ #include "ui/base/window_open_disposition.h"
+@@ -520,6 +527,12 @@ std::unique_ptr<content::WebContents> CreateTargetContents(
+   if (params.disposition == WindowOpenDisposition::NEW_BACKGROUND_TAB) {
+     create_params.initially_hidden = true;
+   }
++  // agens: the empty new tab (Navigate, issue #54) must not claim the spare renderer either: each
++  // one would take it and Chromium would start another.
++  if (url.is_empty()) {
++    create_params.desired_renderer_state =
++        WebContents::CreateParams::kNoRendererProcess;
++  }
+ 
+ #if defined(USE_AURA)
+   if (params.browser->GetWindow() &&
+@@ -632,6 +645,14 @@ base::WeakPtr<content::NavigationHandle> NavigateImpl(
    }
  #endif
  
@@ -16971,6 +17242,32 @@ index b95a279fab..9f039a0242 100644
    if (params->initiating_profile->ShutdownStarted()) {
      // Don't navigate when the profile is shutting down.
      return nullptr;
+@@ -901,9 +922,14 @@ base::WeakPtr<content::NavigationHandle> NavigateImpl(
+   // tab.
+   if (!contents_to_navigate_or_insert) {
+     DCHECK(!params->url.is_empty());
++    // agens: our shell draws the new tab itself, so a new tab for chrome://newtab loads nothing
++    // and has no renderer until the person navigates (issue #54).
++    const bool agens_empty_tab =
++        params->disposition != WindowOpenDisposition::CURRENT_TAB && agens::IsNativeShellEnabled() &&
++        params->url.SchemeIs(content::kChromeUIScheme) && params->url.host() == chrome::kChromeUINewTabHost;
+     if (params->disposition != WindowOpenDisposition::CURRENT_TAB) {
+       tab_to_insert = std::make_unique<tabs::TabModel>(
+-          CreateTargetContents(*params, params->url),
++          CreateTargetContents(*params, agens_empty_tab ? GURL() : params->url),
+           params->browser->GetTabStripModel());
+       if (params->source_contents &&
+           ((params->tabstrip_add_types & AddTabTypes::ADD_INHERIT_OPENER) ||
+@@ -930,7 +956,8 @@ base::WeakPtr<content::NavigationHandle> NavigateImpl(
+ 
+     // Try to handle non-navigational URLs that popup dialogs and such, these
+     // should not actually navigate.
+-    if (!HandleNonNavigationAboutURL(
++    if (!agens_empty_tab &&
++        !HandleNonNavigationAboutURL(
+             params->url, contents_to_navigate_or_insert->GetBrowserContext())) {
+       // Perform the actual navigation, tracking whether it came from the
+       // renderer.
 diff --git a/chrome/browser/ui/select_file_policy/chrome_select_file_policy.cc b/chrome/browser/ui/select_file_policy/chrome_select_file_policy.cc
 index be4b9162d1..60b6aca238 100644
 --- a/chrome/browser/ui/select_file_policy/chrome_select_file_policy.cc
@@ -17335,10 +17632,18 @@ index 2eda2e79d7..1bd592d898 100644
      return;
    }
 diff --git a/content/browser/BUILD.gn b/content/browser/BUILD.gn
-index 901df80d0d..ecbb202f98 100644
+index 901df80d0d..c017e01d14 100644
 --- a/content/browser/BUILD.gn
 +++ b/content/browser/BUILD.gn
-@@ -2733,6 +2733,8 @@ source_set("browser") {
+@@ -1248,6 +1248,7 @@ source_set("browser") {
+     "media/desktop_media_window_registry_aura.cc",
+     "media/flinging_renderer.cc",
+     "media/flinging_renderer.h",
++    "media/agens_audio.cc",  # agens: a tab's own volume
+     "media/forwarding_audio_stream_factory.cc",
+     "media/forwarding_audio_stream_factory.h",
+     "media/frameless_media_interface_proxy.cc",
+@@ -2733,6 +2734,8 @@ source_set("browser") {
        "renderer_host/input/synthetic_gesture_target_mac.mm",
        "renderer_host/popup_menu_helper_mac.h",
        "renderer_host/popup_menu_helper_mac.mm",
@@ -17347,6 +17652,149 @@ index 901df80d0d..ecbb202f98 100644
        "renderer_host/render_widget_host_view_mac.h",
        "renderer_host/render_widget_host_view_mac.mm",
        "renderer_host/render_widget_host_view_mac_editcommand_helper.h",
+diff --git a/content/browser/media/agens_audio.cc b/content/browser/media/agens_audio.cc
+new file mode 100644
+index 0000000000..3a6e24ffa6
+--- /dev/null
++++ b/content/browser/media/agens_audio.cc
+@@ -0,0 +1,21 @@
++// Copyright 2026 SugiyamaLabs.
++
++#include "content/public/browser/agens_audio.h"
++
++#include <algorithm>
++
++#include "content/browser/media/forwarding_audio_stream_factory.h"
++#include "content/browser/web_contents/web_contents_impl.h"
++
++namespace content {
++
++double AgensGetAudioVolume(WebContents* contents) {
++  return static_cast<WebContentsImpl*>(contents)->GetAudioStreamFactory()->GetVolume();
++}
++
++void AgensSetAudioVolume(WebContents* contents, double volume) {
++  static_cast<WebContentsImpl*>(contents)->GetAudioStreamFactory()->SetVolume(
++      std::clamp(volume, 0.0, 1.0));
++}
++
++}  // namespace content
+diff --git a/content/browser/media/audio_loopback_stream_broker_unittest.cc b/content/browser/media/audio_loopback_stream_broker_unittest.cc
+index e147f612b4..47986f4f91 100644
+--- a/content/browser/media/audio_loopback_stream_broker_unittest.cc
++++ b/content/browser/media/audio_loopback_stream_broker_unittest.cc
+@@ -154,6 +154,8 @@ class MockStreamFactory final : public audio::FakeStreamFactory {
+     stream_request_data_->created_callback = std::move(created_callback);
+   }
+ 
++  void SetGroupVolume(const base::UnguessableToken& group_id,
++                      double volume) override {}
+   void BindMuter(
+       mojo::PendingAssociatedReceiver<media::mojom::LocalMuter> receiver,
+       const base::UnguessableToken& group_id) override {
+diff --git a/content/browser/media/forwarding_audio_stream_factory.cc b/content/browser/media/forwarding_audio_stream_factory.cc
+index 557d0312de..49e0a806d0 100644
+--- a/content/browser/media/forwarding_audio_stream_factory.cc
++++ b/content/browser/media/forwarding_audio_stream_factory.cc
+@@ -174,6 +174,14 @@ void ForwardingAudioStreamFactory::Core::SetMuted(bool muted) {
+     muter_->Connect(remote_factory_.get());
+ }
+ 
++void ForwardingAudioStreamFactory::Core::SetVolume(double volume) {
++  CHECK_CURRENTLY_ON(BrowserThread::IO, base::NotFatalUntil::M160);
++  volume_ = volume;
++  if (remote_factory_) {
++    remote_factory_->SetGroupVolume(group_id_, volume);
++  }
++}
++
+ void ForwardingAudioStreamFactory::Core::AddLoopbackSink(
+     AudioStreamBroker::LoopbackSink* sink) {
+   CHECK_CURRENTLY_ON(BrowserThread::IO, base::NotFatalUntil::M160);
+@@ -275,6 +283,17 @@ void ForwardingAudioStreamFactory::SetMuted(bool muted) {
+   }
+ }
+ 
++void ForwardingAudioStreamFactory::SetVolume(double volume) {
++  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M160);
++  if (volume_ != volume) {
++    volume_ = volume;
++    // Unretained is safe as in SetMuted().
++    GetIOThreadTaskRunner({})->PostTask(
++        FROM_HERE, base::BindOnce(&Core::SetVolume,
++                                  base::Unretained(core_.get()), volume));
++  }
++}
++
+ bool ForwardingAudioStreamFactory::IsMuted() const {
+   CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M160);
+   return is_muted_;
+@@ -361,6 +380,9 @@ ForwardingAudioStreamFactory::Core::GetFactory() {
+     // Restore the muting session on reconnect.
+     if (muter_)
+       muter_->Connect(remote_factory_.get());
++    if (volume_) {
++      remote_factory_->SetGroupVolume(group_id_, *volume_);
++    }
+   }
+ 
+   return remote_factory_.get();
+diff --git a/content/browser/media/forwarding_audio_stream_factory.h b/content/browser/media/forwarding_audio_stream_factory.h
+index 0a12aaa7ee..0555162712 100644
+--- a/content/browser/media/forwarding_audio_stream_factory.h
++++ b/content/browser/media/forwarding_audio_stream_factory.h
+@@ -108,6 +108,9 @@ class CONTENT_EXPORT ForwardingAudioStreamFactory final
+     // factory.
+     void SetMuted(bool muted);
+ 
++    // AgensBrowser: playout volume (0..1) of all output streams in the group.
++    void SetVolume(double volume);
++
+     // AudioStreamLoopback::Source implementation
+     void AddLoopbackSink(AudioStreamBroker::LoopbackSink* sink) final;
+     void RemoveLoopbackSink(AudioStreamBroker::LoopbackSink* sink) final;
+@@ -156,6 +159,9 @@ class CONTENT_EXPORT ForwardingAudioStreamFactory final
+     // Instantiated when |outputs_| should be muted, empty otherwise.
+     std::optional<AudioMutingSession> muter_;
+ 
++    // AgensBrowser: set once the volume was changed; resent on reconnect.
++    std::optional<double> volume_;
++
+     StreamBrokerSet inputs_;
+     StreamBrokerSet outputs_;
+     base::flat_set<raw_ptr<AudioStreamBroker::LoopbackSink, CtnExperimental>>
+@@ -203,6 +209,10 @@ class CONTENT_EXPORT ForwardingAudioStreamFactory final
+   // Returns the current muting state.
+   bool IsMuted() const;
+ 
++  // AgensBrowser: playout volume (0..1) for all output streams, not capture.
++  void SetVolume(double volume);
++  double GetVolume() const { return volume_; }
++
+   // WebContentsObserver implementation. We observe these events so that we can
+   // clean up streams belonging to a frame when that frame is destroyed.
+   void RenderFrameDeleted(RenderFrameHost* render_frame_host) final;
+@@ -219,6 +229,7 @@ class CONTENT_EXPORT ForwardingAudioStreamFactory final
+  private:
+   std::unique_ptr<Core> core_;
+   bool is_muted_ = false;
++  double volume_ = 1.0;
+ 
+   base::ScopedClosureRunner capture_handle_;
+ 
+diff --git a/content/browser/media/forwarding_audio_stream_factory_unittest.cc b/content/browser/media/forwarding_audio_stream_factory_unittest.cc
+index f5c6745b40..4d7e7efa4d 100644
+--- a/content/browser/media/forwarding_audio_stream_factory_unittest.cc
++++ b/content/browser/media/forwarding_audio_stream_factory_unittest.cc
+@@ -56,6 +56,8 @@ class MockStreamFactory final : public audio::FakeStreamFactory,
+   bool IsMuterConnected() const { return muter_receiver_.is_bound(); }
+ 
+  private:
++  void SetGroupVolume(const base::UnguessableToken& group_id,
++                      double volume) override {}
+   void BindMuter(
+       mojo::PendingAssociatedReceiver<media::mojom::LocalMuter> receiver,
+       const base::UnguessableToken& group_id) override {
 diff --git a/content/browser/renderer_host/agens_embed_internal_mac.h b/content/browser/renderer_host/agens_embed_internal_mac.h
 new file mode 100644
 index 0000000000..13c75c9ba3
@@ -17816,6 +18264,44 @@ index 0000000000..de3bd93acd
 +}
 +
 +}  // namespace content
+diff --git a/content/browser/renderer_host/media/media_devices_manager.cc b/content/browser/renderer_host/media/media_devices_manager.cc
+index da86c44a2a..d00fbce2f5 100644
+--- a/content/browser/renderer_host/media/media_devices_manager.cc
++++ b/content/browser/renderer_host/media/media_devices_manager.cc
+@@ -62,9 +62,16 @@ namespace content {
+ // Release video source provider in VideoCaptureDevicesChangedObserver
+ // if it is not used.
+ // Do not enable by default until https://crbug.com/377749384 is fixed.
++// AgensBrowser (issue #34): on in the Mac, so the video capture service exits
++// when no page uses the camera; the device cache is dropped on disconnect.
+ #if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
+ BASE_FEATURE(kReleaseVideoSourceProviderIfNotInUse,
+-             base::FEATURE_DISABLED_BY_DEFAULT);
++#if BUILDFLAG(IS_MAC)
++             base::FEATURE_ENABLED_BY_DEFAULT
++#else
++             base::FEATURE_DISABLED_BY_DEFAULT
++#endif
++);
+ 
+ const base::FeatureParam<base::TimeDelta> kReleaseVideoSourceProviderTimeout{
+     &kReleaseVideoSourceProviderIfNotInUse,
+diff --git a/content/browser/renderer_host/media/video_capture_devices_changed_observer.cc b/content/browser/renderer_host/media/video_capture_devices_changed_observer.cc
+index 1348127ac3..4386f9ad7a 100644
+--- a/content/browser/renderer_host/media/video_capture_devices_changed_observer.cc
++++ b/content/browser/renderer_host/media/video_capture_devices_changed_observer.cc
+@@ -62,6 +62,11 @@ void MediaDevicesManager::VideoCaptureDevicesChangedObserver::
+     DisconnectVideoSourceProvider() {
+   mojo_device_notifier_.reset();
+   receiver_.reset();
++  // AgensBrowser: no change notices come while disconnected, so the next
++  // enumeration must ask the service again (a camera may come or go meanwhile).
++  if (invalidate_cache_cb_) {
++    invalidate_cache_cb_.Run();
++  }
+ }
+ 
+ }  // namespace content
 diff --git a/content/browser/renderer_host/render_widget_host_view_mac.mm b/content/browser/renderer_host/render_widget_host_view_mac.mm
 index f99512647a..c62a206753 100644
 --- a/content/browser/renderer_host/render_widget_host_view_mac.mm
@@ -18048,10 +18534,18 @@ index e94288d2fb..40c189b080 100644
        GetBrowserContext(), caller_origin);
  }
 diff --git a/content/public/browser/BUILD.gn b/content/public/browser/BUILD.gn
-index 790d665707..19074293c5 100644
+index 790d665707..1145d690c8 100644
 --- a/content/public/browser/BUILD.gn
 +++ b/content/public/browser/BUILD.gn
-@@ -712,6 +712,7 @@ source_set("browser_sources") {
+@@ -35,6 +35,7 @@ source_set("browser_sources") {
+     "attribution_data_model.cc",
+     "attribution_data_model.h",
+     "auction_result.h",
++    "agens_audio.h",  # agens: a tab's own volume
+     "audio_service.h",
+     "audio_service_info.h",
+     "audio_stream_broker.cc",
+@@ -712,6 +713,7 @@ source_set("browser_sources") {
  
    if (is_mac) {
      sources += [
@@ -18059,6 +18553,32 @@ index 790d665707..19074293c5 100644
        "ax_inspect_factory_mac.mm",
        "native_event_processor_mac.h",
        "native_event_processor_observer_mac.h",
+diff --git a/content/public/browser/agens_audio.h b/content/public/browser/agens_audio.h
+new file mode 100644
+index 0000000000..0c1fdd4d1a
+--- /dev/null
++++ b/content/public/browser/agens_audio.h
+@@ -0,0 +1,20 @@
++// Copyright 2026 SugiyamaLabs.
++// A tab's own playout volume (docs/casca.md, "Som"): a gain on every output stream of the
++// WebContents in the audio service, like muting and apart from it. Capture gets the audio unscaled.
++
++#ifndef CONTENT_PUBLIC_BROWSER_AGENS_AUDIO_H_
++#define CONTENT_PUBLIC_BROWSER_AGENS_AUDIO_H_
++
++#include "content/common/content_export.h"
++
++namespace content {
++
++class WebContents;
++
++// 0..1, 1 (unchanged) by default. Kept with the WebContents until it goes away; never saved.
++CONTENT_EXPORT double AgensGetAudioVolume(WebContents* contents);
++CONTENT_EXPORT void AgensSetAudioVolume(WebContents* contents, double volume);
++
++}  // namespace content
++
++#endif  // CONTENT_PUBLIC_BROWSER_AGENS_AUDIO_H_
 diff --git a/content/public/browser/agens_embed_mac.h b/content/public/browser/agens_embed_mac.h
 new file mode 100644
 index 0000000000..1161c9312a
@@ -18321,6 +18841,191 @@ index 4c032bed25..31b48badfc 100644
  
    return Inject(scripts_run_info);
  }
+diff --git a/media/mojo/mojom/audio_stream_factory.mojom b/media/mojo/mojom/audio_stream_factory.mojom
+index e240fbade7..755449e983 100644
+--- a/media/mojo/mojom/audio_stream_factory.mojom
++++ b/media/mojo/mojom/audio_stream_factory.mojom
+@@ -99,6 +99,11 @@ interface AudioStreamFactory {
+   BindMuter(pending_associated_receiver<LocalMuter> receiver,
+             mojo_base.mojom.UnguessableToken group_id);
+ 
++  // AgensBrowser: scales local playout of every current and future output
++  // stream in |group_id| by |volume| (0..1, 1 = unchanged). Snoopers (tab
++  // capture, loopback) still get the unscaled audio, as with muting.
++  SetGroupVolume(mojo_base.mojom.UnguessableToken group_id, double volume);
++
+   // Creates an AudioInputStream that provides the result of looping-back and
+   // mixing-together all current and future AudioOutputStreams tagged with the
+   // given |group_id|. The loopback re-mixes audio, if necessary, so that the
+diff --git a/services/audio/muteable.h b/services/audio/muteable.h
+index 1ea72c1784..f7bf5ad735 100644
+--- a/services/audio/muteable.h
++++ b/services/audio/muteable.h
+@@ -15,6 +15,9 @@ class Muteable {
+   virtual void StartMuting() = 0;
+   virtual void StopMuting() = 0;
+ 
++  // AgensBrowser: scales local playout (not what Snoopers get) by |volume|.
++  virtual void SetGroupVolume(double volume) {}
++
+  protected:
+   virtual ~Muteable() = default;
+ };
+diff --git a/services/audio/output_controller.cc b/services/audio/output_controller.cc
+index e9ce345aa1..ded51c08ea 100644
+--- a/services/audio/output_controller.cc
++++ b/services/audio/output_controller.cc
+@@ -359,7 +359,7 @@ void OutputController::RecreateStream(OutputController::RecreateReason reason) {
+   ReportStreamCreationUma(reason, StreamCreationResult::kOk);
+ 
+   // We have successfully opened the stream. Set the initial volume.
+-  stream_->SetVolume(volume_);
++  stream_->SetVolume(volume_ * group_volume_);
+ }
+ 
+ void OutputController::Play() {
+@@ -489,7 +489,7 @@ void OutputController::SetVolume(double volume) {
+     case kCreated:
+     case kPlaying:
+     case kPaused:
+-      stream_->SetVolume(volume_);
++      stream_->SetVolume(volume_ * group_volume_);
+       break;
+     default:
+       break;
+@@ -662,6 +662,12 @@ void OutputController::StopMuting() {
+   }
+ }
+ 
++void OutputController::SetGroupVolume(double volume) {
++  DCHECK(task_runner_->BelongsToCurrentThread());
++  group_volume_ = volume;
++  SetVolume(volume_);
++}
++
+ void OutputController::ToggleLocalOutput() {
+   DCHECK(task_runner_->BelongsToCurrentThread());
+   SCOPED_UMA_HISTOGRAM_TIMER(
+diff --git a/services/audio/output_controller.h b/services/audio/output_controller.h
+index 8e279c4373..3142d139ad 100644
+--- a/services/audio/output_controller.h
++++ b/services/audio/output_controller.h
+@@ -187,6 +187,7 @@ class OutputController : public media::AudioOutputStream::AudioSourceCallback,
+   void StopSnooping(Snooper* snooper) override;
+   void StartMuting() override;
+   void StopMuting() override;
++  void SetGroupVolume(double volume) override;
+ 
+   // Accessor for AudioPowerMonitor::ReadCurrentPowerAndClip().  See comments in
+   // audio_power_monitor.h for usage.  This may be called on any thread.
+@@ -355,6 +356,8 @@ class OutputController : public media::AudioOutputStream::AudioSourceCallback,
+ 
+   // The current volume of the audio stream.
+   double volume_;
++  // AgensBrowser: the tab's volume, applied on top of |volume_|.
++  double group_volume_ = 1.0;
+ 
+   State state_;
+ 
+diff --git a/services/audio/public/cpp/fake_stream_factory.h b/services/audio/public/cpp/fake_stream_factory.h
+index 6ac239329a..80a2cc92fa 100644
+--- a/services/audio/public/cpp/fake_stream_factory.h
++++ b/services/audio/public/cpp/fake_stream_factory.h
+@@ -82,6 +82,8 @@ class FakeStreamFactory : public media::mojom::AudioStreamFactory {
+       const media::AudioParameters& params,
+       const base::UnguessableToken& group_id,
+       CreateOutputStreamCallback created_callback) override {}
++  void SetGroupVolume(const base::UnguessableToken& group_id,
++                      double volume) override {}
+   void BindMuter(
+       mojo::PendingAssociatedReceiver<media::mojom::LocalMuter> receiver,
+       const base::UnguessableToken& group_id) override {}
+diff --git a/services/audio/stream_factory.cc b/services/audio/stream_factory.cc
+index 8754d85838..b1a8f82837 100644
+--- a/services/audio/stream_factory.cc
++++ b/services/audio/stream_factory.cc
+@@ -231,6 +231,31 @@ void StreamFactory::BindMuter(
+   muter->AddReceiver(std::move(receiver));
+ }
+ 
++void StreamFactory::SetGroupVolume(const base::UnguessableToken& group_id,
++                                   double volume) {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(owning_sequence_);
++  volume = std::clamp(volume, 0.0, 1.0);
++  if (volume == 1.0) {
++    group_volumes_.erase(group_id);
++  } else {
++    group_volumes_[group_id] = volume;
++  }
++  ApplyGroupVolume(group_id);
++}
++
++void StreamFactory::ApplyGroupVolume(const base::UnguessableToken& group_id) {
++  auto it = group_volumes_.find(group_id);
++  const double volume = it == group_volumes_.end() ? 1.0 : it->second;
++  coordinator_.ForEachMember(base::BindRepeating(
++      [](const base::UnguessableToken& group_id, double volume,
++         const LoopbackCoordinator::Member& member) {
++        if (member.group_id == group_id) {
++          member.loopback_source->SetGroupVolume(volume);
++        }
++      },
++      group_id, volume));
++}
++
+ void StreamFactory::CreateLoopbackStream(
+     mojo::PendingReceiver<media::mojom::AudioInputStream> receiver,
+     mojo::PendingRemote<media::mojom::AudioInputStreamClient> client,
+@@ -401,6 +426,9 @@ void StreamFactory::CreateOutputStreamInternal(
+       std::move(stream_receiver), std::move(device_switch_receiver),
+       std::move(observer), std::move(log), audio_manager_,
+       device_id_or_group_id, params, &coordinator_, group_id));
++  if (group_volumes_.contains(group_id)) {
++    ApplyGroupVolume(group_id);
++  }
+ }
+ 
+ #if BUILDFLAG(CHROME_WIDE_ECHO_CANCELLATION)
+diff --git a/services/audio/stream_factory.h b/services/audio/stream_factory.h
+index 397b55f9ba..8f6a6c9beb 100644
+--- a/services/audio/stream_factory.h
++++ b/services/audio/stream_factory.h
+@@ -10,6 +10,7 @@
+ #include <string>
+ #include <vector>
+ 
++#include "base/containers/flat_map.h"
+ #include "base/containers/flat_set.h"
+ #include "base/containers/unique_ptr_adapters.h"
+ #include "base/functional/callback.h"
+@@ -110,6 +111,8 @@ class StreamFactory final : public media::mojom::AudioStreamFactory {
+   void BindMuter(
+       mojo::PendingAssociatedReceiver<media::mojom::LocalMuter> receiver,
+       const base::UnguessableToken& group_id) final;
++  void SetGroupVolume(const base::UnguessableToken& group_id,
++                      double volume) final;
+   void CreateLoopbackStream(
+       mojo::PendingReceiver<media::mojom::AudioInputStream> stream_receiver,
+       mojo::PendingRemote<media::mojom::AudioInputStreamClient> client,
+@@ -133,6 +136,7 @@ class StreamFactory final : public media::mojom::AudioStreamFactory {
+   void DestroyInputStream(InputStream* stream);
+   void DestroyOutputStream(OutputStream* stream);
+   void DestroyMuter(base::WeakPtr<LocalMuter> muter);
++  void ApplyGroupVolume(const base::UnguessableToken& group_id);
+   void DestroyLoopbackStream(LoopbackStream* stream);
+   void CreateOutputStreamInternal(
+       mojo::PendingReceiver<media::mojom::AudioOutputStream> receiver,
+@@ -168,6 +172,10 @@ class StreamFactory final : public media::mojom::AudioStreamFactory {
+ #endif
+   LoopbackCoordinator coordinator_;
+   std::vector<std::unique_ptr<LocalMuter>> muters_;
++  // AgensBrowser: per-group playout volume, only for groups not at 1.
++  // shortcut: an entry outlives its WebContents until the service restarts;
++  // a few bytes per tab whose volume was changed.
++  base::flat_map<base::UnguessableToken, double> group_volumes_;
+   std::optional<RealtimeAudioThread> loopback_worker_thread_;
+   std::vector<std::unique_ptr<LoopbackStream>> loopback_streams_;
+   InputStreamSet input_streams_;
 diff --git a/third_party/blink/public/mojom/choosers/color_chooser.mojom b/third_party/blink/public/mojom/choosers/color_chooser.mojom
 index ebf7ea0de3..f1201cb012 100644
 --- a/third_party/blink/public/mojom/choosers/color_chooser.mojom

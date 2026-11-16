@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="pt-BR" data-mode="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Recursos da janela</title>
+<!-- Downloads, senhas, URL do link, permissões e folha de aprovação na casca nativa.
+     Tokens e janela de janela.html; popover com seta de menus-seta.html / busca.html; folha de extensoes.html. -->
+<style>
+:root{--bg:#0B0B0D;--side:#111114;--raise:#16161A;--sunk:#0F0F12;--line:#24242A;--line-strong:#3A3A42;--line-hover:#4A4A54;--ink:#F2F2F4;--mute:#9A9AA4;--dim:#8A8A94;--hi:#F4F4F6;--on-hi:#0B0B0D;--warn:#F2C14E;
+  --hover-2:#1B1B20;--float:#1A1A1F;--light-2:#FFE9C7;--light-3:#FFC98A;--red:#F28B82;--kbd:rgba(255,255,255,.07);--off:#4A4A54;--shadow:rgba(0,0,0,.45);
+  --ui:-apple-system,"SF Pro Text",BlinkMacSystemFont,system-ui,sans-serif;--mono:ui-monospace,"SF Mono",Menlo,monospace;--s:10px;--ease:cubic-bezier(.16,1,.3,1)}
+:root[data-mode="light"]{--bg:#FAFAFB;--side:#F1F1F4;--raise:#FFFFFF;--sunk:#E9E9ED;--line:#E0E0E5;--line-strong:#CFCFD6;--line-hover:#B9B9C2;--ink:#16161A;--mute:#5C5C66;--dim:#71717B;--hi:#16161A;--on-hi:#FFFFFF;--warn:#B7791F;
+  --hover-2:#E4E4E9;--float:#FFFFFF;--light-2:#F7A95C;--light-3:#E8893A;--red:#C5453B;--kbd:rgba(0,0,0,.06);--off:#B9B9C2;--shadow:rgba(0,0,0,.14)}
+:root[data-mode="light"] .lights i{background:#D4D4DA}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 var(--ui);text-wrap:pretty;-webkit-font-smoothing:antialiased;transition:background .2s,color .2s}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+:focus-visible{outline:2px solid var(--light-2);outline-offset:2px;border-radius:8px}
+main{max-width:1180px;margin:0 auto;padding:32px 24px 64px}
+header{display:flex;gap:16px;align-items:flex-start}header div{flex:1}header h1{font-size:20px;margin:0 0 4px}header p{margin:0 0 8px;color:var(--dim);max-width:80ch}
+.toc{position:sticky;top:0;z-index:20;display:flex;gap:16px;flex-wrap:wrap;margin:0 -24px 24px;padding:10px 24px;background:var(--bg);border-bottom:1px solid var(--line)}.toc a{color:var(--mute);font-size:13px;text-decoration:none}.toc a:hover{color:var(--ink)}
+section.v{margin:0 0 48px;scroll-margin-top:56px}
+section.v>h2{font-size:13px;font-weight:600;color:var(--mute);margin:0 0 4px}
+p.cap{margin:0 0 10px;color:var(--dim);font-size:12.5px;max-width:780px}
+.seg{display:inline-flex;flex-wrap:wrap;gap:4px;border:1px solid var(--line);border-radius:9px;padding:2px;margin:0 0 12px}.seg button{padding:4px 10px;border-radius:7px;font-size:12.5px;color:var(--mute)}.seg button.on{background:var(--raise);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+.mode{flex:none}
+kbd{font:500 12px/1 var(--ui);padding:3px 5px;border-radius:5px;background:var(--kbd);color:var(--dim)}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:6px 13px;border:1px solid var(--line-strong);border-radius:10px;font-size:13px;white-space:nowrap;flex:none}
+.btn:hover{border-color:var(--line-hover);background:var(--hover-2)}
+.btn.pri{background:var(--hi);border-color:var(--hi);color:var(--on-hi);font-weight:600}
+.btn.pri kbd{background:rgba(128,128,128,.18);color:inherit;opacity:.6;margin-right:-6px}
+.btn.sm{padding:4px 10px;font-size:12.5px}
+.lnk{color:var(--mute);font-size:12.5px}.lnk:hover{color:var(--ink)}
+.logo{width:18px;height:18px;border-radius:5px;display:inline-grid;place-items:center;font:700 10.5px/1 var(--ui);flex:none;color:#0B0B0D}.l-est{background:#C9B6FF}.l-cli{background:#7FD1A8}.l-pes{background:#F2C14E}
+svg.i{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex:none}
+/* janela */
+.nav{position:relative;height:540px;border:1px solid var(--line);border-radius:14px;background:var(--side);overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.nav.sidev{flex-direction:row}
+.lights{display:flex;gap:8px;padding:0 12px 0 16px}.lights i{width:12px;height:12px;border-radius:50%;background:#2A2A30}
+.strip{display:flex;align-items:center;gap:4px;padding:8px 14px 0 0}
+.nav-tab{display:flex;align-items:center;gap:7px;padding:5px 10px;border-radius:8px;font-size:12.5px;color:var(--mute);flex:0 1 200px;min-width:0;overflow:hidden;white-space:nowrap;height:32px}.nav-tab.on{background:var(--raise);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+.nav-tab .t{flex:1;overflow:hidden;text-overflow:ellipsis}.nt{width:28px;height:28px;display:grid;place-items:center;color:var(--dim)}
+.fv{width:14px;height:14px;border-radius:4px;flex:none;display:grid;place-items:center;font:700 8.5px/1 var(--ui);color:#0B0B0D}
+.nav-row{display:flex;align-items:center;gap:6px;margin:8px 14px 10px;position:relative}
+.ib{position:relative;width:30px;height:30px;display:grid;place-items:center;border-radius:8px;color:var(--mute);flex:none}.ib.on,.ib:hover{background:var(--raise);color:var(--ink)}
+.nav-addr{flex:1;min-width:0;display:flex;align-items:center;gap:6px;padding:0 6px 0 6px;height:32px;border:1px solid var(--line);border-radius:10px;background:var(--sunk);color:var(--mute);font-size:13px;white-space:nowrap}
+.nav-addr .u{flex:1;overflow:hidden;text-overflow:ellipsis}.nav-addr .u b{color:var(--ink);font-weight:400}
+.ai{width:22px;height:22px;display:grid;place-items:center;border-radius:7px;color:var(--dim);flex:none}.ai:hover,.ai.on{background:var(--hover-2);color:var(--ink)}.ai svg.i{width:15px;height:15px}
+.ai.asking{color:var(--light-3)}
+.live{display:flex;align-items:center;gap:2px;padding:0 6px;height:22px;border-radius:7px;background:var(--hover-2);color:var(--light-3)}.live svg.i{width:14px;height:14px}
+.live::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--light-3);margin-right:3px;animation:blink 1.6s ease-in-out infinite}
+@keyframes blink{50%{opacity:.35}}
+.profs{border:1px solid var(--line);border-radius:9px;padding:2px;display:flex;gap:4px}.profs span{white-space:nowrap;display:flex;align-items:center;gap:6px;padding:4px 7px;border-radius:8px;font-size:12.5px;color:var(--mute)}.profs span.on{background:var(--raise);color:var(--ink)}
+.area{flex:1;min-height:0;margin:0 14px 14px;border:1px solid var(--line);border-radius:12px;overflow:hidden;position:relative;background:#fff;color:#15151A}
+.area.app{background:var(--bg);color:var(--ink)}
+.page{padding:26px 34px;font:15px/1.6 Georgia,"Times New Roman",serif;max-width:720px}
+.page h3{font:600 22px/1.25 var(--ui);margin:0 0 12px}.page p{margin:0 0 12px}.page a{color:#1A56C7}
+/* barra lateral (janela.html, abas na lateral) */
+.sb{width:220px;flex:none;display:flex;flex-direction:column;padding:12px 8px 10px;gap:2px}
+.sbh{display:flex;align-items:center;gap:8px;padding:12px 8px 10px;font-weight:600;font-size:13.5px}
+.sbt{display:flex;align-items:center;gap:8px;height:32px;padding:0 8px;border-radius:8px;font-size:12.5px;color:var(--mute);white-space:nowrap}.sbt .t{flex:1;overflow:hidden;text-overflow:ellipsis}.sbt.on{background:var(--raise);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+.sbt .rec{display:flex;gap:1px;color:var(--light-3)}.sbt .rec svg.i{width:13px;height:13px}
+.sbf{margin-top:auto;display:flex;gap:6px;padding:8px}.sbf .logo{width:24px;height:24px;border-radius:7px;opacity:.55}.sbf .logo.on{opacity:1;box-shadow:0 0 0 2px var(--side),0 0 0 3px var(--line-strong)}
+.col{flex:1;min-width:0;display:flex;flex-direction:column}
+/* popover com seta (menus-seta.html) */
+.menu{position:absolute;z-index:6;background:var(--float);border:1px solid var(--line-strong);border-radius:12px;padding:6px;filter:drop-shadow(0 10px 24px var(--shadow));color:var(--ink);font-size:13px;animation:rise .18s var(--ease)}
+@keyframes rise{from{opacity:0;transform:translateY(-3px)}}
+.menu .mi{display:flex;align-items:center;gap:10px;padding:5px 8px;border-radius:8px;font-size:13px}.menu .mi:hover{background:var(--raise)}.menu .mi span{flex:1}.menu .mi small{color:var(--dim);font-size:12px}
+.menu hr{border:0;border-top:1px solid var(--line);margin:5px 0}
+.menu[data-side]::after{content:"";position:absolute;width:var(--s);height:var(--s);background:var(--float);border:1px solid var(--line-strong);border-right:0;border-bottom:0;border-top-left-radius:2px;clip-path:polygon(-2px -2px,calc(100% + 2px) -2px,-2px calc(100% + 2px));left:var(--ax);top:0;transform:translate(-50%,-50%) rotate(45deg)}
+.ph{display:flex;align-items:center;gap:8px;padding:6px 8px 8px}.ph b{flex:1;font-weight:600}
+.pbody{padding:6px 8px 4px}.pbody .pt{font-weight:600;margin:0 0 2px}.pbody>small{display:block;color:var(--dim);font-size:12px;margin:0 0 10px}
+.acts{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}.acts.stack{flex-direction:column;align-items:stretch;gap:6px}
+/* downloads */
+.dlb svg.ring{position:absolute;inset:1px;width:28px;height:28px;transform:rotate(-90deg);fill:none;stroke-width:2}
+.dlb .ring .bgc{stroke:var(--line-strong)}.dlb .ring .fgc{stroke:var(--light-3);stroke-linecap:round;transition:stroke-dashoffset .3s}
+.dlb.new{animation:dlnew .2s var(--ease)}.dlb.new svg.arrow{animation:drop .6s var(--ease) 2}
+@keyframes dlnew{from{transform:scale(.6);opacity:0}}
+@keyframes drop{0%{transform:translateY(-5px);opacity:0}60%{transform:none;opacity:1}}
+.dot{position:absolute;right:3px;top:3px;width:7px;height:7px;border-radius:50%;background:var(--warn);box-shadow:0 0 0 2px var(--side)}
+.dlpop{width:350px}
+.dr{display:flex;gap:10px;padding:8px;border-radius:8px;align-items:flex-start}.dr:hover{background:var(--raise)}
+.ft{width:30px;height:36px;border-radius:5px;border:1px solid var(--line-strong);display:grid;place-items:end center;padding-bottom:4px;font:700 8.5px/1 var(--ui);color:var(--mute);flex:none;background:var(--sunk)}
+.dr .m{flex:1;min-width:0}.dr .n{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.dr .s{color:var(--dim);font-size:12px;font-variant-numeric:tabular-nums}
+.bar{height:3px;border-radius:2px;background:var(--line-strong);margin:5px 0 3px;overflow:hidden}.bar i{display:block;height:100%;background:var(--light-3);border-radius:2px}
+.dr.paused .bar i{background:var(--mute)}
+.da{display:flex;gap:2px}.da button{width:26px;height:26px;display:grid;place-items:center;border-radius:7px;color:var(--mute)}.da button:hover{background:var(--hover-2);color:var(--ink)}
+.dr .s.w{color:var(--warn)}
+.danger{margin:2px 0 4px;padding:10px;border:1px solid var(--warn);border-radius:10px;background:color-mix(in srgb,var(--warn) 8%,transparent)}
+.danger .row{display:flex;gap:10px}.danger .t{font-weight:600}.danger p{margin:2px 0 0;color:var(--mute);font-size:12px}.danger .acts{margin-top:10px}
+.empty{padding:22px 10px 18px;text-align:center;color:var(--dim);font-size:12.5px}.empty svg.i{width:26px;height:26px;margin:0 auto 6px;display:block;color:var(--mute)}
+/* senhas */
+.fl{display:flex;flex-direction:column;gap:3px;margin:0 0 8px}.fl label{font-size:12px;color:var(--dim)}
+.fld{height:30px;display:flex;align-items:center;gap:6px;padding:0 9px;border:1px solid var(--line-strong);border-radius:8px;background:var(--sunk);font-size:13px}.fld span:first-child{flex:1}
+.login{max-width:340px;margin:30px auto;font:14px/1.5 var(--ui)}.login h3{text-align:center}
+.login .in{position:relative;height:36px;border:1px solid #D0D0D8;border-radius:8px;padding:0 10px;display:flex;align-items:center;margin:4px 0 12px;color:#15151A}
+.login .in.focus{border-color:#1A56C7;box-shadow:0 0 0 3px rgba(26,86,199,.15)}.login .in.fill{background:#FFF7E8}
+.login label{font-size:13px;font-weight:600}.login .go{height:36px;border-radius:8px;background:#1F2328;color:#fff;display:grid;place-items:center;font-weight:600}
+.af{position:absolute;z-index:6;width:300px;background:var(--float);border:1px solid var(--line-strong);border-radius:10px;padding:5px;filter:drop-shadow(0 10px 24px var(--shadow));color:var(--ink);font:13px/1.4 var(--ui)}
+.af .r{display:flex;align-items:center;gap:10px;padding:6px 8px;border-radius:7px;cursor:pointer}.af .r:hover,.af .r.hl{background:var(--raise)}.af .r small{display:block;color:var(--dim);font-size:12px}
+.af .k{width:26px;height:26px;border-radius:7px;background:var(--sunk);display:grid;place-items:center;color:var(--mute);flex:none}
+.af .ff{padding:5px 8px 3px;color:var(--dim);font-size:11.5px;display:flex;justify-content:space-between}
+.set{display:flex;height:100%}.setnav{width:170px;border-right:1px solid var(--line);padding:14px 8px;display:flex;flex-direction:column;gap:2px;font-size:13px;background:var(--side)}.setnav span{padding:5px 10px;border-radius:7px;color:var(--mute)}.setnav span.on{background:var(--raise);color:var(--ink)}
+.setb{flex:1;padding:18px 22px;overflow:auto;min-width:0}.setb h4{margin:0 0 2px;font-size:16px}.setb>p{margin:0 0 12px;color:var(--dim);font-size:12.5px}
+.tools{display:flex;gap:8px;align-items:center;margin:0 0 10px;flex-wrap:wrap}
+.search{flex:1;min-width:160px;height:30px;display:flex;align-items:center;gap:7px;padding:0 9px;border:1px solid var(--line-strong);border-radius:8px;background:var(--sunk);color:var(--dim)}.search input{flex:1;background:none;border:0;outline:0;color:var(--ink);font:13px var(--ui)}
+.atoseg{display:flex;gap:2px;border:1px solid var(--line);border-radius:9px;padding:2px}.atoseg button{display:flex;align-items:center;gap:6px;padding:3px 9px 3px 5px;border-radius:7px;font-size:12.5px;color:var(--mute)}.atoseg button.on{background:var(--raise);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+.pl{border:1px solid var(--line);border-radius:10px;background:var(--sunk)}
+.pr{display:grid;grid-template-columns:22px 1.2fr 1.3fr 1fr auto;gap:10px;align-items:center;padding:7px 10px;font-size:13px}.pr+.pr{border-top:1px solid var(--line)}
+.pr .site{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pr .usr{color:var(--mute);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pr .pw{font-family:var(--mono);font-size:12.5px;color:var(--mute);white-space:nowrap;overflow:hidden}
+.pr .pw.shown{color:var(--ink)}.pr.gone{display:flex;color:var(--dim);font-size:12.5px}.pr.gone button{margin-left:auto}
+.tid{position:absolute;inset:0;z-index:8;background:rgba(5,5,7,.35);display:grid;place-items:center}
+.tidb{width:280px;background:#ECECEE;color:#1D1D1F;border-radius:14px;padding:18px 18px 14px;text-align:center;font:13px/1.4 var(--ui);box-shadow:0 20px 50px rgba(0,0,0,.4)}
+:root[data-mode="dark"] .tidb{background:#2C2C2E;color:#F2F2F4}
+.tidb .fp{width:46px;height:46px;margin:0 auto 10px;border-radius:50%;display:grid;place-items:center;background:linear-gradient(135deg,#FF6B8A,#FF9F45);color:#fff}.tidb .fp svg.i{width:26px;height:26px}
+.tidb b{display:block;margin-bottom:4px}.tidb small{opacity:.7}.tidb .tb{display:flex;gap:8px;margin-top:14px}.tidb .tb button{flex:1;padding:5px;border-radius:7px;background:rgba(128,128,128,.2)}
+.toast{position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:9;display:flex;align-items:center;gap:10px;background:var(--float);border:1px solid var(--line-strong);border-radius:10px;padding:7px 12px;font:13px/1.3 var(--ui);color:var(--ink);white-space:nowrap;filter:drop-shadow(0 8px 18px var(--shadow));animation:rise .18s var(--ease)}.toast small{color:var(--dim)}
+/* URL do link */
+.hvpage a{text-decoration:underline;cursor:pointer}
+.sbub{position:absolute;left:0;bottom:0;z-index:5;max-width:min(560px,calc(100% - 40px));padding:3px 9px;background:var(--float);color:var(--mute);border:1px solid var(--line-strong);border-left:0;border-bottom:0;border-radius:0 8px 0 0;font:12px/18px var(--ui);white-space:nowrap;transition:transform .15s var(--ease),opacity .12s}
+.sbub b{color:var(--ink);font-weight:500}.sbub.right{left:auto;right:0;border-left:1px solid var(--line-strong);border-right:0;border-radius:8px 0 0 0}
+.sbub.off{opacity:0}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:16px}.pair h5{margin:0 0 6px;font-size:12.5px;color:var(--mute);font-weight:500}.pair .nav{height:300px}
+/* permissões */
+.pli{display:flex;align-items:center;gap:10px;padding:5px 0;font-size:13px}.pli svg.i{color:var(--mute)}
+.si{width:320px}.si .sih{display:flex;gap:10px;align-items:center;padding:6px 8px 8px}.si .sih b{display:block;font-weight:600}.si .sih small{color:var(--dim);font-size:12px}
+.prow{display:flex;align-items:center;gap:10px;padding:6px 8px;border-radius:8px}.prow:hover{background:var(--raise)}.prow span{flex:1}.prow small{display:block;color:var(--dim);font-size:11.5px}.prow svg.i{color:var(--mute)}
+.sw{position:relative;width:30px;height:18px;flex:none}.sw input{position:absolute;opacity:0;inset:0;margin:0;cursor:pointer}.sw i{position:absolute;inset:0;border-radius:9px;background:var(--line-strong);transition:background .15s;pointer-events:none}.sw i::after{content:"";position:absolute;left:2px;top:2px;width:14px;height:14px;border-radius:50%;background:#fff;transition:transform .15s var(--ease)}
+.sw input:checked+i{background:var(--light-3)}.sw input:checked+i::after{transform:translateX(12px)}.sw input:focus-visible+i{outline:2px solid var(--light-2);outline-offset:2px}
+.meet{height:100%;background:#1E1F22;color:#eee;display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:10px;font:13px var(--ui)}.meet div{border-radius:10px;background:#2B2D31;display:grid;place-items:end start;padding:8px}
+/* folha de aprovação */
+.scrim{position:absolute;inset:0;z-index:7;background:rgba(5,5,7,.55);animation:fade .2s var(--ease)}:root[data-mode="light"] .scrim{background:rgba(20,20,26,.28)}
+@keyframes fade{from{opacity:0}}
+.ask{position:absolute;z-index:8;left:50%;top:0;width:min(470px,calc(100% - 32px));max-height:calc(100% - 12px);overflow:auto;transform:translateX(-50%);background:var(--float);border:1px solid var(--line-strong);border-top:0;border-radius:0 0 16px 16px;padding:18px 20px 16px;animation:sheet .25s var(--ease);filter:drop-shadow(0 16px 30px var(--shadow))}
+@keyframes sheet{from{transform:translate(-50%,-24px);opacity:0}}
+.area .ask{color:var(--ink);max-height:none;overflow:visible;top:14px;border-top:1px solid var(--line-strong);border-radius:16px}.nav:has(.ask){height:680px}.ask-hd{display:flex;gap:14px;align-items:center;margin:0 0 12px}.ask-hd h3{margin:0;font-size:16px;font-weight:600;line-height:1.3}.ask-hd small{color:var(--dim);font-size:12.5px}
+.appi{width:48px;height:48px;border-radius:12px;flex:none;display:grid;place-items:center;font:700 22px/1 var(--ui);color:#0B0B0D;background:linear-gradient(145deg,#FFE9C7,#FFC98A 55%,#E8893A)}
+.meta{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 4px}
+.chip{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 9px 0 5px;border:1px solid var(--line);border-radius:8px;font-size:12.5px;color:var(--mute);background:var(--sunk)}.chip b{color:var(--ink);font-weight:500}.chip code{font:12px var(--mono);color:var(--ink)}.chip svg.i{width:14px;height:14px}
+.chip.ok svg.i{color:var(--light-3)}.chip.bad{border-color:var(--warn);color:var(--warn)}
+.g{margin:14px 0 6px;color:var(--dim);font-size:12px}
+.l{border:1px solid var(--line);border-radius:10px;background:var(--sunk)}
+.r{display:flex;gap:10px;padding:8px 12px;font-size:13px}.r+.r{border-top:1px solid var(--line)}.r svg.i{color:var(--mute);margin-top:2px}.r b{font-weight:500;display:block}.r small{color:var(--dim);font-size:12px}
+.note{margin:10px 0 0;color:var(--dim);font-size:12px}.note.w{color:var(--warn)}
+.foot{display:block;margin-top:10px;color:var(--dim);font-size:12px;text-align:right}
+.res{position:absolute;inset:0;display:grid;place-items:center;z-index:2;font:13px var(--ui);color:#555}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+@media (max-width:900px){.pair{grid-template-columns:1fr}.profs span b{display:none}.sb{width:170px}.setnav{display:none}.pr{grid-template-columns:22px 1fr auto}.pr .usr,.pr .pw{display:none}}
+</style>
+</head>
+<body>
+<main>
+<header><div><h1>Downloads, senhas, link, permissões e folha · navegador sozinho</h1><p>Cinco recursos na janela da casca (janela.html, ato Estúdio). Popovers com a seta de menus-seta.html, folha no jeito de extensoes.html. Escolha o estado em cada seção; o que parece botão dentro da janela também responde.</p></div>
+<div class="seg mode" role="group" aria-label="Aparência"><button data-mode="dark" class="on">Escuro</button><button data-mode="light">Claro</button></div></header>
+<nav class="toc"><a href="#downloads">1 · Downloads</a><a href="#senhas">2 · Senhas</a><a href="#link">3 · URL do link</a><a href="#permissoes">4 · Permissões</a><a href="#folha">5 · Folha de aprovação</a></nav>
+<div id="out"></div>
+</main>
+<script>
+const P=d=>`<svg class="i" viewBox="0 0 20 20">${d}</svg>`;
+const IC={back:P('<path d="M12 4 6 10l6 6"/>'),fwd:P('<path d="m8 4 6 6-6 6"/>'),re:P('<path d="M16 10a6 6 0 1 1-2-4.5M16 3v3.5h-3.5"/>'),
+ more:P('<circle cx="5" cy="10" r=".8"/><circle cx="10" cy="10" r=".8"/><circle cx="15" cy="10" r=".8"/>'),
+ lock:P('<rect x="4.5" y="9" width="11" height="8" rx="2.5"/><path d="M7 9V6.5a3 3 0 0 1 6 0V9"/>'),
+ tune:P('<path d="M4 6h7M14 6h2M4 14h2M9 14h7"/><circle cx="12.5" cy="6" r="1.6"/><circle cx="7.5" cy="14" r="1.6"/>'),
+ key:P('<circle cx="7" cy="10" r="3.2"/><path d="M10.2 10H17M14.5 10v2.5M16.5 10v2"/>'),
+ dl:'<svg class="i arrow" viewBox="0 0 20 20"><path d="M10 4v9M6 9.5l4 4 4-4M5 16h10"/></svg>',
+ pause:P('<path d="M7.5 5v10M12.5 5v10"/>'),play:P('<path d="M7 5v10l8-5z"/>'),x:P('<path d="m6 6 8 8M14 6l-8 8"/>'),
+ folder:P('<path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H8l1.5 1.5h6A1.5 1.5 0 0 1 17 8v6.5a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 3 14.5z"/>'),
+ open:P('<path d="M8 5H5v10h10v-3M11 4h5v5M16 4l-7 7"/>'),retry:P('<path d="M16 10a6 6 0 1 1-2-4.5M16 3v3.5h-3.5"/>'),
+ warn:P('<path d="M10 3.5 17 16H3z"/><path d="M10 8.5v3.2M10 13.8v.1"/>'),eye:P('<path d="M2.5 10s2.8-5 7.5-5 7.5 5 7.5 5-2.8 5-7.5 5-7.5-5-7.5-5z"/><circle cx="10" cy="10" r="2.2"/>'),
+ copy:P('<rect x="7" y="7" width="9" height="9" rx="2"/><path d="M13 7V5.5A1.5 1.5 0 0 0 11.5 4h-6A1.5 1.5 0 0 0 4 5.5v6A1.5 1.5 0 0 0 5.5 13H7"/>'),
+ trash:P('<path d="M4 6h12M8 6V4.5h4V6M6 6l.7 9.5h6.6L14 6"/>'),srch:P('<circle cx="9" cy="9" r="4.5"/><path d="m12.5 12.5 3.5 3.5"/>'),
+ cam:P('<rect x="3" y="6" width="10" height="8" rx="2"/><path d="m13 9 4-2.5v7L13 11"/>'),mic:P('<rect x="7.5" y="3" width="5" height="9" rx="2.5"/><path d="M5 10a5 5 0 0 0 10 0M10 15v2"/>'),
+ loc:P('<path d="M10 17s5-4.6 5-8.5a5 5 0 0 0-10 0C5 12.4 10 17 10 17z"/><circle cx="10" cy="8.5" r="1.8"/>'),
+ bell:P('<path d="M6 13V9a4 4 0 0 1 8 0v4l1.5 2h-11zM8.5 16.5a1.5 1.5 0 0 0 3 0"/>'),
+ clip:P('<rect x="5" y="4.5" width="10" height="12" rx="2"/><path d="M8 4.5V3.5h4v1"/>'),
+ scr:P('<rect x="3" y="4" width="14" height="9.5" rx="1.5"/><path d="M7.5 16.5h5M10 13.5v3"/>'),
+ shield:P('<path d="M10 3 4.5 5v4.5c0 3.3 2.3 6 5.5 7.5 3.2-1.5 5.5-4.2 5.5-7.5V5z"/><path d="m7.5 10 1.8 1.8L12.8 8"/>'),
+ tab:P('<rect x="3" y="4.5" width="14" height="11" rx="2"/><path d="M3 8h14"/>'),cur:P('<path d="M5 3.5 15 9l-4.5 1.4L8.5 15z"/>'),
+ cookie:P('<path d="M16.5 10.5A6.5 6.5 0 1 1 9.5 3.5a2.5 2.5 0 0 0 3 3 2.5 2.5 0 0 0 4 4z"/><circle cx="8" cy="9" r=".6"/><circle cx="11" cy="13" r=".6"/>'),
+ read:P('<path d="M4 5h12M4 9h12M4 13h7"/>'),fp:P('<path d="M6 15c1-2 1-4 1-6a3 3 0 0 1 6 0c0 3-.4 5-1.4 7M10 9c0 3-.5 5-1.6 7.5M4.5 11.5c.2-1 .3-1.6.3-2.5a5.2 5.2 0 0 1 10.4 0c0 2-.2 3.5-.6 5"/>')};
+const PROF={"Estúdio":["l-est","E"],"Cliente A":["l-cli","C"],"Pessoal":["l-pes","P"]};
+const TABS=[["#6FA8FF","L","Linear"],["#7FD1A8","P","Planilha de preços"]];
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const urlHTML=u=>{const i=u.indexOf("/");return i<0?`<b>${u}</b>`:`<b>${u.slice(0,i)}</b>${u.slice(i)}`};
+const bar=o=>`<div class="nav-row"><span class="ib">${IC.back}</span><span class="ib">${IC.fwd}</span><span class="ib">${IC.re}</span>
+ <div class="nav-addr"><button class="ai${o.lockOn?" on":""}" data-lock aria-label="Informações do site">${o.permLock?IC.tune:IC.lock}</button><span class="u">${urlHTML(o.url||"docs.estudio.test/precos-2027")}</span>${o.addrx||""}</div>
+ ${o.dl||""}${o.side?"":`<div class="profs">${Object.keys(PROF).map(x=>`<span class="${x=="Estúdio"?"on":""}"><span class="logo ${PROF[x][0]}">${PROF[x][1]}</span>${x=="Estúdio"?`<b>${x}</b>`:""}</span>`).join("")}</div>`}<span class="ib" data-more>${IC.more}</span></div>`;
+const frame=(o={})=>{const tabs=o.tabs||TABS,area=`<div class="area${o.app?" app":""}">${o.page||""}${o.over||""}</div>`;
+ if(o.side)return `<div class="nav sidev"><aside class="sb"><div class="lights"><i></i><i></i><i></i></div><div class="sbh"><span class="logo l-est">E</span>Estúdio</div>${tabs.map((t,i)=>`<span class="sbt${i==tabs.length-1?" on":""}"><span class="fv" style="background:${t[0]}">${t[1]}</span><span class="t">${t[2]}</span>${t[3]||""}</span>`).join("")}<div class="sbf">${Object.keys(PROF).map(x=>`<span class="logo ${PROF[x][0]}${x=="Estúdio"?" on":""}">${PROF[x][1]}</span>`).join("")}</div></aside><div class="col"><div style="height:6px"></div>${bar(o)}${area}</div>${o.inner||""}</div>`;
+ return `<div class="nav"><div class="strip"><div class="lights"><i></i><i></i><i></i></div>${tabs.map((t,i)=>`<span class="nav-tab${i==tabs.length-1?" on":""}"><span class="fv" style="background:${t[0]}">${t[1]}</span><span class="t">${t[2]}</span>${t[3]||""}</span>`).join("")}<span class="nt">+</span></div>${bar(o)}${area}${o.inner||""}</div>`};
+const TXT=`<div class="page"><h3>Tabela de preços 2027</h3><p>O preço base sobe 4% em janeiro. Clientes antigos mantêm o preço atual até a renovação do contrato, e o desconto anual continua em 15%.</p><p>Para o plano Equipe, o preço por assento cai a partir de 20 pessoas.</p></div>`;
+const pop=(sel,cls,html,w)=>`<div class="menu ${cls}" data-pop data-for="${sel}"${w?` style="width:${w}px"`:""}>${html}</div>`;
+
+/* 1 · downloads */
+const ring=p=>`<svg class="ring" viewBox="0 0 28 28"><circle class="bgc" cx="14" cy="14" r="12"/><circle class="fgc" cx="14" cy="14" r="12" stroke-dasharray="75.4" stroke-dashoffset="${75.4*(1-p)}"/></svg>`;
+const dlBtn=(p,cls="",dot)=>`<button class="ib dlb ${cls}" data-dl aria-label="Downloads">${p!=null?ring(p):""}${IC.dl}${dot?'<span class="dot"></span>':""}</button>`;
+const FT=e=>`<span class="ft">${e}</span>`;
+const DROW={
+ run:`<div class="dr" data-row><span class="ft">ZIP</span><div class="m"><div class="n">fotos-ensaio-cliente-a.zip</div><div class="bar"><i style="width:38%"></i></div><div class="s" data-s>18,2 de 48 MB · 12 s</div></div><div class="da"><button data-act="pause" title="Pausar">${IC.pause}</button><button data-act="cancel" title="Cancelar">${IC.x}</button></div></div>`,
+ paused:`<div class="dr paused" data-row><span class="ft">MP4</span><div class="m"><div class="n">aula-12-gravacao.mp4</div><div class="bar"><i style="width:71%"></i></div><div class="s" data-s>Pausado · 312 de 440 MB</div></div><div class="da"><button data-act="pause" title="Continuar">${IC.play}</button><button data-act="cancel" title="Cancelar">${IC.x}</button></div></div>`,
+ done:`<div class="dr" data-row><span class="ft">PDF</span><div class="m"><div class="n">proposta-2027-v3.pdf</div><div class="s">2,4 MB · agora</div></div><div class="da"><button title="Abrir">${IC.open}</button><button title="Mostrar no Finder">${IC.folder}</button></div></div>`,
+ done2:`<div class="dr" data-row><span class="ft">CSV</span><div class="m"><div class="n">precos-2027.csv</div><div class="s">88 KB · há 4 min</div></div><div class="da"><button title="Abrir">${IC.open}</button><button title="Mostrar no Finder">${IC.folder}</button></div></div>`,
+ fail:`<div class="dr" data-row><span class="ft">DMG</span><div class="m"><div class="n">Figma-Desktop.dmg</div><div class="s w">Falhou: a rede caiu em 61%</div></div><div class="da"><button title="Tentar de novo">${IC.retry}</button><button data-act="cancel" title="Tirar da lista">${IC.x}</button></div></div>`,
+ bad:`<div class="danger" data-row><div class="row">${FT("PKG")}<div class="m"><div class="t">Este arquivo pode fazer mal ao seu Mac</div><div class="n" style="font-size:12.5px">atualizador-flash.pkg · 1,1 MB</div><p>A Navegação segura marcou o arquivo como perigoso. Ele ainda não está na pasta Downloads.</p></div></div><div class="acts"><button class="btn sm" data-act="keep">Manter mesmo assim</button><button class="btn sm pri" data-act="cancel">Apagar</button></div></div>`};
+const dlPop=rows=>pop("[data-dl]","dlpop",`<div class="ph"><b>Downloads</b>${rows?'<button class="lnk" data-act="clear">Limpar lista</button>':""}</div><div data-list>${rows||EMPTY}</div><hr><div class="mi">${IC.folder}<span>Abrir a pasta Downloads</span><small>⌥⌘L</small></div>`);
+const EMPTY=`<div class="empty">${IC.dl}Nenhum download neste ato desde que a janela abriu.</div>`;
+const DL={
+ nada:["Sem download","Sem download na sessão, o botão não existe: a barra fica como sempre.",()=>frame({page:TXT})],
+ novo:["Download novo","Ao começar um download, o botão entra à esquerda dos atos (escala de 60% a 100% em 200 ms) e a seta desce duas vezes. O anel em volta é o progresso de todos os downloads somados. Não abre nada sozinho.",()=>frame({page:TXT,dl:dlBtn(.12,"new")})+`<p class="cap" style="margin-top:8px"><button class="btn sm" data-replay>Ver a animação de novo</button></p>`],
+ andamento:["Em andamento","Clique no botão: a lista pendurada nele. Pausar e cancelar funcionam aqui.",()=>frame({page:TXT,dl:dlBtn(.48,"on"),inner:dlPop(DROW.run+DROW.paused+DROW.done2)})],
+ concluido:["Concluído","Terminado, o anel some e o botão fica até a lista ser limpa. Cada linha abre o arquivo; a pasta mostra no Finder.",()=>frame({page:TXT,dl:dlBtn(null,"on"),inner:dlPop(DROW.done+DROW.done2)})],
+ falhou:["Falhou","Falha ganha o ponto âmbar no botão (precisa de você) e a linha diz o motivo, com Tentar de novo.",()=>frame({page:TXT,dl:dlBtn(null,"on",1),inner:dlPop(DROW.fail+DROW.done2)})],
+ perigoso:["Arquivo perigoso","O arquivo fica preso até a pessoa decidir. Apagar é o botão principal; Manter pede o segundo clique de propósito.",()=>frame({page:TXT,dl:dlBtn(null,"on",1),inner:dlPop(DROW.bad+DROW.done)})],
+ vazio:["Lista vazia","Depois de Limpar lista, o popover segue aberto e mostra o vazio; ao fechar, o botão sai da barra.",()=>frame({page:TXT,dl:dlBtn(null,"on"),inner:dlPop("")})]};
+
+/* 2 · senhas */
+const LOGIN=(fill,focus)=>`<div class="page" style="max-width:none"><div class="login"><h3>Entrar no GitHub</h3><label>Usuário ou e-mail</label><div class="in${focus?" focus":""}${fill?" fill":""}" data-user>${fill?"willian@estudio.test":""}</div><label>Senha</label><div class="in${fill?" fill":""}">${fill?"••••••••••••":""}</div><div class="go">Entrar</div></div></div>`;
+const AF=`<div class="af" data-af role="listbox" aria-label="Senhas salvas"><div class="r hl" data-fill>${`<span class="k">${IC.key}</span>`}<div>willian@estudio.test<small>••••••••••••</small></div></div><div class="r" data-fill><span class="k">${IC.key}</span><div>bot-estudio<small>••••••••</small></div></div><hr style="border:0;border-top:1px solid var(--line);margin:4px 0"><div class="r" data-goto="config"><span class="k">${IC.tune}</span><div>Gerenciar senhas…</div></div><div class="ff"><span>Senhas do ato Estúdio</span><span>↑↓ ↵</span></div></div>`;
+const PWS={"Estúdio":[["github.com","willian@estudio.test","gh-Estudio!2027"],["github.com","bot-estudio","b0t-9xQ"],["linear.app","willian@estudio.test","L1near#est"],["dashboard.stripe.com","financeiro@estudio.test","Str!pe-44k"],["figma.com","willian@estudio.test","fgm-Studio_8"]],
+ "Cliente A":[["portal.clientea.test","willian.sugiyama","CliA-2027$"],["jira.clientea.test","wsugiyama","Jr4-cli"]],"Pessoal":[["nubank.com.br","willian","—•—"]]};
+let pwAto="Estúdio",pwQ="";
+const pwRows=()=>{const l=PWS[pwAto].map((r,i)=>[r,i]).filter(([r])=>!pwQ||(r[0]+r[1]).toLowerCase().includes(pwQ.toLowerCase()));
+ return l.length?l.map(([r,i])=>`<div class="pr" data-pi="${i}"><span class="fv" style="background:#B9B9C2;width:18px;height:18px">${r[0][0].toUpperCase()}</span><span class="site">${r[0]}</span><span class="usr">${r[1]}</span><span class="pw" data-pw>••••••••••</span><span class="da"><button data-act="reveal" title="Mostrar senha">${IC.eye}</button><button data-act="copy" title="Copiar senha">${IC.copy}</button><button data-act="del" title="Apagar">${IC.trash}</button></span></div>`).join(""):`<div class="empty">Nenhuma senha com “${esc(pwQ)}” no ato ${pwAto}.</div>`};
+const CONFIG=()=>`<div class="set"><div class="setnav"><span>Geral</span><span>Aparência</span><span>Atos</span><span class="on">Senhas</span><span>Privacidade</span><span>Permissões</span><span>Downloads</span><span>Extensões</span></div><div class="setb"><h4>Senhas</h4><p>Cada ato guarda as suas senhas. Uma senha salva no Estúdio não aparece nem preenche no Cliente A. Ficam no Keychain do Mac.</p>
+ <div class="tools"><div class="atoseg" role="tablist">${Object.keys(PROF).map(x=>`<button class="${x==pwAto?"on":""}" data-pwato="${x}"><span class="logo ${PROF[x][0]}">${PROF[x][1]}</span>${x}<small style="color:var(--dim)">${PWS[x].length}</small></button>`).join("")}</div><label class="search">${IC.srch}<input data-pwq placeholder="Buscar site ou usuário" value="${esc(pwQ)}"></label></div>
+ <div class="pl" data-pwl>${pwRows()}</div><p class="note">Mostrar ou copiar pede o Touch ID (ou a senha do Mac), uma vez a cada 5 min.</p></div></div>`;
+const SAVE=pop("[data-key]","",`<div class="pbody"><div class="pt">Salvar a senha de github.com?</div><small>No ato <b style="color:var(--ink);font-weight:500">Estúdio</b>. Só este ato vai preencher.</small><div class="fl"><label>Usuário</label><div class="fld"><span>willian@estudio.test</span></div></div><div class="fl"><label>Senha</label><div class="fld"><span>••••••••••••</span><span style="color:var(--dim)">${IC.eye}</span></div></div><div class="acts"><button class="btn sm" data-close>Nunca neste site</button><button class="btn sm pri" data-close>Salvar</button></div></div>`,320);
+const PW={
+ oferta:["Oferta depois do login","Depois de um login que deu certo, a chave aparece no fim do endereço e o popover já desce dela (uma vez). Fechar sem escolher deixa só a chave; clicar nela abre de novo. Esc fecha.",()=>frame({url:"github.com/dashboard",page:`<div class="page"><h3>Dashboard</h3><p>Bem-vindo de volta. 3 pull requests esperando sua revisão.</p></div>`,addrx:`<button class="ai on" data-key aria-label="Senha">${IC.key}</button>`,inner:SAVE})],
+ sugestao:["Sugestão sob o campo","Com foco no campo de usuário, a lista desce colada nele (sem seta: é do campo, não de um botão da barra), só com as senhas deste ato. Clique numa conta para preencher.",()=>frame({url:"github.com/login",page:LOGIN(0,1)+AF})],
+ config:["Configurações › Senhas","Lista por ato, com busca. O olho e o copiar pedem o Touch ID; apagar deixa Desfazer na linha.",()=>frame({url:"agens://configuracoes/senhas",app:1,page:CONFIG(),addrx:""})]};
+
+/* 3 · URL do link */
+const mid=(u,max)=>{const s=u.replace(/^https?:\/\//,""),i=s.indexOf("/");if(s.length<=max||i<0)return urlHTML(s);
+ const d=s.slice(0,i),p=s.slice(i),keep=Math.max(8,max-d.length-1),a=Math.ceil(keep*.45),b=keep-a;return `<b>${esc(d)}</b>${esc(p.slice(0,a))}…${esc(p.slice(-b))}`};
+const LINKS=[["https://linear.app/estudio/issue/EST-482","a issue EST-482"],["https://docs.estudio.test/precos-2027/anexos/2027-01/tabela-completa-de-precos-por-plano-e-regiao-revisada.pdf","a tabela completa (PDF)"],["https://github.com/estudio/site/pull/311/files?diff=split&w=1#diff-8a2f0c91e4b7d3a6f5c2e1b0a9d8c7f6","o PR 311"],["https://wa.me/5511999990000","o WhatsApp do comercial"]];
+const HVPAGE=`<div class="page hvpage"><h3>Notas da reunião</h3><p>Antes de mandar a proposta, confira ${LINKS.map((l,i)=>`<a data-href="${l[0]}">${l[1]}</a>${i==LINKS.length-2?" e ":i<LINKS.length-1?", ":""}`).join("")}.</p><p>Passe o ponteiro nos links. Desça o ponteiro até o canto de baixo à esquerda: a bolha pula para a direita para não tampar o que está sob ele.</p><p style="margin-top:150px"><a data-href="https://estudio.test/contato">Fale com a gente</a>, link perto do canto.</p></div>`;
+const bub=(u,right)=>`<div class="sbub${right?" right":""}">${mid(u,70)}</div>`;
+
+/* 4 · permissões */
+const KIND={cammic:["câmera e microfone","meet.test",[["cam","Usar a câmera"],["mic","Usar o microfone"]],1],loc:["localização","mapas.test",[["loc","Saber onde você está"]],1],
+ notif:["notificações","linear.app",[["bell","Mostrar notificações"]],0],clip:["área de transferência","figma.com",[["clip","Ler o que você copiou"]],1],tela:["compartilhar a tela","meet.test",[["scr","Ver sua tela ou uma janela"]],2]};
+let pk="cammic";
+const askPop=k=>{const [n,site,items,once]=KIND[k];return pop("[data-perm]","",`<div class="pbody"><div class="pt">${site} quer</div><small>No ato Estúdio. Você muda depois no ícone ${IC.tune.replace('class="i"','class="i" style="width:12px;height:12px;vertical-align:-2px"')} do endereço.</small>${items.map(([i,t])=>`<div class="pli">${IC[i]}${t}</div>`).join("")}<div class="acts stack">${once==2?`<button class="btn" data-close>Escolher tela ou janela…</button>`:`${once?`<button class="btn" data-close>Permitir esta vez</button>`:""}<button class="btn" data-close>Permitir sempre</button>`}<button class="btn" data-close>Não permitir</button></div></div>`,290)};
+const sw=(on,lbl)=>`<label class="sw"><input type="checkbox"${on?" checked":""} aria-label="${lbl}"><i></i></label>`;
+const SITEINFO=pop("[data-lock]","si",`<div class="sih"><span class="fv" style="background:#8AB4F8;width:28px;height:28px;border-radius:8px;font-size:13px">M</span><div><b>meet.test</b><small>${IC.lock.replace('class="i"','class="i" style="width:11px;height:11px;vertical-align:-1px"')} Conexão segura · ato Estúdio</small></div></div><hr>
+ ${[["cam","Câmera","Em uso agora",1],["mic","Microfone","Em uso agora",1],["scr","Compartilhar a tela","Pergunta toda vez",0],["bell","Notificações","Não permitido",0]].map(r=>`<div class="prow">${IC[r[0]]}<span>${r[1]}<small>${r[2]}</small></span>${sw(r[3],r[1])}</div>`).join("")}
+ <hr><div class="prow">${IC.cookie}<span>Cookies e dados do site<small>14 cookies · 2,1 MB</small></span></div><hr><div class="mi" data-close><span>Redefinir permissões</span><small>volta a perguntar</small></div><div class="mi"><span>Todas as permissões dos sites…</span></div>`);
+const LIVE=`<span class="live" data-lock2 title="Usando câmera e microfone">${IC.cam}${IC.mic}</span>`;
+const MEET=`<div class="meet"><div>Você</div><div>Ana · Cliente A</div><div>Bruno</div><div>Carla</div></div>`;
+const MTABS=[["#6FA8FF","L","Linear"],["#8AB4F8","M","Reunião semanal",`<span class="rec">${IC.cam}${IC.mic}</span>`]];
+const PE={
+ pedido:["Pedido do site","O site pede, a casca mostra o ícone da permissão no endereço, em laranja claro, e o popover desce dele. Escolha o tipo:",()=>frame({url:KIND[pk][1]+"/sala-semanal",page:pk=="cammic"||pk=="tela"?MEET:TXT,addrx:`<button class="ai asking on" data-perm aria-label="Pedido de permissão">${IC[KIND[pk][2][0][0]]}</button>`,inner:askPop(pk)}),1],
+ uso:["Câmera e microfone em uso","Enquanto a câmera ou o microfone estão ligados: no endereço, ponto que pulsa e os dois ícones; na aba (lateral ou em cima), os mesmos ícones antes do ×. Clicar no indicador abre Informações do site.",()=>`<div class="pair"><div><h5>Abas na lateral</h5>${frame({side:1,tabs:MTABS,url:"meet.test/sala-semanal",page:MEET,addrx:LIVE})}</div><div><h5>Abas em cima</h5>${frame({tabs:MTABS,url:"meet.test/sala-semanal",page:MEET,addrx:LIVE})}</div></div>`],
+ info:["Informações do site","O ícone à esquerda do endereço vira ajustes quando o site tem alguma permissão; o popover lista só o que o site já pediu, cada um com interruptor. Redefinir apaga tudo deste site neste ato.",()=>frame({side:1,tabs:MTABS,url:"meet.test/sala-semanal",page:MEET,addrx:LIVE,permLock:1,lockOn:1,inner:SITEINFO})]};
+
+/* 5 · folha */
+const RI=(i,b,s)=>`<div class="r">${IC[i]}<div><b>${b}</b><small>${s}</small></div></div>`;
+const SHEET={
+ app:{t:"O Agens quer usar o AgensBrowser",who:"Agens · com.sugiyamalabs.agens",ok:1,always:1,ato:1,
+  items:RI("tab","Abrir, fechar e trocar abas","No ato Estúdio, e mostrar a página dentro do Agens")+RI("read","Ler as páginas","Endereço, título e o texto do que está aberto")+RI("cookie","Usar os logins do ato","Os cookies do Estúdio vão junto com cada pedido"),
+  note:"Permitir sempre vale para este app. Mudar ou tirar em Configurações › Apps conectados."},
+ agente:{t:"Um agente quer controlar o ato Estúdio",who:"Agente “Pesquisa de preços”, pelo Agens",ok:1,always:0,ato:1,
+  items:RI("cur","Clicar, digitar e rolar","Nas abas deste ato, como se fosse você")+RI("tab","Abrir e fechar abas","Só no Estúdio")+RI("cookie","Agir logado","Usa os logins do Estúdio e do Cliente A, que dividem cookies com ele"),
+  note:"A pílula do agente fica na aba enquanto ele controla. Você retoma a qualquer hora com esc ou na pílula."},
+ terceiro:{t:"O Claude quer usar o AgensBrowser",who:"Claude · com.anthropic.claudefordesktop",ok:1,team:"Q6L2SF6YDW",dev:"Anthropic",letter:"C",always:1,ato:1,
+  items:RI("tab","Abrir, fechar e trocar abas","No ato Estúdio")+RI("read","Ler as páginas","Endereço, título e o texto do que está aberto")+RI("cookie","Usar os logins do ato","Os cookies do Estúdio vão junto com cada pedido"),
+  note:"App de outra empresa. Permitir sempre vale para este app; tirar em Configurações › Apps conectados."}};
+const sheetHTML=k=>{const s=SHEET[k];return `<div class="scrim"></div><div class="ask" role="alertdialog" aria-modal="true" aria-label="${s.t}"><div class="ask-hd"><span class="appi">${k=="falso"?"?":s.letter||"A"}</span><div><h3>${s.t}</h3><small>${s.who}</small></div></div>
+ <div class="meta"><span class="chip"><span class="logo l-est">E</span>Ato <b>Estúdio</b></span></div>
+ <div class="g">Vai poder</div><div class="l">${s.items}</div><p class="note${s.ok?"":" w"}">${s.note}</p>
+ <div class="acts"><button class="btn" data-ans="Permitido">Permitir</button>${s.always?`<button class="btn" data-ans="Permitido sempre">Permitir sempre</button>`:""}<button class="btn pri" data-ans="Não permitido" autofocus>Não permitir <kbd>↩</kbd></button></div><span class="foot">Fechar a janela também conta como Não permitir.</span></div>`};
+const FO={app:["App conectando","Um app pede pelo socket. A folha desce da barra, sobre a janela. Não permitir é o botão padrão (preenchido, com ↩): Return nunca dá acesso por engano.",()=>frame({page:TXT,inner:sheetHTML("app")})],
+ agente:["Agente pede o ato","control.start. Permitir sempre não aparece: controle vale só para esta vez. Mostra com quem o ato divide cookies.",()=>frame({page:TXT,inner:sheetHTML("agente")})],
+ terceiro:["App de terceiro","Qualquer app pode pedir. Permitir sempre vale para aquele app.",()=>frame({page:TXT,inner:sheetHTML("terceiro")})]};
+
+/* montagem */
+const SECS=[["downloads","1 · Downloads","O botão de downloads só existe quando há download nesta sessão do ato. Popover com a seta do botão.",DL],
+ ["senhas","2 · Senhas","Senhas são do ato: salvar, sugerir e listar sempre dentro do ato atual.",PW],
+ ["link","3 · URL do link ao passar o ponteiro",null,null],
+ ["permissoes","4 · Permissões","Pedido do site, uso ao vivo e as permissões por site.",PE],
+ ["folha","5 · Folha de aprovação desenhada","Troca a folha simples do sistema (casca.md, Folha de aprovação). Clique numa resposta para fechar.",FO]];
+const state={downloads:"novo",senhas:"oferta",permissoes:"pedido",folha:"app"};
+const out=document.getElementById("out");
+out.innerHTML=SECS.map(([id,t,c])=>`<section class="v" id="${id}"><h2>${t}</h2>${c?`<p class="cap">${c}</p>`:""}<div data-sec="${id}"></div></section>`).join("");
+function render(id){const S=SECS.find(s=>s[0]==id)[3],box=out.querySelector(`[data-sec="${id}"]`),cur=S[state[id]];
+ box.innerHTML=`<div class="seg">${Object.entries(S).map(([k,v])=>`<button data-st="${k}" class="${k==state[id]?"on":""}">${v[0]}</button>`).join("")}</div>${id=="permissoes"&&state[id]=="pedido"?`<div class="seg" style="margin-left:8px">${Object.entries(KIND).map(([k,v])=>`<button data-pk="${k}" class="${k==pk?"on":""}">${v[0]}</button>`).join("")}</div>`:""}<p class="cap">${cur[1]}</p>${cur[2]()}`;
+ place(box)}
+function place(root){root.querySelectorAll(".nav").forEach(n=>{const a=n.querySelector(".area");if(a)n.querySelectorAll(":scope>.scrim,:scope>.ask").forEach(e=>a.appendChild(e))});root.querySelectorAll("[data-pop]").forEach(m=>{const nav=m.closest(".nav"),a=nav.querySelector(m.dataset.for);if(!a)return;const nb=nav.getBoundingClientRect(),b=a.getBoundingClientRect();
+ const cx=b.left-nb.left+b.width/2,w=m.offsetWidth,x=Math.max(4,Math.min(nb.width-6-w,cx-w/2));
+ m.style.left=x+"px";m.style.top=(b.bottom-nb.top+4+7)+"px";m.style.setProperty("--ax",Math.max(23,Math.min(w-23,cx-x-1))+"px");m.dataset.side="up"});
+ root.querySelectorAll("[data-af]").forEach(m=>{const nav=m.closest(".nav"),f=nav.querySelector("[data-user]"),nb=nav.getBoundingClientRect(),b=f.getBoundingClientRect(),ar=m.parentElement.getBoundingClientRect();m.style.left=(b.left-ar.left)+"px";m.style.top=(b.bottom-ar.top+4)+"px";m.style.width=Math.max(260,b.width)+"px"})}
+function renderLink(){const box=out.querySelector('[data-sec="link"]');
+ box.innerHTML=`<p class="cap">A bolha nasce colada no canto de baixo à esquerda da página, sem seta e sem sombra forte, depois de 0 s no link (some 0,6 s depois de sair). O domínio vem em destaque; esquema (https://) some; o caminho longo é cortado no meio, para o fim (arquivo, âncora) continuar à vista. Se o ponteiro chega perto dela, pula para o canto direito. Passe o ponteiro nos links abaixo.</p>
+ <div data-hv>${frame({url:"docs.estudio.test/notas/reuniao-1611",page:HVPAGE,over:`<div class="sbub off" data-bub></div>`})}</div><div style="height:16px"></div>
+ <div class="pair"><div><h5>Link curto</h5>${frame({url:"docs.estudio.test/notas",page:`<div class="page"><p>Confira <a style="text-decoration:underline">a issue EST-482</a> antes.</p></div>`,over:bub(LINKS[0][0])})}</div><div><h5>Longo, cortado no meio</h5>${frame({url:"docs.estudio.test/notas",page:`<div class="page"><p>Veja <a style="text-decoration:underline">a tabela completa</a>.</p></div>`,over:bub(LINKS[1][0])})}</div>
+ <div><h5>Ponteiro perto: vai para a direita</h5>${frame({url:"docs.estudio.test/notas",page:`<div class="page" style="padding-top:200px"><p><a style="text-decoration:underline">Fale com a gente</a> ${IC.cur.replace('class="i"','class="i" style="color:#000;fill:#fff;margin-left:-60px;vertical-align:-10px"')}</p></div>`,over:bub("https://estudio.test/contato",1)})}</div><div><h5>Fora de link: nada</h5>${frame({url:"docs.estudio.test/notas",page:TXT})}</div></div>`;
+ const hv=box.querySelector("[data-hv] .area"),bb=hv.querySelector("[data-bub]");let t;
+ hv.addEventListener("mousemove",e=>{const a=e.target.closest("a[data-href]");if(!a){clearTimeout(t);t=setTimeout(()=>bb.classList.add("off"),600);return}clearTimeout(t);
+  bb.innerHTML=mid(a.dataset.href,70);bb.classList.remove("off");const r=hv.getBoundingClientRect(),w=bb.offsetWidth+30;bb.classList.toggle("right",e.clientX-r.left<w&&r.bottom-e.clientY<60)});
+ hv.addEventListener("mouseleave",()=>bb.classList.add("off"))}
+["downloads","senhas","permissoes","folha"].forEach(render);renderLink();
+console.assert(mid("https://a.test/"+"x".repeat(200),70).includes("…")&&mid("https://a.test/x",70)=="<b>a.test</b>/x","mid() truncation");
+
+/* interações */
+const toast=(nav,html)=>{nav.querySelector(".toast")?.remove();const area=nav.querySelector(".area");area.insertAdjacentHTML("beforeend",`<div class="toast" role="status">${html}</div>`);setTimeout(()=>area.querySelector(".toast")?.remove(),2400)};
+let revealT;
+document.addEventListener("click",e=>{const T=e.target,sec=T.closest("[data-sec]"),id=sec?.dataset.sec,nav=T.closest(".nav");
+ const md=T.closest("[data-mode]");if(md&&md.tagName=="BUTTON"){document.documentElement.dataset.mode=md.dataset.mode;document.querySelectorAll(".mode button").forEach(b=>b.classList.toggle("on",b==md));return}
+ const st=T.closest("[data-st]");if(st){state[id]=st.dataset.st;render(id);return}
+ const k=T.closest("[data-pk]");if(k){pk=k.dataset.pk;render(id);return}
+ if(T.closest("[data-replay]")){render(id);return}
+ const act=T.closest("[data-act]")?.dataset.act,row=T.closest("[data-row],.pr");
+ if(act=="pause"){const p=row.classList.toggle("paused"),b=T.closest("button");b.innerHTML=p?IC.play:IC.pause;b.title=p?"Continuar":"Pausar";row.querySelector("[data-s]").textContent=p?"Pausado · 18,2 de 48 MB":"18,2 de 48 MB · 12 s";return}
+ if(act=="cancel"){const l=row.parentElement;row.remove();if(!l.children.length)l.innerHTML=EMPTY;return}
+ if(act=="clear"){nav.querySelector("[data-list]").innerHTML=EMPTY;T.remove();return}
+ if(act=="keep"){T.textContent="Clique de novo para manter";T.dataset.act="keep2";return}
+ if(act=="keep2"){row.outerHTML=`<div class="dr" data-row>${FT("PKG")}<div class="m"><div class="n">atualizador-flash.pkg</div><div class="s w">Mantido mesmo marcado como perigoso</div></div><div class="da"><button title="Mostrar no Finder">${IC.folder}</button></div></div>`;return}
+ if(act=="reveal"||act=="copy"){const area=nav.querySelector(".area");area.insertAdjacentHTML("beforeend",`<div class="tid"><div class="tidb"><div class="fp">${IC.fp}</div><b>AgensBrowser quer ${act=="copy"?"copiar":"mostrar"} uma senha</b><small>Toque no Touch ID ou digite a senha do Mac.</small><div class="tb"><button data-tid="no">Cancelar</button><button data-tid="${act}" data-row="${row.dataset.pi}">Usar senha…</button></div></div></div>`);return}
+ const tid=T.closest("[data-tid]");if(tid){const area=nav.querySelector(".area");area.querySelector(".tid").remove();if(tid.dataset.tid=="no")return;const i=+tid.dataset.row,r=area.querySelector(`.pr[data-pi="${i}"]`),pw=PWS[pwAto][i][2];
+  if(tid.dataset.tid=="reveal"){const s=r.querySelector("[data-pw]");s.textContent=pw;s.classList.add("shown");clearTimeout(revealT);revealT=setTimeout(()=>{s.textContent="••••••••••";s.classList.remove("shown")},8000)}else toast(nav,`Senha de ${PWS[pwAto][i][0]} copiada <small>sai da área de transferência em 60 s</small>`);return}
+ if(act=="del"){const i=row.dataset.pi;row.dataset.html=row.innerHTML;row.className="pr gone";row.innerHTML=`Senha de ${PWS[pwAto][i][0]} apagada<button class="btn sm" data-undo>Desfazer</button>`;return}
+ if(T.closest("[data-undo]")){row.className="pr";row.innerHTML=row.dataset.html;return}
+ const ato=T.closest("[data-pwato]");if(ato){pwAto=ato.dataset.pwato;pwQ="";render("senhas");return}
+ if(T.closest("[data-fill]")){nav.querySelector(".area").innerHTML=LOGIN(1,0);return}
+ if(T.closest("[data-goto]")){state.senhas="config";render("senhas");return}
+ if(T.closest("[data-close]")){T.closest(".menu").remove();return}
+ const ans=T.closest("[data-ans]");if(ans){nav.querySelector(".scrim").remove();nav.querySelector(".ask").remove();nav.querySelector(".area").insertAdjacentHTML("beforeend",`<div class="res"><div style="background:#fff;padding:8px 14px;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.15)">Resposta: <b>${ans.dataset.ans}</b> · <button style="color:#1A56C7" data-st="${state.folha}">mostrar de novo</button></div></div>`);return}
+ if(T.closest("[data-dl]")&&id=="downloads"&&state.downloads=="novo"){state.downloads="andamento";render(id);return}
+ if(T.closest("[data-lock],[data-lock2]")&&id=="permissoes"&&!nav.querySelector(".si")){state.permissoes="info";render(id);return}
+ if(T.closest("[data-key]")&&!nav.querySelector("[data-pop]")){render(id);return}
+});
+document.addEventListener("input",e=>{if(e.target.matches("[data-pwq]")){pwQ=e.target.value;e.target.closest(".setb").querySelector("[data-pwl]").innerHTML=pwRows()}});
+document.addEventListener("keydown",e=>{if(e.key=="Escape")document.querySelectorAll(".menu[data-pop]").forEach(m=>m.remove())});
+addEventListener("resize",()=>place(document))
+</script>
+</body>
+</html>
