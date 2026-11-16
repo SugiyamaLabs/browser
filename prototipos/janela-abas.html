@@ -65,7 +65,7 @@ header h1{font-size:20px;margin:0 0 4px}header p{margin:0;color:var(--dim);max-w
 .pin:hover{background:var(--hover)}.pin.on{background:var(--raise)}
 .pin.slot{border:1px dashed var(--light-3);background:var(--hover-2)}
 .sep{height:1px;background:var(--line);margin:4px 8px}
-.list{display:flex;flex-direction:column;gap:1px;flex:1;min-height:0}
+.list{display:flex;flex-direction:column;gap:1px;flex:1;min-height:0;overflow-y:auto;scrollbar-width:none;-webkit-mask-image:linear-gradient(#000 calc(100% - 18px),transparent);mask-image:linear-gradient(#000 calc(100% - 18px),transparent)}.list::-webkit-scrollbar{display:none}.spaces{background:var(--side)}
 .stab{position:relative;height:32px;display:flex;align-items:center;gap:10px;padding:0 6px 0 8px;border-radius:8px;color:var(--mute);font-size:13px;text-align:left;width:100%;flex:none;transition:transform .2s var(--ease),background .16s}
 .stab:hover{background:var(--hover);color:var(--ink)}.stab.on{background:var(--raise);color:var(--ink)}
 .title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
