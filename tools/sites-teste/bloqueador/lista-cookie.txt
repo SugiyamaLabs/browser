@@ -1,0 +1,3 @@
+! Parte "cookies" (vale só com agens.adblock.hide_cookie_notices ligado).
+localhost##.cookie-banner
+localhost##+js(set-cookie, agensConsent, accept)
