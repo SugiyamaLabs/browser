@@ -42,10 +42,10 @@ index 0000000000..0ca36406e1
 +}
 diff --git a/chrome/browser/agens/bridge/approval.cc b/chrome/browser/agens/bridge/approval.cc
 new file mode 100644
-index 0000000000..53ed9316c5
+index 0000000000..7c4d5e226a
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/approval.cc
-@@ -0,0 +1,126 @@
+@@ -0,0 +1,128 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/approval.h"
@@ -56,6 +56,7 @@ index 0000000000..53ed9316c5
 +#include <utility>
 +#include <vector>
 +
++#include "base/json/json_writer.h"
 +#include "base/logging.h"
 +#include "base/no_destructor.h"
 +#include "chrome/browser/agens/bridge/view_ops.h"
@@ -141,7 +142,8 @@ index 0000000000..53ed9316c5
 +      view::AskHost(title, detail, front.offer_always, front.facts.Clone(),
 +                    base::BindOnce(&Answered));  // no sheet: the host asks
 +    } else {
-+      agens::ShowApprovalSheet(title, detail, front.offer_always, base::BindOnce(&Answered));
++      agens::ShowApprovalSheet(title, detail, front.offer_always, base::WriteJson(front.facts).value_or("{}"),
++                               base::BindOnce(&Answered));
 +    }
 +  }
 +}
@@ -265,10 +267,10 @@ index 0000000000..bcb1c5bf02
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_BRIDGE_H_
 diff --git a/chrome/browser/agens/bridge/bridge_mac.mm b/chrome/browser/agens/bridge/bridge_mac.mm
 new file mode 100644
-index 0000000000..d9bf742076
+index 0000000000..e0731dea2c
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/bridge_mac.mm
-@@ -0,0 +1,582 @@
+@@ -0,0 +1,631 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The socket server on macOS: a Unix socket in the user data dir, the peer's code signature read
 +// from its audit token, and the approval of the person before a signed client gets in.
@@ -370,7 +372,39 @@ index 0000000000..d9bf742076
 +  std::string identifier;  // the signing identifier, only when ours
 +  pid_t pid = 0;           // from the audit token (Connection::Checked)
 +  std::string name;      // the app's name, for the approval sheet
++  // Standalone, any app may ask (docs/protocolo.md, "Quem pode conectar"): what the sheet shows
++  // and what "Permitir sempre" remembers it by.
++  std::string bundle_id;  // from its bundle, "" for a bare executable
++  std::string app_path;   // the bundle, or the executable
++  std::string key;        // "<team id>/<bundle id>" when validly signed by a team, else the bundle id,
++                          // else "path:<executable>"; "" when the process could not be read
 +};
++
++// The app's bundle id and path (a bare executable: no id, its own path).
++void ReadBundle(SecCodeRef code, Peer& peer) {
++  CFURLRef url = nullptr;
++  if (SecCodeCopyPath(code, kSecCSDefaultFlags, &url) != errSecSuccess || !url) return;
++  base::apple::ScopedCFTypeRef<CFURLRef> owned(url);
++  NSURL* path = base::apple::CFToNSPtrCast(url);
++  NSBundle* bundle = [NSBundle bundleWithURL:path];
++  peer.bundle_id = base::SysNSStringToUTF8(bundle.bundleIdentifier ?: @"");
++  peer.app_path = base::SysNSStringToUTF8(path.path ?: @"");
++}
++
++// The team that signed `code`, checked against the running process (a team id the signature only
++// claims doesn't count). "" for unsigned, ad hoc or invalid code.
++std::string ValidTeam(SecCodeRef code, CFDictionaryRef info) {
++  CFStringRef id = info ? base::apple::GetValueFromDictionary<CFStringRef>(info, kSecCodeInfoTeamIdentifier) : nullptr;
++  if (!id) return std::string();
++  const std::string team = base::SysCFStringRefToUTF8(id);
++  const std::string text = "anchor apple generic and certificate leaf[subject.OU] = \"" + team + "\"";
++  SecRequirementRef raw = nullptr;
++  if (SecRequirementCreateWithString(base::SysUTF8ToCFStringRef(text).get(), kSecCSDefaultFlags, &raw) != errSecSuccess || !raw) {
++    return std::string();
++  }
++  base::apple::ScopedCFTypeRef<SecRequirementRef> requirement(raw);
++  return SecCodeCheckValidity(code, kSecCSDefaultFlags, requirement.get()) == errSecSuccess ? team : std::string();
++}
 +
 +std::string AppName(SecCodeRef code, const std::string& fallback) {
 +  CFURLRef url = nullptr;
@@ -403,7 +437,7 @@ index 0000000000..d9bf742076
 +  base::apple::ScopedCFTypeRef<SecCodeRef> code(raw_code);
 +
 +  CFDictionaryRef raw_info = nullptr;
-+  std::string identifier;
++  std::string identifier, signer;
 +  if (SecCodeCopySigningInformation(code.get(), kSecCSSigningInformation, &raw_info) ==
 +          errSecSuccess &&
 +      raw_info) {
@@ -412,8 +446,17 @@ index 0000000000..d9bf742076
 +                                                                          kSecCodeInfoIdentifier)) {
 +      identifier = base::SysCFStringRefToUTF8(id);
 +    }
++    signer = ValidTeam(code.get(), info.get());
 +  }
 +  peer.name = AppName(code.get(), identifier.empty() ? peer.name : identifier);
++  ReadBundle(code.get(), peer);
++  // Another app can claim any bundle id, but not a team's valid signature: a signed app is
++  // remembered with its team, so an unsigned copy never inherits its "Permitir sempre".
++  if (!peer.bundle_id.empty()) {
++    peer.key = signer.empty() ? peer.bundle_id : signer + "/" + peer.bundle_id;
++  } else if (!peer.app_path.empty()) {
++    peer.key = (signer.empty() ? "path:" : signer + "/path:") + peer.app_path;
++  }
 +
 +  const std::string& team = TeamId();
 +  if (team.empty()) return peer;
@@ -459,18 +502,26 @@ index 0000000000..d9bf742076
 +    std::move(done).Run(in ? nullptr : kUnauthorized);
 +    return;
 +  }
-+  if (!peer.ours) {
-+    const bool accept = g_browser_process->local_state()->GetBoolean(kAcceptUnsignedPref);
-+    std::move(done).Run(accept ? nullptr : kUnauthorized);
-+    return;
-+  }
-+  if (AlwaysAllowed(peer.identity)) {
++  // Standalone: any app, ours or not, signed or not, after the sheet (decision of 16/11/2026).
++  // "Aceitar apps sem assinatura" (development) still lets the others in without asking.
++  if (!peer.ours && g_browser_process->local_state()->GetBoolean(kAcceptUnsignedPref)) {
 +    std::move(done).Run(nullptr);
 +    return;
 +  }
++  const std::string remember = peer.ours ? peer.identity : peer.key;
++  if (!remember.empty() && AlwaysAllowed(remember)) {
++    std::move(done).Run(nullptr);
++    return;
++  }
++  base::DictValue facts;
++  facts.Set("kind", "connect");
++  facts.Set("app", peer.name);
++  facts.Set("bundle_id", peer.bundle_id);
++  facts.Set("app_path", peer.app_path);
++  facts.Set("ours", peer.ours);
 +  // Connections of the same app ask the same question, so one sheet answers them all.
 +  AskApproval(connection, "O " + peer.name + " quer usar o AgensBrowser", "Ele poderá ver, criar e abrir os seus atos.",
-+              /*offer_always=*/true,
++              /*offer_always=*/!remember.empty(),
 +              base::BindOnce(
 +                  [](std::string identity, Decision done, AgensApprovalAnswer answer) {
 +                    if (answer == kAgensApprovalAllowAlways && !AlwaysAllowed(identity)) {
@@ -478,8 +529,8 @@ index 0000000000..d9bf742076
 +                    }
 +                    std::move(done).Run(answer == kAgensApprovalDeny ? kDenied : nullptr);
 +                  },
-+                  peer.identity, std::move(done)),
-+              base::DictValue().Set("kind", "connect"));
++                  remember, std::move(done)),
++              std::move(facts));
 +}
 +
 +// --- The server (IO thread).
@@ -1135,10 +1186,10 @@ index 0000000000..178c1cd18f
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_CONTROL_KEYS_H_
 diff --git a/chrome/browser/agens/bridge/control_ops.cc b/chrome/browser/agens/bridge/control_ops.cc
 new file mode 100644
-index 0000000000..6a61f22310
+index 0000000000..8744b8ab48
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_ops.cc
-@@ -0,0 +1,943 @@
+@@ -0,0 +1,944 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The control session (docs/protocolo.md, "control, tab, page"): an app, after the person's OK,
 +// drives tabs of one ato. It belongs to the connection and ends on control.stop, when the
@@ -1699,6 +1750,7 @@ index 0000000000..6a61f22310
 +  facts.Set("ato", *id);
 +  facts.Set("ato_name", ato_name);
 +  facts.Set("agent", wanted.agent);
++  facts.Set("app", name);
 +  if (!reason->empty()) facts.Set("reason", *reason);
 +  base::ListValue allow_list, shares_list;
 +  for (const std::string& a : wanted.allow) allow_list.Append(a);
@@ -4576,10 +4628,10 @@ index 0000000000..778768c132
 +}
 diff --git a/chrome/browser/agens/bridge/session_ops.cc b/chrome/browser/agens/bridge/session_ops.cc
 new file mode 100644
-index 0000000000..2cd2b4633b
+index 0000000000..42b2334b0b
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/session_ops.cc
-@@ -0,0 +1,598 @@
+@@ -0,0 +1,599 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Session values (cookie, localStorage and header values) live only in memory on their way to the
 +// socket: never in a log line, pref, file or error message.
@@ -5143,6 +5195,7 @@ index 0000000000..2cd2b4633b
 +  facts.Set("kind", "session");
 +  facts.Set("ato", *id);
 +  facts.Set("ato_name", AgensWindow::AtoName(entry));
++  facts.Set("app", app);
 +  if (!reason->empty()) facts.Set("reason", *reason);
 +  base::ListValue item_list, shares_list;
 +  for (const Item& item : *items) {
@@ -10999,7 +11052,7 @@ index 0000000000..48063dd9a1
 +
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_COOKIE_POOL_H_
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
-index 9d0bf4646d..c5bf888e54 100644
+index 9d0bf4646d..5950f52399 100644
 --- a/chrome/browser/agens/embed/agens_embed.h
 +++ b/chrome/browser/agens/embed/agens_embed.h
 @@ -36,6 +36,13 @@ typedef struct {
@@ -11069,7 +11122,34 @@ index 9d0bf4646d..c5bf888e54 100644
  // Opens that ato's window over this one (each ato keeps its own window and tabs).
  void agens_window_switch_ato(AgensWindow* window, int index);
  void agens_window_new_ato(AgensWindow* window);
-@@ -219,11 +245,24 @@ typedef struct {
+@@ -132,6 +158,12 @@ typedef struct {
+   long long received, total;  // bytes; total is 0 when unknown
+   AgensDownloadState state;
+   int paused;
++  int remaining_s;       // seconds left while running, -1 when unknown
++  double end_time;       // when it finished, seconds since 1970; 0 while running
++  int interrupt_reason;  // failed: Chromium's DownloadInterruptReason (1-19 file, 20s network, 30s server)
++  int can_retry;         // failed and Chromium can resume or restart it
++  int dangerous;         // held until the person decides: delete (remove) or keep
++  int kept;              // kept although it was marked dangerous
+ } AgensDownload;
+ typedef void (*AgensDownloadsChanged)(void* context, const AgensDownload* downloads, int count,
+                                       int started);
+@@ -140,6 +172,13 @@ void agens_window_set_downloads_observer(AgensWindow* window, AgensDownloadsChan
+ void agens_window_download_open(AgensWindow* window, int index);       // the file
+ void agens_window_download_show(AgensWindow* window, int index);       // in the Finder
+ void agens_window_download_cancel(AgensWindow* window, int index);
++void agens_window_download_pause(AgensWindow* window, int index, int pause);  // 0 resumes
++void agens_window_download_retry(AgensWindow* window, int index);
++// Out of the list: a running or dangerous one is cancelled (its partial file goes); a finished
++// file stays on disk.
++void agens_window_download_remove(AgensWindow* window, int index);
++void agens_window_download_keep(AgensWindow* window, int index);  // a dangerous one, on purpose
++void agens_window_downloads_clear(AgensWindow* window);  // "Limpar lista": all but the running ones
+ 
+ // --- Settings (the browser's own; not part of what the Agens app embeds).
+ 
+@@ -219,11 +258,24 @@ typedef struct {
    const char* name;
    const char* version;
    int enabled;
@@ -11095,7 +11175,7 @@ index 9d0bf4646d..c5bf888e54 100644
  
  // Senhas salvas. The list carries no passwords; agens_password_get copies one (the UI asks for
  // Touch ID first). Indexes refer to the last list delivered.
-@@ -255,7 +294,7 @@ void agens_bookmark_add_folder(AgensWindow* window, const char* title);  // at t
+@@ -255,7 +307,7 @@ void agens_bookmark_add_folder(AgensWindow* window, const char* title);  // at t
  // Results arrive through the observer: the current match (1-based, 0 for none) and the total.
  typedef void (*AgensFindChanged)(void* context, int current, int total);
  void agens_window_set_find_observer(AgensWindow* window, AgensFindChanged observer, void* context);
@@ -11104,7 +11184,18 @@ index 9d0bf4646d..c5bf888e54 100644
  void agens_find_stop(AgensWindow* window);
  
  // Saving a password the person just used on the active page. Fills `out` (strings valid until
-@@ -279,6 +318,16 @@ typedef enum {
+@@ -266,7 +318,9 @@ typedef struct {
+   int update;  // a new password for a login already saved
+ } AgensPasswordPrompt;
+ int agens_password_prompt(AgensWindow* window, AgensPasswordPrompt* out);
+-typedef enum { kAgensPasswordSave, kAgensPasswordNever, kAgensPasswordNotNow } AgensPasswordAnswer;
++// _Later: the panel closed without a choice; the key stays in the address and asks again.
++typedef enum { kAgensPasswordSave, kAgensPasswordNever, kAgensPasswordNotNow, kAgensPasswordLater } AgensPasswordAnswer;
++int agens_password_pending(AgensWindow* window);  // the active page has a password to save (the key)
+ void agens_password_answer(AgensWindow* window, AgensPasswordAnswer answer);
+ 
+ // A site asks for permissions (camera, location…): agens_ui_permission_prompt shows them, the
+@@ -279,6 +333,16 @@ typedef enum {
  } AgensPermissionAnswer;
  void agens_window_permission_answer(AgensWindow* window, AgensPermissionAnswer answer);
  
@@ -11121,7 +11212,7 @@ index 9d0bf4646d..c5bf888e54 100644
  // The site of the active page, for the panel behind the site icon. `pattern` is what
  // agens_site_exception_set takes for this site. Strings valid until the next call.
  typedef struct {
-@@ -291,13 +340,20 @@ AgensPermission agens_site_permission(AgensWindow* window, const char* kind);  /
+@@ -291,13 +355,20 @@ AgensPermission agens_site_permission(AgensWindow* window, const char* kind);  /
  // Cookies and storage of the active page's site only.
  void agens_site_clear_data(AgensWindow* window, AgensDoneFn done, void* context);
  
@@ -11145,7 +11236,7 @@ index 9d0bf4646d..c5bf888e54 100644
  } AgensExtensionButton;
  typedef void (*AgensExtensionButtonsChanged)(void* context, const AgensExtensionButton* list, int count,
                                               const char* installed);
-@@ -340,6 +396,7 @@ typedef enum {
+@@ -340,6 +411,7 @@ typedef enum {
    kAgensCommandFindNext,     // ⌘G
    kAgensCommandFindPrevious, // ⌘⇧G
    kAgensCommandPasswordPrompt,  // the page has a password to save or update: ask (see below)
@@ -11153,7 +11244,7 @@ index 9d0bf4646d..c5bf888e54 100644
  } AgensCommand;
  int agens_ui_command(void* chrome, AgensCommand command);
  // Opens Settings on a section ("senhas", "extensoes", "sobre"...; "" keeps the current one), or the
-@@ -354,10 +411,23 @@ void agens_ui_colors(void* chrome, unsigned* window, unsigned* page, unsigned* l
+@@ -354,10 +426,28 @@ void agens_ui_colors(void* chrome, unsigned* window, unsigned* page, unsigned* l
  // lights center on it; it follows the density).
  // Where the extensions button is (extension popups hang from it).
  AgensRect agens_ui_extensions_anchor(void* chrome);
@@ -11161,11 +11252,17 @@ index 9d0bf4646d..c5bf888e54 100644
 +void agens_ui_extension_popup(void* chrome, int open);
  float agens_ui_card_radius(void* chrome);
  float agens_ui_titlebar_height(void* chrome);
- void agens_ui_permission_prompt(void* chrome, const char* site, const char* const* asks, int count);
+-void agens_ui_permission_prompt(void* chrome, const char* site, const char* const* asks, int count);
++// `asks`: "camera", "microphone", "location", "notifications" or "clipboard", else Chromium's own
++// words for the request. `offer_once`: every one of them can be allowed only this time.
++void agens_ui_permission_prompt(void* chrome, const char* site, const char* const* asks, int count, int offer_once);
  void agens_ui_permission_prompt_close(void* chrome);
 +// `title` is the question, `detail` the explanation under it (may hold several lines). The answer
 +// buttons are Permitir, Permitir sempre (only when `offer_always`) and Não permitir (the default).
-+void agens_ui_approval_prompt(void* chrome, const char* title, const char* detail, int offer_always);
++// `facts`: the same in parts, as JSON ({"kind": "connect" | "control" | "session", "app_name",
++// "bundle_id", "app_path", "ours", "ato_name", "agent", "reason", "allow", "shares_with"…), for the
++// drawn sheet; "{}" when there are none.
++void agens_ui_approval_prompt(void* chrome, const char* title, const char* detail, int offer_always, const char* facts);
 +// DevTools (docs/casca.md, "DevTools"). Where a new one opens: 1 in the page card, 0 in its own
 +// window (the choice the person made last, for every ato).
 +int agens_ui_devtools_in_page(void* chrome);
@@ -12279,7 +12376,7 @@ index 0000000000..9787b1d770
 +
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EXTENSIONS_H_
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
-index 268d4dc7bd..a259856506 100644
+index 268d4dc7bd..60d8af9a56 100644
 --- a/chrome/browser/agens/embed/agens_window.h
 +++ b/chrome/browser/agens/embed/agens_window.h
 @@ -5,6 +5,7 @@
@@ -12362,7 +12459,24 @@ index 268d4dc7bd..a259856506 100644
      Storage().RemoveObserver(this);
      for (download::DownloadItem* item : downloads) item->RemoveObserver(this);
      if (downloads_manager) downloads_manager->RemoveObserver(this);
-@@ -284,7 +307,81 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -274,8 +297,15 @@ struct AgensWindow : public TabStripModelObserver,
+         case download::DownloadItem::INTERRUPTED: state = kAgensDownloadFailed; break;
+         default: break;
+       }
++      base::TimeDelta left;
++      const bool failed = state == kAgensDownloadFailed;
+       out.push_back({names[i].c_str(), item->GetReceivedBytes(),
+-                     std::max<int64_t>(0, item->GetTotalBytes()), state, item->IsPaused()});
++                     std::max<int64_t>(0, item->GetTotalBytes()), state, item->IsPaused(),
++                     item->TimeRemaining(&left) ? static_cast<int>(left.InSeconds()) : -1,
++                     item->GetEndTime().is_null() ? 0 : item->GetEndTime().InSecondsFSinceUnixEpoch(),
++                     failed ? static_cast<int>(item->GetLastReason()) : 0, failed && item->CanResume(),
++                     item->IsDangerous() && state == kAgensDownloading,
++                     item->GetDangerType() == download::DOWNLOAD_DANGER_TYPE_USER_VALIDATED});
+     }
+     downloads_observer(downloads_context, out.data(), static_cast<int>(out.size()), started);
+   }
+@@ -284,7 +314,81 @@ struct AgensWindow : public TabStripModelObserver,
      return g_browser_process->profile_manager()->GetProfileAttributesStorage();
    }
  
@@ -12445,7 +12559,7 @@ index 268d4dc7bd..a259856506 100644
      // Creation order, so an ato keeps its place and color: Chromium names profile folders
      // "Default", then "Profile 1", "Profile 2"…
      std::vector<ProfileAttributesEntry*> atos;
-@@ -304,19 +401,18 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -304,19 +408,18 @@ struct AgensWindow : public TabStripModelObserver,
    void NotifyAtos() {
      if (!atos_observer) return;
      std::vector<ProfileAttributesEntry*> entries = Atos();
@@ -12471,7 +12585,7 @@ index 268d4dc7bd..a259856506 100644
      }
      atos_observer(atos_context, atos.data(), static_cast<int>(atos.size()));
    }
-@@ -330,14 +426,9 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -330,14 +433,9 @@ struct AgensWindow : public TabStripModelObserver,
    }
  
    void NewAto() {
@@ -12488,7 +12602,7 @@ index 268d4dc7bd..a259856506 100644
      const gfx::Rect bounds = browser->GetWindow()->GetBounds();
      const std::u16string name = base::UTF8ToUTF16(base::StringPrintf("Ato %zu", Atos().size() + 1));
      manager->CreateProfileAsync(
-@@ -362,7 +453,10 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -362,7 +460,10 @@ struct AgensWindow : public TabStripModelObserver,
  
    // ProfileAttributesStorage::Observer:
    void OnProfileAdded(const base::FilePath&) override { NotifyAtos(); }
@@ -12500,7 +12614,7 @@ index 268d4dc7bd..a259856506 100644
    void OnProfileNameChanged(const base::FilePath&, const std::u16string&) override { NotifyAtos(); }
  
    TabStripModel* model() { return browser->GetTabStripModel(); }
-@@ -370,6 +464,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -370,6 +471,7 @@ struct AgensWindow : public TabStripModelObserver,
    // Loading pages change a tab many times a frame (title, URL, favicon, loading); the UI gets one
    // update per run of the message loop instead of one per change.
    void Notify() {
@@ -12508,7 +12622,7 @@ index 268d4dc7bd..a259856506 100644
      if (notify_pending) return;
      notify_pending = true;
      base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
-@@ -406,7 +501,8 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -406,7 +508,8 @@ struct AgensWindow : public TabStripModelObserver,
      const int count = model()->count();
      bookmarks::BookmarkModel* bookmarks =
          BookmarkModelFactory::GetForBrowserContextIfExists(browser->GetProfile());
@@ -12518,7 +12632,7 @@ index 268d4dc7bd..a259856506 100644
      std::vector<std::vector<uint8_t>> icons(count);
      std::vector<AgensTab> tabs(count);
      struct Split { int layout = 0, first = 0; double ratio = 0.5; };
-@@ -455,6 +551,22 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -455,6 +558,22 @@ struct AgensWindow : public TabStripModelObserver,
                   zoom::ZoomController::FromWebContents(contents)
                       ? zoom::ZoomController::FromWebContents(contents)->GetZoomPercent()
                       : 100};
@@ -12541,7 +12655,7 @@ index 268d4dc7bd..a259856506 100644
      }
      observer(context, tabs.data(), static_cast<int>(tabs.size()));
    }
-@@ -582,6 +694,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -582,6 +701,7 @@ struct AgensWindow : public TabStripModelObserver,
    raw_ptr<void> downloads_context = nullptr;
    base::CallbackListSubscription search_loaded_;
    base::CancelableTaskTracker history_tracker;
@@ -12549,7 +12663,7 @@ index 268d4dc7bd..a259856506 100644
    raw_ptr<void> ui = nullptr;  // the chrome (agens_ui_*), set by the platform shell
    raw_ptr<views::View> extensions_anchor = nullptr;  // under the UI's extensions button
    AgensExtensionButtonsChanged extension_buttons_observer = nullptr;
-@@ -591,62 +704,99 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -591,62 +711,99 @@ struct AgensWindow : public TabStripModelObserver,
    base::ScopedObservation<extensions::ExtensionRegistry, extensions::ExtensionRegistryObserver>
        extensions_observation{this};
  
@@ -12668,7 +12782,7 @@ index 268d4dc7bd..a259856506 100644
    AgensFindChanged find_observer = nullptr;
    raw_ptr<void> find_context = nullptr;
    base::ScopedObservation<find_in_page::FindTabHelper, find_in_page::FindResultObserver> find_observation{this};
-@@ -655,7 +805,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -655,7 +812,7 @@ struct AgensWindow : public TabStripModelObserver,
      content::WebContents* active = model()->GetActiveWebContents();
      return active ? find_in_page::FindTabHelper::FromWebContents(active) : nullptr;
    }
@@ -12677,7 +12791,7 @@ index 268d4dc7bd..a259856506 100644
      find_in_page::FindTabHelper* helper = ActiveFind();
      if (!helper) return;
      if (!find_observation.IsObservingSource(helper)) {
-@@ -667,7 +817,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -667,7 +824,7 @@ struct AgensWindow : public TabStripModelObserver,
        if (find_observer) find_observer(find_context, 0, 0);
        return;
      }
@@ -12719,10 +12833,19 @@ index 4eb24ab895..436be6abd7 100644
      progress_.Run(0, created ? "Criando o ato " + ato + "…" : "Usando o ato " + ato + "…");
      manager->CreateProfileAsync(
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
-index cfdc014cf4..31b6e9cc5e 100644
+index cfdc014cf4..ca19cb8ebe 100644
 --- a/chrome/browser/agens/embed/native_shell.cc
 +++ b/chrome/browser/agens/embed/native_shell.cc
-@@ -52,6 +52,8 @@
+@@ -4,6 +4,8 @@
+ #include "chrome/browser/agens/embed/native_shell.h"
+ 
+ #include "chrome/browser/agens/embed/agens_window.h"
++#include "components/permissions/permission_request.h"
++#include "components/permissions/permission_util.h"
+ #include <algorithm>
+ #include "base/task/single_thread_task_runner.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
+@@ -52,6 +54,8 @@
  #include "extensions/browser/ui_util.h"
  #include "extensions/browser/uninstall_reason.h"
  #include "extensions/common/extension.h"
@@ -12731,7 +12854,7 @@ index cfdc014cf4..31b6e9cc5e 100644
  #include "chrome/browser/themes/theme_service.h"
  #include "chrome/browser/themes/theme_service_factory.h"
  #include "ui/base/window_open_disposition.h"
-@@ -61,6 +63,7 @@
+@@ -61,6 +65,7 @@
  #include "base/no_destructor.h"
  
  WEB_CONTENTS_USER_DATA_KEY_IMPL(AgensPageError);
@@ -12739,7 +12862,7 @@ index cfdc014cf4..31b6e9cc5e 100644
  
  namespace {
  base::flat_set<const StatusBubble*>& NativeBubbles() {
-@@ -93,6 +96,13 @@ void agens_window_set_atos_observer(AgensWindow* w, AgensAtosChanged observer, v
+@@ -93,6 +98,13 @@ void agens_window_set_atos_observer(AgensWindow* w, AgensAtosChanged observer, v
    w->atos_context = context;
    w->NotifyAtos();
  }
@@ -12753,7 +12876,41 @@ index cfdc014cf4..31b6e9cc5e 100644
  void agens_window_switch_ato(AgensWindow* w, int index) {
    w->SwitchAto(index);
  }
-@@ -370,12 +380,23 @@ void agens_extensions(AgensWindow* w, AgensExtensionsFn fn, void* context) {
+@@ -117,6 +129,33 @@ void agens_window_download_show(AgensWindow* w, int index) {
+ void agens_window_download_cancel(AgensWindow* w, int index) {
+   if (download::DownloadItem* item = w->DownloadAt(index)) item->Cancel(/*user_cancel=*/true);
+ }
++void agens_window_download_pause(AgensWindow* w, int index, int pause) {
++  download::DownloadItem* item = w->DownloadAt(index);
++  if (!item) return;
++  if (pause) {
++    item->Pause();
++  } else {
++    item->Resume(/*user_resume=*/true);
++  }
++}
++void agens_window_download_retry(AgensWindow* w, int index) {
++  download::DownloadItem* item = w->DownloadAt(index);
++  if (item && item->CanResume()) item->Resume(/*user_resume=*/true);
++}
++void agens_window_download_remove(AgensWindow* w, int index) {
++  if (download::DownloadItem* item = w->DownloadAt(index)) item->Remove();  // OnDownloadDestroyed updates the list
++}
++void agens_window_download_keep(AgensWindow* w, int index) {
++  download::DownloadItem* item = w->DownloadAt(index);
++  if (item && item->IsDangerous()) item->ValidateDangerousDownload();
++}
++void agens_window_downloads_clear(AgensWindow* w) {
++  std::vector<download::DownloadItem*> done;
++  for (download::DownloadItem* item : w->downloads) {
++    if (item->GetState() != download::DownloadItem::IN_PROGRESS) done.push_back(item);
++  }
++  for (download::DownloadItem* item : done) item->Remove();  // each Remove changes w->downloads
++}
+ void agens_window_set_color_mode(AgensWindow* w, AgensColorMode mode) {
+   const auto scheme = mode == kAgensModeLight  ? ThemeService::BrowserColorScheme::kLight
+                       : mode == kAgensModeDark ? ThemeService::BrowserColorScheme::kDark
+@@ -370,12 +409,23 @@ void agens_extensions(AgensWindow* w, AgensExtensionsFn fn, void* context) {
    extensions::ExtensionRegistry* registry = extensions::ExtensionRegistry::Get(profile);
    std::vector<scoped_refptr<const extensions::Extension>> shown;
    for (const auto& e : registry->GenerateInstalledExtensionsSet()) {
@@ -12781,7 +12938,7 @@ index cfdc014cf4..31b6e9cc5e 100644
    }
    fn(context, out.data(), static_cast<int>(out.size()));
  }
-@@ -388,11 +409,21 @@ void agens_extension_set_enabled(AgensWindow* w, const char* id, int enabled) {
+@@ -388,11 +438,21 @@ void agens_extension_set_enabled(AgensWindow* w, const char* id, int enabled) {
      registrar->DisableExtension(id, {extensions::disable_reason::DISABLE_USER_ACTION});
    }
  }
@@ -12807,7 +12964,7 @@ index cfdc014cf4..31b6e9cc5e 100644
  }
  
  namespace {
-@@ -473,6 +504,9 @@ void agens_password_remove(AgensWindow* w, int index) {
+@@ -473,13 +533,23 @@ void agens_password_remove(AgensWindow* w, int index) {
    saved->logins.erase(saved->logins.begin() + index);
  }
  
@@ -12817,7 +12974,22 @@ index cfdc014cf4..31b6e9cc5e 100644
  void agens_window_permission_answer(AgensWindow* w, AgensPermissionAnswer answer) {
    base::WeakPtr<permissions::PermissionPrompt::Delegate> delegate = std::move(w->permission_delegate);
    if (!delegate) return;
-@@ -535,6 +569,7 @@ void agens_extension_click(AgensWindow* w, const char* id) {
+   const PromptOptions options = std::monostate();
+   switch (answer) {
+     case kAgensPermissionAllow: delegate->Accept(options); break;
+-    case kAgensPermissionAllowOnce: delegate->AcceptThisTime(options); break;
++    case kAgensPermissionAllowOnce: {
++      bool once = true;  // AcceptThisTime DCHECKs on kinds without it (notifications)
++      for (const auto& request : delegate->Requests()) {
++        once = once && permissions::PermissionUtil::DoesSupportTemporaryGrants(request->GetContentSettingsType());
++      }
++      once ? delegate->AcceptThisTime(options) : delegate->Accept(options);
++      break;
++    }
+     case kAgensPermissionDeny: delegate->Deny(options); break;
+     case kAgensPermissionDismiss: delegate->Dismiss(options); break;
+   }
+@@ -535,6 +605,7 @@ void agens_extension_click(AgensWindow* w, const char* id) {
    const extensions::Extension* extension =
        extensions::ExtensionRegistry::Get(profile)->enabled_extensions().GetByID(id ? id : "");
    content::WebContents* active = w->model()->GetActiveWebContents();
@@ -12825,7 +12997,7 @@ index cfdc014cf4..31b6e9cc5e 100644
    auto* runner = active ? extensions::ExtensionActionRunner::GetForWebContents(active) : nullptr;
    if (!extension || !runner) return;
    if (runner->RunAction(extension, /*grant_tab_permissions=*/true) != extensions::ExtensionAction::ShowAction::kShowPopup) {
-@@ -559,8 +594,8 @@ void agens_window_set_find_observer(AgensWindow* w, AgensFindChanged observer, v
+@@ -559,8 +630,8 @@ void agens_window_set_find_observer(AgensWindow* w, AgensFindChanged observer, v
    w->find_observer = observer;
    w->find_context = context;
  }
@@ -12836,7 +13008,21 @@ index cfdc014cf4..31b6e9cc5e 100644
  }
  void agens_find_stop(AgensWindow* w) {
    w->StopFind();
-@@ -707,11 +742,44 @@ void agens_window_unsplit(AgensWindow* w, int index) {
+@@ -608,9 +679,13 @@ int agens_password_prompt(AgensWindow* w, AgensPasswordPrompt* out) {
+   controller->OnBubbleShown();  // our panel is the bubble
+   return 1;
+ }
++int agens_password_pending(AgensWindow* w) {
++  return PendingPasswords(w) != nullptr;
++}
+ void agens_password_answer(AgensWindow* w, AgensPasswordAnswer answer) {
+   ManagePasswordsUIController* controller = PendingPasswords(w);
+   if (!controller) return;
++  if (answer == kAgensPasswordLater) return controller->OnBubbleHidden();
+   const bool update = controller->GetState() == password_manager::ui::PENDING_PASSWORD_UPDATE_STATE;
+   if (answer == kAgensPasswordSave) {
+     const password_manager::PasswordForm& form = controller->GetPendingPassword();
+@@ -707,11 +782,44 @@ void agens_window_unsplit(AgensWindow* w, int index) {
  void agens_window_set_pinned(AgensWindow* w, int index, int pinned) {
    if (w->model()->ContainsIndex(index)) w->model()->SetTabPinned(index, pinned);
  }
@@ -12881,7 +13067,7 @@ index cfdc014cf4..31b6e9cc5e 100644
  void agens_window_navigate(AgensWindow* w, const char* text) {
    content::WebContents* active = w->model()->GetActiveWebContents();
    std::u16string input = base::UTF8ToUTF16(text ? text : "");
-@@ -760,8 +828,14 @@ void agens_window_show_site_info(AgensWindow* w) {
+@@ -760,8 +868,14 @@ void agens_window_show_site_info(AgensWindow* w) {
      ShowPageInfoDialog(active, base::DoNothing(), bubble_anchor_util::Anchor::kLocationBar);
    }
  }
@@ -12898,11 +13084,12 @@ index cfdc014cf4..31b6e9cc5e 100644
  }
  void agens_window_stop(AgensWindow* w) {
    chrome::ExecuteCommand(w->browser, IDC_STOP);
-@@ -814,6 +888,12 @@ void NativeTabStateChanged(views::Widget*) {}
+@@ -814,6 +928,13 @@ void NativeTabStateChanged(views::Widget*) {}
  void ConfirmCloseWithDownloads(views::Widget*, int, base::OnceCallback<void(bool)> callback) {
    std::move(callback).Run(true);
  }
-+void ShowApprovalSheet(const std::string&, const std::string&, bool, base::OnceCallback<void(AgensApprovalAnswer)> done) {
++void ShowApprovalSheet(const std::string&, const std::string&, bool, const std::string&,
++                       base::OnceCallback<void(AgensApprovalAnswer)> done) {
 +  std::move(done).Run(kAgensApprovalDeny);
 +}
 +content::JavaScriptDialogManager* EmbeddedDialogManager() {
@@ -12912,7 +13099,7 @@ index cfdc014cf4..31b6e9cc5e 100644
  
  bool IsNativeStatusBubble(const StatusBubble* bubble) {
 diff --git a/chrome/browser/agens/embed/native_shell.h b/chrome/browser/agens/embed/native_shell.h
-index d81488f053..3eef3778eb 100644
+index d81488f053..86c8260e08 100644
 --- a/chrome/browser/agens/embed/native_shell.h
 +++ b/chrome/browser/agens/embed/native_shell.h
 @@ -8,6 +8,7 @@
@@ -12923,15 +13110,17 @@ index d81488f053..3eef3778eb 100644
  #include "chrome/browser/extensions/extension_install_prompt.h"
  #include "chrome/browser/ui/login/login_handler.h"
  #include "components/javascript_dialogs/tab_modal_dialog_view.h"
-@@ -68,6 +69,15 @@ void NativeTabStateChanged(views::Widget* widget);
+@@ -68,6 +69,17 @@ void NativeTabStateChanged(views::Widget* widget);
  // True for the native shell's bubble. Chromium casts status bubbles to StatusBubbleViews in a
  // couple of places; those check this first.
  bool IsNativeStatusBubble(const StatusBubble* bubble);
 +// Shows a socket approval (bridge/approval.h queues them) on the most recently active window that
 +// can show one. Answers deny right away without such a window, and later if it closes first.
++// `facts` is the ask's parts as JSON (bridge/approval.h), for the drawn sheet.
 +void ShowApprovalSheet(const std::string& title,
 +                       const std::string& detail,
 +                       bool offer_always,
++                       const std::string& facts,
 +                       base::OnceCallback<void(AgensApprovalAnswer)> done);
 +// Embedded (agens_embedded.h): the manager that sends the dialogs of tabs no agent holds to the
 +// host app. Null otherwise.
@@ -12940,7 +13129,7 @@ index d81488f053..3eef3778eb 100644
  void ConfirmCloseWithDownloads(views::Widget* widget, int count, base::OnceCallback<void(bool)> callback);
  
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
-index 5d7ca90415..8ee2d5c3dd 100644
+index 5d7ca90415..40e1e27207 100644
 --- a/chrome/browser/agens/embed/native_shell_mac.mm
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
 @@ -7,7 +7,16 @@
@@ -13247,13 +13436,14 @@ index 5d7ca90415..8ee2d5c3dd 100644
      default: return false;
    }
    if (!IsNativeShellEnabled() || !browser->GetWindow()) return false;
-@@ -360,6 +547,34 @@ bool HandleNativeCommand(BrowserWindowInterface* browser, int command_id) {
+@@ -360,6 +547,35 @@ bool HandleNativeCommand(BrowserWindowInterface* browser, int command_id) {
    return shell && shell->Command(*command);
  }
  
 +void ShowApprovalSheet(const std::string& title,
 +                       const std::string& detail,
 +                       bool offer_always,
++                       const std::string& facts,
 +                       base::OnceCallback<void(AgensApprovalAnswer)> done) {
 +  // The most recently active window that isn't closing and isn't already asking.
 +  BrowserWindowInterface* browser = nullptr;
@@ -13276,13 +13466,13 @@ index 5d7ca90415..8ee2d5c3dd 100644
 +  }
 +  browser->GetWindow()->Activate();  // the sheet must be seen to be answered
 +  shell->window()->approval_answer = std::move(done);
-+  agens_ui_approval_prompt(shell->window()->ui, title.c_str(), detail.c_str(), offer_always);
++  agens_ui_approval_prompt(shell->window()->ui, title.c_str(), detail.c_str(), offer_always, facts.c_str());
 +}
 +
  bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
    if (!IsNativeShellEnabled() || !browser->GetWindow()) return false;
    views::Widget* widget = views::Widget::GetWidgetForNativeWindow(browser->GetWindow()->GetNativeWindow());
-@@ -377,6 +592,13 @@ bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
+@@ -377,24 +593,42 @@ bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
   public:
    NativePermissionPrompt(AgensWindow* window, Delegate* delegate) : window_(window->weak.GetWeakPtr()) {
      window->permission_delegate = delegate->GetWeakPtr();
@@ -13296,8 +13486,23 @@ index 5d7ca90415..8ee2d5c3dd 100644
      const GURL origin = delegate->GetRequestingOrigin();
      const std::string site = origin.is_valid() ? std::string(origin.host()) : std::string();
      std::vector<std::string> asks;
-@@ -389,12 +611,15 @@ bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
-     agens_ui_permission_prompt(window->ui, site.c_str(), pointers.data(), static_cast<int>(pointers.size()));
++    bool once = true;
+     for (const auto& request : delegate->Requests()) {
+-      asks.push_back(base::UTF16ToUTF8(request->GetMessageTextFragment()));
++      const permissions::RequestType type = request->request_type();
++      const char* name = type == permissions::RequestType::kClipboard ? "clipboard"
++                         : type == permissions::RequestType::kGeolocation ? "location"
++                                                                          : PermissionName(type);
++      asks.push_back(name && type != permissions::RequestType::kRegisterProtocolHandler
++                         ? std::string(name)
++                         : base::UTF16ToUTF8(request->GetMessageTextFragment()));
++      once = once && permissions::PermissionUtil::DoesSupportTemporaryGrants(request->GetContentSettingsType());
+     }
+     std::vector<const char*> pointers;
+     for (const std::string& a : asks) pointers.push_back(a.c_str());
+     delegate->SetPromptShown();
+-    agens_ui_permission_prompt(window->ui, site.c_str(), pointers.data(), static_cast<int>(pointers.size()));
++    agens_ui_permission_prompt(window->ui, site.c_str(), pointers.data(), static_cast<int>(pointers.size()), once);
    }
    ~NativePermissionPrompt() override {
 -    if (window_ && window_->ui) agens_ui_permission_prompt_close(window_->ui);
@@ -13314,7 +13519,7 @@ index 5d7ca90415..8ee2d5c3dd 100644
    }
    permissions::PermissionPromptDisposition GetPromptDisposition() const override {
      return permissions::PermissionPromptDisposition::ANCHORED_BUBBLE;
-@@ -407,7 +632,74 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
+@@ -407,7 +641,74 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
    }
  
   private:
@@ -13389,7 +13594,7 @@ index 5d7ca90415..8ee2d5c3dd 100644
  };
  
  std::unique_ptr<permissions::PermissionPrompt> CreateNativePermissionPrompt(
-@@ -424,34 +716,230 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
+@@ -424,34 +725,230 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
    return std::make_unique<NativePermissionPrompt>(shell->window(), delegate);
  }
  
@@ -13638,7 +13843,7 @@ index 5d7ca90415..8ee2d5c3dd 100644
  }  // namespace
  
  class NativeLoginHandler : public LoginHandler {
-@@ -466,6 +954,9 @@ void ShowNativeInstallDialog(std::unique_ptr<ExtensionInstallPromptShowParams> p
+@@ -466,6 +963,9 @@ void ShowNativeInstallDialog(std::unique_ptr<ExtensionInstallPromptShowParams> p
    bool BuildViewImpl(const std::u16string& authority,
                       const std::u16string& explanation,
                       LoginModelData*) override {
@@ -13648,7 +13853,7 @@ index 5d7ca90415..8ee2d5c3dd 100644
      NSWindow* window = web_contents() ? web_contents()->GetTopLevelNativeWindow().GetNativeNSWindow() : nil;
      if (!window) return false;
      alert_ = [[NSAlert alloc] init];
-@@ -500,13 +991,52 @@ bool BuildViewImpl(const std::u16string& authority,
+@@ -500,13 +1000,52 @@ bool BuildViewImpl(const std::u16string& authority,
    void CloseDialog() override {
      if (window_ && alert_.window.sheetParent) [window_ endSheet:alert_.window returnCode:NSModalResponseAbort];
      alert_ = nil;
@@ -13701,7 +13906,7 @@ index 5d7ca90415..8ee2d5c3dd 100644
  };
  
  // Owns itself: deleted when its sheet ends.
-@@ -520,6 +1050,13 @@ void CloseDialog() override {
+@@ -520,6 +1059,13 @@ void CloseDialog() override {
                   content::JavaScriptDialogManager::DialogClosedCallback callback,
                   base::OnceClosure force_closed)
        : callback_(std::move(callback)), force_closed_(std::move(force_closed)) {
@@ -13715,7 +13920,7 @@ index 5d7ca90415..8ee2d5c3dd 100644
      alert_ = [[NSAlert alloc] init];
      alert_.messageText = base::SysUTF16ToNSString(title);
      alert_.informativeText = base::SysUTF16ToNSString(message);
-@@ -558,6 +1095,8 @@ void CloseDialogWithoutCallback() override {
+@@ -558,6 +1104,8 @@ void CloseDialogWithoutCallback() override {
  
   private:
    void Finish(bool ok) {
@@ -13724,7 +13929,7 @@ index 5d7ca90415..8ee2d5c3dd 100644
      force_closed_.Reset();
      if (callback_) std::move(callback_).Run(ok, ok ? GetUserInput() : std::u16string());
      base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE, this);
-@@ -567,6 +1106,7 @@ void Finish(bool ok) {
+@@ -567,6 +1115,7 @@ void Finish(bool ok) {
    NSAlert* __strong alert_;
    NSTextField* __strong field_ = nil;
    NSWindow* __strong window_ = nil;
@@ -13732,7 +13937,7 @@ index 5d7ca90415..8ee2d5c3dd 100644
    base::WeakPtrFactory<NativeJsDialog> weak_{this};
  };
  
-@@ -589,10 +1129,28 @@ void Finish(bool ok) {
+@@ -589,10 +1138,28 @@ void Finish(bool ok) {
        ->GetWeakPtr();
  }
  
@@ -13762,7 +13967,7 @@ index 5d7ca90415..8ee2d5c3dd 100644
    auto* shell = widget && widget->GetRootView()
                      ? views::AsViewClass<NativeShellView>(
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
-index 3c18c4eab1..017cc80371 100644
+index 3c18c4eab1..5961f84b95 100644
 --- a/chrome/browser/agens/ui/chrome_mac.mm
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
 @@ -21,6 +21,8 @@
@@ -13874,7 +14079,23 @@ index 3c18c4eab1..017cc80371 100644
  static NSString* const kIconInicio = @"<rect x='3' y='4.5' width='14' height='11' rx='3'/><path d='M8.6 7.8l3.4 2.2-3.4 2.2z'/>";
  static NSString* const kIconMoon = @"<path d='M15.5 12.5A6.5 6.5 0 0 1 7.5 4.5a6.5 6.5 0 1 0 8 8z'/>";
  static NSString* const kIconWifiOff = @"<path d='M3 8.2a10 10 0 0 1 14 0 M5.6 11a6.3 6.3 0 0 1 8.8 0 M8.3 13.8a2.4 2.4 0 0 1 3.4 0 M10 16.4h.01 M3.5 3.5l13 13'/>";
-@@ -507,24 +577,31 @@ @interface AgensTabRow : AgensHoverView
+@@ -493,13 +563,14 @@ - (void)mouseDown:(NSEvent*)event {
+   if (_enabled) [super mouseDown:event];
+ }
+ - (void)refresh {
+-  self.layer.backgroundColor = self.hovered && _enabled ? CG(kRaise, self) : NSColor.clearColor.CGColor;
++  self.layer.backgroundColor = (self.hovered && _enabled) || self.selected ? CG(kRaise, self) : NSColor.clearColor.CGColor;
+ }
+ @end
+ 
+ // One tab: favicon (or spinner), title, sound, close on hover. Three looks: a row in the column,
+ // a pinned tile (prototype .pin) and a pill in the top strip (prototype .ttab).
+ typedef enum { kLookRow, kLookPin, kLookTop } TabLook;
++static NSImage* CaptureIcons(BOOL camera, BOOL microphone, CGFloat size);  // below, with the permissions
+ @interface AgensTabRow : AgensHoverView
+ @property(nonatomic) int index;
+ @property(nonatomic) TabLook look;
+@@ -507,24 +578,32 @@ @interface AgensTabRow : AgensHoverView
  @property(nonatomic, copy) void (^onClose)(void);
  @property(nonatomic, copy) void (^onPin)(void);
  @property(nonatomic, copy) void (^onMute)(void);
@@ -13895,6 +14116,7 @@ index 3c18c4eab1..017cc80371 100644
 -  BOOL _muted;
    BOOL _audible;
    BOOL _capturing;
++  BOOL _bothCaptures;
 +  BOOL _reopened;
 +  NSTrackingArea* _soundArea;
 +  int _soundHoverSeq;
@@ -13907,7 +14129,7 @@ index 3c18c4eab1..017cc80371 100644
  }
  @synthesize index = _index;
  @synthesize look = _look;
-@@ -532,6 +609,9 @@ @implementation AgensTabRow {
+@@ -532,6 +611,9 @@ @implementation AgensTabRow {
  @synthesize onClose = _onClose;
  @synthesize onPin = _onPin;
  @synthesize onMute = _onMute;
@@ -13917,7 +14139,7 @@ index 3c18c4eab1..017cc80371 100644
  @synthesize onSplit = _onSplit;
  @synthesize onUnsplit = _onUnsplit;
  @synthesize inSplit = _inSplit;
-@@ -567,6 +647,16 @@ - (instancetype)initWithFrame:(NSRect)frame {
+@@ -567,6 +649,16 @@ - (instancetype)initWithFrame:(NSRect)frame {
      _title = Label(13, NSFontWeightRegular, kMute);
      _sound = [NSButton buttonWithImage:Symbol(@"speaker.wave.2.fill", 10) target:self action:@selector(mute:)];
      _sound.bordered = NO;
@@ -13934,7 +14156,17 @@ index 3c18c4eab1..017cc80371 100644
      _close = [NSButton buttonWithImage:Symbol(@"xmark", 10) target:self action:@selector(closeTab:)];
      _close.bordered = NO;
      _close.contentTintColor = kDim.color();
-@@ -611,6 +701,12 @@ - (void)updateWith:(const AgensTab&)tab {
+@@ -596,7 +688,8 @@ - (void)layout {
+   if (self.compact) {
+     _sound.frame = NSMakeRect(w - 15, 1, 14, 14);  // a badge on the tile's corner
+   } else {
+-    _sound.frame = NSMakeRect(NSMinX(_close.frame) - 20, (h - 20) / 2, 20, 20);
++    const CGFloat sw = _capturing && _bothCaptures ? 30 : 20;  // camera and microphone side by side
++    _sound.frame = NSMakeRect(NSMinX(_close.frame) - sw, (h - 20) / 2, sw, 20);
+   }
+   const CGFloat titleX = NSMaxX(_favicon.frame) + (_look == kLookTop ? 8 : 10);
+   const CGFloat titleEnd = (_sound.hidden ? NSMinX(_close.frame) : NSMinX(_sound.frame)) - 4;
+@@ -611,6 +704,12 @@ - (void)updateWith:(const AgensTab&)tab {
    _title.stringValue = title;
    self.toolTip = title;
    self.accessibilityLabel = tab.sleeping ? [title stringByAppendingString:@", dormindo"] : title;
@@ -13947,15 +14179,27 @@ index 3c18c4eab1..017cc80371 100644
    NSImage* icon = nil;
    if (tab.favicon_png) {
      icon = [[NSImage alloc] initWithData:[NSData dataWithBytes:tab.favicon_png
-@@ -629,6 +725,7 @@ - (void)updateWith:(const AgensTab&)tab {
+@@ -629,10 +728,12 @@ - (void)updateWith:(const AgensTab&)tab {
    _pinned = tab.pinned;
    _inSplit = tab.split != 0;
    _muted = tab.muted;
 +  _volume = tab.volume_percent;
    _audible = tab.audible;
    _capturing = tab.camera || tab.microphone;
++  _bothCaptures = tab.camera && tab.microphone;
    if (_capturing) {  // camera or microphone in use outranks sound: it's what you'd want to know
-@@ -654,6 +751,23 @@ - (void)refresh {
+-    _sound.image = Symbol(tab.camera ? @"video.fill" : @"mic.fill", 10);
++    _sound.image = CaptureIcons(tab.camera, tab.microphone, 13);  // prototype .sbt .rec
+     _sound.toolTip = tab.camera && tab.microphone ? @"Usando a câmera e o microfone"
+                      : tab.camera                 ? @"Usando a câmera"
+                                                   : @"Usando o microfone";
+@@ -649,11 +750,28 @@ - (void)refresh {
+   [super refresh];
+   _title.textColor = (self.selected || self.hovered) ? kInk.color() : kMute.color();
+   _close.hidden = self.compact || !(self.selected || self.hovered);
+-  _sound.contentTintColor = _capturing ? NSColor.systemRedColor : _muted ? kLight3.color() : kDim.color();
++  _sound.contentTintColor = _capturing || _muted ? kLight3.color() : kDim.color();
+   // Pinned tiles always have the line; top pills only when selected.
    const BOOL border = _look == kLookPin || (_look == kLookTop && self.selected);
    self.layer.borderWidth = border ? 1 : 0;
    self.layer.borderColor = CG(kLine, self);
@@ -13979,7 +14223,7 @@ index 3c18c4eab1..017cc80371 100644
  }
  - (NSMenu*)menuForEvent:(NSEvent*)event {
    NSMenu* menu = [[NSMenu alloc] initWithTitle:@"Aba"];
-@@ -695,6 +809,25 @@ - (void)mute:(id)sender {
+@@ -695,6 +813,25 @@ - (void)mute:(id)sender {
    if (_capturing) return;  // the badge only tells; the site panel changes permissions
    if (_onMute) _onMute();
  }
@@ -14005,7 +14249,7 @@ index 3c18c4eab1..017cc80371 100644
  @end
  
  // One suggestion (prototype .sug): icon, text, detail on the right.
-@@ -766,9 +899,10 @@ - (void)layout {
+@@ -766,9 +903,10 @@ - (void)layout {
  - (void)updateWith:(const AgensAto&)ato index:(int)index {
    NSString* name = @(ato.name);
    _tile.stringValue = Monogram(name);
@@ -14017,7 +14261,7 @@ index 3c18c4eab1..017cc80371 100644
    self.accessibilityLabel = self.toolTip;
    self.selected = ato.active;
  }
-@@ -856,12 +990,14 @@ - (void)layout {
+@@ -856,12 +994,14 @@ - (void)layout {
  @interface AgensMenuRow : AgensHoverView
  - (instancetype)initWithIcon:(NSString*)icon title:(NSString*)title key:(NSString*)key;
  - (void)setIconImage:(NSImage*)image;
@@ -14032,7 +14276,7 @@ index 3c18c4eab1..017cc80371 100644
  - (instancetype)initWithIcon:(NSString*)icon title:(NSString*)title key:(NSString*)key {
    if ((self = [super initWithFrame:NSZeroRect])) {
      self.radius = 7;
-@@ -889,9 +1025,22 @@ - (void)layout {
+@@ -889,9 +1029,22 @@ - (void)layout {
    _title.frame = NSMakeRect(37, 8, w - 37 - (_key.stringValue.length ? 70 : 10), 18);
  }
  - (void)refresh {
@@ -14057,20 +14301,12 @@ index 3c18c4eab1..017cc80371 100644
  }
  - (void)setIconImage:(NSImage*)image {  // a picture of its own (an extension's icon), not tinted
    _icon.image = image;
-@@ -1015,6 +1164,9 @@ - (void)toggleSidebar;
- - (BOOL)tabsOnTop;
- - (void)toggleTabsPosition;
- - (NSArray<NSString*>*)atoNamesForSettings;
-+- (NSArray<NSNumber*>*)atoSharedForSettings;  // "Compartilhar cookies", per ato, same order
-+- (NSArray<NSString*>*)atoIdsForSettings;      // the profile folders, same order
-+- (NSString*)currentAtoNameForSettings;         // this window's ato
- - (NSImage*)extensionIcon:(NSString*)extensionId;
- @end
- 
-@@ -1032,6 +1184,96 @@ - (BOOL)isFlipped {
+@@ -899,98 +1052,382 @@ - (void)setIconImage:(NSImage*)image {  // a picture of its own (an extension's
  }
  @end
  
+-// One download in the panel: file name, size or state, a progress line while it runs, and
+-// buttons to show it in the Finder or cancel it.
 +// The control pill's buttons (prototipos/controle.html .btn, .btn.pri and .nav-end): a bordered
 +// text button, the primary one filled with ink, or a round icon bubble.
 +@interface AgensPillButton : AgensHoverView
@@ -14125,6 +14361,664 @@ index 3c18c4eab1..017cc80371 100644
 +}
 +@end
 +
++// Downloads (prototipos/janela-recursos.html, #downloads). Icons from the prototype.
++static NSString* const kIconPause = @"<path d='M7.5 5v10M12.5 5v10'/>";
++static NSString* const kIconPlay = @"<path d='M7 5v10l8-5z'/>";
++static NSString* const kIconX = @"<path d='m6 6 8 8M14 6l-8 8'/>";
++static NSString* const kIconFolder = @"<path d='M3 6.5A1.5 1.5 0 0 1 4.5 5H8l1.5 1.5h6A1.5 1.5 0 0 1 17 8v6.5a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 3 14.5z'/>";
++static NSString* const kIconOpen = @"<path d='M8 5H5v10h10v-3M11 4h5v5M16 4l-7 7'/>";
++static NSString* const kIconRetry = @"<path d='M16 10a6 6 0 1 1-2-4.5M16 3v3.5h-3.5'/>";
++static const Token kWarn{0xF2C14E, 0xB7791F, 0xF2C14E};  // prototype --warn: "precisa de você"
++
++static NSString* Bytes(long long n) {
++  return [NSByteCountFormatter stringFromByteCount:n countStyle:NSByteCountFormatterCountStyleFile];
++}
++// "18,2 de 48 MB": the first number in the second one's unit, without repeating it.
++static NSString* BytesOf(long long part, long long whole) {
++  NSByteCountFormatter* f = [[NSByteCountFormatter alloc] init];
++  f.countStyle = NSByteCountFormatterCountStyleFile;
++  f.allowedUnits = whole >= 1000000000 ? NSByteCountFormatterUseGB
++                   : whole >= 1000000  ? NSByteCountFormatterUseMB
++                   : whole >= 1000     ? NSByteCountFormatterUseKB
++                                       : NSByteCountFormatterUseBytes;
++  NSString* total = [f stringFromByteCount:whole];
++  f.includesUnit = NO;
++  return [NSString stringWithFormat:@"%@ de %@", [f stringFromByteCount:part], total];
++}
++static NSString* ShortDuration(int s) {
++  return s < 60 ? [NSString stringWithFormat:@"%d s", s] : s < 3600 ? [NSString stringWithFormat:@"%d min", (s + 30) / 60]
++                                                                    : [NSString stringWithFormat:@"%d h", (s + 1800) / 3600];
++}
++static NSString* Ago(double end) {
++  const int s = (int)MAX(0, NSDate.date.timeIntervalSince1970 - end);
++  return s < 60 ? @"agora" : [@"há " stringByAppendingString:ShortDuration(s)];
++}
++// Why it failed, short (Chromium's DownloadInterruptReason).
++static NSString* FailReason(const AgensDownload& d) {
++  const int r = d.interrupt_reason;
++  if (r >= 20 && r < 30) {
++    return d.total > 0 ? [NSString stringWithFormat:@"a rede caiu em %d%%", (int)(100.0 * d.received / d.total)] : @"a rede caiu";
++  }
++  if (r >= 30 && r < 40) return @"o site não entregou o arquivo";
++  if (r == 3) return @"o disco está cheio";
++  if (r == 2) return @"sem permissão para gravar na pasta";
++  if (r == 41 || r == 50) return @"o navegador fechou antes do fim";
++  if (r == 7 || r == 11 || r == 12 || r == 51) return @"o sistema bloqueou o arquivo";
++  return @"erro ao gravar o arquivo";
++}
++
++// A small icon button in a row (prototype .da button): 26 pt, mute, hover background.
++static AgensToolButton* RowButton(NSString* icon, NSString* label, void (^press)(void)) {
++  AgensToolButton* b = [[AgensToolButton alloc] initWithSymbol:@"circle" label:label];
++  [b setImage:AgensIcon(icon, 16)];
++  [b setTint:kMute];
++  b.radius = 7;
++  b.onPress = press;
++  return b;
++}
++
++// One download in the panel (prototype .dr, or .danger while a dangerous file waits): the file's
++// type, name, a progress line while it runs, its state and the buttons for that state.
+ @interface AgensDownloadRow : AgensHoverView
+-@property(nonatomic, copy) void (^onShow)(void);
+-@property(nonatomic, copy) void (^onCancel)(void);
++@property(nonatomic, copy) void (^onAction)(NSString* action);  // pause resume remove open show retry keep
++@property(nonatomic) BOOL keepArmed;  // "Manter mesmo assim" was clicked once
+ - (void)updateWith:(const AgensDownload&)d;
+++ (CGFloat)heightFor:(const AgensDownload&)d;
+ @end
+ @implementation AgensDownloadRow {
+-  NSImageView* _icon;
++  NSView* _type;
++  NSTextField* _ext;
++  NSTextField* _title;  // dangerous only
+   NSTextField* _name;
+   NSTextField* _detail;
+   NSView* _track;
+   NSView* _bar;
+-  NSButton* _show;
+-  NSButton* _cancel;
++  NSMutableArray<NSView*>* _buttons;
+   double _fraction;
++  BOOL _danger, _paused, _barShown;
++}
++@synthesize onAction = _onAction;
++@synthesize keepArmed = _keepArmed;
+++ (CGFloat)heightFor:(const AgensDownload&)d {
++  if (d.dangerous) return 135;
++  return d.state == kAgensDownloading ? 64 : 53;
++}
++- (BOOL)isFlipped {
++  return YES;
+ }
+-@synthesize onShow = _onShow;
+-@synthesize onCancel = _onCancel;
+ - (instancetype)initWithFrame:(NSRect)frame {
+   if ((self = [super initWithFrame:frame])) {
+-    self.radius = 7;
+-    _icon = [NSImageView imageViewWithImage:AgensIcon(kIconDown)];
+-    _icon.contentTintColor = kDim.color();
++    self.radius = 8;
++    _type = [[NSView alloc] init];
++    _type.wantsLayer = YES;
++    _type.layer.borderWidth = 1;
++    _ext = Label(8.5, NSFontWeightBold, kMute);
++    _ext.alignment = NSTextAlignmentCenter;
++    [_type addSubview:_ext];
++    _title = Label(13, NSFontWeightSemibold, kInk);
+     _name = Label(13, NSFontWeightRegular, kInk);
+-    _detail = Label(11.5, NSFontWeightRegular, kDim);
++    _name.lineBreakMode = NSLineBreakByTruncatingMiddle;
++    _detail = Label(12, NSFontWeightRegular, kDim);
+     _track = [[NSView alloc] init];
+     _bar = [[NSView alloc] init];
+     for (NSView* v in @[ _track, _bar ]) {
+       v.wantsLayer = YES;
+       v.layer.cornerRadius = 1.5;
+     }
+-    _show = [NSButton buttonWithImage:Symbol(@"magnifyingglass", 12) target:self action:@selector(show:)];
+-    _show.toolTip = @"Mostrar no Finder";
+-    _show.accessibilityLabel = @"Mostrar no Finder";
+-    _cancel = [NSButton buttonWithImage:Symbol(@"xmark", 11) target:self action:@selector(cancel:)];
+-    _cancel.toolTip = @"Cancelar";
+-    _cancel.accessibilityLabel = @"Cancelar download";
+-    for (NSButton* b in @[ _show, _cancel ]) {
+-      b.bordered = NO;
+-      b.contentTintColor = kDim.color();
+-    }
+-    for (NSView* v in @[ _icon, _name, _detail, _track, _bar, _show, _cancel ]) [self addSubview:v];
++    _buttons = [NSMutableArray array];
++    for (NSView* v in @[ _type, _title, _name, _detail, _track, _bar ]) [self addSubview:v];
+   }
+   return self;
+ }
+-- (void)layout {
+-  [super layout];
+-  CGFloat w = NSWidth(self.bounds);
+-  _icon.frame = NSMakeRect(10, 13, 17, 17);
+-  _cancel.frame = NSMakeRect(w - 30, 12, 22, 20);
+-  _show.frame = NSMakeRect(w - (_cancel.hidden ? 30 : 54), 12, 22, 20);
+-  CGFloat textW = NSMinX(_show.frame) - 6 - 37;
+-  _name.frame = NSMakeRect(37, 6, textW, 17);
+-  _detail.frame = NSMakeRect(37, 23, textW, 15);
+-  _track.frame = NSMakeRect(37, 38, textW, 3);
+-  _bar.frame = NSMakeRect(37, 38, textW * _fraction, 3);
+-}
+-static NSString* Bytes(long long n) {
+-  return [NSByteCountFormatter stringFromByteCount:n countStyle:NSByteCountFormatterCountStyleFile];
++- (void)act:(NSString*)action {
++  if (_onAction) _onAction(action);
+ }
+ - (void)updateWith:(const AgensDownload&)d {
+-  _name.stringValue = @(d.name);
+-  BOOL running = d.state == kAgensDownloading;
++  __weak AgensDownloadRow* weak = self;
++  auto act = ^(NSString* a) { return ^{ [weak act:a]; }; };
++  NSString* name = @(d.name);
++  NSString* ext = name.pathExtension.uppercaseString;
++  _ext.stringValue = ext.length && ext.length <= 4 ? ext : @"";
++  _danger = d.dangerous;
++  _paused = d.paused;
++  const BOOL running = d.state == kAgensDownloading && !d.dangerous;
++  _barShown = running;
+   _fraction = running && d.total > 0 ? (double)d.received / d.total : 0;
+-  switch (d.state) {
+-    case kAgensDownloading:
+-      _detail.stringValue = d.paused ? @"Pausado"
+-                            : d.total > 0 ? [NSString stringWithFormat:@"%@ de %@", Bytes(d.received), Bytes(d.total)]
+-                                          : Bytes(d.received);
+-      break;
+-    case kAgensDownloaded: _detail.stringValue = Bytes(d.total ?: d.received); break;
+-    case kAgensDownloadCancelled: _detail.stringValue = @"Cancelado"; break;
+-    case kAgensDownloadFailed: _detail.stringValue = @"Falhou"; break;
+-  }
+-  _track.hidden = _bar.hidden = !running;
+-  _cancel.hidden = !running;
+-  _show.hidden = d.state != kAgensDownloaded;
+-  self.accessibilityLabel = [NSString stringWithFormat:@"%@, %@", _name.stringValue, _detail.stringValue];
++  _title.hidden = !_danger;
++  _title.stringValue = @"Este arquivo pode fazer mal ao seu Mac";
++  _name.font = [NSFont systemFontOfSize:_danger ? 12.5 : 13];
++  _name.stringValue = _danger ? [NSString stringWithFormat:@"%@ · %@", name, Bytes(d.total ?: d.received)] : name;
++  BOOL warn = NO;
++  NSArray* buttons;
++  if (_danger) {
++    _detail.stringValue = @"O navegador marcou o arquivo como perigoso. Ele ainda não está na pasta Downloads.";
++    AgensPillButton* keep = [[AgensPillButton alloc] init];
++    keep.label.stringValue = _keepArmed ? @"Clique de novo para manter" : @"Manter mesmo assim";
++    keep.onPress = _keepArmed ? act(@"keep") : ^{
++      AgensDownloadRow* strong = weak;
++      if (strong && strong->_onAction) strong->_onAction(@"arm");
++    };
++    AgensPillButton* del = [[AgensPillButton alloc] init];
++    del.label.stringValue = @"Apagar";
++    del.primary = YES;
++    del.onPress = act(@"remove");
++    for (AgensPillButton* b in @[ keep, del ]) {
++      b.label.font = [NSFont systemFontOfSize:12.5 weight:b.primary ? NSFontWeightSemibold : NSFontWeightRegular];
++      b.accessibilityLabel = b.label.stringValue;
++    }
++    buttons = @[ keep, del ];
++  } else if (d.state == kAgensDownloading) {
++    NSString* amount = d.total > 0 ? BytesOf(d.received, d.total) : Bytes(d.received);
++    _detail.stringValue = d.paused ? [@"Pausado · " stringByAppendingString:amount]
++                          : d.remaining_s >= 0 ? [NSString stringWithFormat:@"%@ · %@", amount, ShortDuration(d.remaining_s)]
++                                               : amount;
++    buttons = @[ d.paused ? RowButton(kIconPlay, @"Continuar", act(@"resume")) : RowButton(kIconPause, @"Pausar", act(@"pause")),
++                 RowButton(kIconX, @"Cancelar", act(@"remove")) ];
++  } else if (d.state == kAgensDownloaded) {
++    warn = d.kept;
++    _detail.stringValue = d.kept ? @"Mantido mesmo marcado como perigoso"
++                                 : [NSString stringWithFormat:@"%@ · %@", Bytes(d.total ?: d.received), Ago(d.end_time)];
++    buttons = d.kept ? @[ RowButton(kIconFolder, @"Mostrar no Finder", act(@"show")) ]
++                     : @[ RowButton(kIconOpen, @"Abrir", act(@"open")), RowButton(kIconFolder, @"Mostrar no Finder", act(@"show")) ];
++  } else {
++    const BOOL failed = d.state == kAgensDownloadFailed && d.interrupt_reason != 40;
++    warn = failed;
++    _detail.stringValue = failed ? [@"Falhou: " stringByAppendingString:FailReason(d)] : @"Cancelado";
++    NSMutableArray* b = [NSMutableArray array];
++    if (d.can_retry) [b addObject:RowButton(kIconRetry, @"Tentar de novo", act(@"retry"))];
++    [b addObject:RowButton(kIconX, @"Tirar da lista", act(@"remove"))];
++    buttons = b;
++  }
++  _detail.textColor = (warn ? kWarn : _danger ? kMute : kDim).color();
++  _detail.maximumNumberOfLines = _danger ? 3 : 1;
++  _detail.lineBreakMode = _danger ? NSLineBreakByWordWrapping : NSLineBreakByTruncatingTail;
++  _detail.font = [NSFont systemFontOfSize:12];
++  _detail.cell.wraps = _danger;
++  for (NSView* v in _buttons) [v removeFromSuperview];
++  [_buttons setArray:buttons];
++  for (NSView* v in _buttons) [self addSubview:v];
++  _track.hidden = _bar.hidden = !_barShown;
++  self.accessibilityRole = NSAccessibilityGroupRole;
++  self.accessibilityLabel = _danger ? [NSString stringWithFormat:@"%@. %@", _title.stringValue, _name.stringValue]
++                                    : [NSString stringWithFormat:@"%@, %@", name, _detail.stringValue];
++  self.onPress = d.state == kAgensDownloaded ? act(@"open") : (void (^)(void))nil;
+   [self refresh];
+   self.needsLayout = YES;
+ }
++- (void)layout {
++  [super layout];
++  const CGFloat w = NSWidth(self.bounds);
++  if (_danger) {  // prototype .danger: 10 pt in, the buttons under the text on the right
++    _type.frame = NSMakeRect(10, 12, 30, 36);
++    const CGFloat x = 50, tw = w - x - 10;
++    _title.frame = NSMakeRect(x, 11, tw, 18);
++    _name.frame = NSMakeRect(x, 30, tw, 17);
++    _detail.frame = NSMakeRect(x, 49, tw, 32);
++    CGFloat bx = w - 10;
++    for (AgensPillButton* b in _buttons.reverseObjectEnumerator) {
++      const CGFloat bw = ceil(b.label.fittingSize.width) + 22;
++      bx -= bw;
++      b.frame = NSMakeRect(bx, 93, bw, 26);
++      bx -= 8;
++    }
++  } else {
++    _type.frame = NSMakeRect(8, 8, 30, 36);
++    CGFloat bx = w - 8;
++    for (NSView* b in _buttons.reverseObjectEnumerator) {
++      bx -= 26;
++      b.frame = NSMakeRect(bx, 8, 26, 26);
++      bx -= 2;
++    }
++    const CGFloat x = 48, tw = bx - 8 - x;
++    _name.frame = NSMakeRect(x, 9, tw, 18);
++    _track.frame = NSMakeRect(x, 32, tw, 3);
++    _bar.frame = NSMakeRect(x, 32, tw * _fraction, 3);
++    _detail.frame = NSMakeRect(x, _barShown ? 38 : 28, tw, 16);
++  }
++  _ext.frame = NSMakeRect(0, 4, 30, 12);  // the type view isn't flipped: at its foot
++}
+ - (void)refresh {
+-  self.layer.backgroundColor = self.hovered ? CG(kRaise, self) : NSColor.clearColor.CGColor;
+-  _track.layer.backgroundColor = CG(kLine, self);
+-  _bar.layer.backgroundColor = CG(kLight3, self);
++  self.layer.cornerRadius = (_danger ? 10 : 8) * Round();
++  if (_danger) {
++    __block CGColorRef fill;
++    [self.effectiveAppearance performAsCurrentDrawingAppearance:^{
++      fill = [kWarn.color() colorWithAlphaComponent:0.08].CGColor;
++    }];
++    self.layer.backgroundColor = fill;
++    self.layer.borderColor = CG(kWarn, self);
++    self.layer.borderWidth = 1;
++  } else {
++    self.layer.backgroundColor = self.hovered ? CG(kRaise, self) : NSColor.clearColor.CGColor;
++    self.layer.borderWidth = 0;
++  }
++  _type.layer.cornerRadius = 5;
++  _type.layer.backgroundColor = CG(kSunk, self);
++  _type.layer.borderColor = CG(kLineStrong, self);
++  _track.layer.backgroundColor = CG(kLineStrong, self);
++  _bar.layer.backgroundColor = CG(_paused ? kMute : kLight3, self);
++}
++@end
++
++// The toolbar's downloads button: the ring is the progress of everything running, summed; the
++// amber dot says a download needs the person (failed or dangerous).
++@interface AgensDownloadsButton : AgensToolButton
++- (void)setProgress:(double)progress attention:(BOOL)attention;  // progress < 0: no ring
++- (void)arrive:(BOOL)appear;
++@end
++@implementation AgensDownloadsButton {
++  CAShapeLayer* _track;
++  CAShapeLayer* _ring;
++  CALayer* _dot;
++}
++- (instancetype)initWithSymbol:(NSString*)symbol label:(NSString*)label size:(CGFloat)size {
++  if ((self = [super initWithSymbol:symbol label:label size:size])) {
++    _track = [CAShapeLayer layer];
++    _ring = [CAShapeLayer layer];
++    for (CAShapeLayer* l in @[ _track, _ring ]) {
++      l.fillColor = nil;
++      l.lineWidth = 2;
++      l.hidden = YES;
++      [self.layer addSublayer:l];
++    }
++    _ring.lineCap = kCALineCapRound;
++    _dot = [CALayer layer];
++    _dot.hidden = YES;
++    _dot.cornerRadius = 5.5;
++    _dot.borderWidth = 2;
++    [self.layer addSublayer:_dot];
++  }
++  return self;
++}
++- (void)layout {
++  [super layout];
++  // From 12 o'clock, clockwise; the view is flipped, so is its layer.
++  CGMutablePathRef path = CGPathCreateMutable();
++  CGPathAddArc(path, nullptr, 14, 14, 12, -M_PI_2, 3 * M_PI_2, NO);
++  _track.path = _ring.path = path;
++  CGPathRelease(path);
++  _dot.frame = NSMakeRect(NSWidth(self.bounds) - 3 - 9, 3 - 2, 11, 11);
+ }
+-- (void)show:(id)sender {
+-  if (_onShow) _onShow();
++- (void)refresh {
++  [super refresh];
++  _track.strokeColor = CG(kLineStrong, self);
++  _ring.strokeColor = CG(kLight3, self);
++  _dot.backgroundColor = CG(kWarn, self);
++  _dot.borderColor = CG(kSideBg, self);
++}
++- (void)setProgress:(double)progress attention:(BOOL)attention {
++  [CATransaction begin];
++  [CATransaction setAnimationDuration:0.3];
++  _track.hidden = _ring.hidden = progress < 0;
++  _ring.strokeEnd = MAX(0, MIN(1, progress));
++  [CATransaction commit];
++  _dot.hidden = !attention;
++  [self refresh];
+ }
+-- (void)cancel:(id)sender {
+-  if (_onCancel) _onCancel();
++// A download started (prototype .dlb.new): the button grows in (60% → 100%, 200 ms) when it just
++// appeared, and the arrow drops twice. Nothing with "Reduzir movimento".
++- (void)arrive:(BOOL)appear {
++  if (NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) return;
++  if (appear) {
++    CATransform3D t = CATransform3DMakeTranslation(14, 14, 0);
++    t = CATransform3DScale(t, 0.6, 0.6, 1);
++    t = CATransform3DTranslate(t, -14, -14, 0);
++    CABasicAnimation* grow = [CABasicAnimation animationWithKeyPath:@"transform"];
++    grow.fromValue = [NSValue valueWithCATransform3D:t];
++    grow.toValue = [NSValue valueWithCATransform3D:CATransform3DIdentity];
++    grow.duration = 0.2;
++    grow.timingFunction = [CAMediaTimingFunction functionWithControlPoints:0.16:1:0.3:1];
++    [self.layer addAnimation:grow forKey:@"grow"];
++  }
++  NSView* icon = self.subviews.firstObject;
++  icon.wantsLayer = YES;
++  CAKeyframeAnimation* drop = [CAKeyframeAnimation animationWithKeyPath:@"transform.translation.y"];
++  drop.values = @[ @(-5), @0, @0 ];
++  drop.keyTimes = @[ @0, @0.6, @1 ];
++  CAKeyframeAnimation* fade = [CAKeyframeAnimation animationWithKeyPath:@"opacity"];
++  fade.values = @[ @0, @1, @1 ];
++  fade.keyTimes = drop.keyTimes;
++  CAAnimationGroup* group = [CAAnimationGroup animation];
++  group.animations = @[ drop, fade ];
++  group.duration = 0.6;
++  group.repeatCount = 2;
++  group.timingFunction = [CAMediaTimingFunction functionWithControlPoints:0.16:1:0.3:1];
++  [icon.layer addAnimation:group forKey:@"drop"];
+ }
+ @end
+ 
+@@ -1003,6 +1440,258 @@ - (NSView*)hitTest:(NSPoint)point {
+ }
+ @end
+ 
++// Under the approval sheet (prototype .scrim): dims the page and takes its clicks.
++@interface AgensSheetScrim : NSView
++@end
++@implementation AgensSheetScrim
++- (void)mouseDown:(NSEvent*)event {
++}
++- (BOOL)accessibilityIsIgnored {
++  return YES;
++}
++@end
++
++// The link's URL while the pointer is on it (prototipos/janela-recursos.html, #link): flush in the
++// page's bottom-left corner, the domain in ink, a long path cut in the middle so its end (file,
++// anchor) stays in view.
++static NSAttributedString* LinkText(NSString* s, NSUInteger max) {
++  const NSUInteger slash = [s rangeOfString:@"/"].location;
++  NSString* domain = slash == NSNotFound ? s : [s substringToIndex:slash];
++  NSString* path = slash == NSNotFound ? @"" : [s substringFromIndex:slash];
++  const NSInteger keep = MAX(8, (NSInteger)max - (NSInteger)domain.length - 1);
++  if (s.length > max && (NSInteger)path.length > keep) {
++    const NSUInteger a = [path rangeOfComposedCharacterSequenceAtIndex:(NSUInteger)ceil(keep * 0.45)].location;
++    const NSUInteger b = [path rangeOfComposedCharacterSequenceAtIndex:path.length - (keep - a)].location;
++    path = [NSString stringWithFormat:@"%@…%@", [path substringToIndex:a], [path substringFromIndex:b]];
++  }
++  NSMutableAttributedString* out = [[NSMutableAttributedString alloc]
++      initWithString:domain
++          attributes:@{NSFontAttributeName : [NSFont systemFontOfSize:12 weight:NSFontWeightMedium], NSForegroundColorAttributeName : kInk.color()}];
++  [out appendAttributedString:[[NSAttributedString alloc]
++                                  initWithString:path
++                                      attributes:@{NSFontAttributeName : [NSFont systemFontOfSize:12], NSForegroundColorAttributeName : kMute.color()}]];
++  return out;
++}
++
++// Prototype .sbub: float background, a 1 pt border only on the sides that face the page, the
++// outer corner rounded; on the right (`right`), mirrored. The page card's corner clips it.
++@interface AgensLinkBubble : AgensPassThroughView
++@property(nonatomic, readonly) NSTextField* text;
++@property(nonatomic) BOOL right;
++@property(nonatomic) CGFloat cardRadius;
++@end
++@implementation AgensLinkBubble {
++  CAShapeLayer* _fill;
++  CAShapeLayer* _edge;
++}
++@synthesize text = _text;
++@synthesize right = _right;
++@synthesize cardRadius = _cardRadius;
++- (BOOL)isFlipped {
++  return YES;
++}
++- (instancetype)initWithFrame:(NSRect)frame {
++  if ((self = [super initWithFrame:frame])) {
++    self.wantsLayer = YES;
++    _fill = [CAShapeLayer layer];
++    _edge = [CAShapeLayer layer];
++    _edge.fillColor = nil;
++    _edge.lineWidth = 1;
++    [self.layer addSublayer:_fill];
++    [self.layer addSublayer:_edge];
++    _text = Label(12, NSFontWeightRegular, kMute);
++    _text.lineBreakMode = NSLineBreakByTruncatingMiddle;
++    [self addSubview:_text];
++  }
++  return self;
++}
++- (void)layout {
++  [super layout];
++  const CGFloat w = NSWidth(self.bounds), h = NSHeight(self.bounds), r = 8 * Round(), R = MAX(0, _cardRadius - 1);
++  _text.frame = NSMakeRect(_right ? 10 : 9, 4, w - 19, 18);
++  // Drawn for the left corner, then mirrored for the right one.
++  CGMutablePathRef fill = CGPathCreateMutable(), edge = CGPathCreateMutable();
++  CGPathMoveToPoint(fill, nullptr, 0, 0);
++  CGPathAddArcToPoint(fill, nullptr, w, 0, w, h, r);
++  CGPathAddLineToPoint(fill, nullptr, w, h);
++  CGPathAddArcToPoint(fill, nullptr, 0, h, 0, 0, R);
++  CGPathCloseSubpath(fill);
++  CGPathMoveToPoint(edge, nullptr, 0, 0.5);
++  CGPathAddArcToPoint(edge, nullptr, w - 0.5, 0.5, w - 0.5, h, r - 0.5);
++  CGPathAddLineToPoint(edge, nullptr, w - 0.5, h);
++  CGAffineTransform flip = _right ? CGAffineTransformMake(-1, 0, 0, 1, w, 0) : CGAffineTransformIdentity;
++  CGPathRef f = CGPathCreateCopyByTransformingPath(fill, &flip), e = CGPathCreateCopyByTransformingPath(edge, &flip);
++  _fill.path = f;
++  _edge.path = e;
++  for (CGPathRef p : {(CGPathRef)fill, (CGPathRef)edge, f, e}) CGPathRelease(p);
++  [self refresh];
++}
++- (void)refresh {
++  _fill.fillColor = CG(kFloat, self);
++  _edge.strokeColor = CG(kLineStrong, self);
++}
++- (void)viewDidChangeEffectiveAppearance {
++  [super viewDidChangeEffectiveAppearance];
++  [self refresh];
++}
++@end
++
++// Permissions (prototipos/janela-recursos.html, #permissoes). Icons from the prototype.
++static NSString* const kIconCam = @"<rect x='3' y='6' width='10' height='8' rx='2'/><path d='m13 9 4-2.5v7L13 11'/>";
++static NSString* const kIconMic = @"<rect x='7.5' y='3' width='5' height='9' rx='2.5'/><path d='M5 10a5 5 0 0 0 10 0M10 15v2'/>";
++static NSString* const kIconLoc = @"<path d='M10 17s5-4.6 5-8.5a5 5 0 0 0-10 0C5 12.4 10 17 10 17z'/><circle cx='10' cy='8.5' r='1.8'/>";
++static NSString* const kIconBell = @"<path d='M6 13V9a4 4 0 0 1 8 0v4l1.5 2h-11zM8.5 16.5a1.5 1.5 0 0 0 3 0'/>";
++static NSString* const kIconClip = @"<rect x='5' y='4.5' width='10' height='12' rx='2'/><path d='M8 4.5V3.5h4v1'/>";
++static NSString* const kIconTune = @"<path d='M4 6h7M14 6h2M4 14h2M9 14h7'/><circle cx='12.5' cy='6' r='1.6'/><circle cx='7.5' cy='14' r='1.6'/>";
++static NSString* const kIconCookie = @"<path d='M16.5 10.5A6.5 6.5 0 1 1 9.5 3.5a2.5 2.5 0 0 0 3 3 2.5 2.5 0 0 0 4 4z'/><circle cx='8' cy='9' r='.6'/><circle cx='11' cy='13' r='.6'/>";
++static NSString* const kIconPopups = @"<rect x='3' y='4.5' width='14' height='11' rx='2'/><path d='M3 8h14'/>";
++static NSString* const kIconSound = @"<path d='M4 8h2.5L10 5v10l-3.5-3H4z M13 7.5a3.5 3.5 0 0 1 0 5'/>";
++// Two icons side by side, as one template image (camera and microphone on the tab).
++static NSImage* AgensIconPair(NSString* a, NSString* b, CGFloat size) {
++  NSString* svg = [NSString stringWithFormat:
++      @"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 38 20' width='%g' height='%g' fill='none' stroke='#000' "
++      @"stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'>%@<g transform='translate(18 0)'>%@</g></svg>",
++      size * 1.9, size, a, b];
++  NSImage* image = [[NSImage alloc] initWithData:[svg dataUsingEncoding:NSUTF8StringEncoding]];
++  [image setTemplate:YES];
++  return image;
++}
++// The kinds a site asks for: icon, what it may do (the request) and its name (the site panel).
++struct PermissionKind {  // literals only: unretained, so the table needs no destructor
++  const char* kind;
++  __unsafe_unretained NSString* icon;
++  __unsafe_unretained NSString* ask;
++  __unsafe_unretained NSString* name;
++};
++static const PermissionKind kPermissionKinds[] = {
++    {"camera", kIconCam, @"Usar a câmera", @"Câmera"},
++    {"microphone", kIconMic, @"Usar o microfone", @"Microfone"},
++    {"location", kIconLoc, @"Saber onde você está", @"Localização"},
++    {"notifications", kIconBell, @"Mostrar notificações", @"Notificações"},
++    {"clipboard", kIconClip, @"Ler o que você copiou", @"Área de transferência"},
++    {"popups", kIconPopups, @"Abrir pop-ups", @"Pop-ups e redirecionamentos"},
++    {"sound", kIconSound, @"Tocar som", @"Som"},
++};
++static NSImage* CaptureIcons(BOOL camera, BOOL microphone, CGFloat size) {
++  return camera && microphone ? AgensIconPair(kIconCam, kIconMic, size) : AgensIcon(camera ? kIconCam : kIconMic, size);
++}
++static const PermissionKind* FindPermissionKind(NSString* kind) {
++  for (const PermissionKind& k : kPermissionKinds) {
++    if ([kind isEqualToString:@(k.kind)]) return &k;
++  }
++  return nullptr;
++}
++
++// Prototype .sw: a 30×18 switch, warm when on.
++@interface AgensSwitch : AgensHoverView
++@property(nonatomic) BOOL on;
++@property(nonatomic, copy) void (^onChange)(BOOL on);
++@end
++@implementation AgensSwitch {
++  CALayer* _knob;
++}
++@synthesize on = _on;
++@synthesize onChange = _onChange;
++- (instancetype)initWithFrame:(NSRect)frame {
++  if ((self = [super initWithFrame:frame])) {
++    _knob = [CALayer layer];
++    _knob.cornerRadius = 7;
++    _knob.backgroundColor = NSColor.whiteColor.CGColor;
++    [self.layer addSublayer:_knob];
++    __weak AgensSwitch* weak = self;
++    self.onPress = ^{
++      AgensSwitch* strong = weak;
++      if (!strong) return;
++      strong.on = !strong.on;
++      if (strong->_onChange) strong->_onChange(strong.on);
++    };
++  }
++  return self;
++}
++- (NSAccessibilityRole)accessibilityRole {
++  return NSAccessibilityCheckBoxRole;
++}
++- (id)accessibilityValue {
++  return @(_on);
++}
++- (void)setOn:(BOOL)on {
++  _on = on;
++  [self refresh];
++}
++- (void)refresh {
++  self.layer.cornerRadius = 9;
++  self.layer.backgroundColor = CG(_on ? kLight3 : kLineStrong, self);
++  [CATransaction begin];
++  [CATransaction setDisableActions:NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion];
++  _knob.frame = CGRectMake(_on ? 14 : 2, 2, 14, 14);
++  [CATransaction commit];
++}
++@end
++
++// Camera or microphone in use, in the address (prototype .live): a pulsing dot and the icons, warm.
++@interface AgensLiveView : AgensHoverView
++- (void)setCamera:(BOOL)camera microphone:(BOOL)microphone;
++- (CGFloat)width;
++@end
++@implementation AgensLiveView {
++  CALayer* _dot;
++  NSImageView* _cam;
++  NSImageView* _mic;
++}
++- (instancetype)initWithFrame:(NSRect)frame {
++  if ((self = [super initWithFrame:frame])) {
++    self.radius = 7;
++    _dot = [CALayer layer];
++    _dot.cornerRadius = 3;
++    [self.layer addSublayer:_dot];
++    _cam = [NSImageView imageViewWithImage:AgensIcon(kIconCam, 14)];
++    _mic = [NSImageView imageViewWithImage:AgensIcon(kIconMic, 14)];
++    for (NSImageView* v in @[ _cam, _mic ]) {
++      v.contentTintColor = kLight3.color();
++      [self addSubview:v];
++    }
++  }
++  return self;
++}
++- (void)setCamera:(BOOL)camera microphone:(BOOL)microphone {
++  _cam.hidden = !camera;
++  _mic.hidden = !microphone;
++  self.accessibilityLabel = camera && microphone ? @"Usando câmera e microfone" : camera ? @"Usando a câmera" : @"Usando o microfone";
++  self.toolTip = self.accessibilityLabel;
++  [_dot removeAnimationForKey:@"blink"];
++  if (!NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) {
++    CABasicAnimation* blink = [CABasicAnimation animationWithKeyPath:@"opacity"];
++    blink.fromValue = @1;
++    blink.toValue = @0.35;
++    blink.duration = 0.8;
++    blink.autoreverses = YES;
++    blink.repeatCount = HUGE_VALF;
++    blink.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
++    [_dot addAnimation:blink forKey:@"blink"];
++  }
++  self.needsLayout = YES;
++}
++- (CGFloat)width {
++  return 6 + 6 + 3 + (_cam.hidden ? 0 : 16) + (_mic.hidden ? 0 : 16) + 4;
++}
++- (void)layout {
++  [super layout];
++  const CGFloat h = NSHeight(self.bounds);
++  _dot.frame = CGRectMake(6, (h - 6) / 2, 6, 6);
++  CGFloat x = 15;
++  for (NSImageView* v in @[ _cam, _mic ]) {
++    if (v.hidden) continue;
++    v.frame = NSMakeRect(x, (h - 14) / 2, 14, 14);
++    x += 16;
++  }
++}
++- (void)refresh {
++  self.layer.cornerRadius = 7 * Round();
++  self.layer.backgroundColor = CG(self.hovered ? kRaise : kHover, self);
++  _dot.backgroundColor = CG(kLight3, self);
++}
++@end
++
+ // ---------------------------------------------------------------------------------------------
+ // Configurações (prototype .settings): a window with the section list on the left (252 pt, 36 pt
+ // rows, Agens icons) and the section on the right. v1 has Aparência, Busca and Atos of our own;
+@@ -1015,6 +1704,9 @@ - (void)toggleSidebar;
+ - (BOOL)tabsOnTop;
+ - (void)toggleTabsPosition;
+ - (NSArray<NSString*>*)atoNamesForSettings;
++- (NSArray<NSNumber*>*)atoSharedForSettings;  // "Compartilhar cookies", per ato, same order
++- (NSArray<NSString*>*)atoIdsForSettings;      // the profile folders, same order
++- (NSString*)currentAtoNameForSettings;         // this window's ato
+ - (NSImage*)extensionIcon:(NSString*)extensionId;
+ @end
+ 
+@@ -1032,6 +1724,43 @@ - (BOOL)isFlipped {
+ }
+ @end
+ 
++
 +// The agent's cursor over the page (prototype .nav-cursor): an arrow and a tag with its name. The
 +// pointer goes through it.
 +@interface AgensCursorView : AgensPassThroughView
@@ -14164,7 +15058,7 @@ index 3c18c4eab1..017cc80371 100644
  static AgensSettings* g_settings;
  
  @implementation AgensSettings {
-@@ -1052,6 +1294,7 @@ @implementation AgensSettings {
+@@ -1052,12 +1781,15 @@ @implementation AgensSettings {
    // Exceções por site and extensions, as last listed (rows address them by tag)
    std::vector<std::pair<std::string, std::string>> _exceptions;  // site, kind
    std::vector<std::string> _extensionIds, _extensionNames;
@@ -14172,7 +15066,39 @@ index 3c18c4eab1..017cc80371 100644
    // Senhas salvas
    std::vector<std::pair<std::string, std::string>> _logins;  // site, username
    BOOL _loginsFresh;
-@@ -1421,8 +1664,15 @@ - (void)showSection:(NSString*)key {
+   int _revealed;  // the login whose password shows, or -1
+   std::string _revealedPassword;
+   NSDate* _unlockedUntil;
++  int _revealGeneration;  // the 8 s hide of the shown password
++  int _removing;          // apagada, still undoable (Desfazer), or -1
+   NSSearchField* _loginSearch;
+   CGFloat _loginsY;
+   NSString* _passwordStatus;
+@@ -1128,6 +1860,7 @@ + (void)showFor:(AgensWindow*)window collapsed:(BOOL)collapsed chrome:(id<AgensS
+ }
+ + (void)forget:(AgensWindow*)window {
+   if (g_settings && g_settings->_browser == window) {
++    [g_settings commitRemoval];
+     g_settings->_browser = nullptr;
+     [g_settings close];
+   }
+@@ -1152,6 +1885,7 @@ - (instancetype)init {
+     _clearWhat = kAgensClearHistory | kAgensClearCookies | kAgensClearCache;
+     _importWhat = kAgensImportBookmarks | kAgensImportHistory | kAgensImportPasswords | kAgensImportCookies |
+                   kAgensImportExtensions;
++    _removing = -1;
+     _revealed = -1;
+     AgensFlippedView* root = [[AgensFlippedView alloc] init];
+     root.wantsLayer = YES;
+@@ -1291,6 +2025,7 @@ - (NSSegmentedControl*)segments:(NSArray<NSString*>*)labels selected:(NSInteger)
+ - (void)showSection:(NSString*)key {
+   if (![key isEqualToString:_section]) {  // leaving a page forgets what it showed
+     _loginsFresh = NO;
++    [self commitRemoval];
+     _revealed = -1;
+     _revealedPassword.clear();
+     _clearStatus = _resetStatus = _passwordStatus = nil;
+@@ -1421,8 +2156,15 @@ - (void)showSection:(NSString*)key {
    } else if ([key isEqualToString:@"extensoes"]) {
      y = [self fillExtensions:y];
      // Like Brave: installs and updates come from Google's store (the only Google service we use).
@@ -14190,7 +15116,7 @@ index 3c18c4eab1..017cc80371 100644
                     y:y];
      y = [self option:@"Atualizar extensões sozinhas" detail:@"Pergunta à loja do Google por versões novas de tempos em tempos."
               control:[self prefSwitch:"agens.extensions.auto_update"]
-@@ -1432,6 +1682,7 @@ - (void)showSection:(NSString*)key {
+@@ -1432,6 +2174,7 @@ - (void)showSection:(NSString*)key {
      NSButton* proxy = [NSButton buttonWithTitle:@"Abrir…" target:self action:@selector(openProxy:)];
      y = [self option:@"Configurações de proxy" detail:@"Usa as do macOS." control:proxy y:y];
      y = [self option:@"Restaurar as configurações originais" detail:nil control:[self subButton:@"Restaurar…" key:@"restaurar"] y:y];
@@ -14198,7 +15124,7 @@ index 3c18c4eab1..017cc80371 100644
    } else if ([key isEqualToString:@"sobre"]) {
      NSString* version = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"";
      y = [self info:product detail:[NSString stringWithFormat:@"Versão %@ · SugiyamaLabs", version] note:@"" y:y];
-@@ -1602,7 +1853,10 @@ static void EnginesListed(void* context, const AgensSearchEngine* engines, int c
+@@ -1602,7 +2345,10 @@ static void EnginesListed(void* context, const AgensSearchEngine* engines, int c
  - (CGFloat)fillAtos:(CGFloat)y {
    // The atos list comes from the chrome (it already observes them); rename in place.
    NSArray<NSString*>* names = [_chrome atoNamesForSettings];
@@ -14210,7 +15136,7 @@ index 3c18c4eab1..017cc80371 100644
      NSTextField* field = [NSTextField textFieldWithString:names[i]];
      field.tag = i;
      field.delegate = self;
-@@ -1610,12 +1864,18 @@ - (CGFloat)fillAtos:(CGFloat)y {
+@@ -1610,12 +2356,18 @@ - (CGFloat)fillAtos:(CGFloat)y {
      field.action = @selector(renameAto:);
      field.frame = NSMakeRect(0, 0, 220, 24);
      y = [self option:[NSString stringWithFormat:@"Ato %lu", (unsigned long)i + 1] detail:nil control:field y:y];
@@ -14230,7 +15156,7 @@ index 3c18c4eab1..017cc80371 100644
    note.frame = NSMakeRect(32, y + 44, NSWidth(_pane.bounds) - 64, 16);
    [_pane addSubview:note];
    return y + 70;
-@@ -1818,6 +2078,48 @@ - (void)setEngine:(NSPopUpButton*)popup {
+@@ -1818,6 +2570,48 @@ - (void)setEngine:(NSPopUpButton*)popup {
  - (void)renameAto:(NSTextField*)field {
    if (_browser && field.stringValue.length) agens_window_rename_ato(_browser, (int)field.tag, field.stringValue.UTF8String);
  }
@@ -14279,7 +15205,7 @@ index 3c18c4eab1..017cc80371 100644
  - (void)newAto:(id)sender {
    if (_browser) agens_window_new_ato(_browser);
  }
-@@ -2265,39 +2567,68 @@ - (void)removeException:(NSButton*)button {
+@@ -2265,39 +3059,68 @@ - (void)removeException:(NSButton*)button {
    [self showSection:@"excecoes"];
  }
  
@@ -14360,7 +15286,7 @@ index 3c18c4eab1..017cc80371 100644
    }
    return y;
  }
-@@ -2305,11 +2636,34 @@ - (void)toggleExtension:(NSSwitch*)sw {
+@@ -2305,11 +3128,34 @@ - (void)toggleExtension:(NSSwitch*)sw {
    const size_t i = sw.tag;
    if (_browser && i < _extensionIds.size()) {
      agens_extension_set_enabled(_browser, _extensionIds[i].c_str(), sw.state == NSControlStateValueOn);
@@ -14395,7 +15321,7 @@ index 3c18c4eab1..017cc80371 100644
    NSAlert* alert = [[NSAlert alloc] init];
    alert.messageText = [NSString stringWithFormat:@"Remover %@?", @(_extensionNames[i].c_str())];
    alert.informativeText = @"Sai deste ato junto com os dados dela.";
-@@ -2320,10 +2674,31 @@ - (void)confirmRemoveExtension:(NSButton*)button {
+@@ -2320,13 +3166,35 @@ - (void)confirmRemoveExtension:(NSButton*)button {
    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
      AgensSettings* strong = weak;
      if (r != NSAlertFirstButtonReturn || !strong || !strong->_browser) return;
@@ -14426,9 +15352,142 @@ index 3c18c4eab1..017cc80371 100644
 +  }];
 +}
  
- // Senhas salvas: search, then one row per login. Seeing or copying a password asks for Touch ID
- // (or the Mac's password), good for a minute.
-@@ -2634,7 +3009,7 @@ - (void)showStep:(int)step {
+-// Senhas salvas: search, then one row per login. Seeing or copying a password asks for Touch ID
+-// (or the Mac's password), good for a minute.
++// Senhas salvas (prototype "Configurações › Senhas"): search, then one row per login of this ato.
++// Seeing or copying a password asks for Touch ID (or the Mac's password), good for 5 min; a shown
++// password hides after 8 s, a copied one leaves the clipboard after 60 s; Apagar leaves Desfazer.
+ - (CGFloat)passwordsPage:(CGFloat)y {
+   if (!_loginsFresh && _browser) {
+     _loginsFresh = YES;
+@@ -2340,6 +3208,10 @@ - (CGFloat)passwordsPage:(CGFloat)y {
+     _loginSearch.action = @selector(searchLogins:);
+     _loginSearch.sendsSearchStringImmediately = YES;
+   }
++  y = [self info:[NSString stringWithFormat:@"Senhas do ato %@", [_chrome currentAtoNameForSettings]]
++          detail:@"Cada ato guarda as suas senhas: uma senha salva aqui não aparece nem preenche nos outros atos. Ficam no Keychain do Mac."
++            note:@""
++               y:y];
+   _loginSearch.frame = NSMakeRect(32, y, NSWidth(_pane.bounds) - 64, 28);
+   [_pane addSubview:_loginSearch];
+   _loginsY = y + 40;
+@@ -2360,15 +3232,23 @@ - (CGFloat)fillLogins {
+     NSString* site = @(_logins[i].first.c_str());
+     NSString* user = _logins[i].second.empty() ? @"(sem usuário)" : @(_logins[i].second.c_str());
+     if (q.length && ![site.lowercaseString containsString:q] && ![user.lowercaseString containsString:q]) continue;
++    if ((int)i == _removing) {
++      y = [self option:[NSString stringWithFormat:@"Senha de %@ apagada", site] detail:nil
++               control:[self buttons:@[ [self small:@"Desfazer" action:@selector(undoRemovePassword:) tag:i] ]] y:y];
++      continue;
++    }
+     const BOOL shown = (int)i == _revealed;
+     NSView* box = [self buttons:@[
+       [self small:shown ? @"Esconder" : @"Ver" action:@selector(revealPassword:) tag:i],
+       [self small:@"Copiar" action:@selector(copyPassword:) tag:i],
+       [self small:@"Apagar…" action:@selector(confirmRemovePassword:) tag:i],
+     ]];
+-    NSString* detail = shown ? [NSString stringWithFormat:@"%@ · %@", user, @(_revealedPassword.c_str())] : user;
++    NSString* detail = [NSString stringWithFormat:@"%@ · %@", user, shown ? @(_revealedPassword.c_str()) : @"••••••••••"];
+     y = [self option:site detail:detail control:box y:y];
+   }
++  if (!_logins.empty()) {
++    y = [self info:@"" detail:nil note:@"Mostrar ou copiar pede o Touch ID (ou a senha do Mac), uma vez a cada 5 min." y:y];
++  }
+   for (NSUInteger k = before; k < _pane.subviews.count; ++k) _pane.subviews[k].identifier = @"login";
+   NSRect f = _pane.frame;
+   f.size.height = MAX(y + 40, NSHeight(_paneScroll.frame));
+@@ -2396,7 +3276,7 @@ - (void)unlockThen:(void (^)(void))then {
+                       dispatch_async(dispatch_get_main_queue(), ^{
+                         AgensSettings* strong = weak;
+                         if (!ok || !strong) return;
+-                        strong->_unlockedUntil = [NSDate dateWithTimeIntervalSinceNow:60];
++                        strong->_unlockedUntil = [NSDate dateWithTimeIntervalSinceNow:5 * 60];
+                         then();
+                       });
+                     }];
+@@ -2423,6 +3303,15 @@ - (void)revealPassword:(NSButton*)button {
+     strong->_revealed = i;
+     strong->_revealedPassword = [strong passwordAt:i];
+     [strong fillLogins];
++    const int generation = ++strong->_revealGeneration;
++    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
++      AgensSettings* again = weak;
++      if (!again || again->_revealGeneration != generation || again->_revealed != i) return;
++      again->_revealed = -1;
++      std::fill(again->_revealedPassword.begin(), again->_revealedPassword.end(), 0);
++      again->_revealedPassword.clear();
++      [again fillLogins];
++    });
+   }];
+ }
+ - (void)copyPassword:(NSButton*)button {
+@@ -2432,31 +3321,45 @@ - (void)copyPassword:(NSButton*)button {
+     AgensSettings* strong = weak;
+     if (!strong) return;
+     const std::string password = [strong passwordAt:i];
+-    [NSPasteboard.generalPasteboard clearContents];
+-    [NSPasteboard.generalPasteboard setString:@(password.c_str()) forType:NSPasteboardTypeString];
+-    strong->_passwordStatus = [NSString stringWithFormat:@"Senha de %@ copiada.", @(strong->_logins[i].first.c_str())];
++    NSPasteboard* board = NSPasteboard.generalPasteboard;
++    [board clearContents];
++    [board setString:@(password.c_str()) forType:NSPasteboardTypeString];
++    const NSInteger copied = board.changeCount;
++    // Out of the clipboard in 60 s, unless something else was copied since.
++    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
++      if (NSPasteboard.generalPasteboard.changeCount == copied) [NSPasteboard.generalPasteboard clearContents];
++    });
++    strong->_passwordStatus = [NSString stringWithFormat:@"Senha de %@ copiada · sai da área de transferência em 60 s",
++                                                         @(strong->_logins[i].first.c_str())];
+     [strong fillLogins];
+   }];
+ }
++// Apagar: the row says so with Desfazer; the login really goes on the next Apagar, on leaving the
++// page or closing Configurações.
+ - (void)confirmRemovePassword:(NSButton*)button {
+-  const int i = (int)button.tag;
++  int i = (int)button.tag;
+   if (i < 0 || i >= (int)_logins.size()) return;
+-  NSAlert* alert = [[NSAlert alloc] init];
+-  alert.messageText = [NSString stringWithFormat:@"Apagar a senha de %@?", @(_logins[i].first.c_str())];
+-  alert.informativeText = _logins[i].second.empty() ? @"Não dá para desfazer." : [NSString stringWithFormat:@"Usuário %@. Não dá para desfazer.", @(_logins[i].second.c_str())];
+-  [alert addButtonWithTitle:@"Apagar"].hasDestructiveAction = YES;
+-  [alert addButtonWithTitle:@"Cancelar"];
+-  __weak AgensSettings* weak = self;
+-  [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
+-    AgensSettings* strong = weak;
+-    if (r != NSAlertFirstButtonReturn || !strong || !strong->_browser || i >= (int)strong->_logins.size()) return;
+-    agens_password_remove(strong->_browser, i);
+-    strong->_logins.erase(strong->_logins.begin() + i);
+-    strong->_revealed = -1;
+-    strong->_revealedPassword.clear();
+-    strong->_passwordStatus = nil;
+-    [strong fillLogins];
+-  }];
++  if (_removing >= 0 && _removing < i) --i;  // the earlier one goes now, the list shifts
++  [self commitRemoval];
++  _removing = i;
++  _revealed = -1;
++  _revealedPassword.clear();
++  _passwordStatus = nil;
++  [self fillLogins];
++}
++- (void)undoRemovePassword:(NSButton*)button {
++  _removing = -1;
++  [self fillLogins];
++}
++- (void)windowWillClose:(NSNotification*)note {
++  [self commitRemoval];
++}
++- (void)commitRemoval {
++  const int i = _removing;
++  _removing = -1;
++  if (i < 0 || i >= (int)_logins.size() || !_browser) return;
++  agens_password_remove(_browser, i);
++  _logins.erase(_logins.begin() + i);
+ }
+ @end
+ 
+@@ -2634,7 +3537,7 @@ - (void)showStep:(int)step {
        _atoName = [NSTextField textFieldWithString:@"Pessoal"];
        _atoName.frame = NSMakeRect(170, y + 30, 300, 26);
        NSTextField* cookies = Label(12, NSFontWeightRegular, kDim);
@@ -14437,7 +15496,7 @@ index 3c18c4eab1..017cc80371 100644
        cookies.frame = NSMakeRect(90, y + 76, 460, 16);
        cookies.alignment = NSTextAlignmentCenter;
        for (NSView* v in @[ label, _atoName, cookies ]) [_body addSubview:v];
-@@ -3440,8 +3815,9 @@ - (void)retry:(id)sender {
+@@ -3440,8 +4343,9 @@ - (void)retry:(id)sender {
  }
  @end
  
@@ -14449,7 +15508,7 @@ index 3c18c4eab1..017cc80371 100644
  @interface AgensFindBar : NSView <NSTextFieldDelegate>
  @property(nonatomic) AgensWindow* engine;
  - (void)open;
-@@ -3451,33 +3827,55 @@ - (void)setCurrent:(int)current total:(int)total;
+@@ -3451,33 +4355,55 @@ - (void)setCurrent:(int)current total:(int)total;
  - (void)refreshTheme;
  @end
  @implementation AgensFindBar {
@@ -14510,7 +15569,7 @@ index 3c18c4eab1..017cc80371 100644
      [self refreshTheme];
    }
    return self;
-@@ -3486,24 +3884,53 @@ - (BOOL)isFlipped {
+@@ -3486,24 +4412,53 @@ - (BOOL)isFlipped {
    return YES;
  }
  - (void)refreshTheme {
@@ -14575,7 +15634,7 @@ index 3c18c4eab1..017cc80371 100644
  }
  - (void)open {
    self.hidden = NO;
-@@ -3516,8 +3943,7 @@ - (void)close {
+@@ -3516,8 +4471,7 @@ - (void)close {
    if (_engine) agens_find_stop(_engine);
  }
  - (void)search:(BOOL)forward {
@@ -14585,7 +15644,7 @@ index 3c18c4eab1..017cc80371 100644
  }
  - (void)step:(BOOL)forward {
    if (self.hidden) {
-@@ -3526,11 +3952,25 @@ - (void)step:(BOOL)forward {
+@@ -3526,11 +4480,25 @@ - (void)step:(BOOL)forward {
    }
    [self search:forward];
  }
@@ -14615,7 +15674,16 @@ index 3c18c4eab1..017cc80371 100644
  }
  - (void)controlTextDidChange:(NSNotification*)note {
    [self search:YES];
-@@ -3556,6 +3996,216 @@ static void FindChanged(void* context, int current, int total) {
+@@ -3549,13 +4517,223 @@ - (BOOL)control:(NSControl*)control textView:(NSTextView*)textView doCommandBySe
+ @end
+ 
+ static void SiteDataCleared(void* context) {
+-  NSButton* button = (__bridge_transfer NSButton*)context;
+-  button.title = @"Dados apagados";
++  NSTextField* note = (__bridge_transfer NSTextField*)context;
++  note.stringValue = @"Apagados";
+ }
+ static void FindChanged(void* context, int current, int total) {
    [(__bridge AgensFindBar*)context setCurrent:current total:total];
  }
  
@@ -14832,7 +15900,7 @@ index 3c18c4eab1..017cc80371 100644
  // ---------------------------------------------------------------------------------------------
  // The chrome.
  
-@@ -3625,6 +4275,8 @@ @implementation AgensChrome {
+@@ -3625,6 +4803,8 @@ @implementation AgensChrome {
    AgensDragView* _tabsDoc;
    AgensToolButton* _moreAtos;  // "⋯" when the atos don't fit
    NSMutableArray<NSString*>* _atoNames;
@@ -14841,9 +15909,20 @@ index 3c18c4eab1..017cc80371 100644
    int _activeAto;
    NSView* _atosLine;
    NSMutableArray<AgensAtoButton*>* _atoButtons;
-@@ -3635,8 +4287,19 @@ @implementation AgensChrome {
+@@ -3633,10 +4813,29 @@ @implementation AgensChrome {
+   AgensToolButton* _toggle;
+   AgensToolButton* _star;  // in the address, right side (prototype .star)
    AgensToolButton* _sound;  // in the address, left of the star, while the page plays or is muted
-   AgensToolButton* _capture;  // in the address: camera/microphone in use (opens the site panel)
+-  AgensToolButton* _capture;  // in the address: camera/microphone in use (opens the site panel)
++  AgensLiveView* _capture;
++  BOOL _cameraOn, _micOn;  // in the address: camera/microphone in use (opens the site panel)
++  AgensToolButton* _asking;
++  AgensToolButton* _key;
++  NSView* _sheet;  // the approval sheet (askApproval:), over the page area
++  NSView* _scrim;
++  id _sheetKeys;  // in the address: a password to save (prototype "Oferta depois do login")  // in the address: the permission a site is asking for, its popover hangs here
++  BOOL _sitePermissions;     // the site has permissions set in this ato: the site icon is the tune
++  NSString* _permissionsURL;  // the page _sitePermissions was read for
    NSArray<AgensToolButton*>* _indicators;  // pop-ups, location, notifications, downloads (kAgensInd*)
 -  AgensHoverView* _zoom;      // "110%" while the page isn't at 100% (click: back to 100%)
 -  NSTextField* _zoomLabel;
@@ -14863,16 +15942,32 @@ index 3c18c4eab1..017cc80371 100644
    AgensToolButton* _newTabTop;  // "+" at the end of the top strip
    AgensStripView* _strip;       // holds the tabs on top; scrolls when they don't fit
    CGFloat _stripOffset;
-@@ -3648,6 +4311,8 @@ @implementation AgensChrome {
+@@ -3648,16 +4847,21 @@ @implementation AgensChrome {
    AgensToolButton* _menu;  // "⋯" after the address
    NSView* _menuView;       // the open panel (menu or downloads), shown under its button
    __weak NSView* _popoverAnchor;
 +  NSRect _arrowFrom;     // the control the open panel points at (in self), or empty: no arrow
 +  NSView* _popupArrow;   // the white arrow over an extension's popup, while it is open
    id _clickMonitor;
-   AgensToolButton* _downloadsButton;  // shows up once there is a download this session
+-  AgensToolButton* _downloadsButton;  // shows up once there is a download this session
++  AgensDownloadsButton* _downloadsButton;  // shows up once there is a download this session
++  NSString* _keepArmed;  // the dangerous download whose Manter was clicked once
    NSView* _downloadsPanel;            // the open downloads panel, refreshed live
-@@ -3673,8 +4338,13 @@ @implementation AgensChrome {
+   std::vector<AgensDownload> _downloads;
+   std::vector<std::string> _downloadNames;
+   NSView* _loadbar;  // prototype .loadbar: a warm glow running over a 2 pt line while the page loads
+   CAGradientLayer* _loadGlow;
+   CGFloat _loadW;
+-  NSView* _statusPill;  // link URL, bottom-left of the page (Chromium's status bubble)
+-  NSTextField* _statusText;
++  AgensLinkBubble* _statusPill;  // link URL, bottom-left of the page (Chromium's status bubble)
++  NSString* _statusString;
++  int _statusHide;      // generation of the pending hide (0,6 s after the pointer leaves the link)
++  id _pointerMonitor;   // moves the bubble out from under the pointer
+   BOOL _bookmarked;
+   NSImageView* _newTabPlus;
+   NSTextField* _newTabLabel;
+@@ -3673,8 +4877,13 @@ @implementation AgensChrome {
    std::vector<BookmarkItem> _bookmarks;
    long long _barId;
    AgensFindBar* _find;
@@ -14888,10 +15983,11 @@ index 3c18c4eab1..017cc80371 100644
    AgensErrorView* _error;
    BOOL _stopPage;  // the active tab shows a security stop page
    int _split;            // the active tab's split (0 none, 1 side by side, 2 stacked)
-@@ -3691,6 +4361,26 @@ @implementation AgensChrome {
+@@ -3691,6 +4900,27 @@ @implementation AgensChrome {
    NSString* _url;
    BOOL _loading;
    NSRect _page;
++  NSRect _statusArea;  // where the link bubble goes: the page's own part of the card
 +  NSString* _controller;  // the agent driving a tab shown in the card (active or split partner), nil when none
 +  int _controlIndex;      // that tab, for the pill's buttons
 +  NSString* _controlTitleText;  // the pill's lines while the agent works
@@ -14915,7 +16011,38 @@ index 3c18c4eab1..017cc80371 100644
  }
  
  - (instancetype)initWithWindow:(AgensWindow*)window {
-@@ -3762,20 +4452,13 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3737,12 +4967,27 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+     [_omni addSubview:_omniIcon];
+     [_omni addSubview:_address];
+     [_omni addSubview:_sound];
+-    _capture = [[AgensToolButton alloc] initWithSymbol:@"video.fill" label:@"Usando a câmera" size:12];
+-    _capture.radius = 7;
++    _capture = [[AgensLiveView alloc] init];
+     _capture.hidden = YES;
+-    [_capture setTint:kDim];
+     _capture.onPress = ^{ [weak showSiteInfo]; };
+     [_omni addSubview:_capture];
++    _asking = [[AgensToolButton alloc] initWithSymbol:@"circle" label:@"Pedido de permissão" size:12];
++    _asking.radius = 7;
++    _asking.hidden = YES;
++    _asking.selected = YES;
++    [_asking setTint:kLight3];
++    _asking.onPress = ^{ [weak closeMenu]; };  // its popover is open while it shows; clicking closes it
++    [_omni addSubview:_asking];
++    _key = [[AgensToolButton alloc] initWithSymbol:@"key" label:@"Salvar a senha" size:12];
++    [_key setImage:AgensIcon(@"<circle cx='7' cy='10' r='3.2'/><path d='M10.2 10H17M14.5 10v2.5M16.5 10v2'/>", 15)];
++    _key.radius = 7;
++    _key.hidden = YES;
++    _key.onPress = ^{
++      AgensChrome* strong = weak;
++      if (!strong) return;
++      strong->_passwordAsked ? [strong closeMenu] : [strong askToSavePassword];
++    };
++    [_omni addSubview:_key];
+     {
+       // One small icon per Chromium address-bar indicator; they all open the site panel.
+       struct { NSString* symbol; NSString* label; } kInd[] = {
+@@ -3762,20 +5007,13 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
          [list addObject:b];
        }
        _indicators = list;
@@ -14941,7 +16068,7 @@ index 3c18c4eab1..017cc80371 100644
        [_omni addSubview:_zoom];
      }
      [_omni addSubview:_star];
-@@ -3786,6 +4469,7 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3786,11 +5024,12 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
      _siteButton.onPress = ^{ [weak showSiteInfo]; };
      [_omni addSubview:_siteButton positioned:NSWindowBelow relativeTo:_omniIcon];
      _extensions = [NSMutableArray array];
@@ -14949,7 +16076,32 @@ index 3c18c4eab1..017cc80371 100644
      _extButton = [[AgensToolButton alloc] initWithSymbol:@"puzzlepiece" label:@"Extensões"];
      [_extButton setImage:AgensIcon(kIconExtensions)];
      _extButton.hidden = YES;
-@@ -3859,6 +4543,8 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+     _extButton.onPress = ^{ [weak toggleExtensions:nil]; };
+-    _downloadsButton = [[AgensToolButton alloc] initWithSymbol:@"arrow.down" label:@"Downloads"];
++    _downloadsButton = [[AgensDownloadsButton alloc] initWithSymbol:@"arrow.down" label:@"Downloads"];
+     [_downloadsButton setImage:AgensIcon(kIconDown)];
+     _downloadsButton.hidden = YES;
+     _downloadsButton.onPress = ^{ [weak toggleDownloads]; };
+@@ -3803,12 +5042,13 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+     _loadGlow.endPoint = CGPointMake(1, 0.5);
+     _loadGlow.cornerRadius = 1;
+     [_loadbar.layer addSublayer:_loadGlow];
+-    _statusPill = [[AgensPassThroughView alloc] init];
+-    _statusPill.wantsLayer = YES;
+-    _statusPill.layer.borderWidth = 1;
++    _statusPill = [[AgensLinkBubble alloc] init];
+     _statusPill.hidden = YES;
+-    _statusText = Label(12, NSFontWeightRegular, kMute);
+-    [_statusPill addSubview:_statusText];
++    _pointerMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskMouseMoved
++                                                            handler:^NSEvent*(NSEvent* event) {
++                                                              [weak placeStatus];
++                                                              return event;
++                                                            }];
+     _menu = [[AgensToolButton alloc] initWithSymbol:@"ellipsis" label:@"Menu"];
+     _menu.onPress = ^{ [weak showMenu]; };
+ 
+@@ -3859,6 +5099,8 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
      _tabsDoc = [[AgensDragView alloc] init];
      _tabsScroll.documentView = _tabsDoc;
      _atoNames = [NSMutableArray array];
@@ -14958,7 +16110,7 @@ index 3c18c4eab1..017cc80371 100644
      _moreAtos = [[AgensToolButton alloc] initWithSymbol:@"ellipsis" label:@"Todos os atos" size:13];
      _moreAtos.onPress = ^{ [weak showAtosMenu]; };
      _addAto = [[AgensToolButton alloc] initWithSymbol:@"plus" label:@"Novo ato"];
-@@ -3942,6 +4628,13 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3942,6 +5184,13 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
      };
      _find = [[AgensFindBar alloc] initWithFrame:NSZeroRect];
      _find.engine = window;
@@ -14972,7 +16124,7 @@ index 3c18c4eab1..017cc80371 100644
      agens_window_set_find_observer(window, FindChanged, (__bridge void*)_find);
      _bookmarksPage = [[AgensBookmarksView alloc] init];
      _bookmarksPage.hidden = YES;
-@@ -3966,9 +4659,47 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3966,9 +5215,47 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
      _ntp.field.delegate = self;
  
      for (NSView* v in @[ _toggle, _back, _forward, _reload, _omni, _extButton, _downloadsButton, _menu, _tabsScroll, _moreAtos, _atoTile, _atoName, _separator, _newTab, _newTabTop,
@@ -15021,10 +16173,22 @@ index 3c18c4eab1..017cc80371 100644
      [self refreshTheme];
      ApplyAppearance(agens_window_color_mode(_window));  // the saved choice, from the first window on
      agens_window_set_tabs_observer(_window, TabsChanged, (__bridge void*)self);
-@@ -4009,6 +4740,10 @@ - (void)refreshTheme {
+@@ -3998,7 +5285,6 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+ - (void)refreshTheme {
+   _omni.layer.cornerRadius = 10 * Round();
+   _suggest.layer.cornerRadius = 12 * Round();
+-  _statusPill.layer.cornerRadius = 7 * Round();
+   _omni.layer.backgroundColor = CG(kSunk, self);
+   _omni.layer.borderColor = CG(_address.currentEditor ? kLineStrong : kLine, self);
+   _suggest.layer.backgroundColor = CG(kFloat, self);
+@@ -4007,8 +5293,12 @@ - (void)refreshTheme {
+   _separator.layer.backgroundColor = CG(kLine, self);
+   _atosLine.layer.backgroundColor = CG(kLine, self);
    _atoDot.layer.backgroundColor = CG(kLight3, self);
-   _statusPill.layer.backgroundColor = CG(kFloat, self);
-   _statusPill.layer.borderColor = CG(kLine, self);
+-  _statusPill.layer.backgroundColor = CG(kFloat, self);
+-  _statusPill.layer.borderColor = CG(kLine, self);
++  [_statusPill refresh];
++  [self refreshSheetColors];
 +  _controlBar.layer.cornerRadius = 14 * Round();
 +  _controlBar.layer.backgroundColor = CG(kFloat, self);
 +  _controlBar.layer.borderColor = CG(kLineStrong, self);
@@ -15032,7 +16196,20 @@ index 3c18c4eab1..017cc80371 100644
    SyncGlass(_suggest, 12 * Round());
    [self runLoadbar];  // the glow's color
  }
-@@ -4167,6 +4902,11 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4160,13 +5450,21 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+   CGFloat omniX = top ? NSMaxX(_reload.frame) + 10 : MAX(columnEnd + kGap, navX + 126);
+   _menu.frame = NSMakeRect(width - kPad - 28, btnY, 28, 28);
+   CGFloat omniEnd = NSMinX(_menu.frame) - 4;
+-  if (!_downloadsButton.hidden) {
+-    _downloadsButton.frame = NSMakeRect(NSMinX(_menu.frame) - 30, btnY, 28, 28);
++  // Downloads sit right before the atos (prototype .dlb); in the column, the atos aren't here.
++  auto placeDownloads = [&] {
++    if (_downloadsButton.hidden) return;
++    _downloadsButton.frame = NSMakeRect(omniEnd + 4 - 30, btnY, 28, 28);
+     omniEnd = NSMinX(_downloadsButton.frame) - 4;
+-  }
++  };
++  if (!top) placeDownloads();
    if (!_extButton.hidden) {
      _extButton.frame = NSMakeRect(omniEnd + 4 - 30, btnY, 28, 28);
      omniEnd = NSMinX(_extButton.frame) - 4;
@@ -15044,7 +16221,31 @@ index 3c18c4eab1..017cc80371 100644
    }
  
    // Atos: only what fits (6 in the open column, 5 collapsed, 4 on the bar); past that the last
-@@ -4208,9 +4948,9 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4193,6 +5491,7 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+       v.frame = NSMakeRect(x, btnY, 30, 28);
+       x += 32;
+     }
++    placeDownloads();
+   }
+   _omni.frame = NSMakeRect(omniX, barY + (bar - omniH) / 2, omniEnd - omniX, omniH);
+   _omniIcon.frame = NSMakeRect(12, (omniH - 14) / 2, 14, 14);
+@@ -4200,17 +5499,23 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+   _star.frame = NSMakeRect(NSWidth(_omni.frame) - 4 - 26, (omniH - 26) / 2, 26, 26);
+   _sound.frame = NSMakeRect(NSMinX(_star.frame) - 26, (omniH - 26) / 2, 26, 26);
+   const CGFloat afterSound = _sound.hidden ? NSMinX(_star.frame) : NSMinX(_sound.frame);
+-  _capture.frame = NSMakeRect(afterSound - 26, (omniH - 26) / 2, 26, 26);
+-  CGFloat addressEnd = _capture.hidden ? afterSound : NSMinX(_capture.frame);
++  const CGFloat liveW = [_capture width];
++  _capture.frame = NSMakeRect(afterSound - liveW - 2, (omniH - 22) / 2, liveW, 22);
++  CGFloat addressEnd = _capture.hidden ? afterSound : NSMinX(_capture.frame) - 2;
++  for (AgensToolButton* b in @[ _asking, _key ]) {
++    if (b.hidden) continue;
++    b.frame = NSMakeRect(addressEnd - 24, (omniH - 22) / 2, 22, 22);
++    addressEnd = NSMinX(b.frame) - 2;
++  }
+   for (AgensToolButton* b in _indicators) {
+     if (b.hidden) continue;
+     addressEnd -= 26;
      b.frame = NSMakeRect(addressEnd, (omniH - 26) / 2, 26, 26);
    }
    if (!_zoom.hidden) {
@@ -15057,7 +16258,7 @@ index 3c18c4eab1..017cc80371 100644
    }
    _address.frame = NSMakeRect(33, (omniH - 18) / 2, addressEnd - 6 - 33, 18);
  
-@@ -4340,8 +5080,13 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4340,8 +5645,13 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
  
    _page = page;
    // Our pages over the card (new tab, errors…) cover the active tab's pane only; the engine splits
@@ -15072,7 +16273,7 @@ index 3c18c4eab1..017cc80371 100644
    if (_split) {
      const CGFloat gap = 8;
      if (_split == 2) {
-@@ -4367,14 +5112,23 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4367,15 +5677,23 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
      _ntp2.frame = NSInsetRect(other, 1, 1);
      _ntp2Click.frame = _ntp2.frame;
    }
@@ -15092,14 +16293,15 @@ index 3c18c4eab1..017cc80371 100644
    if (NSWidth(_page) != _loadW) [self runLoadbar];  // the sweep is sized to the line
 -  CGFloat statusW = MIN(ceil(_statusText.fittingSize.width) + 24, NSWidth(_page) / 2);
 -  _statusPill.frame = NSMakeRect(NSMinX(_page) + 8, NSMaxY(_page) - 8 - 22, statusW, 22);
+-  _statusText.frame = NSMakeRect(10, 3, statusW - 20, 16);
 +  // Over the page's own part (not over DevTools in the card).
-+  const NSRect statusArea = _devtoolsShown && !_split ? pane : _page;
-+  CGFloat statusW = MIN(ceil(_statusText.fittingSize.width) + 24, NSWidth(statusArea) / 2);
-+  _statusPill.frame = NSMakeRect(NSMinX(statusArea) + 8, NSMaxY(statusArea) - 8 - 22, statusW, 22);
-   _statusText.frame = NSMakeRect(10, 3, statusW - 20, 16);
++  _statusArea = _devtoolsShown && !_split ? pane : _page;
++  [self placeStatus];
++  [self placeSheet];
  
    NSRect anchor = [self editingField] == _ntp.field ? [_ntp convertRect:_ntp.well.frame toView:self]
-@@ -4384,11 +5138,38 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+                                                      : _omni.frame;
+@@ -4384,11 +5702,38 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
    for (NSUInteger i = 0; i < _suggestionRows.count; ++i) {
      _suggestionRows[i].frame = NSMakeRect(5, 5 + i * 34, NSWidth(anchor) - 10, 34);
    }
@@ -15140,7 +16342,7 @@ index 3c18c4eab1..017cc80371 100644
  }
  - (AgensRect)siteIconRect {
    NSRect r = [_omni convertRect:_omniIcon.frame toView:self];
-@@ -4398,6 +5179,111 @@ - (void)relayout {
+@@ -4398,6 +5743,111 @@ - (void)relayout {
    [self layoutForWidth:(int)NSWidth(self.bounds) height:(int)NSHeight(self.bounds)];
  }
  
@@ -15252,7 +16454,7 @@ index 3c18c4eab1..017cc80371 100644
  - (void)setTabs:(const AgensTab*)tabs count:(int)count {
    __weak AgensChrome* weak = self;
    while ((int)_rows.count < count) {
-@@ -4415,6 +5301,7 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+@@ -4415,6 +5865,7 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
        AgensChrome* strong = weak;
        if (strong && strong->_window) agens_window_toggle_mute(strong->_window, weakRow.index);
      };
@@ -15260,7 +16462,7 @@ index 3c18c4eab1..017cc80371 100644
      row.onSplit = ^(int layout) {
        AgensChrome* strong = weak;
        if (strong && strong->_window) agens_window_split(strong->_window, weakRow.index, layout);
-@@ -4431,6 +5318,7 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+@@ -4431,6 +5882,7 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
      [_rows removeLastObject];
    }
    int activeTab = -1;
@@ -15268,7 +16470,7 @@ index 3c18c4eab1..017cc80371 100644
    _pinnedCount = 0;
    _partner = -1;
    BOOL partnerIsNewTab = NO;
-@@ -4448,6 +5336,7 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+@@ -4448,6 +5900,7 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
      if (tabs[i].pinned) ++_pinnedCount;
      if (tabs[i].active) activeTab = i;
      if (!tabs[i].active) continue;
@@ -15276,9 +16478,24 @@ index 3c18c4eab1..017cc80371 100644
      if (_activeIndex != i) {
        [_find close];  // a find belongs to the page it ran on
        _stripFollowActive = YES;
-@@ -4466,13 +5355,25 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
-                                                                        : @"Usando o microfone";
-     _capture.toolTip = _capture.accessibilityLabel;
+@@ -4458,21 +5911,33 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+     [_sound setTint:tabs[i].muted ? kLight3 : kDim];
+     _sound.accessibilityLabel = tabs[i].muted ? @"Ativar o som da aba" : @"Silenciar a aba";
+     _sound.toolTip = _sound.accessibilityLabel;
+-    _capture.hidden = !(tabs[i].camera || tabs[i].microphone);
+-    [_capture setSymbol:tabs[i].camera ? @"video.fill" : @"mic.fill"];
+-    [_capture setColor:NSColor.systemRedColor];  // like the system's own camera/mic dot
+-    _capture.accessibilityLabel = tabs[i].camera && tabs[i].microphone ? @"Usando a câmera e o microfone"
+-                                  : tabs[i].camera                     ? @"Usando a câmera"
+-                                                                       : @"Usando o microfone";
+-    _capture.toolTip = _capture.accessibilityLabel;
++    const BOOL capturing = tabs[i].camera || tabs[i].microphone;
++    if (capturing && (_capture.hidden || tabs[i].camera != _cameraOn || tabs[i].microphone != _micOn)) {
++      [_capture setCamera:tabs[i].camera microphone:tabs[i].microphone];
++    }
++    _capture.hidden = !capturing;
++    _cameraOn = tabs[i].camera;
++    _micOn = tabs[i].microphone;
      for (NSUInteger k = 0; k < _indicators.count; ++k) _indicators[k].hidden = !(tabs[i].indicators & (1 << k));
 -    _zoom.hidden = tabs[i].zoom_percent == 100;
 -    _zoomLabel.stringValue = [NSString stringWithFormat:@"%d%%", tabs[i].zoom_percent];
@@ -15304,7 +16521,7 @@ index 3c18c4eab1..017cc80371 100644
      _error.hidden = !(tabs[i].error || _stopPage) || tabs[i].loading || !tabs[i].url[0];
      if (!_error.hidden) [_error showError:tabs[i].error name:@(tabs[i].error_name) stop:_stopPage];
      _url = @(tabs[i].url);
-@@ -4480,6 +5381,14 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+@@ -4480,6 +5945,14 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
      _bookmarked = tabs[i].bookmarked;
      _back.enabled = tabs[i].can_go_back;
      _forward.enabled = tabs[i].can_go_forward;
@@ -15319,7 +16536,25 @@ index 3c18c4eab1..017cc80371 100644
    }
    if (_loadbar.hidden == _loading) {
      _loadbar.hidden = !_loading;
-@@ -4506,6 +5415,11 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+@@ -4493,7 +5966,16 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+   _siteButton.hidden = _url.length == 0;
+   _reload.accessibilityLabel = _loading ? @"Parar" : @"Recarregar";
+   BOOL secure = [_url hasPrefix:@"https://"];
+-  _omniIcon.image = Symbol(_url.length == 0 ? @"magnifyingglass" : secure ? @"lock.fill" : @"globe", 12);
++  if (![_permissionsURL isEqualToString:_url]) [self readSitePermissions];
++  const BOOL keyShown = _window && agens_password_pending(_window);
++  if (keyShown != !_key.hidden) {
++    _key.hidden = !keyShown;
++    [self relayout];
++  }
++  // The lock turns into the tune while the site has permissions here (prototype "Informações do site").
++  _omniIcon.image = _url.length == 0 ? Symbol(@"magnifyingglass", 12)
++                    : _sitePermissions || _cameraOn || _micOn ? AgensIcon(kIconTune, 14)
++                                                              : Symbol(secure ? @"lock.fill" : @"globe", 12);
+   // Don't overwrite what the person is typing.
+   if (_address.currentEditor == nil) _address.stringValue = [self displayURL];
+   const BOOL wasHistory = !_history.hidden;
+@@ -4506,6 +5988,11 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
    if (!_ntp.hidden && !wasNTP) _ntp.field.stringValue = @"";
    [self relayout];
    if (activeTab >= 0 && _rows[activeTab].superview == _tabsDoc) [_tabsDoc scrollRectToVisible:_rows[activeTab].frame];
@@ -15331,7 +16566,7 @@ index 3c18c4eab1..017cc80371 100644
  }
  
  // Chromium's internal pages show as agens:// (typing agens:// opens them: url_fixer, agens-scheme.patch).
-@@ -4539,14 +5453,18 @@ - (void)setAtos:(const AgensAto*)atos count:(int)count {
+@@ -4539,14 +6026,18 @@ - (void)setAtos:(const AgensAto*)atos count:(int)count {
      [_atoButtons removeLastObject];
    }
    [_atoNames removeAllObjects];
@@ -15351,7 +16586,7 @@ index 3c18c4eab1..017cc80371 100644
    }
    [self relayout];
  }
-@@ -4671,13 +5589,25 @@ - (void)showMenu {
+@@ -4671,13 +6162,25 @@ - (void)showMenu {
      NSString* title;
      NSString* key;
      void (^action)(void);
@@ -15378,7 +16613,7 @@ index 3c18c4eab1..017cc80371 100644
    const CGFloat w = 280, rowH = 33;
    NSView* panel = [self popoverWidth:w height:std::size(items) * rowH + 10 under:_menu];
    panel.accessibilityRole = NSAccessibilityMenuRole;
-@@ -4685,6 +5615,7 @@ - (void)showMenu {
+@@ -4685,6 +6188,7 @@ - (void)showMenu {
    CGFloat y = NSHeight(panel.frame) - 5 - rowH;  // the panel isn't flipped
    for (const Item& it : items) {
      AgensMenuRow* row = [[AgensMenuRow alloc] initWithIcon:it.icon title:it.title key:it.key];
@@ -15386,7 +16621,7 @@ index 3c18c4eab1..017cc80371 100644
      void (^action)(void) = it.action;
      row.onPress = ^{
        [weak closeMenu];
-@@ -4694,7 +5625,7 @@ - (void)showMenu {
+@@ -4694,7 +6198,7 @@ - (void)showMenu {
      [panel addSubview:row];
      y -= rowH;
    }
@@ -15395,7 +16630,7 @@ index 3c18c4eab1..017cc80371 100644
  }
  
  // Our floating panels (prototype .menu): float background, strong border, 12 pt corners.
-@@ -4709,11 +5640,18 @@ - (NSView*)popoverWidth:(CGFloat)w height:(CGFloat)h under:(NSView*)anchor {
+@@ -4709,11 +6213,18 @@ - (NSView*)popoverWidth:(CGFloat)w height:(CGFloat)h under:(NSView*)anchor {
    return panel;
  }
  - (void)presentPopover:(NSView*)panel anchor:(NSView*)anchor {
@@ -15414,7 +16649,7 @@ index 3c18c4eab1..017cc80371 100644
    // Rise in, as the prototype (.2s); a click anywhere else or Esc closes it.
    _menuView.alphaValue = 0;
    [NSAnimationContext runAnimationGroup:^(NSAnimationContext* ctx) {
-@@ -4735,12 +5673,24 @@ - (void)presentPopover:(NSView*)panel anchor:(NSView*)anchor {
+@@ -4735,16 +6246,61 @@ - (void)presentPopover:(NSView*)panel anchor:(NSView*)anchor {
                                       NSPoint p = [strong convertPoint:event.locationInWindow fromView:nil];
                                       if (event.window != strong.window ||
                                           (!NSPointInRect(p, strong->_menuView.frame) &&
@@ -15437,32 +16672,257 @@ index 3c18c4eab1..017cc80371 100644
 +  // We are flipped, the panel isn't: under the control, its arrow is on its top edge.
 +  DrawArrowPanel(_menuView, radius, p.below, round(p.arrow_x - (round(p.x) - p.x)), nil);
 +}
++// Shows at once on a link; leaving it, stays 0,6 s (the pointer often crosses to the next link).
  - (void)setStatus:(const char*)text {
-   _statusText.stringValue = @(text);
-   _statusPill.hidden = _statusText.stringValue.length == 0;
-@@ -4775,7 +5725,7 @@ - (void)showDownloads {
-   NSView* panel = [self popoverWidth:w height:10 under:_downloadsButton];
-   panel.accessibilityRole = NSAccessibilityListRole;
+-  _statusText.stringValue = @(text);
+-  _statusPill.hidden = _statusText.stringValue.length == 0;
+-  [self relayout];
++  NSString* s = @(text);
++  const int generation = ++_statusHide;
++  if (!s.length) {
++    __weak AgensChrome* weak = self;
++    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
++      AgensChrome* strong = weak;
++      if (!strong || strong->_statusHide != generation) return;
++      strong->_statusString = nil;
++      [NSAnimationContext runAnimationGroup:^(NSAnimationContext* ctx) {
++        ctx.duration = NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion ? 0 : 0.12;
++        strong->_statusPill.animator.alphaValue = 0;
++      } completionHandler:^{
++        if (!strong->_statusString) strong->_statusPill.hidden = YES;
++      }];
++    });
++    return;
++  }
++  _statusString = s;
++  _statusPill.text.attributedStringValue = LinkText(s, 70);
++  _statusPill.hidden = NO;
++  _statusPill.alphaValue = 1;
++  [self placeStatus];
++}
++// Prototype .sbub: as wide as its text, up to 560 pt (40 pt less than the page); in the
++// bottom-right corner while the pointer is near the bottom-left one.
++- (void)placeStatus {
++  if (_statusPill.hidden || NSIsEmptyRect(_statusArea)) return;
++  const NSRect a = _statusArea;
++  const CGFloat w = MIN(ceil(_statusPill.text.attributedStringValue.size.width) + 20, MIN(560, NSWidth(a) - 40)), h = 25;
++  const NSPoint p = [self convertPoint:self.window.mouseLocationOutsideOfEventStream fromView:nil];
++  const BOOL right = p.x - NSMinX(a) < w + 30 && NSMaxY(a) - p.y < 60 && NSPointInRect(p, a);
++  _statusPill.cardRadius = agens_ui_card_radius(nullptr);
++  _statusPill.right = right;
++  _statusPill.frame = NSMakeRect(right ? NSMaxX(a) - w : NSMinX(a), NSMaxY(a) - h, w, h);
++  _statusPill.needsLayout = YES;
+ }
+ 
+ - (void)setDownloads:(const AgensDownload*)downloads count:(int)count started:(BOOL)started {
+@@ -4752,16 +6308,31 @@ - (void)setDownloads:(const AgensDownload*)downloads count:(int)count started:(B
+   for (int i = 0; i < count; ++i) _downloadNames.push_back(downloads[i].name);
+   _downloads.assign(downloads, downloads + count);
+   for (int i = 0; i < count; ++i) _downloads[i].name = _downloadNames[i].c_str();  // keep our copies
+-  BOOL running = std::any_of(_downloads.begin(), _downloads.end(), [](const AgensDownload& d) { return d.state == kAgensDownloading; });
+-  _downloadsButton.hidden = count == 0;
+-  [_downloadsButton setTint:running ? kLight3 : kDim];
+-  _downloadsButton.accessibilityLabel = running ? @"Downloads em andamento" : @"Downloads";
+-  [self relayout];
+-  if (started) {
+-    [self showDownloads];  // like Chrome: a new download opens the list
+-  } else if (_downloadsPanel) {
+-    [self fillDownloads];
+-  }
++  const BOOL appear = _downloadsButton.hidden;
++  [self paintDownloadsButton];
++  // Nothing opens by itself (prototype "Download novo"): the button arrives and its arrow drops.
++  if (started && !_downloadsButton.hidden) [_downloadsButton arrive:appear];
++  if (_downloadsPanel) [self fillDownloads];
++}
++// The button exists while there is a download this session, or while its panel is open (after
++// Limpar lista the panel shows the empty list; closing it takes the button away).
++- (void)paintDownloadsButton {
++  long long got = 0, total = 0;
++  BOOL running = NO, attention = NO;
++  for (const AgensDownload& d : _downloads) {
++    if (d.dangerous || (d.state == kAgensDownloadFailed && d.interrupt_reason != 40)) attention = YES;
++    if (d.state != kAgensDownloading || d.dangerous) continue;
++    running = YES;
++    got += d.received;
++    total += d.total;
++  }
++  const BOOL hide = _downloads.empty() && !_downloadsPanel;
++  const BOOL moved = hide != _downloadsButton.hidden;
++  _downloadsButton.hidden = hide;
++  [_downloadsButton setProgress:running ? (total > 0 ? (double)got / total : 0) : -1 attention:attention];
++  [_downloadsButton setTint:running ? kInk : kDim];
++  _downloadsButton.accessibilityLabel = attention ? @"Downloads, um precisa de você" : running ? @"Downloads em andamento" : @"Downloads";
++  if (moved) [self relayout];
+ }
+ - (void)toggleDownloads {
+   if (_downloadsPanel) {
+@@ -4771,62 +6342,311 @@ - (void)toggleDownloads {
+   }
+ }
+ - (void)showDownloads {
+-  const CGFloat w = 340;
+-  NSView* panel = [self popoverWidth:w height:10 under:_downloadsButton];
+-  panel.accessibilityRole = NSAccessibilityListRole;
++  NSView* panel = [self popoverWidth:350 height:10 under:_downloadsButton];
++  panel.accessibilityRole = NSAccessibilityGroupRole;
    panel.accessibilityLabel = @"Downloads";
 -  [self presentPopover:panel anchor:_downloadsButton];
 +  [self presentPopover:panel anchor:_downloadsButton pointingAt:_downloadsButton];
    _downloadsPanel = panel;
++  _downloadsButton.selected = YES;
    [self fillDownloads];
  }
-@@ -4807,6 +5757,7 @@ - (void)fillDownloads {
-     [_downloadsPanel addSubview:row];
-     y -= rowH;
-   }
++static NSURL* DownloadsFolder(AgensWindow* window) {
++  char dir[1024] = "";
++  if (window) agens_pref_get_string(window, kAgensProfile, "download.default_directory", dir, sizeof dir);
++  return dir[0] ? [NSURL fileURLWithPath:@(dir)]
++                : [NSFileManager.defaultManager URLsForDirectory:NSDownloadsDirectory inDomains:NSUserDomainMask].firstObject;
++}
++- (void)openDownloadsFolder {
++  if (NSURL* folder = DownloadsFolder(_window)) [NSWorkspace.sharedWorkspace openURL:folder];
++}
++// Prototype .dlpop: "Downloads" and Limpar lista, the rows (or the empty list), a line and
++// "Abrir a pasta Downloads". Rebuilt on every update; its buttons act on mouse down.
+ - (void)fillDownloads {
+-  const CGFloat w = NSWidth(_downloadsPanel.frame), rowH = 48;
++  const CGFloat w = NSWidth(_downloadsPanel.frame), pad = 6, headH = 34, footH = 11 + 31;
+   const int count = (int)MIN(_downloads.size(), (size_t)6);
++  CGFloat listH = 0;
++  for (int i = 0; i < count; ++i) listH += [AgensDownloadRow heightFor:_downloads[i]];
++  if (!count) listH = 92;
+   for (NSView* v in [_downloadsPanel.subviews copy]) [v removeFromSuperview];
+   NSRect f = _downloadsPanel.frame;
+-  f.size.height = count * rowH + 10;
++  f.size.height = pad + headH + listH + footH + pad;
+   _downloadsPanel.frame = f;
++  AgensFlippedView* content = [[AgensFlippedView alloc] initWithFrame:_downloadsPanel.bounds];
++  [_downloadsPanel addSubview:content];
+   __weak AgensChrome* weak = self;
+-  CGFloat y = f.size.height - 5 - rowH;
++  NSTextField* title = Label(13, NSFontWeightSemibold, kInk);
++  title.stringValue = @"Downloads";
++  title.frame = NSMakeRect(pad + 8, pad + 7, 160, 18);
++  [content addSubview:title];
++  if (count) {
++    NSButton* clear = [NSButton buttonWithTitle:@"Limpar lista" target:self action:@selector(clearDownloads:)];
++    clear.bordered = NO;
++    clear.attributedTitle = [[NSAttributedString alloc]
++        initWithString:@"Limpar lista"
++            attributes:@{NSFontAttributeName : [NSFont systemFontOfSize:12.5], NSForegroundColorAttributeName : kMute.color()}];
++    [clear sizeToFit];
++    clear.frame = NSMakeRect(w - pad - 8 - NSWidth(clear.frame), pad + 7, NSWidth(clear.frame), 18);
++    [content addSubview:clear];
++  }
++  CGFloat y = pad + headH;
+   for (int i = 0; i < count; ++i) {
+-    AgensDownloadRow* row = [[AgensDownloadRow alloc] initWithFrame:NSMakeRect(5, y, w - 10, rowH)];
+-    [row updateWith:_downloads[i]];
+-    const BOOL done = _downloads[i].state == kAgensDownloaded;
+-    row.onPress = ^{
+-      AgensChrome* strong = weak;
+-      if (strong && done && strong->_window) agens_window_download_open(strong->_window, i);
+-    };
+-    row.onShow = ^{
+-      AgensChrome* strong = weak;
+-      if (strong && strong->_window) agens_window_download_show(strong->_window, i);
+-    };
+-    row.onCancel = ^{
+-      AgensChrome* strong = weak;
+-      if (strong && strong->_window) agens_window_download_cancel(strong->_window, i);
+-    };
+-    [_downloadsPanel addSubview:row];
+-    y -= rowH;
++    const AgensDownload& d = _downloads[i];
++    const CGFloat h = [AgensDownloadRow heightFor:d];
++    // The dangerous block has the prototype's margin (2 pt above, 4 below) inside its row height.
++    AgensDownloadRow* row = [[AgensDownloadRow alloc]
++        initWithFrame:d.dangerous ? NSMakeRect(pad, y + 2, w - 2 * pad, h - 6) : NSMakeRect(pad, y, w - 2 * pad, h)];
++    NSString* name = @(d.name);
++    row.keepArmed = [_keepArmed isEqualToString:name];
++    row.onAction = ^(NSString* action) { [weak download:i action:action name:name]; };
++    [row updateWith:d];
++    [content addSubview:row];
++    y += h;
++  }
++  if (!count) {  // prototype .empty
++    NSImageView* icon = [NSImageView imageViewWithImage:AgensIcon(kIconDown, 26)];
++    icon.contentTintColor = kMute.color();
++    icon.frame = NSMakeRect((w - 26) / 2, y + 18, 26, 26);
++    NSTextField* text = Label(12.5, NSFontWeightRegular, kDim);
++    text.stringValue = @"Nenhum download neste ato desde que a janela abriu.";
++    text.alignment = NSTextAlignmentCenter;
++    text.frame = NSMakeRect(pad + 10, y + 50, w - 2 * pad - 20, 18);
++    [content addSubview:icon];
++    [content addSubview:text];
++    y += listH;
++  }
++  NSView* line = [[NSView alloc] initWithFrame:NSMakeRect(pad, y + 5, w - 2 * pad, 1)];
++  line.wantsLayer = YES;
++  line.layer.backgroundColor = CG(kLine, self);
++  [content addSubview:line];
++  AgensMenuRow* folder = [[AgensMenuRow alloc] initWithIcon:kIconFolder title:@"Abrir a pasta Downloads" key:@"⌥⌘L"];
++  folder.frame = NSMakeRect(pad, y + 11, w - 2 * pad, 31);
++  folder.onPress = ^{
++    [weak closeMenu];
++    [weak openDownloadsFolder];
++  };
++  [content addSubview:folder];
 +  [self pointPanel];  // its height changed
++}
++- (void)download:(int)index action:(NSString*)action name:(NSString*)name {
++  if (!_window) return;
++  if ([action isEqualToString:@"arm"]) {  // Manter asks for a second click, on purpose
++    _keepArmed = name;
++    [self fillDownloads];
++    return;
+   }
++  _keepArmed = nil;
++  if ([action isEqualToString:@"pause"] || [action isEqualToString:@"resume"]) {
++    agens_window_download_pause(_window, index, [action isEqualToString:@"pause"]);
++  } else if ([action isEqualToString:@"remove"]) {
++    agens_window_download_remove(_window, index);
++  } else if ([action isEqualToString:@"retry"]) {
++    agens_window_download_retry(_window, index);
++  } else if ([action isEqualToString:@"keep"]) {
++    agens_window_download_keep(_window, index);
++  } else if ([action isEqualToString:@"open"]) {
++    agens_window_download_open(_window, index);
++  } else if ([action isEqualToString:@"show"]) {
++    agens_window_download_show(_window, index);
++  }
++}
++- (void)clearDownloads:(id)sender {
++  _keepArmed = nil;
++  if (_window) agens_window_downloads_clear(_window);
  }
  - (void)closeMenu {
++  if (!_asking.hidden) {  // the asking icon lives as long as its popover
++    _asking.hidden = YES;
++    [self relayout];
++  }
    if (_permissionAsked) {  // closed without an answer
-@@ -4820,13 +5771,178 @@ - (void)closeMenu {
+     _permissionAsked = NO;
+     if (_window) agens_window_permission_answer(_window, kAgensPermissionDismiss);
+   }
+-  if (_passwordAsked) {  // closed without an answer
++  if (_passwordAsked) {  // closed without an answer: the key stays and asks again
+     _passwordAsked = NO;
+-    if (_window) agens_password_answer(_window, kAgensPasswordNotNow);
++    _key.selected = NO;
++    if (_window) agens_password_answer(_window, kAgensPasswordLater);
+   }
    [_menuView removeFromSuperview];
    _menuView = nil;
    _popoverAnchor = nil;
+-  _downloadsPanel = nil;
 +  _arrowFrom = NSZeroRect;
-   _downloadsPanel = nil;
++  if (_downloadsPanel) {
++    _downloadsPanel = nil;
++    _downloadsButton.selected = NO;
++    _keepArmed = nil;
++    [self paintDownloadsButton];  // an empty list takes the button away now
++  }
 +  _zoomValue = nil;
 +  _zoom.selected = NO;
 +  _volumeRow = nil;
@@ -15636,7 +17096,22 @@ index 3c18c4eab1..017cc80371 100644
  - (void)menuBookmarks:(id)sender {
    if (_window) agens_window_open_page(_window, kAgensBookmarks);
  }
-@@ -4854,6 +5970,15 @@ - (BOOL)collapsed {
+@@ -4839,8 +6659,12 @@ - (void)menuSettings:(id)sender {
+ // chrome://settings, extensions, downloads... land here (native_shell.cc): a Settings section, or
+ // the downloads panel.
+ - (void)openSection:(NSString*)key {
+-  if ([key isEqualToString:@"downloads-panel"]) {
+-    if (!_downloadsPanel) [self showDownloads];
++  if ([key isEqualToString:@"downloads-panel"]) {  // ⌥⌘L: the list, or the folder when there is none
++    if (_downloadsButton.hidden) {
++      [self openDownloadsFolder];
++    } else if (!_downloadsPanel) {
++      [self showDownloads];
++    }
+     return;
+   }
+   [self menuSettings:nil];
+@@ -4854,6 +6678,15 @@ - (BOOL)collapsed {
  - (NSArray<NSString*>*)atoNamesForSettings {
    return [_atoNames copy];
  }
@@ -15652,7 +17127,17 @@ index 3c18c4eab1..017cc80371 100644
  - (void)toggleSidebar {
    _collapsed = !_collapsed;
    [NSUserDefaults.standardUserDefaults setBool:_collapsed forKey:kCollapsedKey];
-@@ -4975,22 +6100,36 @@ - (void)detach {
+@@ -4959,6 +6792,9 @@ - (void)detach {
+   _keyMonitor = nil;
+   if (_menuMonitor) [NSEvent removeMonitor:_menuMonitor];
+   _menuMonitor = nil;
++  if (_pointerMonitor) [NSEvent removeMonitor:_pointerMonitor];
++  _pointerMonitor = nil;
++  [self closeSheet];  // the engine answers Não permitir for a closing window
+   if (_window) {
+     agens_window_set_tabs_observer(_window, nullptr, nullptr);
+     agens_window_set_atos_observer(_window, nullptr, nullptr);
+@@ -4975,22 +6811,36 @@ - (void)detach {
  // popup hangs from the button), and the "installed" notice.
  - (void)setExtensions:(const AgensExtensionButton*)list count:(int)count installed:(const char*)installed {
    [_extensions removeAllObjects];
@@ -15695,7 +17180,7 @@ index 3c18c4eab1..017cc80371 100644
    }
  }
  - (NSImage*)extensionIcon:(NSString*)extensionId {
-@@ -4999,43 +6138,128 @@ - (NSImage*)extensionIcon:(NSString*)extensionId {
+@@ -4999,43 +6849,128 @@ - (NSImage*)extensionIcon:(NSString*)extensionId {
    }
    return nil;
  }
@@ -15839,7 +17324,7 @@ index 3c18c4eab1..017cc80371 100644
    manage.frame = NSMakeRect(5, y, w - 10, rowH);
    manage.onPress = ^{
      AgensChrome* strong = weak;
-@@ -5044,7 +6268,62 @@ - (void)showExtensions:(NSString*)notice {
+@@ -5044,7 +6979,62 @@ - (void)showExtensions:(NSString*)notice {
      [g_settings showSection:@"extensoes"];
    };
    [panel addSubview:manage];
@@ -15902,7 +17387,7 @@ index 3c18c4eab1..017cc80371 100644
  }
  
  // --- Favoritos: the page, the bar and its menus.
-@@ -5094,6 +6373,89 @@ - (NSRect)roomForBar:(NSRect)page {
+@@ -5094,6 +7084,89 @@ - (NSRect)roomForBar:(NSRect)page {
    page.size.height -= 32;
    return page;
  }
@@ -15992,7 +17477,7 @@ index 3c18c4eab1..017cc80371 100644
  - (void)toggleBookmarkBar {
    [NSUserDefaults.standardUserDefaults setBool:!_barShown forKey:kBookmarkBarKey];
    [NSNotificationCenter.defaultCenter postNotificationName:kThemeChanged object:nil];  // every window
-@@ -5135,7 +6497,7 @@ - (void)showFolder:(long long)folder under:(NSView*)button {
+@@ -5135,7 +7208,7 @@ - (void)showFolder:(long long)folder under:(NSView*)button {
      none.frame = NSMakeRect(14, 11, w - 28, 18);
      [panel addSubview:none];
    }
@@ -16001,48 +17486,783 @@ index 3c18c4eab1..017cc80371 100644
  }
  - (void)openBookmark:(NSString*)url {
    if (_window && url.length) agens_window_navigate(_window, url.UTF8String);
-@@ -5204,6 +6566,31 @@ - (void)answerPermission:(NSButton*)button {
-   if (_window) agens_window_permission_answer(_window, (AgensPermissionAnswer)button.tag);
-   [self closeMenu];
+@@ -5160,201 +7233,623 @@ - (void)newBookmarkFolder {
  }
-+// The socket needs the person's OK (an app connecting; later a site session, agent control).
+ // "Salvar a senha?" under the address bar, on its right (where Chrome shows its key). Closing the
+ // panel any other way counts as "Agora não".
+-// A site asks for permissions: a panel under the site icon (where Chrome's bubble points), with
+-// what it wants, and Permitir / Só desta vez / Bloquear. Closing it any other way dismisses
+-// (the site may ask again later).
+-- (void)askPermission:(NSString*)site asks:(NSArray<NSString*>*)asks {
++// A site asks (prototype "Pedido do site"): the permission's icon shows warm at the end of the
++// address and the popover hangs from it: "<site> quer", the ato, what it may do, and Permitir esta
++// vez / Permitir sempre / Não permitir stacked (no "esta vez" for kinds without it, as
++// notifications). Closing it any other way dismisses (the site may ask again later).
++- (void)askPermission:(NSString*)site asks:(NSArray<NSString*>*)asks once:(BOOL)once {
+   [self closeMenu];
+-  const CGFloat w = 340, lineH = 20, h = 16 + 20 + 6 + asks.count * lineH + 16 + 24 + 14;
+-  NSView* panel = [self popoverWidth:w height:h under:_omni];
+-  panel.frame = NSMakeRect(NSMinX(_omni.frame), NSMaxY(_omni.frame) + 6, w, h);
++  const PermissionKind* first = asks.count ? FindPermissionKind(asks[0]) : nullptr;
++  [_asking setImage:AgensIcon(first ? first->icon : kIconPermissions, 15)];
++  _asking.hidden = NO;
++  [self relayout];
++  const CGFloat w = 290, x = 14, tw = w - 2 * x, itemH = 30, btnH = 32;
++  NSMutableArray<NSArray*>* answers = [NSMutableArray array];  // title, tag
++  if (once) [answers addObject:@[ @"Permitir esta vez", @(kAgensPermissionAllowOnce) ]];
++  [answers addObject:@[ @"Permitir sempre", @(kAgensPermissionAllow) ]];
++  [answers addObject:@[ @"Não permitir", @(kAgensPermissionDeny) ]];
++  // The note under the title, with the tune icon inline as the prototype.
++  NSMutableAttributedString* note = [[NSMutableAttributedString alloc]
++      initWithString:[NSString stringWithFormat:@"No ato %@. Você muda depois no ícone ", [self currentAtoNameForSettings]]];
++  NSTextAttachment* tune = [[NSTextAttachment alloc] init];
++  NSImage* tuneImage = AgensIcon(kIconTune, 12);
++  tune.image = tuneImage;
++  tune.bounds = NSMakeRect(0, -2, 12, 12);
++  [note appendAttributedString:[NSAttributedString attributedStringWithAttachment:tune]];
++  [note appendAttributedString:[[NSAttributedString alloc] initWithString:@" do endereço."]];
++  [note addAttributes:@{NSFontAttributeName : [NSFont systemFontOfSize:12], NSForegroundColorAttributeName : kDim.color()}
++                range:NSMakeRange(0, note.length)];
++  const CGFloat noteH = ceil([note boundingRectWithSize:NSMakeSize(tw, 100) options:NSStringDrawingUsesLineFragmentOrigin].size.height) + 2;
++  const CGFloat h = 12 + 19 + 2 + noteH + 8 + asks.count * itemH + 12 + answers.count * btnH + (answers.count - 1) * 6 + 10;
++  NSView* panel = [self popoverWidth:w height:h under:_asking];
+   panel.accessibilityRole = NSAccessibilityGroupRole;
+-  NSTextField* title = Label(13.5, NSFontWeightSemibold, kInk);
+-  title.stringValue = [NSString stringWithFormat:@"%@ quer:", site.length ? site : @"Este site"];
++  panel.accessibilityLabel = [NSString stringWithFormat:@"%@ quer", site];
++  AgensFlippedView* content = [[AgensFlippedView alloc] initWithFrame:panel.bounds];
++  [panel addSubview:content];
++  NSTextField* title = Label(13, NSFontWeightSemibold, kInk);
++  title.stringValue = [NSString stringWithFormat:@"%@ quer", site.length ? site : @"Este site"];
+   title.lineBreakMode = NSLineBreakByTruncatingMiddle;
+-  title.frame = NSMakeRect(16, h - 16 - 20, w - 32, 20);
+-  [panel addSubview:title];
+-  CGFloat y = NSMinY(title.frame) - 6 - lineH;
+-  for (NSString* ask in asks) {
+-    NSTextField* line = Label(13, NSFontWeightRegular, kMute);
+-    line.stringValue = [@"·  " stringByAppendingString:ask];
+-    line.frame = NSMakeRect(16, y, w - 32, 18);
+-    [panel addSubview:line];
+-    y -= lineH;
+-  }
+-  NSButton* allow = [NSButton buttonWithTitle:@"Permitir" target:self action:@selector(answerPermission:)];
+-  allow.tag = kAgensPermissionAllow;
+-  NSButton* once = [NSButton buttonWithTitle:@"Só desta vez" target:self action:@selector(answerPermission:)];
+-  once.tag = kAgensPermissionAllowOnce;
+-  NSButton* deny = [NSButton buttonWithTitle:@"Bloquear" target:self action:@selector(answerPermission:)];
+-  deny.tag = kAgensPermissionDeny;
+-  CGFloat x = w - 16;
+-  for (NSButton* b in @[ allow, once, deny ]) {
+-    [b sizeToFit];
+-    x -= NSWidth(b.frame);
+-    b.frame = NSMakeRect(x, 14, NSWidth(b.frame), NSHeight(b.frame));
+-    x -= 8;
+-    [panel addSubview:b];
++  title.frame = NSMakeRect(x, 12, tw, 19);
++  NSTextField* noteLabel = [NSTextField wrappingLabelWithString:@""];
++  noteLabel.attributedStringValue = note;
++  noteLabel.frame = NSMakeRect(x - 2, 33, tw + 4, noteH);
++  for (NSView* v in @[ title, noteLabel ]) [content addSubview:v];
++  CGFloat y = 33 + noteH + 8;
++  for (NSString* ask in asks) {  // prototype .pli
++    const PermissionKind* k = FindPermissionKind(ask);
++    NSImageView* icon = [NSImageView imageViewWithImage:AgensIcon(k ? k->icon : kIconPermissions, 16)];
++    icon.contentTintColor = kMute.color();
++    icon.frame = NSMakeRect(x, y + 7, 16, 16);
++    NSTextField* line = Label(13, NSFontWeightRegular, kInk);
++    line.stringValue = k ? k->ask : [[ask substringToIndex:1].uppercaseString stringByAppendingString:[ask substringFromIndex:1]];
++    line.frame = NSMakeRect(x + 26, y + 5, tw - 26, 19);
++    [content addSubview:icon];
++    [content addSubview:line];
++    y += itemH;
+   }
+-  [self presentPopover:panel anchor:_omni];
++  y += 12;
++  __weak AgensChrome* weak = self;
++  for (NSArray* a : answers) {  // prototype .acts.stack: full width, none filled
++    AgensPillButton* b = [[AgensPillButton alloc] initWithFrame:NSMakeRect(x, y, tw, btnH)];
++    b.radius = 10;
++    b.label.stringValue = a[0];
++    b.accessibilityLabel = a[0];
++    const AgensPermissionAnswer answer = (AgensPermissionAnswer)[a[1] intValue];
++    b.onPress = ^{ [weak answerPermission:answer]; };
++    [content addSubview:b];
++    y += btnH + 6;
++  }
++  [self presentPopover:panel anchor:_asking.superview pointingAt:_asking];
+   _permissionAsked = YES;
+ }
+-- (void)answerPermission:(NSButton*)button {
++- (void)answerPermission:(AgensPermissionAnswer)answer {
+   _permissionAsked = NO;
+-  if (_window) agens_window_permission_answer(_window, (AgensPermissionAnswer)button.tag);
++  if (_window) agens_window_permission_answer(_window, answer);
+   [self closeMenu];
++  _permissionsURL = nil;  // an answer may have set a permission: read them again
++  [self readSitePermissions];
++}
++// The socket needs the person's OK (prototype "Folha de aprovação desenhada"): a sheet floating over
++// the page area, 14 pt from its top, on a scrim that takes the clicks. The app's icon, name and
++// bundle id, the ato, what it will be able to do, and Permitir / Permitir sempre / Não permitir;
++// Não permitir is the default (Return), because the sheet may come up while the person types.
 +// Closing the window while it waits counts as Não permitir (the engine answers then).
-+- (void)askApproval:(NSString*)title detail:(NSString*)detail offerAlways:(BOOL)offerAlways {
++- (void)askApproval:(NSString*)title detail:(NSString*)detail offerAlways:(BOOL)offerAlways facts:(NSDictionary*)facts {
 +  if (!_window || !self.window) {
 +    if (_window) agens_window_approval_answer(_window, kAgensApprovalDeny);
 +    return;
 +  }
-+  NSAlert* alert = [[NSAlert alloc] init];
-+  alert.messageText = title;
-+  alert.informativeText = detail;
-+  // Return answers Não permitir: the sheet comes up while the person may be typing elsewhere.
-+  [alert addButtonWithTitle:@"Permitir"].keyEquivalent = @"";
-+  if (offerAlways) [alert addButtonWithTitle:@"Permitir sempre"];
-+  [alert addButtonWithTitle:@"Não permitir"].keyEquivalent = @"\r";
++  [self closeSheet];
++  auto str = [&](NSString* key) -> NSString* {
++    id v = facts[key];
++    return [v isKindOfClass:NSString.class] ? v : @"";
++  };
++  NSString* kind = str(@"kind");
++  NSString* app = str(@"app").length ? str(@"app") : str(@"app_name");
++  NSString* ato = str(@"ato_name");
++  NSString* agent = str(@"agent");
++  NSString* who = app;
++  NSString* note = detail;
++  NSMutableArray<NSArray<NSString*>*>* items = [NSMutableArray array];  // icon, title, line
++  if ([kind isEqualToString:@"connect"]) {
++    NSString* where = str(@"bundle_id").length ? str(@"bundle_id") : str(@"app_path");
++    who = where.length ? [NSString stringWithFormat:@"%@ · %@", app, where] : app;
++    [items addObject:@[ kIconAtos, @"Ver e abrir os seus atos", @"A lista de atos; criar um e abrir a janela dele" ]];
++    [items addObject:@[ kIconPermissions, @"Pedir o resto, uma coisa por vez", @"Usar abas ou logins de um ato abre outra folha como esta" ]];
++    const BOOL ours = [facts[@"ours"] isKindOfClass:NSNumber.class] && [facts[@"ours"] boolValue];
++    note = offerAlways ? (ours ? @"Permitir sempre vale para este app." : @"App de outra empresa. Permitir sempre vale para este app.")
++                       : (ours ? @"Vale para esta conexão." : @"App de outra empresa. Vale para esta conexão.");
++  } else if ([kind isEqualToString:@"control"]) {
++    const BOOL named = agent.length && ![agent isEqualToString:app];
++    title = named ? [NSString stringWithFormat:@"Um agente quer controlar o ato %@", ato]
++                  : [NSString stringWithFormat:@"O %@ quer controlar o ato %@", app, ato];
++    who = named ? [NSString stringWithFormat:@"Agente “%@”, pelo %@", agent, app] : app;
++    NSArray* shares = [facts[@"shares_with"] isKindOfClass:NSArray.class] ? facts[@"shares_with"] : @[];
++    [items addObject:@[ @"<path d='M5 3.5 15 9l-4.5 1.4L8.5 15z'/>", @"Clicar, digitar e rolar", @"Nas abas deste ato, como se fosse você" ]];
++    [items addObject:@[ @"<rect x='3' y='4.5' width='14' height='11' rx='2'/><path d='M3 8h14'/>", @"Abrir e fechar abas",
++                        [NSString stringWithFormat:@"Só no %@", ato] ]];
++    [items addObject:@[ kIconCookie, @"Agir logado",
++                        shares.count ? [NSString stringWithFormat:@"Usa os logins do %@ e de %@, que dividem cookies com ele", ato,
++                                                                  [shares componentsJoinedByString:@", "]]
++                                     : [NSString stringWithFormat:@"Usa os logins do %@", ato] ]];
++    NSArray* allow = [facts[@"allow"] isKindOfClass:NSArray.class] ? facts[@"allow"] : @[];
++    if ([allow containsObject:@"passwords"]) [items addObject:@[ kIconPasswords, @"Preencher senhas salvas", @"As do ato, nos sites delas" ]];
++    if ([allow containsObject:@"clipboard"]) [items addObject:@[ kIconClip, @"Usar a área de transferência", @"Ler e escrever o que está copiado" ]];
++    if ([allow containsObject:@"eval"]) [items addObject:@[ kIconSettings, @"Rodar código nas páginas", @"JavaScript dele nas abas que controla" ]];
++    note = @"A pílula do agente fica na aba enquanto ele controla. Você retoma a qualquer hora com esc ou na pílula.";
++    offerAlways = NO;  // control is for this time only (prototype "Agente pede o ato")
++  }
++  NSString* reason = [kind isEqualToString:@"control"] ? str(@"reason") : @"";
++
++  const CGFloat W = 470, px = 20, tw = W - 2 * px;
++  AgensFlippedView* sheet = [[AgensFlippedView alloc] initWithFrame:NSMakeRect(0, 0, W, 100)];
++  sheet.wantsLayer = YES;
++  sheet.layer.cornerRadius = 16 * Round();
++  sheet.layer.borderWidth = 1;
++  sheet.layer.backgroundColor = CG(kFloat, self);
++  sheet.layer.borderColor = CG(kLineStrong, self);
++  sheet.layer.shadowOpacity = 0.45;
++  sheet.layer.shadowRadius = 15;
++  sheet.layer.shadowOffset = CGSizeZero;
++  sheet.accessibilityRole = NSAccessibilitySheetRole;
++  sheet.accessibilityLabel = title;
++  // Header (prototype .ask-hd): the app's icon, the question, who asks.
++  NSView* icon;
++  NSString* path = str(@"app_path");
++  if (path.length) {
++    NSImageView* image = [NSImageView imageViewWithImage:[NSWorkspace.sharedWorkspace iconForFile:path]];
++    image.imageScaling = NSImageScaleProportionallyUpOrDown;
++    icon = image;
++  } else {  // prototype .appi: the warm tile with the initial
++    icon = [[NSView alloc] init];
++    icon.wantsLayer = YES;
++    CAGradientLayer* g = [CAGradientLayer layer];
++    g.colors = @[ (id)Hex(0xFFE9C7).CGColor, (id)Hex(0xFFC98A).CGColor, (id)Hex(0xE8893A).CGColor ];
++    g.locations = @[ @0, @0.55, @1 ];
++    g.startPoint = CGPointMake(0, 0);
++    g.endPoint = CGPointMake(1, 1);
++    g.cornerRadius = 12;
++    g.frame = CGRectMake(0, 0, 48, 48);
++    [icon.layer addSublayer:g];
++    NSTextField* letter = Label(22, NSFontWeightBold, kBg);
++    letter.textColor = Hex(0x0B0B0D);
++    letter.alignment = NSTextAlignmentCenter;
++    letter.stringValue = app.length ? [app substringToIndex:1].uppercaseString : @"?";
++    letter.frame = NSMakeRect(0, 10, 48, 28);
++    [icon addSubview:letter];
++  }
++  icon.frame = NSMakeRect(px, 18, 48, 48);
++  [sheet addSubview:icon];
++  const CGFloat hx = px + 62, hw = W - hx - px;
++  NSTextField* head = [NSTextField wrappingLabelWithString:title];
++  head.font = [NSFont systemFontOfSize:16 weight:NSFontWeightSemibold];
++  head.textColor = kInk.color();
++  const CGFloat headH = ceil([head.cell cellSizeForBounds:NSMakeRect(0, 0, hw, 200)].height);
++  NSTextField* whoLabel = Label(12.5, NSFontWeightRegular, kDim);
++  whoLabel.stringValue = who;
++  whoLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
++  const CGFloat blockH = headH + 18, hy = 18 + MAX(0, (48 - blockH) / 2);
++  head.frame = NSMakeRect(hx, hy, hw, headH);
++  whoLabel.frame = NSMakeRect(hx, hy + headH, hw, 18);
++  [sheet addSubview:head];
++  [sheet addSubview:whoLabel];
++  CGFloat y = MAX(18 + 48, hy + blockH) + 12;
++  if (reason.length) {  // what the agent said it wants to do
++    NSTextField* r = [NSTextField wrappingLabelWithString:[NSString stringWithFormat:@"“%@”", reason]];
++    r.font = [NSFont systemFontOfSize:13];
++    r.textColor = kMute.color();
++    const CGFloat rh = ceil([r.cell cellSizeForBounds:NSMakeRect(0, 0, tw, 200)].height);
++    r.frame = NSMakeRect(px, y, tw, rh);
++    [sheet addSubview:r];
++    y += rh + 10;
++  }
++  if (ato.length) {  // prototype .chip: "Ato <b>Estúdio</b>"
++    NSTextField* chipText = Label(12.5, NSFontWeightRegular, kMute);
++    NSMutableAttributedString* t = [[NSMutableAttributedString alloc]
++        initWithString:@"Ato " attributes:@{NSFontAttributeName : [NSFont systemFontOfSize:12.5], NSForegroundColorAttributeName : kMute.color()}];
++    [t appendAttributedString:[[NSAttributedString alloc] initWithString:ato
++                                                              attributes:@{NSFontAttributeName : [NSFont systemFontOfSize:12.5 weight:NSFontWeightMedium],
++                                                                           NSForegroundColorAttributeName : kInk.color()}]];
++    chipText.attributedStringValue = t;
++    const CGFloat cw = ceil(t.size.width) + 5 + 18 + 6 + 9;
++    NSView* chip = [[NSView alloc] initWithFrame:NSMakeRect(px, y, cw, 26)];
++    chip.wantsLayer = YES;
++    chip.layer.cornerRadius = 8 * Round();
++    chip.layer.borderWidth = 1;
++    chip.layer.borderColor = CG(kLine, self);
++    chip.layer.backgroundColor = CG(kSunk, self);
++    NSTextField* mono = Label(10.5, NSFontWeightBold, kInk);
++    mono.stringValue = [ato substringToIndex:1].uppercaseString;
++    mono.alignment = NSTextAlignmentCenter;
++    mono.wantsLayer = YES;
++    mono.layer.cornerRadius = 5;
++    mono.layer.backgroundColor = CG(kRaise2, self);
++    mono.frame = NSMakeRect(5, 4, 18, 18);
++    chipText.frame = NSMakeRect(29, 4, cw - 29, 17);
++    [chip addSubview:mono];
++    [chip addSubview:chipText];
++    [sheet addSubview:chip];
++    y += 26 + 4;
++  }
++  if (items.count) {  // "Vai poder" and the list (prototype .g, .l, .r)
++    NSTextField* g = Label(12, NSFontWeightRegular, kDim);
++    g.stringValue = @"Vai poder";
++    g.frame = NSMakeRect(px, y + 14, tw, 16);
++    [sheet addSubview:g];
++    y += 14 + 16 + 6;
++    const CGFloat rowH = 54;
++    NSView* list = [[NSView alloc] initWithFrame:NSMakeRect(px, y, tw, items.count * rowH + (items.count - 1))];
++    list.wantsLayer = YES;
++    list.layer.cornerRadius = 10 * Round();
++    list.layer.borderWidth = 1;
++    list.layer.borderColor = CG(kLine, self);
++    list.layer.backgroundColor = CG(kSunk, self);
++    CGFloat ry = NSHeight(list.frame);  // the list isn't flipped: from the top down
++    for (NSUInteger k = 0; k < items.count; ++k) {
++      ry -= rowH;
++      NSImageView* i = [NSImageView imageViewWithImage:AgensIcon(items[k][0], 16)];
++      i.contentTintColor = kMute.color();
++      i.frame = NSMakeRect(12, ry + rowH - 8 - 2 - 16, 16, 16);
++      NSTextField* b = Label(13, NSFontWeightMedium, kInk);
++      b.stringValue = items[k][1];
++      b.frame = NSMakeRect(38, ry + rowH - 8 - 19, tw - 50, 19);
++      NSTextField* sm = Label(12, NSFontWeightRegular, kDim);
++      sm.stringValue = items[k][2];
++      sm.frame = NSMakeRect(38, ry + 9, tw - 50, 17);
++      for (NSView* v in @[ i, b, sm ]) [list addSubview:v];
++      if (k + 1 < items.count) {
++        ry -= 1;
++        NSView* l = [[NSView alloc] initWithFrame:NSMakeRect(0, ry, tw, 1)];
++        l.wantsLayer = YES;
++        l.layer.backgroundColor = CG(kLine, self);
++        [list addSubview:l];
++      }
++    }
++    [sheet addSubview:list];
++    y += NSHeight(list.frame);
++  }
++  if (note.length) {
++    NSTextField* n = [NSTextField wrappingLabelWithString:note];
++    n.font = [NSFont systemFontOfSize:12];
++    n.textColor = kDim.color();
++    const CGFloat nh = ceil([n.cell cellSizeForBounds:NSMakeRect(0, 0, tw, 400)].height);
++    n.frame = NSMakeRect(px, y + 10, tw, nh);
++    [sheet addSubview:n];
++    y += 10 + nh;
++  }
++  // Prototype .acts: right-aligned, Não permitir filled with its ↩.
++  y += 12;
 +  __weak AgensChrome* weak = self;
-+  [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
-+    AgensChrome* strong = weak;
-+    // No window to answer through: it closed, and closing it already answered Não permitir
-+    // (~AgensWindow posts the deny).
-+    if (!strong || !strong->_window) return;
-+    agens_window_approval_answer(strong->_window, r == NSAlertFirstButtonReturn                ? kAgensApprovalAllow
-+                                                  : offerAlways && r == NSAlertSecondButtonReturn ? kAgensApprovalAllowAlways
-+                                                                                                  : kAgensApprovalDeny);
-+  }];
++  NSMutableArray* answers = [NSMutableArray arrayWithObject:@[ @"Permitir", @(kAgensApprovalAllow) ]];
++  if (offerAlways) [answers addObject:@[ @"Permitir sempre", @(kAgensApprovalAllowAlways) ]];
++  [answers addObject:@[ @"Não permitir  ↩", @(kAgensApprovalDeny) ]];
++  CGFloat bx = W - px;
++  for (NSArray* a in answers.reverseObjectEnumerator) {
++    AgensPillButton* b = [[AgensPillButton alloc] init];
++    b.radius = 10;
++    b.label.stringValue = a[0];
++    const AgensApprovalAnswer answer = (AgensApprovalAnswer)[a[1] intValue];
++    b.primary = answer == kAgensApprovalDeny;
++    b.accessibilityLabel = answer == kAgensApprovalDeny ? @"Não permitir" : a[0];
++    const CGFloat bw = ceil(b.label.fittingSize.width) + 28;
++    bx -= bw;
++    b.frame = NSMakeRect(bx, y, bw, 32);
++    bx -= 8;
++    b.onPress = ^{ [weak answerSheet:answer]; };
++    [sheet addSubview:b];
++  }
++  y += 32;
++  NSTextField* foot = Label(12, NSFontWeightRegular, kDim);
++  foot.stringValue = @"Fechar a janela também conta como Não permitir.";
++  foot.alignment = NSTextAlignmentRight;
++  foot.frame = NSMakeRect(px, y + 10, tw, 17);
++  [sheet addSubview:foot];
++  y += 10 + 17 + 16;
++  sheet.frame = NSMakeRect(0, 0, W, y);
++
++  _scrim = [[AgensSheetScrim alloc] init];
++  _scrim.wantsLayer = YES;
++  _sheet = sheet;
++  [self addSubview:_scrim];
++  [self addSubview:_sheet];
++  [self placeSheet];
++  [self refreshSheetColors];
++  if (!NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) {  // prototype @keyframes sheet / fade
++    _scrim.alphaValue = 0;
++    _sheet.alphaValue = 0;
++    NSRect to = _sheet.frame, from = NSOffsetRect(to, 0, -24);
++    _sheet.frame = from;
++    [NSAnimationContext runAnimationGroup:^(NSAnimationContext* ctx) {
++      ctx.duration = 0.25;
++      ctx.timingFunction = [CAMediaTimingFunction functionWithControlPoints:0.16:1:0.3:1];
++      self->_scrim.animator.alphaValue = 1;
++      self->_sheet.animator.alphaValue = 1;
++      self->_sheet.animator.frame = to;
++    }];
++  }
++  _sheetKeys = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
++                                                     handler:^NSEvent*(NSEvent* event) {
++                                                       AgensChrome* strong = weak;
++                                                       if (!strong || event.window != strong.window) return event;
++                                                       if (event.keyCode == 36 || event.keyCode == 76) {  // Return, Enter
++                                                         [strong answerSheet:kAgensApprovalDeny];
++                                                         return nil;
++                                                       }
++                                                       return event;
++                                                     }];
++  NSAccessibilityPostNotification(_sheet, NSAccessibilityLayoutChangedNotification);
 +}
++- (void)placeSheet {
++  if (!_sheet) return;
++  const NSRect a = NSIsEmptyRect(_statusArea) ? _page : _statusArea;
++  const CGFloat w = MIN(470, NSWidth(a) - 32);
++  NSRect f = _sheet.frame;
++  _sheet.frame = NSMakeRect(round(NSMidX(a) - w / 2), NSMinY(a) + 14, w, NSHeight(f));
++  _scrim.frame = a;
++  _scrim.layer.cornerRadius = agens_ui_card_radius(nullptr);
++}
++- (void)refreshSheetColors {
++  if (!_scrim) return;
++  _scrim.layer.backgroundColor = IsDark(self.effectiveAppearance) ? Hex(0x050507, 0.55).CGColor : Hex(0x14141A, 0.28).CGColor;
++}
++- (void)answerSheet:(AgensApprovalAnswer)answer {
++  if (!_sheet) return;
++  [self closeSheet];
++  if (_window) agens_window_approval_answer(_window, answer);
++}
++- (void)closeSheet {
++  [_sheet removeFromSuperview];
++  [_scrim removeFromSuperview];
++  _sheet = nil;
++  _scrim = nil;
++  if (_sheetKeys) [NSEvent removeMonitor:_sheetKeys];
++  _sheetKeys = nil;
+ }
  - (void)permissionGone {
    if (!_permissionAsked) return;
    _permissionAsked = NO;  // nothing to answer any more
-@@ -5294,7 +6681,7 @@ - (void)showSiteInfo {
-   all.frame = NSMakeRect(w - 16 - NSWidth(all.frame), 14, NSWidth(all.frame), NSHeight(all.frame));
-   [panel addSubview:clear];
-   [panel addSubview:all];
+   [self closeMenu];
+ }
+-// The panel behind the site icon (Chrome's page info): the site, whether the connection is
+-// private, this site's permissions (changed right here), its data, and the full list.
+ static void SiteDataCleared(void* context);
++// What this site has set in this ato (kind → value), from the exceptions list.
++static void CollectSiteExceptions(void* context, const AgensSiteException* list, int count) {
++  auto* out = static_cast<std::pair<std::string, std::map<std::string, AgensPermission>>*>(context);
++  for (int i = 0; i < count; ++i) {
++    if (out->first == list[i].site) out->second[list[i].kind] = list[i].value;
++  }
++}
++- (std::map<std::string, AgensPermission>)sitePermissions:(const AgensSiteInfo&)info {
++  std::pair<std::string, std::map<std::string, AgensPermission>> found{info.pattern, {}};
++  if (_window) agens_site_exceptions(_window, CollectSiteExceptions, &found);
++  return found.second;
++}
++- (void)readSitePermissions {
++  _permissionsURL = _url;
++  AgensSiteInfo info;
++  _sitePermissions = _window && agens_site_info(_window, &info) && ![self sitePermissions:info].empty();
++}
++// The panel behind the site icon (prototype "Informações do site"): the site and its connection,
++// one switch per permission the site has here (or uses now), its data, Redefinir permissões and
++// the full list.
+ - (void)showSiteInfo {
+   AgensSiteInfo info;
+   if (!_window || !agens_site_info(_window, &info)) return;
+-  NSString* pattern = @(info.pattern);
+-  struct Kind {
+-    const char* kind;
+-    NSString* label;
+-    BOOL ask;
+-  } kinds[] = {
+-      {"camera", @"Câmera", YES}, {"microphone", @"Microfone", YES}, {"location", @"Localização", YES},
+-      {"notifications", @"Notificações", YES}, {"popups", @"Pop-ups e redirecionamentos", NO}, {"sound", @"Som", NO},
++  const std::map<std::string, AgensPermission> set = [self sitePermissions:info];
++  struct Row {
++    const PermissionKind* kind;
++    AgensPermission value;
++    BOOL live;
+   };
+-  const CGFloat w = 340, rowH = 30, n = std::size(kinds);
+-  const CGFloat h = 16 + 20 + 4 + 32 + 12 + 1 + 8 + n * rowH + 8 + 1 + 12 + 24 + 14;
++  std::vector<Row> rows;
++  for (const PermissionKind& k : kPermissionKinds) {
++    const BOOL live = (!strcmp(k.kind, "camera") && _cameraOn) || (!strcmp(k.kind, "microphone") && _micOn);
++    auto it = set.find(k.kind);
++    if (it != set.end() || live) rows.push_back({&k, it != set.end() ? it->second : kAgensAllow, live});
++  }
++  const CGFloat w = 320, pad = 6, rowH = 44, lineH = 11, itemH = 29;
++  const CGFloat listH = rows.empty() ? 34 : rows.size() * rowH;
++  const CGFloat h = pad + 44 + lineH + listH + lineH + rowH + lineH + 2 * itemH + pad;
+   NSView* panel = [self popoverWidth:w height:h under:_omni];
+-  panel.frame = NSMakeRect(NSMinX(_omni.frame), NSMaxY(_omni.frame) + 6, w, h);
+   panel.accessibilityRole = NSAccessibilityGroupRole;
+   panel.accessibilityLabel = @"Informações do site";
+-  CGFloat y = h - 16 - 20;  // the panel isn't flipped: from the top down
+-  NSTextField* host = Label(13.5, NSFontWeightSemibold, kInk);
+-  host.stringValue = @(info.host);
+-  host.lineBreakMode = NSLineBreakByTruncatingMiddle;
+-  host.frame = NSMakeRect(16, y, w - 32, 20);
+-  y -= 4 + 32;
+-  NSImageView* lock = [NSImageView imageViewWithImage:Symbol(info.secure ? @"lock.fill" : @"lock.open", 11)];
+-  lock.contentTintColor = info.secure ? kDim.color() : kLight3.color();
+-  lock.frame = NSMakeRect(16, y + 16, 14, 14);
+-  NSTextField* conn = Label(12, NSFontWeightRegular, kMute);
+-  conn.stringValue = info.secure ? @"Conexão segura: o que você envia vai cifrado até o site."
+-                                 : @"Conexão não segura: o que você envia pode ser lido no caminho.";
+-  conn.maximumNumberOfLines = 2;
+-  conn.lineBreakMode = NSLineBreakByWordWrapping;
+-  conn.frame = NSMakeRect(36, y, w - 36 - 16, 32);
+-  for (NSView* v in @[ host, lock, conn ]) [panel addSubview:v];
+-  y -= 12;
+-  NSView* line1 = [[NSView alloc] initWithFrame:NSMakeRect(16, y, w - 32, 1)];
+-  y -= 8;
+-  for (const Kind& k : kinds) {
+-    y -= rowH;
+-    NSTextField* label = Label(13, NSFontWeightRegular, kInk);
+-    label.stringValue = k.label;
+-    NSPopUpButton* popup = [[NSPopUpButton alloc] init];
+-    popup.controlSize = NSControlSizeSmall;
+-    popup.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
+-    if (k.ask) {
+-      [popup addItemWithTitle:@"Perguntar"];
+-      popup.lastItem.tag = kAgensAsk;
+-    }
+-    [popup addItemWithTitle:@"Permitir"];
+-    popup.lastItem.tag = kAgensAllow;
+-    [popup addItemWithTitle:@"Bloquear"];
+-    popup.lastItem.tag = kAgensBlock;
+-    [popup selectItemWithTag:agens_site_permission(_window, k.kind)];
+-    popup.identifier = [NSString stringWithFormat:@"%s", k.kind];
+-    popup.toolTip = pattern;
+-    popup.accessibilityLabel = k.label;
+-    popup.target = self;
+-    popup.action = @selector(setSitePermission:);
+-    [popup sizeToFit];
+-    popup.frame = NSMakeRect(w - 16 - NSWidth(popup.frame), y + 3, NSWidth(popup.frame), NSHeight(popup.frame));
+-    label.frame = NSMakeRect(16, y + 4, NSMinX(popup.frame) - 8 - 16, 18);  // text centered on the menu (measured)
+-    [panel addSubview:label];
+-    [panel addSubview:popup];
+-  }
+-  y -= 8;
+-  NSView* line2 = [[NSView alloc] initWithFrame:NSMakeRect(16, y, w - 32, 1)];
+-  for (NSView* l in @[ line1, line2 ]) {
++  AgensFlippedView* content = [[AgensFlippedView alloc] initWithFrame:panel.bounds];
++  [panel addSubview:content];
++  NSString* host = @(info.host);
++  // Header (prototype .sih): the site's tile, its name, the connection and the ato.
++  NSTextField* tile = Label(13, NSFontWeightBold, kInk);
++  tile.stringValue = host.length ? [host substringToIndex:1].uppercaseString : @"?";
++  tile.alignment = NSTextAlignmentCenter;
++  NSView* tileBox = [[NSView alloc] initWithFrame:NSMakeRect(pad + 8, pad + 6, 28, 28)];
++  tileBox.wantsLayer = YES;
++  tileBox.layer.cornerRadius = 8;
++  tileBox.layer.backgroundColor = CG(kRaise2, self);
++  tile.frame = NSMakeRect(0, 5, 28, 18);
++  [tileBox addSubview:tile];
++  NSTextField* name = Label(13, NSFontWeightSemibold, kInk);
++  name.stringValue = host;
++  name.lineBreakMode = NSLineBreakByTruncatingMiddle;
++  name.frame = NSMakeRect(pad + 46, pad + 3, w - pad * 2 - 54, 18);
++  NSTextField* conn = Label(12, NSFontWeightRegular, kDim);
++  NSMutableAttributedString* connText = [[NSMutableAttributedString alloc] init];
++  NSTextAttachment* lock = [[NSTextAttachment alloc] init];
++  lock.image = AgensIcon(kIconLock, 11);
++  lock.bounds = NSMakeRect(0, -1, 11, 11);
++  [connText appendAttributedString:[NSAttributedString attributedStringWithAttachment:lock]];
++  [connText appendAttributedString:[[NSAttributedString alloc]
++                                       initWithString:[NSString stringWithFormat:@" %@ · ato %@", info.secure ? @"Conexão segura" : @"Conexão não segura",
++                                                                                 [self currentAtoNameForSettings]]]];
++  [connText addAttributes:@{NSFontAttributeName : [NSFont systemFontOfSize:12],
++                            NSForegroundColorAttributeName : (info.secure ? kDim : kWarn).color()}
++                    range:NSMakeRange(0, connText.length)];
++  conn.attributedStringValue = connText;
++  conn.toolTip = info.secure ? @"O que você envia vai cifrado até o site." : @"O que você envia pode ser lido no caminho.";
++  conn.frame = NSMakeRect(pad + 46, pad + 22, w - pad * 2 - 54, 17);
++  for (NSView* v in @[ tileBox, name, conn ]) [content addSubview:v];
++  CGFloat y = pad + 44;
++  auto line = [&] {
++    NSView* l = [[NSView alloc] initWithFrame:NSMakeRect(pad, y + 5, w - 2 * pad, 1)];
+     l.wantsLayer = YES;
+     l.layer.backgroundColor = CG(kLine, self);
+-    [panel addSubview:l];
+-  }
+-  NSButton* clear = [NSButton buttonWithTitle:@"Apagar dados deste site" target:self action:@selector(clearSiteData:)];
+-  NSButton* all = [NSButton buttonWithTitle:@"Todas as exceções…" target:self action:@selector(openExceptions:)];
+-  for (NSButton* b in @[ clear, all ]) {
+-    b.controlSize = NSControlSizeSmall;
+-    b.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
+-    [b sizeToFit];
+-  }
+-  clear.frame = NSMakeRect(16, 14, NSWidth(clear.frame), NSHeight(clear.frame));
+-  all.frame = NSMakeRect(w - 16 - NSWidth(all.frame), 14, NSWidth(all.frame), NSHeight(all.frame));
+-  [panel addSubview:clear];
+-  [panel addSubview:all];
 -  [self presentPopover:panel anchor:_siteButton.superview];
+-}
+-- (void)setSitePermission:(NSPopUpButton*)popup {
+-  AgensSiteInfo info;
+-  if (_window && agens_site_info(_window, &info)) {
+-    agens_site_exception_set(_window, info.pattern, popup.identifier.UTF8String, (AgensPermission)popup.selectedItem.tag);
++    [content addSubview:l];
++    y += lineH;
++  };
++  // A row (prototype .prow): icon, the name and a small line under it, then `control`.
++  auto row = [&](NSString* icon, NSString* title, NSString* note, NSView* control) {
++    AgensHoverView* r = [[AgensHoverView alloc] initWithFrame:NSMakeRect(pad, y, w - 2 * pad, rowH)];
++    r.radius = 8;
++    NSImageView* i = [NSImageView imageViewWithImage:AgensIcon(icon, 16)];
++    i.contentTintColor = kMute.color();
++    i.frame = NSMakeRect(8, (rowH - 16) / 2, 16, 16);
++    NSTextField* t = Label(13, NSFontWeightRegular, kInk);
++    t.stringValue = title;
++    NSTextField* n = Label(11.5, NSFontWeightRegular, kDim);
++    n.stringValue = note;
++    const CGFloat textW = w - 2 * pad - 34 - (control ? 46 : 8);
++    t.frame = NSMakeRect(34, rowH - 6 - 18, textW, 18);  // the row isn't flipped
++    n.frame = NSMakeRect(34, 6, textW, 16);
++    n.identifier = @"note";
++    for (NSView* v in @[ i, t, n ]) [r addSubview:v];
++    if (control) {
++      control.frame = NSMakeRect(NSWidth(r.frame) - 8 - 30, (rowH - 18) / 2, 30, 18);
++      [r addSubview:control];
++    }
++    r.accessibilityLabel = [NSString stringWithFormat:@"%@, %@", title, note];
++    [content addSubview:r];
++    y += rowH;
++    return r;
++  };
++  line();
++  __weak AgensChrome* weak = self;
++  NSString* pattern = @(info.pattern);
++  auto noteFor = [](AgensPermission v, BOOL live) {
++    return live ? @"Em uso agora" : v == kAgensAllow ? @"Permitido" : v == kAgensBlock ? @"Não permitido"
++                                  : v == kAgensSessionOnly ? @"Só nesta sessão" : @"Pergunta toda vez";
++  };
++  for (const Row& r : rows) {
++    AgensSwitch* sw = [[AgensSwitch alloc] init];
++    sw.on = r.live || r.value == kAgensAllow || r.value == kAgensSessionOnly;
++    sw.accessibilityLabel = r.kind->name;
++    AgensHoverView* rv = row(r.kind->icon, r.kind->name, noteFor(r.value, r.live), sw);
++    const char* kind = r.kind->kind;
++    sw.onChange = ^(BOOL on) {
++      AgensChrome* strong = weak;
++      if (!strong || !strong->_window) return;
++      agens_site_exception_set(strong->_window, pattern.UTF8String, kind, on ? kAgensAllow : kAgensBlock);
++      for (NSView* v in rv.subviews) {
++        if ([v.identifier isEqualToString:@"note"]) ((NSTextField*)v).stringValue = on ? @"Permitido" : @"Não permitido";
++      }
++      strong->_permissionsURL = nil;
++    };
+   }
+-}
+-- (void)clearSiteData:(NSButton*)button {
+-  if (!_window) return;
+-  button.enabled = NO;
+-  button.title = @"Apagando…";
+-  agens_site_clear_data(_window, SiteDataCleared, (__bridge_retained void*)button);  // held until done
++  if (rows.empty()) {
++    NSTextField* none = Label(12.5, NSFontWeightRegular, kDim);
++    none.stringValue = @"Este site não pediu nenhuma permissão neste ato.";
++    none.frame = NSMakeRect(pad + 8, y + 8, w - 2 * pad - 16, 18);
++    [content addSubview:none];
++    y += listH;
++  }
++  line();
++  AgensHoverView* data = row(kIconCookie, @"Cookies e dados do site", @"Clique para apagar os deste site", nil);
++  data.onPress = ^{
++    AgensChrome* strong = weak;
++    if (!strong || !strong->_window) return;
++    NSTextField* note = nil;
++    for (NSView* v in data.subviews) {
++      if ([v.identifier isEqualToString:@"note"]) note = (NSTextField*)v;
++    }
++    note.stringValue = @"Apagando…";
++    data.onPress = nil;
++    agens_site_clear_data(strong->_window, SiteDataCleared, (__bridge_retained void*)note);  // held until done
++  };
++  line();
++  auto item = [&](NSString* title, NSString* note, void (^press)(void)) {  // prototype .mi
++    AgensMenuRow* m = [[AgensMenuRow alloc] initWithIcon:@"" title:title key:@""];
++    m.frame = NSMakeRect(pad, y, w - 2 * pad, itemH);
++    m.onPress = press;
++    if (note) {
++      NSTextField* n = Label(12, NSFontWeightRegular, kDim);
++      n.stringValue = note;
++      n.alignment = NSTextAlignmentRight;
++      n.frame = NSMakeRect(NSWidth(m.frame) - 8 - 130, 6, 130, 17);
++      [m addSubview:n];
++    }
++    [content addSubview:m];
++    y += itemH;
++  };
++  item(@"Redefinir permissões", @"volta a perguntar", ^{
++    AgensChrome* strong = weak;
++    if (!strong || !strong->_window) return;
++    for (const PermissionKind& k : kPermissionKinds) agens_site_exception_remove(strong->_window, pattern.UTF8String, k.kind);
++    [strong closeMenu];
++    strong->_permissionsURL = nil;
++    [strong relayout];
++  });
++  item(@"Todas as permissões dos sites…", nil, ^{ [weak openExceptions:nil]; });
 +  [self presentPopover:panel anchor:_siteButton.superview pointingAt:_siteButton];
  }
- - (void)setSitePermission:(NSPopUpButton*)popup {
-   AgensSiteInfo info;
-@@ -5376,6 +6763,9 @@ - (int)command:(AgensCommand)command {
+ - (void)openExceptions:(id)sender {
+   [self closeMenu];
+   [self menuSettings:nil];
+   [g_settings showSection:@"excecoes"];
+ }
++// "Salvar a senha?" (prototype "Oferta depois do login"): the key shows at the end of the address
++// and the popover hangs from it, once. Closing it without a choice leaves the key; clicking it asks
++// again. Esc closes.
+ - (void)askToSavePassword {
+   AgensPasswordPrompt prompt;
+   if (!_window || !agens_password_prompt(_window, &prompt)) return;
++  _key.hidden = NO;
++  [self relayout];
+   NSString* site = @(prompt.site);
+   NSString* user = prompt.username[0] ? @(prompt.username) : @"sem usuário";
+-  const CGFloat w = 320, h = 104;
+-  NSView* panel = [self popoverWidth:w height:h under:_omni];
+-  panel.frame = NSMakeRect(NSMaxX(_omni.frame) - w, NSMaxY(_omni.frame) + 6, w, h);
++  const CGFloat w = 320, x = 14, tw = w - 2 * x, h = 216;
++  NSView* panel = [self popoverWidth:w height:h under:_key];
+   panel.accessibilityRole = NSAccessibilityGroupRole;
+-  NSTextField* title = Label(13.5, NSFontWeightSemibold, kInk);
++  AgensFlippedView* content = [[AgensFlippedView alloc] initWithFrame:panel.bounds];
++  [panel addSubview:content];
++  NSTextField* title = Label(13, NSFontWeightSemibold, kInk);
+   title.stringValue = [NSString stringWithFormat:prompt.update ? @"Atualizar a senha de %@?" : @"Salvar a senha de %@?", site];
+   title.lineBreakMode = NSLineBreakByTruncatingMiddle;
+-  title.frame = NSMakeRect(16, h - 16 - 20, w - 32, 20);
+-  NSTextField* who = Label(12.5, NSFontWeightRegular, kMute);
+-  who.stringValue = [NSString stringWithFormat:@"%@ · fica só neste Mac, neste ato", user];
+-  who.frame = NSMakeRect(16, NSMinY(title.frame) - 4 - 18, w - 32, 18);
+-  NSButton* save = [NSButton buttonWithTitle:prompt.update ? @"Atualizar" : @"Salvar" target:self action:@selector(answerPassword:)];
+-  save.tag = kAgensPasswordSave;
+-  save.keyEquivalent = @"\r";
+-  NSButton* later = [NSButton buttonWithTitle:@"Agora não" target:self action:@selector(answerPassword:)];
+-  later.tag = kAgensPasswordNotNow;
+-  for (NSButton* b in @[ save, later ]) [b sizeToFit];
+-  save.frame = NSMakeRect(w - 16 - NSWidth(save.frame), 14, NSWidth(save.frame), NSHeight(save.frame));
+-  later.frame = NSMakeRect(NSMinX(save.frame) - 8 - NSWidth(later.frame), 14, NSWidth(later.frame), NSHeight(later.frame));
+-  for (NSView* v in @[ title, who, save, later ]) [panel addSubview:v];
+-  if (!prompt.update) {
+-    NSButton* never = [NSButton buttonWithTitle:@"Nunca neste site" target:self action:@selector(answerPassword:)];
+-    never.tag = kAgensPasswordNever;
+-    never.bordered = NO;
+-    never.font = [NSFont systemFontOfSize:12];
+-    never.contentTintColor = kMute.color();
+-    [never sizeToFit];
+-    never.frame = NSMakeRect(10, 16, NSWidth(never.frame) + 8, NSHeight(never.frame));
+-    [panel addSubview:never];
+-  }
+-  [self presentPopover:panel anchor:_omni];
++  title.frame = NSMakeRect(x, 12, tw, 19);
++  panel.accessibilityLabel = title.stringValue;
++  NSTextField* who = Label(12, NSFontWeightRegular, kDim);
++  NSString* ato = [self currentAtoNameForSettings];
++  NSMutableAttributedString* whoText = [[NSMutableAttributedString alloc]
++      initWithString:[NSString stringWithFormat:@"No ato %@. Só este ato vai preencher.", ato]
++          attributes:@{NSFontAttributeName : [NSFont systemFontOfSize:12], NSForegroundColorAttributeName : kDim.color()}];
++  [whoText addAttributes:@{NSFontAttributeName : [NSFont systemFontOfSize:12 weight:NSFontWeightMedium], NSForegroundColorAttributeName : kInk.color()}
++                   range:NSMakeRange(6, ato.length)];
++  who.attributedStringValue = whoText;
++  who.frame = NSMakeRect(x, 33, tw, 17);
++  for (NSView* v in @[ title, who ]) [content addSubview:v];
++  // Prototype .fl / .fld: a label and a sunk, bordered box with the value.
++  CGFloat y = 60;
++  for (NSArray<NSString*>* f in @[ @[ @"Usuário", user ], @[ @"Senha", @"••••••••••••" ] ]) {
++    NSTextField* label = Label(12, NSFontWeightRegular, kDim);
++    label.stringValue = f[0];
++    label.frame = NSMakeRect(x, y, tw, 16);
++    NSView* box = [[NSView alloc] initWithFrame:NSMakeRect(x, y + 19, tw, 30)];
++    box.wantsLayer = YES;
++    box.layer.cornerRadius = 8 * Round();
++    box.layer.borderWidth = 1;
++    box.layer.borderColor = CG(kLineStrong, self);
++    box.layer.backgroundColor = CG(kSunk, self);
++    NSTextField* value = Label(13, NSFontWeightRegular, kInk);
++    value.stringValue = f[1];
++    value.frame = NSMakeRect(9, 6, tw - 18, 18);
++    [box addSubview:value];
++    [content addSubview:label];
++    [content addSubview:box];
++    y += 57;
++  }
++  __weak AgensChrome* weak = self;
++  NSArray* answers = prompt.update ? @[ @[ @"Agora não", @(kAgensPasswordNotNow) ], @[ @"Atualizar", @(kAgensPasswordSave) ] ]
++                                   : @[ @[ @"Nunca neste site", @(kAgensPasswordNever) ], @[ @"Salvar", @(kAgensPasswordSave) ] ];
++  CGFloat bx = w - x;
++  for (NSArray* a in answers.reverseObjectEnumerator) {  // prototype .acts: right-aligned, Salvar filled
++    AgensPillButton* b = [[AgensPillButton alloc] init];
++    b.label.stringValue = a[0];
++    b.primary = [a[1] intValue] == kAgensPasswordSave;
++    b.label.font = [NSFont systemFontOfSize:12.5 weight:b.primary ? NSFontWeightSemibold : NSFontWeightRegular];
++    b.accessibilityLabel = a[0];
++    const CGFloat bw = ceil(b.label.fittingSize.width) + 22;
++    bx -= bw;
++    b.frame = NSMakeRect(bx, y + 4, bw, 28);
++    bx -= 8;
++    const AgensPasswordAnswer answer = (AgensPasswordAnswer)[a[1] intValue];
++    b.onPress = ^{ [weak answerPassword:answer]; };
++    [content addSubview:b];
++  }
++  [self presentPopover:panel anchor:_key.superview pointingAt:_key];
++  _key.selected = YES;
+   _passwordAsked = YES;
+ }
+-- (void)answerPassword:(NSButton*)button {
++- (void)answerPassword:(AgensPasswordAnswer)answer {
+   _passwordAsked = NO;
+-  if (_window) agens_password_answer(_window, (AgensPasswordAnswer)button.tag);
++  if (_window) agens_password_answer(_window, answer);
+   [self closeMenu];
++  _key.hidden = YES;
++  [self relayout];
+ }
+ - (int)command:(AgensCommand)command {
+   switch (command) {
+@@ -5376,6 +7871,9 @@ - (int)command:(AgensCommand)command {
      case kAgensCommandFindPrevious:
        [_find step:NO];
        return 1;
@@ -16052,7 +18272,7 @@ index 3c18c4eab1..017cc80371 100644
      default:
        return 0;
    }
-@@ -5398,6 +6788,12 @@ - (void)focusAddress {
+@@ -5398,6 +7896,12 @@ - (void)focusAddress {
  AgensRect agens_ui_layout(void* chrome, int width, int height) {
    return [(__bridge AgensChrome*)chrome layoutForWidth:width height:height];
  }
@@ -16065,16 +18285,27 @@ index 3c18c4eab1..017cc80371 100644
  AgensRect agens_ui_site_icon_rect(void* chrome) {
    return [(__bridge AgensChrome*)chrome siteIconRect];
  }
-@@ -5412,12 +6808,18 @@ void agens_ui_permission_prompt(void* chrome, const char* site, const char* cons
-   for (int i = 0; i < count; ++i) [list addObject:@(asks[i])];
-   [(__bridge AgensChrome*)chrome askPermission:@(site) asks:list];
+@@ -5407,10 +7911,17 @@ void agens_ui_focus_address(void* chrome) {
+ void agens_ui_colors(void* chrome, unsigned* window, unsigned* page, unsigned* line) {
+   [(__bridge AgensChrome*)chrome colorsWindow:window page:page line:line];
  }
-+void agens_ui_approval_prompt(void* chrome, const char* title, const char* detail, int offer_always) {
-+  [(__bridge AgensChrome*)chrome askApproval:@(title) detail:@(detail) offerAlways:offer_always != 0];
+-void agens_ui_permission_prompt(void* chrome, const char* site, const char* const* asks, int count) {
++void agens_ui_permission_prompt(void* chrome, const char* site, const char* const* asks, int count, int offer_once) {
+   NSMutableArray<NSString*>* list = [NSMutableArray array];
+   for (int i = 0; i < count; ++i) [list addObject:@(asks[i])];
+-  [(__bridge AgensChrome*)chrome askPermission:@(site) asks:list];
++  [(__bridge AgensChrome*)chrome askPermission:@(site) asks:list once:offer_once != 0];
 +}
++void agens_ui_approval_prompt(void* chrome, const char* title, const char* detail, int offer_always, const char* facts) {
++  NSDictionary* parts = [NSJSONSerialization JSONObjectWithData:[@(facts ?: "{}") dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
++  [(__bridge AgensChrome*)chrome askApproval:@(title)
++                                      detail:@(detail)
++                                 offerAlways:offer_always != 0
++                                       facts:[parts isKindOfClass:NSDictionary.class] ? parts : @{}];
+ }
  void agens_ui_permission_prompt_close(void* chrome) {
    [(__bridge AgensChrome*)chrome permissionGone];
- }
+@@ -5418,6 +7929,9 @@ void agens_ui_permission_prompt_close(void* chrome) {
  AgensRect agens_ui_extensions_anchor(void* chrome) {
    return [(__bridge AgensChrome*)chrome extensionsAnchor];
  }

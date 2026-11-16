@@ -40,7 +40,8 @@ Os dois saem do mesmo repositório e do mesmo build, empacotados de dois jeitos,
 - **Quem pode conectar:** o navegador lê o processo do outro lado (`LOCAL_PEERTOKEN`) e confere a assinatura de código.
   - Dentro do Agens: só o próprio Agens (o mesmo Team ID e o bundle id do Agens).
   - No AgensBrowser sozinho: qualquer app, nosso ou de terceiros (decisão do Willian, 16/11/2026), depois da folha "<app> quer usar o AgensBrowser", com **Permitir**, **Permitir sempre** e **Não permitir**. A folha mostra o nome do app, o ato e o que ele vai poder fazer, sem falar de assinatura; **Permitir sempre** vale para aquele app.
-  - Para desenvolvimento, "Aceitar apps sem assinatura" em Configurações › Sistema, que vem desligado.
+  - **Permitir sempre** fica guardado pelo bundle id do app (sem bundle, pelo caminho do executável), com o Team ID junto quando o app é assinado por um time: uma cópia sem assinatura com o mesmo bundle id não herda.
+  - Para desenvolvimento, "Aceitar apps sem assinatura" em Configurações › Sistema, que vem desligado: com ele, um app que não é nosso entra sem folha.
   - No motor embutido não há folha de conexão: entra o processo que abriu o motor, mais os apps assinados com o nosso Team ID cujo identificador de assinatura o hospedeiro lista ao abrir (`--agens-allowed-clients`). Em desenvolvimento, `--agens-accept-unsigned`.
 - **Versão:** `hello` devolve a versão do protocolo. Mudança que quebra cliente sobe a versão. Navegador velho demais responde e o cliente avisa "Atualize".
 
