@@ -182,6 +182,17 @@ O controle vale **para a conexão**: quando o cliente desconecta, o controle aca
 - **Senha**: campo de senha vem com `password: true` e sem `value`, inclusive depois de "mostrar senha". `page.type` nele dá `denied`. Com o foco nele, `page.key` só aceita teclas que movem (Tab, Enter, Escape, setas). `page.screenshot` dá `denied` enquanto houver senha revelada na página.
 - Nas abas controladas não há senhas salvas, autofill nem downloads.
 
+#### Páginas sem HTTPS
+
+Para a pessoa, o HTTPS-Only continua estrito: site só `http://` mostra o aviso antes de abrir. Na aba de um agente (enquanto a pessoa não assumiu), o aviso não aparece e a página abre sozinha, porque um aviso pararia a automação até alguém clicar. Como uma página sem HTTPS pode ter sido trocada por qualquer um na rede (e virar injeção de prompt), valem estas regras:
+
+- **O motor ainda tenta HTTPS primeiro.** Se a versão `https://` falhar, cai para `http://` sem aviso. A queda fica guardada **só naquela aba**: nada entra na lista de sites liberados do ato, e a aba da pessoa no mesmo site continua mostrando o aviso.
+- **`insecure: true`** vem em toda resposta `ok` de `page.*`, `tab.open` e `tab.navigate` quando a página principal da aba está em `http://`, também depois da queda. Endereço local (`localhost`, `*.localhost`, `127.0.0.1`, `[::1]`) não conta: o tráfego não sai do Mac (o HTTPS-Only também não avisa ali).
+- **Ler e clicar continuam livres** (`page.snapshot`, `page.click`, `page.screenshot`…).
+- **Digitar pede o OK da pessoa:** `page.type`, `page.key` com um caractere ou colar, e `page.dialog` com `text`. O motor manda a folha (embutido, `approval.ask` com `kind: "insecure_typing"`) "<agente> quer digitar numa página sem HTTPS" e a operação espera na fila da aba. **Permitir** vale para aquela operação; **Permitir sempre** vale para aquele host até o fim da sessão de controle; **Não permitir** responde `denied`. Se a página mudar de host enquanto a pessoa decide, a resposta é `failed` e o agente tenta de novo. Teclas que movem, `Enter`, `Backspace` e `Delete` não pedem.
+- **Campo de senha** continua `denied`, com ou sem OK.
+- **Cookie `Secure`** nunca vai para `http://` (padrão do Chromium: `net/cookies/cookie_base.cc`, `EXCLUDE_SECURE_ONLY`), e uma página `http://` não consegue gravar um.
+
 ### host e view (fase 5): a página dentro de outro app
 
 Só existem quando o motor roda **embutido** (aberto por outro app com `--agens-embedded`, sem ícone no Dock e sem janela, a não ser a do DevTools que a pessoa pede em janela própria: veja "Passo 5.5"). No AgensBrowser sozinho respondem `unknown_op`.
@@ -210,7 +221,7 @@ Quem desenha a interface é o app hospedeiro: barra de endereço, abas, atos, o 
 - **Entrada.** O app manda o que a vista recebeu: `view.focus {tab, on}`, `view.mouse {tab, data, x, y}`, `view.mouse.leave {tab}`, `view.wheel {tab, data, x, y}`, `view.key {tab, data, text, commands, marked, sel_start, sel_end, had_marked, unmarked}` e `view.edit {tab, command}` (`cut`, `copy`, `paste`, `selectAll`, `undo`, `redo`). `data` é o `NSEvent` serializado (`CGEventCreateData`, em base64); `x` e `y` contam do canto de cima da vista, em pontos. Sem `id`, o motor não responde.
 - **Aba com agente.** Quando um agente controla a aba, `view.tab` traz `control: {agent, title, detail, state}`, com `state` `"working"` ou `"paused"`, para o app desenhar o aviso. O app manda `view.control {tab, action}` com `take` (Assumir), `give` (Devolver) ou `end` (encerrar). A pessoa pode ver a aba do agente o tempo todo; com `take`, as teclas e os cliques dela passam a valer e os do agente respondem `paused`.
 - **Aprovações.** Embutido, o motor não mostra folha: manda `approval.ask {ask, title, detail, offer_always, ...}` ao hospedeiro, que desenha e responde `approval.answer {ask, answer}` com `allow`, `always` ou `deny`. Sem hospedeiro ligado, a resposta é `denied`. `title` e `detail` vêm sempre, prontos para mostrar (o texto da folha do AgensBrowser sozinho). Para quem desenha a própria folha, vêm também as partes, quando o motor as conhece (motor mais antigo não manda nenhuma; `kind` desconhecido: mostre `title` e `detail`):
-  - `kind`: `"control"` (`control.start`) ou `"session"` (`session`). Existe também `"connect"` (a folha de conexão), que embutido não chega ao hospedeiro, porque ali não há folha de conexão.
+  - `kind`: `"control"` (`control.start`), `"session"` (`session`) ou `"insecure_typing"` (o agente quer digitar numa página sem HTTPS; vem com `host`, ver "Páginas sem HTTPS"). Existe também `"connect"` (a folha de conexão), que embutido não chega ao hospedeiro, porque ali não há folha de conexão.
   - `ato` (id) e `ato_name`.
   - `app`: o nome do app que pede (do bundle dele).
   - `agent` (só `control`): o nome que as abas vão mostrar, o `agent` do `control.start` ou, sem ele, o nome do app.

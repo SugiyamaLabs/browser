@@ -917,16 +917,17 @@ index 0000000000..e0731dea2c
 +}  // namespace agens::bridge
 diff --git a/chrome/browser/agens/bridge/control_keys.cc b/chrome/browser/agens/bridge/control_keys.cc
 new file mode 100644
-index 0000000000..fec584dc6d
+index 0000000000..9bbba4cf56
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_keys.cc
-@@ -0,0 +1,191 @@
+@@ -0,0 +1,208 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/control_keys.h"
 +
 +#include <algorithm>
 +
++#include "base/json/json_reader.h"
 +#include "base/json/json_writer.h"
 +#include "base/strings/utf_string_conversions.h"
 +#include "chrome/browser/agens/bridge/protocol.h"
@@ -1094,6 +1095,22 @@ index 0000000000..fec584dc6d
 +         host == "[::1]";
 +}
 +
++bool IsInsecurePage(const GURL& url) {
++  return url.is_valid() && url.SchemeIs("http") && !IsLocalURL(url);
++}
++
++bool KeyTypes(const Key& key) {
++  if (TouchesClipboard(key)) return key.windows_code == 'V';
++  return !key.text.empty() && key.text != u"\r" && !key.meta && !key.ctrl;
++}
++
++std::string MarkInsecure(std::string line) {
++  std::optional<base::Value> value = base::JSONReader::Read(line, base::JSON_PARSE_RFC);
++  if (!value || !value->is_dict() || value->GetDict().FindBool("ok") != true) return line;
++  value->GetDict().Set("insecure", true);
++  return base::WriteJson(*value).value_or(line) + "\n";
++}
++
 +std::string ClipChars(std::string text, size_t max) {
 +  size_t count = 0;
 +  for (size_t i = 0; i < text.size(); ++i) {
@@ -1114,10 +1131,10 @@ index 0000000000..fec584dc6d
 +}  // namespace agens::bridge
 diff --git a/chrome/browser/agens/bridge/control_keys.h b/chrome/browser/agens/bridge/control_keys.h
 new file mode 100644
-index 0000000000..178c1cd18f
+index 0000000000..e3c4343bf6
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_keys.h
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,88 @@
 +// Copyright 2026 SugiyamaLabs.
 +// page.key's key names and the password rules that depend on them (docs/protocolo.md, "control,
 +// tab, page"). Pure logic, checked by protocol_selfcheck.cc with only //base.
@@ -1188,6 +1205,15 @@ index 0000000000..178c1cd18f
 +// [::1]. `url` is the committed origin's URL.
 +bool IsLocalURL(const GURL& url);
 +
++// An http:// page that is not local (IsLocalURL): anyone on the network may have read or changed
++// it. page.* answers carry insecure: true there, and typing waits for the person's OK.
++bool IsInsecurePage(const GURL& url);
++// page.key that puts text into the page: a character (no meta or ctrl) or paste. Keys that move,
++// Enter, Backspace and Delete don't.
++bool KeyTypes(const Key& key);
++// An ok reply line with "insecure": true added; any other line as it is.
++std::string MarkInsecure(std::string line);
++
 +// `text` cut to at most `max` characters (code points), never inside one.
 +std::string ClipChars(std::string text, size_t max);
 +
@@ -1199,10 +1225,10 @@ index 0000000000..178c1cd18f
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_CONTROL_KEYS_H_
 diff --git a/chrome/browser/agens/bridge/control_ops.cc b/chrome/browser/agens/bridge/control_ops.cc
 new file mode 100644
-index 0000000000..8744b8ab48
+index 0000000000..ee38257775
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_ops.cc
-@@ -0,0 +1,944 @@
+@@ -0,0 +1,1033 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The control session (docs/protocolo.md, "control, tab, page"): an app, after the person's OK,
 +// drives tabs of one ato. It belongs to the connection and ends on control.stop, when the
@@ -1366,6 +1392,7 @@ index 0000000000..8744b8ab48
 +  void AnswerOk() {
 +    base::DictValue result;
 +    result.Set("tab", id);
++    if (web_contents() && IsInsecurePage(web_contents()->GetLastCommittedURL())) result.Set("insecure", true);
 +    Answer(OkReply(waiting_id_, std::move(result)));
 +  }
 +
@@ -1475,6 +1502,7 @@ index 0000000000..8744b8ab48
 +  bool passwords = false, clipboard = false, eval = false;  // control.start's allow
 +  base::FilePath ato;  // the ato's profile folder
 +  std::vector<std::string> shares_with;  // SharesWith(ato) when the person agreed
++  std::set<std::string> typing_hosts;   // insecure pages the person let it type on ("Permitir sempre")
 +  std::vector<std::unique_ptr<Tab>> tabs;
 +  int next_tab = 1;
 +
@@ -1629,6 +1657,66 @@ index 0000000000..8744b8ab48
 +    if (entry->GetPath().BaseName().AsUTF8Unsafe() == id) return entry;
 +  }
 +  return nullptr;
++}
++
++// Typing on an insecure page (IsInsecurePage: http://, not local) waits for the person's OK; a
++// page the network may have changed could steer the agent into typing what it shouldn't there.
++// "Permitir sempre" covers that host for the rest of the session. `then` gets an error code and
++// message, or an empty code to go on (the page is still on the host asked about).
++using TypingCallback = base::OnceCallback<void(std::string_view code, std::string_view message)>;
++void AskBeforeTyping(uint64_t connection, Tab& tab, TypingCallback then) {
++  const GURL url = tab.web_contents() ? tab.web_contents()->GetLastCommittedURL() : GURL();
++  const std::string host(url.host());
++  auto it = Sessions().find(connection);
++  if (!IsInsecurePage(url) || it == Sessions().end() || it->second.typing_hosts.contains(host)) {
++    return std::move(then).Run("", "");
++  }
++  const Session& session = it->second;
++  const std::string ato = session.ato.BaseName().AsUTF8Unsafe();
++  base::DictValue facts;
++  facts.Set("kind", "insecure_typing");
++  facts.Set("ato", ato);
++  if (ProfileAttributesEntry* entry = FindAto(ato)) facts.Set("ato_name", AgensWindow::AtoName(entry));
++  facts.Set("agent", session.agent);
++  facts.Set("host", host);
++  AskApproval(
++      connection, session.agent + " quer digitar numa página sem HTTPS",
++      host + " abriu sem HTTPS: quem estiver na mesma rede pode ler o que for digitado, ou ter mudado a página "
++                   "para enganar o agente.",
++      /*offer_always=*/true,
++      base::BindOnce(
++          [](uint64_t connection, base::WeakPtr<Tab> tab, std::string host, TypingCallback then,
++             AgensApprovalAnswer answer) {
++            if (answer == kAgensApprovalDeny) {
++              return std::move(then).Run(kDenied, "the person did not allow typing on a page without HTTPS");
++            }
++            if (!tab || !tab->web_contents()) return std::move(then).Run(kFailed, "the tab is no longer controlled");
++            if (std::string(tab->web_contents()->GetLastCommittedURL().host()) != host) {
++              return std::move(then).Run(kFailed, "the page changed while the person was asked: try again");
++            }
++            auto it = Sessions().find(connection);
++            if (answer == kAgensApprovalAllowAlways && it != Sessions().end()) it->second.typing_hosts.insert(host);
++            std::move(then).Run("", "");
++          },
++          connection, tab.GetWeakPtr(), host, std::move(then)),
++      std::move(facts));
++}
++
++// A page op that types: AskBeforeTyping first, in the tab's queue, then `act`.
++Page::Op TypingOp(uint64_t connection, Tab& tab, base::Value id, Page::Op act) {
++  return base::BindOnce(
++      [](uint64_t connection, base::WeakPtr<Tab> tab, base::Value id, Page::Op act, ReplyCallback reply) {
++        if (!tab) return std::move(reply).Run(ErrorReply(&id, kFailed, "the tab is no longer controlled"));
++        AskBeforeTyping(connection, *tab,
++                        base::BindOnce(
++                            [](base::Value id, Page::Op act, ReplyCallback reply, std::string_view code,
++                               std::string_view message) {
++                              if (!code.empty()) return std::move(reply).Run(ErrorReply(&id, code, message));
++                              std::move(act).Run(std::move(reply));
++                            },
++                            std::move(id), std::move(act), std::move(reply)));
++      },
++      connection, tab.GetWeakPtr(), std::move(id), std::move(act));
 +}
 +
 +// Ends the session. Its tabs stay open and are no longer controlled, unless `close_tabs`.
@@ -1956,7 +2044,7 @@ index 0000000000..8744b8ab48
 +  std::move(reply).Run(OkReply(request.id));
 +}
 +
-+void PageOp(Session& session, Request request, ReplyCallback reply) {
++void PageOp(uint64_t connection, Session& session, Request request, ReplyCallback reply) {
 +  const std::string& op = request.op;
 +  std::optional<std::string> id = StringParam(request.body, "tab");
 +  if (!id) {
@@ -1972,6 +2060,15 @@ index 0000000000..8744b8ab48
 +    std::move(reply).Run(ErrorReply(&request.id, kDialogOpen, "a dialog is open: answer it with page.dialog"));
 +    return;
 +  }
++  // An answer from an insecure page says so, as the page is when the answer goes out.
++  reply = base::BindOnce(
++      [](base::WeakPtr<Tab> tab, ReplyCallback reply, std::string line) {
++        if (tab && tab->web_contents() && IsInsecurePage(tab->web_contents()->GetLastCommittedURL())) {
++          line = MarkInsecure(std::move(line));
++        }
++        std::move(reply).Run(std::move(line));
++      },
++      tab->GetWeakPtr(), std::move(reply));
 +  std::optional<std::string> ref = StringParam(request.body, "ref");
 +  // Runs `method` (a Page op without other arguments) in the tab's queue.
 +  auto run = [&](void (Page::*method)(base::Value, ReplyCallback)) {
@@ -2024,8 +2121,23 @@ index 0000000000..8744b8ab48
 +      return;
 +    }
 +    // At once, outside the queue: the op that raised it (a click, an eval) is stuck until it's answered.
-+    tab->AnswerDialog(*action == "accept", text_value ? &text : nullptr);
-+    std::move(reply).Run(OkReply(request.id));
++    // Text for a prompt is typing: on an insecure page, the person's OK first.
++    const bool accept = *action == "accept";
++    if (!accept || !text_value) {
++      tab->AnswerDialog(accept, nullptr);
++      return std::move(reply).Run(OkReply(request.id));
++    }
++    AskBeforeTyping(connection, *tab,
++                    base::BindOnce(
++                        [](base::WeakPtr<Tab> tab, base::Value id, std::u16string text, ReplyCallback reply,
++                           std::string_view code, std::string_view message) {
++                          if (!code.empty()) return std::move(reply).Run(ErrorReply(&id, code, message));
++                          if (!tab || !tab->AnswerDialog(true, &text)) {
++                            return std::move(reply).Run(ErrorReply(&id, kBadRequest, "no dialog is open on that tab"));
++                          }
++                          std::move(reply).Run(OkReply(id));
++                        },
++                        tab->GetWeakPtr(), request.id.Clone(), std::move(text), std::move(reply)));
 +  } else if (op == "page.snapshot") {
 +    tab->page.Run(request.id.Clone(), base::BindOnce(&Page::Snapshot, base::Unretained(&tab->page), request.id.Clone()),
 +                  std::move(reply));
@@ -2051,7 +2163,9 @@ index 0000000000..8744b8ab48
 +      return;
 +    }
 +    tab->page.Run(request.id.Clone(),
-+                  base::BindOnce(&Page::Type, base::Unretained(&tab->page), request.id.Clone(), *ref, std::move(text16)),
++                  TypingOp(connection, *tab, request.id.Clone(),
++                           base::BindOnce(&Page::Type, base::Unretained(&tab->page), request.id.Clone(), *ref,
++                                          std::move(text16))),
 +                  std::move(reply));
 +  } else if (op == "page.key") {
 +    std::optional<std::string> name = StringParam(request.body, "key");
@@ -2063,8 +2177,9 @@ index 0000000000..8744b8ab48
 +                                      "of shift, meta, alt, ctrl"));
 +      return;
 +    }
-+    tab->page.Run(request.id.Clone(),
-+                  base::BindOnce(&Page::PressKey, base::Unretained(&tab->page), request.id.Clone(), std::move(*key)),
++    const bool types = KeyTypes(*key);
++    Page::Op act = base::BindOnce(&Page::PressKey, base::Unretained(&tab->page), request.id.Clone(), std::move(*key));
++    tab->page.Run(request.id.Clone(), types ? TypingOp(connection, *tab, request.id.Clone(), std::move(act)) : std::move(act),
 +                  std::move(reply));
 +  } else {
 +    std::move(reply).Run(ErrorReply(&request.id, kUnknownOp, op));
@@ -2135,7 +2250,7 @@ index 0000000000..8744b8ab48
 +  } else if (op == "tab.close") {
 +    TabClose(session, request, std::move(reply));
 +  } else if (op.starts_with("page.")) {
-+    PageOp(session, std::move(request), std::move(reply));
++    PageOp(client.connection, session, std::move(request), std::move(reply));
 +  } else {
 +    std::move(reply).Run(ErrorReply(&request.id, kUnknownOp, op));
 +  }
@@ -4102,10 +4217,10 @@ index 0000000000..aa8a7e7704
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_PROTOCOL_H_
 diff --git a/chrome/browser/agens/bridge/protocol_selfcheck.cc b/chrome/browser/agens/bridge/protocol_selfcheck.cc
 new file mode 100644
-index 0000000000..f81d56005e
+index 0000000000..9b47bcc568
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/protocol_selfcheck.cc
-@@ -0,0 +1,233 @@
+@@ -0,0 +1,253 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Assert-based check of the wire format (protocol.h). Build and run:
 +//   ninja -C out/Dev agens_bridge_selfcheck && out/Dev/agens_bridge_selfcheck
@@ -4314,6 +4429,26 @@ index 0000000000..f81d56005e
 +                            "ws://localhost/", "chrome://settings", "data:text/html,hi", "http://example.invalid/",
 +                            "about:blank", ""}) {
 +      CHECK_TRUE(!IsLocalURL(GURL(url)));
++    }
++    // Pages without HTTPS (docs/protocolo.md, "Páginas sem HTTPS").
++    CHECK_TRUE(IsInsecurePage(GURL("http://example.com/")) && IsInsecurePage(GURL("http://insecure.test:8765/form")));
++    CHECK_TRUE(IsInsecurePage(GURL("http://user:pw@127.0.0.1/")));
++    for (const char* url : {"https://example.com/", "http://localhost/", "http://127.0.0.1:8765/form", "http://[::1]/",
++                            "about:blank", "data:text/html,hi", "chrome://newtab", ""}) {
++      CHECK_TRUE(!IsInsecurePage(GURL(url)));
++    }
++    CHECK_TRUE(KeyTypes(*ParseKey("a", nullptr)) && KeyTypes(*ParseKey(" ", nullptr)));
++    base::Value meta_v = *base::JSONReader::Read("[\"meta\"]", base::JSON_PARSE_RFC), meta_a = meta_v.Clone();
++    CHECK_TRUE(KeyTypes(*ParseKey("v", &meta_v)) && !KeyTypes(*ParseKey("a", &meta_a)));
++    for (const char* name : {"Enter", "Tab", "Backspace", "Delete", "ArrowUp", "Escape"}) {
++      CHECK_TRUE(!KeyTypes(*ParseKey(name, nullptr)));
++    }
++    {
++      std::optional<base::Value> marked = base::JSONReader::Read(MarkInsecure(OkReply(base::Value(3), {})), base::JSON_PARSE_RFC);
++      CHECK_TRUE(marked && marked->GetDict().FindBool("insecure") == true && marked->GetDict().FindInt("id") == 3);
++      const std::string error = ErrorReply(nullptr, kDenied, "no");
++      CHECK_TRUE(MarkInsecure(error) == error && MarkInsecure("junk") == "junk");
++      CHECK_TRUE(MarkInsecure(OkReply(base::Value(1), {})).ends_with("\n"));
 +    }
 +    CHECK_TRUE(ClipChars("abc", 2) == "ab" && ClipChars("abc", 3) == "abc" && ClipChars("", 0).empty());
 +    CHECK_TRUE(ClipChars("\xC3\xA7\xC3\xA7", 1) == "\xC3\xA7" && ClipChars("a\xF0\x9F\x98\x80" "b", 2) == "a\xF0\x9F\x98\x80");
@@ -14650,7 +14785,7 @@ index 5d7ca90415..40e1e27207 100644
    auto* shell = widget && widget->GetRootView()
                      ? views::AsViewClass<NativeShellView>(
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
-index 3c18c4eab1..0a7c5c377e 100644
+index 3c18c4eab1..52d4e492ce 100644
 --- a/chrome/browser/agens/ui/chrome_mac.mm
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
 @@ -21,6 +21,8 @@
@@ -16071,6 +16206,24 @@ index 3c18c4eab1..0a7c5c377e 100644
      y = [self option:@"Licença" detail:@"BSD-3-Clause" control:[self linkButton:@"github.com/SugiyamaLabs/browser" url:@"https://github.com/SugiyamaLabs/browser"] y:y];
      y = [self option:@"Avisos de código aberto" detail:@"Chromium, ungoogled-chromium e as listas do bloqueador." control:[self subButton:@"Ver…" key:@"avisos"] y:y];
    }
+@@ -1521,7 +2429,7 @@ - (NSSwitch*)webrtcSwitch {
+   NSSwitch* sw = [[NSSwitch alloc] init];
+   char policy[64] = "";
+   if (_browser) agens_pref_get_string(_browser, kAgensProfile, "webrtc.ip_handling_policy", policy, sizeof policy);
+-  sw.state = strcmp(policy, "disable_non_proxied_udp") == 0 ? NSControlStateValueOn : NSControlStateValueOff;
++  sw.state = strcmp(policy, "default") == 0 ? NSControlStateValueOff : NSControlStateValueOn;
+   sw.target = self;
+   sw.action = @selector(toggleWebrtc:);
+   return sw;
+@@ -1529,7 +2437,7 @@ - (NSSwitch*)webrtcSwitch {
+ - (void)toggleWebrtc:(NSSwitch*)sw {
+   if (_browser) {
+     agens_pref_set_string(_browser, kAgensProfile, "webrtc.ip_handling_policy",
+-                          sw.state == NSControlStateValueOn ? "disable_non_proxied_udp" : "default");
++                          sw.state == NSControlStateValueOn ? "default_public_interface_only" : "default");
+   }
+ }
+ - (NSSwitch*)cookiesOnCloseSwitch {
 @@ -1602,7 +2510,10 @@ static void EnginesListed(void* context, const AgensSearchEngine* engines, int c
  - (CGFloat)fillAtos:(CGFloat)y {
    // The atos list comes from the chrome (it already observes them); rename in place.
@@ -22303,6 +22456,145 @@ index e20ec3ac9e..c0045267b5 100644
    void BindMuter(
        mojo::PendingAssociatedReceiver<media::mojom::LocalMuter> receiver,
        const base::UnguessableToken& group_id) override;
+diff --git a/chrome/browser/ssl/https_upgrades_interceptor.cc b/chrome/browser/ssl/https_upgrades_interceptor.cc
+index 6fff9bdd12..3cda3ae29d 100644
+--- a/chrome/browser/ssl/https_upgrades_interceptor.cc
++++ b/chrome/browser/ssl/https_upgrades_interceptor.cc
+@@ -367,7 +367,7 @@ void HttpsUpgradesInterceptor::MaybeCreateLoader(
+     // Only allowlist the initial host of the navigation. Server-side redirect
+     // targets are not chosen by the user and shouldn't be persistently
+     // allowlisted.
+-    if (state &&
++    if (state && !IsAgensAgentTab(web_contents) &&
+         tentative_resource_request.navigation_redirect_chain.size() <= 1) {
+       state->AllowHttpForHost(tentative_resource_request.url.GetHost(),
+                               storage_partition);
+@@ -545,6 +545,15 @@ void HttpsUpgradesInterceptor::MaybeCreateLoaderOnHstsQueryCompleted(
+     return;
+   }
+ 
++  // agens: an agent's tab goes on over http:// to a URL whose upgrade already failed in this tab
++  // (the fallback redirect itself included), instead of the profile-wide allowlist above.
++  if (IsAgensAgentTab(web_contents) && tab_helper->has_failed_upgrade(url)) {
++    RecordNavigationRequestSecurityLevel(
++        NavigationRequestSecurityLevel::kInsecure);
++    std::move(callback).Run({});
++    return;
++  }
++
+   // If this is a back/forward navigation to a failed upgrade, then don't
+   // intercept to upgrade the navigation. Other forms of re-visiting a URL
+   // that previously failed to be upgraded to HTTPS *should* be intercepted so
+@@ -626,7 +635,7 @@ void HttpsUpgradesInterceptor::MaybeCreateLoaderOnHstsQueryCompleted(
+     // HFM vs. Upgrades.
+     if (!IsInterstitialEnabled(*interstitial_state_)) {
+       // StatefulSSLHostStateDelegate can be null during tests.
+-      if (state) {
++      if (state && !IsAgensAgentTab(web_contents)) {
+         state->AllowHttpForHost(
+             tab_helper->fallback_url().GetHost(),
+             web_contents->GetPrimaryMainFrame()->GetStoragePartition());
+@@ -806,7 +815,7 @@ bool HttpsUpgradesInterceptor::MaybeCreateLoaderForResponse(
+   // the user proceeding through the interstitial only.
+   if (!IsInterstitialEnabled(*interstitial_state_)) {
+     // StatefulSSLHostStateDelegate can be null during tests.
+-    if (state) {
++    if (state && !IsAgensAgentTab(web_contents)) {
+       state->AllowHttpForHost(
+           tab_helper->fallback_url().GetHost(),
+           web_contents->GetPrimaryMainFrame()->GetStoragePartition());
+diff --git a/chrome/browser/ssl/https_upgrades_navigation_throttle.cc b/chrome/browser/ssl/https_upgrades_navigation_throttle.cc
+index ddd4432f25..156a2c4fdf 100644
+--- a/chrome/browser/ssl/https_upgrades_navigation_throttle.cc
++++ b/chrome/browser/ssl/https_upgrades_navigation_throttle.cc
+@@ -105,6 +105,11 @@ HttpsUpgradesNavigationThrottle::~HttpsUpgradesNavigationThrottle() = default;
+ 
+ content::NavigationThrottle::ThrottleCheckResult
+ HttpsUpgradesNavigationThrottle::WillStartRequest() {
++  // agens: the tab may have become an agent's after this throttle was made (tab.open marks it
++  // right after the navigation starts).
++  if (IsAgensAgentTab(navigation_handle()->GetWebContents())) {
++    interstitial_state_ = {};
++  }
+   // If the navigation is fallback to HTTP, trigger the HTTP interstitial (if
+   // enabled). The interceptor creates a redirect for the fallback navigation,
+   // which will trigger MaybeCreateLoader() in the interceptor for the redirect
+@@ -194,6 +199,11 @@ HttpsUpgradesNavigationThrottle::WillFailRequest() {
+ 
+ content::NavigationThrottle::ThrottleCheckResult
+ HttpsUpgradesNavigationThrottle::WillRedirectRequest() {
++  // agens: the tab may have become an agent's after this throttle was made (tab.open marks it
++  // right after the navigation starts).
++  if (IsAgensAgentTab(navigation_handle()->GetWebContents())) {
++    interstitial_state_ = {};
++  }
+   // If the navigation is doing a fallback redirect to HTTP, trigger the HTTP
+   // interstitial (if enabled). The interceptor creates a redirect for the
+   // fallback navigation, which will trigger MaybeCreateLoader() in the
+diff --git a/chrome/browser/ssl/https_upgrades_navigation_throttle.h b/chrome/browser/ssl/https_upgrades_navigation_throttle.h
+index d51af888ca..d572690684 100644
+--- a/chrome/browser/ssl/https_upgrades_navigation_throttle.h
++++ b/chrome/browser/ssl/https_upgrades_navigation_throttle.h
+@@ -63,7 +63,8 @@ class HttpsUpgradesNavigationThrottle : public content::NavigationThrottle {
+ 
+   // Parameters about whether the throttle should trigger the interstitial
+   // warning before navigating to the HTTP fallback URL.
+-  const security_interstitials::https_only_mode::HttpInterstitialState
++  // Not const (agens): cleared once the tab is an agent's.
++  security_interstitials::https_only_mode::HttpInterstitialState
+       interstitial_state_;
+ };
+ 
+diff --git a/chrome/browser/ssl/https_upgrades_util.cc b/chrome/browser/ssl/https_upgrades_util.cc
+index 4790143c19..26b4607e9d 100644
+--- a/chrome/browser/ssl/https_upgrades_util.cc
++++ b/chrome/browser/ssl/https_upgrades_util.cc
+@@ -6,6 +6,7 @@
+ 
+ #include "base/feature_list.h"
+ #include "base/values.h"
++#include "chrome/browser/agens/embed/agens_controlled.h"  // agens nogncheck
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/safe_browsing/advanced_protection_status_manager.h"
+ #include "chrome/browser/safe_browsing/advanced_protection_status_manager_factory.h"
+@@ -58,6 +59,12 @@ void AllowHttpForHostnamesForTesting(const std::vector<std::string>& hostnames,
+   prefs->SetList(prefs::kHttpAllowlist, std::move(allowed_hosts));
+ }
+ 
++bool IsAgensAgentTab(content::WebContents* web_contents) {
++  const AgensControlled* mark =
++      web_contents ? AgensControlled::FromWebContents(web_contents) : nullptr;
++  return mark && !mark->paused;
++}
++
+ void ClearHttpAllowlistForHostnamesForTesting(PrefService* prefs) {
+   base::ListValue empty_list;
+   prefs->SetList(prefs::kHttpAllowlist, std::move(empty_list));
+@@ -65,7 +72,7 @@ void ClearHttpAllowlistForHostnamesForTesting(PrefService* prefs) {
+ 
+ security_interstitials::https_only_mode::HttpInterstitialState
+ ComputeInterstitialState(content::WebContents* web_contents, const GURL& url) {
+-  if (!web_contents) {
++  if (!web_contents || IsAgensAgentTab(web_contents)) {
+     return {};
+   }
+   Profile* profile =
+diff --git a/chrome/browser/ssl/https_upgrades_util.h b/chrome/browser/ssl/https_upgrades_util.h
+index 59f02d024b..dd573e16cf 100644
+--- a/chrome/browser/ssl/https_upgrades_util.h
++++ b/chrome/browser/ssl/https_upgrades_util.h
+@@ -42,6 +42,11 @@ void ClearHttpAllowlistForHostnamesForTesting(PrefService* prefs);
+ security_interstitials::https_only_mode::HttpInterstitialState
+ ComputeInterstitialState(content::WebContents* web_contents, const GURL& url);
+ 
++// agens: a tab an agent drives (and the person has not taken over). It never shows the HTTP
++// interstitial: http:// loads after a failed upgrade, remembered for that tab only, never in the
++// profile's allowlist, so the person's tabs stay strict (docs/protocolo.md, "Páginas sem HTTPS").
++bool IsAgensAgentTab(content::WebContents* web_contents);
++
+ // Returns true if the HTTPS-First Balanced Mode feature flag is enabled.
+ bool IsBalancedModeAvailable();
+ 
 diff --git a/chrome/browser/ui/autofill/chrome_autofill_client.cc b/chrome/browser/ui/autofill/chrome_autofill_client.cc
 index 242bac51ca..9b04fdb59f 100644
 --- a/chrome/browser/ui/autofill/chrome_autofill_client.cc
@@ -22413,6 +22705,23 @@ index d48ee3c659..a34dd35d8e 100644
  
    return extra_data;
  }
+diff --git a/chrome/browser/ui/browser_ui_prefs.cc b/chrome/browser/ui/browser_ui_prefs.cc
+index e032c26ae7..6c47f16829 100644
+--- a/chrome/browser/ui/browser_ui_prefs.cc
++++ b/chrome/browser/ui/browser_ui_prefs.cc
+@@ -157,8 +157,10 @@ void RegisterBrowserUserPrefs(user_prefs::PrefRegistrySyncable* registry) {
+   registry->RegisterBooleanPref(prefs::kPrintPreviewUseSystemDefaultPrinter,
+                                 false);
+ #endif
+-  registry->RegisterStringPref(prefs::kWebRTCIPHandlingPolicy,
+-                               blink::kWebRTCIPHandlingDisableNonProxiedUdp);
++  // Agens: local IPs stay hidden, calls (Meet, Discord) still go direct over UDP.
++  registry->RegisterStringPref(
++      prefs::kWebRTCIPHandlingPolicy,
++      blink::kWebRTCIPHandlingDefaultPublicInterfaceOnly);
+   registry->RegisterListPref(prefs::kWebRTCIPHandlingUrl, base::ListValue());
+   registry->RegisterBooleanPref(prefs::kWebRTCPostQuantumKeyAgreement, false);
+   registry->RegisterStringPref(prefs::kWebRTCUDPPortRange, std::string());
 diff --git a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc b/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
 index 9e4154d594..ce89b2bcaa 100644
 --- a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc

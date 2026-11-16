@@ -63,6 +63,10 @@ class H(http.server.BaseHTTPRequestHandler):
             auth = self.headers.get("Authorization", "")
             return self.reply(200, ('{"ok": true, "bearer": %s}' % str(auth == "Bearer test-bearer-123").lower()).encode(),
                               ctype="application/json")
+        if path == "/secure-cookie":  # a Secure cookie and a plain one; over http the Secure one must not stick
+            return self.reply(200, b"<p>set</p>", [("Set-Cookie", "sec=fake-1; Secure; Path=/"), ("Set-Cookie", "plain=fake-2; Path=/")])
+        if path == "/cookies":  # the Cookie header this request carried, as page text
+            return self.reply(200, ("<p>cookies: %s</p>" % self.headers.get("Cookie", "")).encode())
         if path == "/auth" or path.startswith("/auth/"):
             return self.basic_auth(path)
         if self.path == "/login?auto=1":  # logs in by itself, for gates that cannot type

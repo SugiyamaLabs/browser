@@ -75,7 +75,9 @@ EXTENSION = os.environ["REPO"] + "/tools/sites-teste/extensao"
 # no reason, then one for log out. No system input either way.
 def launch(profile, *extra, name=None):
     log = open(f"{OUT}/engine{'-' + (name or extra[0].strip('-')) if name or extra else ''}.log", "w")
+    # insecure.test: the test site under a name that is not local, for the http:// checks.
     p = subprocess.Popen([APP, f"--user-data-dir={profile}", "--agens-embedded", *extra, f"--load-extension={EXTENSION}",
+                          "--host-resolver-rules=MAP insecure.test 127.0.0.1",
                           "--agens-test-quit-signal", "--use-mock-keychain", "--no-first-run"], stdout=log, stderr=log)
     for _ in range(60):
         if os.path.exists(profile + "/agens.sock"): return p
@@ -365,6 +367,57 @@ if e:
             check("page.type on a label's text is bad_request (the keys would be lost)", err(r2) == "bad_request", r2)
         agent.ask("tab.close", tab=ft)
     check("12 fresh tabs: page.type then page.click Show at once, the value every time", not wrong, wrong)
+    # Pages without HTTPS (docs/protocolo.md, "Páginas sem HTTPS"): an agent's tab opens them with no
+    # interstitial and says insecure; reading and clicking go on, typing waits for the person's OK.
+    INSECURE = f"http://insecure.test:{PORT}"
+    it = agent.ask("tab.open", ato=ato, url=INSECURE + "/form")
+    itab = it.get("tab")
+    check("agent's tab.open of an http:// site: no interstitial, the answer says insecure", it.get("ok") and it.get("insecure") is True, it)
+    isnap = agent.ask("page.snapshot", tab=itab)
+    inodes = isnap.get("nodes", [])
+    iref = lambda role, name: next((n["ref"] for n in inodes if n.get("role") == role and n.get("name") == name), "none")
+    check("page.snapshot there: the form itself, with insecure: true",
+          isnap.get("insecure") is True and iref("textField", "Text") != "none", {k: v for k, v in isnap.items() if k != "nodes"})
+    ck = agent.ask("page.click", tab=itab, ref=iref("checkBox", "Check me"))
+    check("page.click there needs no OK and says insecure", ck.get("ok") and ck.get("insecure") is True, ck)
+    def insecure_ask(timeout=20):
+        return c.event(lambda e: e["event"] == "approval.ask" and e.get("kind") == "insecure_typing", timeout)
+    rid = agent.send("page.type", tab=itab, ref=iref("textField", "Text"), text="no")
+    a = insecure_ask()
+    check("page.type there asks the host (approval.ask insecure_typing, host, offer_always)",
+          bool(a) and a.get("host") == "insecure.test" and a.get("offer_always") is True and a.get("ato") == ato, a)
+    if a: c.ask("approval.answer", ask=a["ask"], answer="deny")
+    check("deny: page.type answers denied", err(agent.wait(rid)) == "denied")
+    rid = agent.send("page.type", tab=itab, ref=iref("textField", "Text"), text="ok1")
+    a = insecure_ask()
+    if a: c.ask("approval.answer", ask=a["ask"], answer="allow")
+    check("allow: page.type goes through", bool(a) and agent.wait(rid).get("ok"))
+    rid = agent.send("page.key", tab=itab, key="2")
+    a = insecure_ask()
+    check("allow covers one action: page.key with a character asks again", bool(a), a)
+    if a: c.ask("approval.answer", ask=a["ask"], answer="always")
+    check("always: page.key goes through", agent.wait(rid).get("ok"))
+    t3 = agent.ask("page.type", tab=itab, ref=iref("textField", "Text"), text="3")
+    check("after always, typing on that host goes on without asking", t3.get("ok") and not insecure_ask(2), t3)
+    check("page.key Backspace there never asks", agent.ask("page.key", tab=itab, key="Backspace").get("ok") and not insecure_ask(2))
+    got = next((n for n in agent.ask("page.snapshot", tab=itab).get("nodes", []) if n.get("role") == "textField" and n.get("name") == "Text"), {})
+    check("what was typed after the OKs is there (ok12)", got.get("value") == "ok12", got)
+    pw = agent.ask("page.type", tab=itab, ref=iref("textField", "Password"), text="x")
+    check("a password field there is still denied", err(pw) == "denied", pw)
+    agent.ask("tab.navigate", tab=itab, url=INSECURE + "/secure-cookie")
+    agent.ask("tab.navigate", tab=itab, url=INSECURE + "/cookies")
+    sent = " ".join(n.get("name", "") for n in agent.ask("page.snapshot", tab=itab).get("nodes", []))
+    check("over http a Secure cookie does not stick (the plain one does)", "plain=fake-2" in sent and "sec=" not in sent, sent[:200])
+    agent.ask("tab.close", tab=itab)
+    local = agent.ask("page.snapshot", tab=r.get("tab"))
+    check("a local http:// page (127.0.0.1) is not insecure", local.get("ok") and "insecure" not in local)
+    # The person's own tab on the same site: HTTPS-Only stays strict, and the agent left no allowlist.
+    pt = c.ask("view.open", ato=ato, url=INSECURE + "/form").get("tab", "")
+    time.sleep(6); c.pump(0.5)
+    seen = [e for e in c.events if e["event"] == "view.tab" and e.get("tab") == pt]
+    check("the person's tab on that http:// site still stops before the page (HTTPS-Only strict)",
+          bool(seen) and not any(e.get("title") == "Form (test)" for e in seen), [(e.get("title"), e.get("url")) for e in seen][-3:])
+    c.ask("view.close", tab=pt)
     c.ask("view.control", tab=e["tab"], action="end")
     check("view.control end: the agent's control stops",
           bool(agent.event(lambda m: m["event"] == "control.stopped", 10)))
@@ -1061,7 +1114,9 @@ def near(a, x, y, slack=40):  # the ask's anchor is about the field's box in the
 def external(tab, timeout=5):
     return c.event(lambda e: e["event"] == "view.external" and e.get("tab") == tab, timeout)
 
-t = ui_tab("/fuga"); titled(t, "Fuga (test)")
+# The first click waits for the page's first paint: before it Chromium drops input (paint holding),
+# and the title comes from the parser, earlier. Clicking on "Fuga (test)" lost the date click.
+t = ui_tab("/fuga"); check("date: the test page painted (Fuga ready)", titled(t, "Fuga ready", 15))
 # Focused, as the host's view is when the person clicks.
 c.send_raw({"op": "view.focus", "tab": t, "on": True})
 

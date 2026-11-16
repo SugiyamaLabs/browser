@@ -174,3 +174,20 @@ Listas reais mais `tools/sites-teste/bloqueador/lista*.txt`, servidas com `--age
 | `/youtube` como `https://www.youtube.com/watch` (servidor local com certificado próprio) | **PASS**: `ytInitialPlayerResponse`, `JSON.parse`, `fetch` e XHR de `/youtubei/v1/player` chegam sem `adPlacements`/`playerAds`/`adSlots`, junto com as regras `+js` reais do YouTube; nível 0 = tudo com anúncio |
 
 Não testado: YouTube e sites reais com rede e janela (pré-roll de verdade, quebra de site por algum scriptlet das listas), tempo e memória a mais por página, o texto de créditos numa interface.
+
+### Medido: sites reais com rede (16/11/2026, build dev, headless, perfil novo por modo)
+
+[`tools/bloqueador_real.py`](../tools/bloqueador_real.py): motor headless (sem janela, sem foco), rede de verdade, ligado (nível 2, o padrão) contra desligado (nível 0 semeado no `Local State`). Requisições contadas pelo Resource Timing do documento principal (requisição bloqueada aparece com duração 0). Uma rodada completa; YouTube repetido várias vezes por causa do renderer que morre (abaixo).
+
+| Página | Desligado | Ligado |
+|---|---|---|
+| YouTube, vídeo (`dQw4w9WgXcQ`) | `ytInitialPlayerResponse` com `adPlacements` (1); toca (5 s em 5 s) | **sem `adPlacements`, `playerAds` nem `adSlots`**; player inicia e toca (5 s em 5 s), sem `.ad-showing` |
+| Twitch, canal ao vivo (`gaules`) | toca; 9 requisições a hosts de anúncio carregaram (amazon-adsystem, scorecardresearch) | toca; 2 carregaram (`s.amazon-adsystem.com`). Nenhum anúncio apareceu no player em ~17 s em nenhum dos dois; o anúncio costurado no HLS continua possível (não bloqueamos) |
+| UOL | 14 espaços `#banner-*`, 1 visível com anúncio, 5 iframes de anúncio, 61 requisições de anúncio carregadas; o evento `load` passou de 30 s | 15 espaços, **0 visíveis, 0 espaços vazios na página**, 0 iframes de anúncio, 0 requisições de anúncio carregadas (30 bloqueadas); `load` em 0,5–0,7 s |
+| 20 abas de `tools/tabs.txt`, uma depois da outra | `load` mediano 1,82 s (soma 45,6 s); 76 requisições de anúncio carregadas | **1,36 s** (soma 25,1 s); 12 carregadas (Twitch, `s.amazon-adsystem.com`), 83 bloqueadas |
+| Memória, as 20 abas abertas, 60 s depois | 5.594 MB, 35 processos | **5.277 MB** (−317 MB, −6%), 28 processos |
+
+- **Quebra:** nenhum erro de JavaScript que só aparece com o bloqueador ligado, fora dois esperados: o analytics do UOL reclama que o `uolplayer.js` (bloqueado) não carregou, e os erros de GraphQL da Twitch (`unauthenticated`, `failed integrity check`), que aparecem também desligado (sem login, headless). Todas as 20 páginas abriram nos dois modos.
+- **Renderer do YouTube morre no build dev, ligado ou desligado:** em parte das aberturas o renderer da aba do YouTube morre num `DCHECK` do Blink (`inline_item_result.cc:55`, quebra de linha de texto). Ligado: 8 de 15; desligado: 2 de 8. Não é o bloqueador. Só existe no build dev (DCHECK ligado); no build oficial esse `DCHECK` não roda. O script marca `renderer_crashed` e os números acima são das aberturas em que não morreu.
+- **Memória:** headless, build dev e todas as abas acordadas (nada dorme em 60 s). Serve só para comparar ligado e desligado; não vale como linha de [medicoes.md](medicoes.md) nem contra a meta de 1.933 MB (essa é medida com o build oficial e as abas dormindo).
+- **Não testado:** pré-roll de verdade (nenhum apareceu desligado nesta rede, então "sem anúncio" no YouTube vem do `ytInitialPlayerResponse` limpo, não de ver o anúncio sumir), Twitch por mais de ~20 s, rolagem do UOL (espaços que só carregam ao rolar), mais de uma rodada das 20 abas.

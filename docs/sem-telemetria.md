@@ -31,7 +31,7 @@ Processos vivos no fim: navegador, GPU, rede, armazenamento e 3 renderers (a nov
 
 ## Privacidade no máximo por padrão (#42)
 
-Auditoria dos padrões em 16/11/2026 (build dev, perfil novo, `chrome://prefs-internals` lido pelo DevTools em modo headless; cabeçalhos conferidos numa página local que devolve o que recebeu). **Nenhum padrão precisou mudar**: o ungoogled e o Chromium 156 já entregam tudo no ponto pedido, ou mais forte.
+Auditoria dos padrões em 16/11/2026 (build dev, perfil novo, `chrome://prefs-internals` lido pelo DevTools em modo headless; cabeçalhos conferidos numa página local que devolve o que recebeu). Nenhum padrão precisou mudar para ficar mais forte. Em 16/11/2026 o WebRTC foi **afrouxado** de propósito para `default_public_interface_only`, para Meet e Discord funcionarem normalmente.
 
 | Item | Pref | Padrão hoje | De onde vem | O que pode quebrar |
 |---|---|---|---|---|
@@ -39,8 +39,8 @@ Auditoria dos padrões em 16/11/2026 (build dev, perfil novo, `chrome://prefs-in
 | Do Not Track | `enable_do_not_track` | ligado; a página recebe `DNT: 1` | ungoogled | nada conhecido |
 | Global Privacy Control | `universal_optout.enabled` | ligado; `Sec-GPC: 1` e `navigator.globalPrivacyControl = true` | Chromium 156 | nada conhecido |
 | Sem previsão nem pré-carga de rede | `net.network_prediction_options` | 2 (desligado): sem preconnect, DNS prefetch nem prerender | ungoogled | navegação um pouco mais lenta no primeiro clique |
-| WebRTC | `webrtc.ip_handling_policy` | `disable_non_proxied_udp` | ungoogled | **mais forte** que o `default_public_interface_only` pedido: nenhum IP local nem UDP direto. Chamada de vídeo (Meet, Discord, Zoom web) cai para TURN por TCP: funciona na maioria, com mais atraso; sem servidor TURN, não conecta |
-| HTTPS | `https_only_mode_enabled` | ligado (HTTPS-Only estrito), mais o upgrade automático | Chromium 156 | site só HTTP mostra um aviso antes de abrir; `localhost` não. Em aba de agente o aviso para a automação até alguém continuar |
+| WebRTC | `webrtc.ip_handling_policy` | `default_public_interface_only` (mudado em 16/11/2026; o ungoogled vinha com `disable_non_proxied_udp`) | nosso (`browser_ui_prefs.cc`) | nada conhecido: só a interface da rota padrão, com o IP público; IP local nunca vaza. A chamada (Meet, Discord, Zoom web) segue direta por UDP, sem cair para TURN. Configurações › Privacidade, "Não revelar o IP local", liga e desliga entre este e `default` |
+| HTTPS | `https_only_mode_enabled` | ligado (HTTPS-Only estrito), mais o upgrade automático | Chromium 156 | site só HTTP mostra um aviso antes de abrir; `localhost` não. Em aba de agente não há aviso: abre sozinha, marcada `insecure`, e digitar ali pede o OK da pessoa ([protocolo](protocolo.md#páginas-sem-https)) |
 | Referrer | `enable_referrers` | ligado, política `strict-origin-when-cross-origin` (para outro site vai só a origem, salvo se a página pedir outra) | Chromium | nada; ver decisão abaixo |
 | Sugestões de busca | `search.suggest_enabled` | desligado | ungoogled | nenhuma sugestão até a pessoa ligar |
 | Safe Browsing | — | não existe no build | ungoogled | — |
