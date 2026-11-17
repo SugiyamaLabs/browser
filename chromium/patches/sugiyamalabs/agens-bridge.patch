@@ -6027,10 +6027,10 @@ index 0000000000..ef8bfc467e
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_SESSION_READ_H_
 diff --git a/chrome/browser/agens/bridge/ui_answer.cc b/chrome/browser/agens/bridge/ui_answer.cc
 new file mode 100644
-index 0000000000..e8d3c4546a
+index 0000000000..79a4877df7
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ui_answer.cc
-@@ -0,0 +1,231 @@
+@@ -0,0 +1,253 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/ui_answer.h"
@@ -6185,6 +6185,20 @@ index 0000000000..e8d3c4546a
 +    if (!OnlyKeys(body, {"response", "error"}) || !response == !error) return UiAnswer::kBadRequest;
 +    return Pick(response ? response->is_dict() : error->is_string() && IsWebAuthnError(error->GetString()));
 +  }
++  if (*kind == "screen_share") {
++    // One of the sources the host was last told about; `audio` is ignored where the ask's `audio`
++    // doesn't list the source's type.
++    const std::string* source = body.FindString("source");
++    const base::Value* audio = body.Find("audio");
++    const base::ListValue* sources = asked.FindList("sources");
++    if (!OnlyKeys(body, {"source", "audio"}) || !source || !sources || (audio && !audio->is_bool())) {
++      return UiAnswer::kBadRequest;
++    }
++    return Pick(std::ranges::any_of(*sources, [&](const base::Value& s) {
++      const std::string* id = s.is_dict() ? s.GetDict().FindString("id") : nullptr;
++      return id && *id == *source;
++    }));
++  }
 +  if (*kind == "extension") {
 +    if (!OnlyKeys(body, {"allow", "atos"}) || !body.FindBool("allow")) return UiAnswer::kBadRequest;
 +    const base::Value* atos = body.Find("atos");
@@ -6239,6 +6253,14 @@ index 0000000000..e8d3c4546a
 +  } else if (*kind == "print") {
 +    clip(fields, "title", kMaxUiLabelChars);
 +    clip(fields, "url", kMaxUiUrlBytes);
++  } else if (*kind == "screen_share") {
++    if (base::ListValue* sources = fields.FindList("sources")) {
++      for (base::Value& source : *sources) {
++        if (!source.is_dict()) continue;
++        clip(source.GetDict(), "title", kMaxUiLabelChars);
++        clip(source.GetDict(), "app", kMaxUiLabelChars);
++      }
++    }
 +  } else if (*kind == "extension") {
 +    clip(fields, "name", kMaxUiLabelChars);
 +    clip(fields, "version", kMaxUiLabelChars);
@@ -6264,10 +6286,10 @@ index 0000000000..e8d3c4546a
 +}  // namespace agens::bridge
 diff --git a/chrome/browser/agens/bridge/ui_answer.h b/chrome/browser/agens/bridge/ui_answer.h
 new file mode 100644
-index 0000000000..0304ade671
+index 0000000000..56b95365f4
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ui_answer.h
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,66 @@
 +// Copyright 2026 SugiyamaLabs.
 +// What the host may answer to a ui.ask (docs/protocolo.md, "Passo 5.3"). Pure logic, so
 +// ui_answer_selfcheck.cc runs it with only //base; the engine side is ui_ops.h.
@@ -6312,7 +6334,8 @@ index 0000000000..0304ade671
 +// only with the action inspect. A date answer is a `value` number between the ask's `min` and
 +// `max`, a whole number of `step`s from `min`; a color answer a `value` "#rrggbb"; a webauthn
 +// answer a `response` object (its shape is checked by the engine side) or an `error` named by
-+// IsWebAuthnError. print has no answer but cancel.
++// IsWebAuthnError; a screen_share answer a `source` that is the `id` of one of the ask's `sources`,
++// with an optional boolean `audio`. print has no answer but cancel.
 +UiAnswer CheckUiAnswer(bool from_host, const base::DictValue* asked, const base::DictValue& body);
 +
 +// The DOMException names a webauthn answer may carry.
@@ -6335,10 +6358,10 @@ index 0000000000..0304ade671
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_UI_ANSWER_H_
 diff --git a/chrome/browser/agens/bridge/ui_answer_selfcheck.cc b/chrome/browser/agens/bridge/ui_answer_selfcheck.cc
 new file mode 100644
-index 0000000000..df835d4a98
+index 0000000000..d0dd97e89b
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ui_answer_selfcheck.cc
-@@ -0,0 +1,264 @@
+@@ -0,0 +1,270 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Assert-based check of ui_answer.h, run by agens_bridge_selfcheck (protocol_selfcheck.cc).
 +
@@ -6521,6 +6544,12 @@ index 0000000000..df835d4a98
 +  UI_CHECK(Check(passkey, R"({"response":"x"})") == kBad && Check(passkey, R"({})") == kBad);
 +  UI_CHECK(Check(passkey, R"({"response":{},"error":"NotAllowedError"})") == kBad);
 +  UI_CHECK(IsHexColor("#abcdef") && !IsHexColor("abcdef1") && !IsHexColor("#abcde"));
++  // screen_share: a source the ask offered, an optional boolean audio.
++  const std::string share = R"({"kind":"screen_share","sources":[{"id":"v4","type":"tab"},{"id":"screen:1:0","type":"screen"}]})";
++  UI_CHECK(Check(share, R"({"source":"v4"})") == kOk && Check(share, R"({"source":"screen:1:0","audio":true})") == kOk);
++  UI_CHECK(Check(share, R"({"source":"v5"})") == kBad && Check(share, R"({"source":4})") == kBad);
++  UI_CHECK(Check(share, R"({"source":"v4","audio":"yes"})") == kBad && Check(share, R"({"source":"v4","index":0})") == kBad);
++  UI_CHECK(Check(share, R"({})") == kBad && Check(share, R"({"cancel":true})") == kCancel);
 +
 +  // What the page controls, cut before it goes out.
 +  {
@@ -6605,10 +6634,10 @@ index 0000000000..df835d4a98
 +}
 diff --git a/chrome/browser/agens/bridge/ui_ops.cc b/chrome/browser/agens/bridge/ui_ops.cc
 new file mode 100644
-index 0000000000..6d867a7d9e
+index 0000000000..5ad6c26fc0
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ui_ops.cc
-@@ -0,0 +1,1226 @@
+@@ -0,0 +1,1245 @@
 +// Copyright 2026 SugiyamaLabs.
 +// - One queue for every ask, in the order they came; only the oldest of each tab and kind is on
 +//   the host at a time, and at most kMaxOpenUiAsks wait in all.
@@ -7650,6 +7679,25 @@ index 0000000000..6d867a7d9e
 +  SendNext();
 +}
 +
++bool Update(int ask, base::DictValue fields) {
++  Pending* p = Find(ask);
++  if (!p) return false;
++  p->fields.Merge(fields.Clone());
++  ClipUiAsk(p->fields);
++  if (!p->sent || p->checking || !view::Host()) return false;
++  fields.Set("ask", *p->fields.FindString("ask"));
++  fields.Set("kind", p->kind);
++  if (const std::string* tab = p->fields.FindString("tab")) fields.Set("tab", *tab);
++  ClipUiAsk(fields);
++  SendEventTo(view::Host(), "ui.update", std::move(fields));
++  return true;
++}
++
++bool Sent(int ask) {
++  const Pending* p = Find(ask);
++  return p && p->sent;
++}
++
 +void TabClosing(content::WebContents* contents) {
 +  if (Watch::FromWebContents(contents)) EndTab(view::TabNumber(contents), "closed");
 +}
@@ -7837,10 +7885,10 @@ index 0000000000..6d867a7d9e
 +}  // namespace agens::bridge::ui_ask
 diff --git a/chrome/browser/agens/bridge/ui_ops.h b/chrome/browser/agens/bridge/ui_ops.h
 new file mode 100644
-index 0000000000..19b49ac97d
+index 0000000000..2dd33f71f1
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/ui_ops.h
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,93 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The host draws what the engine would put on screen (docs/protocolo.md, "Passo 5.3"): ui.ask to
 +// the host, ui.answer back, ui.cancel when the engine gives up first. Embedded only; UI thread.
@@ -7880,6 +7928,12 @@ index 0000000000..19b49ac97d
 +int Ask(content::WebContents* contents, std::string_view kind, base::DictValue fields, AnswerCallback done);
 +// The page gave up: the host gets ui.cancel "gone" if it was asked, and `done` never runs.
 +void Withdraw(int ask);
++// An open ask changed (screen_share's sources): `fields` replace those keys in it, and the host
++// gets ui.update {ask, kind, tab, ...fields} if it was sent. False when it was not sent yet (it
++// goes later with these fields) or is gone.
++bool Update(int ask, base::DictValue fields);
++// The ask is on the host now (not waiting behind another of its tab and kind).
++bool Sent(int ask);
 +
 +// The engine closes the tab (view.close, tab.close): its asks end with "closed" now, before
 +// Chromium tears the page down and cancels its dialogs for other reasons.
@@ -8398,10 +8452,10 @@ index 0000000000..e98cac0576
 +}
 diff --git a/chrome/browser/agens/bridge/view_ops.cc b/chrome/browser/agens/bridge/view_ops.cc
 new file mode 100644
-index 0000000000..4e31bf8941
+index 0000000000..eb97b5f713
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_ops.cc
-@@ -0,0 +1,1708 @@
+@@ -0,0 +1,1722 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The host draws the interface; the engine hands it the pages (docs/protocolo.md, "host e view").
 +// - One host: the connection that sent host.attach (the app that launched the engine).
@@ -8439,6 +8493,7 @@ index 0000000000..4e31bf8941
 +#include "chrome/browser/agens/bridge/view_input.h"
 +#include "chrome/browser/agens/bridge/view_pick.h"
 +#include "chrome/browser/agens/embed/agens_controlled.h"
++#include "chrome/browser/agens/embed/agens_screen_share.h"
 +#include "chrome/browser/agens/embed/agens_embedded.h"
 +#include "chrome/browser/agens/embed/agens_window.h"
 +#include "chrome/browser/agens/embed/native_shell.h"
@@ -8744,6 +8799,7 @@ index 0000000000..4e31bf8941
 +  if (const AgensControlled* controlled = AgensControlled::FromWebContents(contents)) {
 +    tab.Set("control", ControlFields(*controlled));
 +  }
++  if (std::optional<base::DictValue> sharing = agens::ShareFields(contents)) tab.Set("sharing", std::move(*sharing));
 +  return tab;
 +}
 +
@@ -9896,6 +9952,18 @@ index 0000000000..4e31bf8941
 +  } else if (op == "view.print_pdf") {
 +    ui_ask::PrintPdf(contents, request, std::move(reply));
 +    return;
++  } else if (op == "view.share.stop") {
++    // The person's Parar, also on an agent's tab; view.tab drops `sharing` when it ends.
++    if (!agens::StopSharing(contents)) {
++      std::move(reply).Run(ErrorReply(&request.id, kNotFound, "the tab is not sharing"));
++      return;
++    }
++  } else if (op == "view.share.switch") {
++    // Trocar: a new ui.ask screen_share (switching, only tabs); its answer changes what is shared.
++    if (!agens::SwitchSharing(contents)) {
++      std::move(reply).Run(ErrorReply(&request.id, kNotFound, "the tab is not sharing something that can switch"));
++      return;
++    }
 +  } else {
 +    std::move(reply).Run(ErrorReply(&request.id, kUnknownOp, op));
 +    return;
@@ -13047,21 +13115,25 @@ index 0000000000..9787b1d770
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EXTENSIONS_H_
 diff --git a/chrome/browser/agens/embed/agens_screen_share.h b/chrome/browser/agens/embed/agens_screen_share.h
 new file mode 100644
-index 0000000000..be680bd45e
+index 0000000000..4cfca597c7
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_screen_share.h
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,49 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Compartilhar a tela in the casca (prototipos/janela-tela.html #tela): our picker in place of
 +// Chromium's getDisplayMedia dialog, and our sharing marks in place of its notification window and
 +// tab-sharing infobar. The rest of Chromium's flow (DisplayMediaAccessHandler, the capture itself)
-+// stays. Only in the AgensBrowser on its own; embedded and outside the native shell these return
++// stays. In the AgensBrowser on its own the casca draws them; embedded, the host does (ui.ask
++// "screen_share", view.tab's `sharing`: docs/protocolo.md, "Passo 5.8"). Elsewhere these return
 +// null and Chromium's own UI runs.
 +#ifndef CHROME_BROWSER_AGENS_EMBED_AGENS_SCREEN_SHARE_H_
 +#define CHROME_BROWSER_AGENS_EMBED_AGENS_SCREEN_SHARE_H_
 +
 +#include <memory>
++#include <optional>
 +#include <string>
++
++#include "base/values.h"
 +
 +#include "chrome/browser/agens/embed/agens_embed.h"
 +
@@ -13076,7 +13148,7 @@ index 0000000000..be680bd45e
 +namespace agens {
 +
 +// From DesktopMediaPicker::Create: the casca's picker for a request from a tab of a native-shell
-+// window; null for anything else (no request, "this tab", embedded).
++// window, the host's (ui.ask) for one embedded; null for anything else (no request, "this tab").
 +std::unique_ptr<DesktopMediaPicker> CreateNativeDesktopMediaPicker(const content::MediaStreamRequest* request);
 +// From CreateMediaStreamCaptureIndicatorUI: the bar and marks while `capturer` shares `media_id`;
 +// null outside the casca (Chromium's notification UI then).
@@ -13086,30 +13158,46 @@ index 0000000000..be680bd45e
 +// AgensTab.sharing* for a tab; `name` keeps the string `tab->sharing_name` points to.
 +void FillShareState(content::WebContents* contents, AgensTab* tab, std::string* name);
 +
++// Embedded: view.tab's `sharing` {kind, target, title, audio, switch} while the tab captures.
++std::optional<base::DictValue> ShareFields(content::WebContents* contents);
++// view.share.stop and view.share.switch (the host's Parar and Trocar). False when the tab shares
++// nothing (switch: nothing that can switch).
++bool StopSharing(content::WebContents* contents);
++bool SwitchSharing(content::WebContents* contents);
++
 +}  // namespace agens
 +
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_SCREEN_SHARE_H_
 diff --git a/chrome/browser/agens/embed/agens_screen_share_mac.mm b/chrome/browser/agens/embed/agens_screen_share_mac.mm
 new file mode 100644
-index 0000000000..218fdc8772
+index 0000000000..a4c34b2b5b
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_screen_share_mac.mm
-@@ -0,0 +1,396 @@
+@@ -0,0 +1,560 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Compartilhar a tela in the casca (agens_screen_share.h, docs/casca.md).
 +
 +#include "chrome/browser/agens/embed/agens_screen_share.h"
 +
++#import <AppKit/AppKit.h>
++#include <CoreGraphics/CoreGraphics.h>
++
 +#include <map>
 +#include <utility>
 +#include <vector>
 +
++#include "base/base64.h"
 +#include "base/functional/bind.h"
 +#include "base/memory/weak_ptr.h"
 +#include "base/no_destructor.h"
++#include "base/strings/sys_string_conversions.h"
 +#include "base/strings/utf_string_conversions.h"
 +#include "base/task/thread_pool.h"
 +#include "base/timer/timer.h"
++#include "chrome/browser/agens/bridge/ui_ops.h"
++#include "chrome/browser/agens/bridge/view_input.h"
++#include "chrome/browser/agens/bridge/view_ops.h"
++#include "chrome/browser/agens/embed/agens_embedded.h"
 +#include "chrome/browser/agens/embed/agens_window.h"
 +#include "chrome/browser/agens/embed/native_shell.h"
 +#include "chrome/browser/media/webrtc/desktop_media_list.h"
@@ -13135,6 +13223,25 @@ index 0000000000..218fdc8772
 +namespace {
 +
 +using content::DesktopMediaID;
++
++// The protocol's names for AgensShareKind.
++constexpr const char* kTypeNames[] = {"screen", "window", "tab"};
++// Base64 thumbnails per ui.ask or ui.update; the rest goes in the next one.
++constexpr size_t kHostThumbnailBytes = 512 * 1024;
++
++// A tab capture's tab: the page of its main frame.
++content::WebContents* SharedTab(const DesktopMediaID& id) {
++  content::RenderFrameHost* frame =
++      content::RenderFrameHost::FromID(id.web_contents_id.render_process_id, id.web_contents_id.main_render_frame_id);
++  return frame ? content::WebContents::FromRenderFrameHost(frame) : nullptr;
++}
++
++// What the host calls a source: a tab's view id ("" for one it doesn't know), else the capture id.
++std::string HostId(const DesktopMediaID& id) {
++  if (id.type != DesktopMediaID::TYPE_WEB_CONTENTS) return id.ToString();
++  const int n = bridge::view::KnownTab(SharedTab(id));
++  return n ? bridge::ViewTabName(n) : std::string();
++}
 +
 +int KindOf(DesktopMediaList::Type type) {
 +  switch (type) {
@@ -13162,11 +13269,16 @@ index 0000000000..218fdc8772
 +}
 +
 +// Shows the sources on the casca (agens_ui_share_picker) and answers with the one picked
-+// (agens_window_share_pick). `switching`: "Trocar", only tabs.
++// (agens_window_share_pick); with no `window` (embedded), on the host (ui.ask "screen_share",
++// ui.update while open). `switching`: "Trocar", only tabs.
 +class SharePicker : public DesktopMediaPicker {
 + public:
-+  SharePicker(AgensWindow* window, content::WebContents* contents, bool switching)
-+      : window_(window->weak.GetWeakPtr()), switching_(switching) {
++  SharePicker(AgensWindow* window, content::WebContents* contents, bool switching, std::string origin = {})
++      : window_(window ? window->weak.GetWeakPtr() : nullptr),
++        host_(!window),
++        contents_(contents->GetWeakPtr()),
++        origin_(std::move(origin)),
++        switching_(switching) {
 +    if (tabs::TabInterface* tab = tabs::TabInterface::MaybeGetFromContents(contents)) {
 +      tab_id_ = tab->GetHandle().raw_value();
 +    }
@@ -13176,6 +13288,7 @@ index 0000000000..218fdc8772
 +    std::erase(Pickers(), this);
 +    if (manager_shown_) DesktopMediaPickerManager::Get()->OnHideDialog();
 +    if (window_ && window_->ui) agens_ui_share_picker(window_->ui, nullptr);
++    bridge::ui_ask::Withdraw(ask_);  // the request went first: ui.cancel "gone"
 +  }
 +
 +  // DesktopMediaPicker:
@@ -13203,7 +13316,8 @@ index 0000000000..218fdc8772
 +      if (list->IsSourceListDelegated()) continue;
 +      const int kind = KindOf(list->GetMediaListType());
 +      kinds_ |= 1 << kind;
-+      list->SetThumbnailSize(gfx::Size(360, 226));  // the 16:10 tile, at 2x
++      // The casca's 16:10 tile at 2x; the host's at most 320 points wide.
++      list->SetThumbnailSize(host_ ? gfx::Size(320, 200) : gfx::Size(360, 226));
 +      watches_.push_back(std::make_unique<Watch>(this));
 +      lists_.push_back(std::move(list));
 +      if (kind == kAgensShareTab) {
@@ -13225,7 +13339,7 @@ index 0000000000..218fdc8772
 +    for (const auto& list : lists_) {
 +      for (int i = 0; i < list->GetSourceCount(); ++i) {
 +        const DesktopMediaList::Source& source = list->GetSource(i);
-+        if (source.id.ToString() != id) continue;
++        if ((host_ ? HostId(source.id) : source.id.ToString()) != id) continue;
 +        DesktopMediaID media_id = source.id;
 +        const int kind = KindOf(list->GetMediaListType());
 +        media_id.audio_share = switching_ ? switch_audio_ : audio && (audio_ & (1 << kind));
@@ -13239,6 +13353,12 @@ index 0000000000..218fdc8772
 +  void set_switch_audio(bool audio) { switch_audio_ = audio; }
 +
 + private:
++  struct Thumbnail {
++    uint32_t generation = 0;
++    uint32_t on_host = 0;  // the generation the host has
++    std::vector<uint8_t> png;
++  };
++
 +  struct Watch : DesktopMediaListObserver {
 +    explicit Watch(SharePicker* picker) : picker(picker) {}
 +    void OnSourceAdded(int) override { picker->Changed(); }
@@ -13286,7 +13406,9 @@ index 0000000000..218fdc8772
 +  }
 +  void Publish() {
 +    publish_pending_ = false;
-+    if (!window_ || !window_->ui || done_.is_null()) return;
++    if (done_.is_null()) return;
++    if (host_) return PublishToHost();
++    if (!window_ || !window_->ui) return;
 +    std::vector<std::string> ids, names;
 +    std::vector<int> kinds;
 +    std::vector<const std::vector<uint8_t>*> pngs;
@@ -13296,13 +13418,7 @@ index 0000000000..218fdc8772
 +        ids.push_back(source.id.ToString());
 +        names.push_back(base::UTF16ToUTF8(source.name));
 +        kinds.push_back(KindOf(list->GetMediaListType()));
-+        Thumbnail& t = thumbnails_[ids.back()];
-+        const SkBitmap* bitmap = source.thumbnail.isNull() ? nullptr : source.thumbnail.bitmap();
-+        if (bitmap && bitmap->getGenerationID() != t.generation) {  // only new pictures get encoded
-+          t.generation = bitmap->getGenerationID();
-+          t.png = gfx::PNGCodec::EncodeBGRASkBitmap(*bitmap, false).value_or(std::vector<uint8_t>());
-+        }
-+        pngs.push_back(&t.png);
++        pngs.push_back(&Encode(ids.back(), source).png);
 +      }
 +    }
 +    std::vector<AgensShareSource> sources(ids.size());
@@ -13315,6 +13431,100 @@ index 0000000000..218fdc8772
 +    agens_ui_share_picker(window_->ui, &picker);
 +  }
 +
++  Thumbnail& Encode(const std::string& id, const DesktopMediaList::Source& source) {
++    Thumbnail& t = thumbnails_[id];
++    const SkBitmap* bitmap = source.thumbnail.isNull() ? nullptr : source.thumbnail.bitmap();
++    if (bitmap && bitmap->getGenerationID() != t.generation) {  // only new pictures get encoded
++      t.generation = bitmap->getGenerationID();
++      t.png = gfx::PNGCodec::EncodeBGRASkBitmap(*bitmap, false).value_or(std::vector<uint8_t>());
++    }
++    return t;
++  }
++
++  // The window's app, for the host to name it and draw its icon (from the bundle id).
++  void AddApp(DesktopMediaID::Id window, base::DictValue& entry) {
++    auto [it, fresh] = apps_.try_emplace(window);
++    if (fresh) {
++      NSArray* info = CFBridgingRelease(
++          CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, static_cast<CGWindowID>(window)));
++      NSDictionary* first = info.firstObject;
++      NSString* owner = first[(__bridge NSString*)kCGWindowOwnerName];
++      NSNumber* pid = first[(__bridge NSString*)kCGWindowOwnerPID];
++      NSRunningApplication* app = pid ? [NSRunningApplication runningApplicationWithProcessIdentifier:pid.intValue] : nil;
++      it->second = {owner ? base::SysNSStringToUTF8(owner) : std::string(),
++                    app.bundleIdentifier ? base::SysNSStringToUTF8(app.bundleIdentifier) : std::string()};
++    }
++    if (!it->second.first.empty()) entry.Set("app", it->second.first);
++    if (!it->second.second.empty()) entry.Set("bundle_id", it->second.second);
++  }
++
++  // ui.ask "screen_share" the first time, ui.update after. A thumbnail (a tab's favicon) goes only
++  // when it is new to the host, within kHostThumbnailBytes per message.
++  void PublishToHost() {
++    if (!contents_) return;
++    base::ListValue sources;
++    size_t budget = kHostThumbnailBytes;
++    bool deferred = false;
++    std::vector<std::pair<Thumbnail*, uint32_t>> going;
++    for (const auto& list : lists_) {
++      const int kind = KindOf(list->GetMediaListType());
++      for (int i = 0; i < list->GetSourceCount(); ++i) {
++        const DesktopMediaList::Source& source = list->GetSource(i);
++        const std::string id = HostId(source.id);
++        if (id.empty()) continue;
++        base::DictValue entry;
++        entry.Set("id", id);
++        entry.Set("type", kTypeNames[kind]);
++        entry.Set("title", base::UTF16ToUTF8(source.name));
++        if (kind == kAgensShareWindow) AddApp(source.id.id, entry);
++        Thumbnail& t = Encode(id, source);
++        if (!t.png.empty() && t.on_host != t.generation) {
++          std::string png = base::Base64Encode(t.png);
++          if (png.size() <= budget) {
++            budget -= png.size();
++            entry.Set(kind == kAgensShareTab ? "favicon" : "thumbnail", std::move(png));
++            going.emplace_back(&t, t.generation);
++          } else {
++            deferred = true;
++          }
++        }
++        sources.Append(std::move(entry));
++      }
++    }
++    base::DictValue fields;
++    fields.Set("sources", std::move(sources));
++    fields.Set("permission", permission_ ? "granted" : "missing");
++    bool on_host;
++    if (!ask_) {
++      base::ListValue types, audio;
++      for (int kind : {kAgensShareScreen, kAgensShareWindow, kAgensShareTab}) {
++        if (kinds_ & (1 << kind)) types.Append(kTypeNames[kind]);
++        if (audio_ & (1 << kind)) audio.Append(kTypeNames[kind]);
++      }
++      fields.Set("origin", origin_);
++      fields.Set("types", std::move(types));
++      fields.Set("audio", std::move(audio));
++      fields.Set("switching", switching_);
++      ask_ = bridge::ui_ask::Ask(contents_.get(), "screen_share", std::move(fields),
++                                 base::BindOnce(&SharePicker::Answered, weak_.GetWeakPtr()));
++      on_host = ask_ && bridge::ui_ask::Sent(ask_);
++    } else {
++      on_host = bridge::ui_ask::Update(ask_, std::move(fields));
++    }
++    // Not on the host yet (behind another ask): every thumbnail goes again with the next update.
++    if (!on_host) return;
++    for (auto [t, generation] : going) t->on_host = generation;
++    if (deferred) Changed();
++  }
++
++  // The host's ui.answer; null when the engine ended it (no host, the tab went).
++  void Answered(const base::DictValue* answer) {
++    ask_ = 0;
++    const std::string* source = answer ? answer->FindString("source") : nullptr;
++    if (!source) return Finish(base::unexpected(blink::mojom::MediaStreamRequestResult::PERMISSION_DENIED_BY_USER));
++    Pick(*source, answer->FindBool("audio").value_or(false));
++  }
++
 +  void Finish(DoneCallbackArgumentType result) {
 +    poll_.Stop();
 +    if (manager_shown_) DesktopMediaPickerManager::Get()->OnHideDialog();
@@ -13324,12 +13534,12 @@ index 0000000000..218fdc8772
 +    content::GetUIThreadTaskRunner({})->PostTask(FROM_HERE, base::BindOnce(std::move(done_), result));
 +  }
 +
-+  struct Thumbnail {
-+    uint32_t generation = 0;
-+    std::vector<uint8_t> png;
-+  };
-+
 +  base::WeakPtr<AgensWindow> window_;
++  const bool host_;
++  base::WeakPtr<content::WebContents> contents_;
++  const std::string origin_;  // host: who asks (the requesting frame's origin)
++  int ask_ = 0;               // host: the open ui.ask
++  std::map<DesktopMediaID::Id, std::pair<std::string, std::string>> apps_;  // window: app name, bundle id
 +  const bool switching_;
 +  bool switch_audio_ = false;
 +  int tab_id_ = 0;
@@ -13339,8 +13549,9 @@ index 0000000000..218fdc8772
 +  bool permission_known_ = false, permission_ = false;
 +  bool publish_pending_ = false, manager_shown_ = false;
 +  DoneCallback done_;
-+  std::vector<std::unique_ptr<DesktopMediaList>> lists_;
++  // Declared before lists_ so they go after them: a list keeps a raw_ptr to its watch.
 +  std::vector<std::unique_ptr<Watch>> watches_;  // one per list, same order
++  std::vector<std::unique_ptr<DesktopMediaList>> lists_;
 +  std::map<std::string, Thumbnail> thumbnails_;
 +  base::RepeatingTimer poll_;
 +  base::WeakPtrFactory<SharePicker> weak_{this};
@@ -13387,19 +13598,21 @@ index 0000000000..218fdc8772
 +      return it != WindowNames().end() ? it->second : std::string();
 +    }
 +    if (media_id_.type != DesktopMediaID::TYPE_WEB_CONTENTS) return std::string();
-+    content::RenderFrameHost* frame = content::RenderFrameHost::FromID(
-+        media_id_.web_contents_id.render_process_id, media_id_.web_contents_id.main_render_frame_id);
-+    content::WebContents* shared = frame ? content::WebContents::FromRenderFrameHost(frame) : nullptr;
++    content::WebContents* shared = SharedTab(media_id_);
 +    return shared ? base::UTF16ToUTF8(shared->GetTitle()) : std::string();
 +  }
++  // The source's id as the host's ask had it.
++  std::string Target() const { return HostId(media_id_); }
 +
 +  void Stop() {
 +    if (stop_) std::move(stop_).Run();
 +  }
-+  // Trocar: the picker again, with this ato's tabs; the pick changes the shared tab in place.
++  // Trocar: the picker again, with this ato's tabs; the pick changes the shared tab in place. No
++  // `window`: the host's (view.share.switch).
 +  void Switch(AgensWindow* window) {
 +    if (source_.is_null() || !capturer_) return;
-+    switcher_ = std::make_unique<SharePicker>(window, capturer_.get(), /*switching=*/true);
++    switcher_ = std::make_unique<SharePicker>(window, capturer_.get(), /*switching=*/true,
++                                              capturer_->GetPrimaryMainFrame()->GetLastCommittedOrigin().Serialize());
 +    switcher_->set_switch_audio(audio_);
 +    DesktopMediaPicker::Params params(DesktopMediaPicker::Params::RequestSource::kGetDisplayMedia);
 +    params.web_contents = capturer_.get();
@@ -13450,6 +13663,10 @@ index 0000000000..218fdc8772
 +  if (!request || request->video_type == blink::mojom::MediaStreamType::DISPLAY_VIDEO_CAPTURE_THIS_TAB) return nullptr;
 +  content::RenderFrameHost* frame = content::RenderFrameHost::FromID(request->render_process_id, request->render_frame_id);
 +  content::WebContents* contents = frame ? content::WebContents::FromRenderFrameHost(frame) : nullptr;
++  if (IsEmbedded()) {
++    return contents ? std::make_unique<SharePicker>(nullptr, contents, /*switching=*/false, request->url_origin.Serialize())
++                    : nullptr;
++  }
 +  AgensWindow* window = NativeWindowForContents(contents);
 +  return window ? std::make_unique<SharePicker>(window, contents, /*switching=*/false) : nullptr;
 +}
@@ -13457,7 +13674,7 @@ index 0000000000..218fdc8772
 +std::unique_ptr<MediaStreamUI> CreateNativeShareUI(content::WebContents* capturer,
 +                                                   const DesktopMediaID& media_id,
 +                                                   bool audio) {
-+  if (!NativeWindowForContents(capturer)) return nullptr;
++  if (!capturer || (!IsEmbedded() && !NativeWindowForContents(capturer))) return nullptr;
 +  return std::make_unique<NativeShareUI>(capturer, media_id, audio);
 +}
 +
@@ -13473,6 +13690,32 @@ index 0000000000..218fdc8772
 +  tab->sharing_audio = share->audio();
 +  tab->sharing_name = name->c_str();
 +  tab->sharing_switch = share->can_switch();
++}
++
++std::optional<base::DictValue> ShareFields(content::WebContents* contents) {
++  const std::vector<NativeShareUI*> shares = SharesOf(contents);
++  if (shares.empty()) return std::nullopt;
++  NativeShareUI* share = shares.front();  // as FillShareState
++  base::DictValue fields;
++  fields.Set("kind", kTypeNames[share->kind()]);
++  fields.Set("target", share->Target());
++  fields.Set("title", share->Name());
++  fields.Set("audio", share->audio());
++  fields.Set("switch", share->can_switch());
++  return fields;
++}
++
++bool StopSharing(content::WebContents* contents) {
++  const std::vector<NativeShareUI*> shares = SharesOf(contents);
++  for (NativeShareUI* share : shares) share->Stop();
++  return !shares.empty();
++}
++
++bool SwitchSharing(content::WebContents* contents) {
++  const std::vector<NativeShareUI*> shares = SharesOf(contents);
++  if (shares.empty() || !shares.front()->can_switch()) return false;
++  shares.front()->Switch(nullptr);
++  return true;
 +}
 +
 +}  // namespace agens

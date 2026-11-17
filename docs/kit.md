@@ -83,7 +83,7 @@ Navegação: `navigate(tab, to: texto)` (endereço ou busca, como na barra), `ba
 
 ## As abas e os dados delas
 
-`engine.tabs` é um modelo observável com as abas de cada ato: título, URL, carregando, áudio (`audible`, `muted`, `volume` de 0 a 100), se dá para voltar e avançar, ícone (PNG) e `control` quando um agente está usando a aba e `agentCursor`, o ponto onde está o ponteiro dele (o app desenha).
+`engine.tabs` é um modelo observável com as abas de cada ato: título, URL, carregando, áudio (`audible`, `muted`, `volume` de 0 a 100), se dá para voltar e avançar, ícone (PNG) e `control` quando um agente está usando a aba e `agentCursor`, o ponto onde está o ponteiro dele (o app desenha), e `sharing` enquanto a página compartilha a tela (veja "Compartilhar a tela", abaixo).
 
 ```swift
 try await engine.tabs.load(ato: ato)        // as abas que já existem (inclui as do agente)
@@ -133,7 +133,7 @@ let read = try await engine.settings()                                          
 
 ## Menus, diálogos e pedidos da página
 
-O que a página abre por conta própria chega como `ui.ask` ([protocolo.md](protocolo.md), "Passo 5.3"): lista de `select`, botão direito, `alert`/`confirm`/`prompt`/`beforeunload`, escolher arquivo, login HTTP, permissão do site, instalar extensão, seletor de data e de cor, imprimir e passkey.
+O que a página abre por conta própria chega como `ui.ask` ([protocolo.md](protocolo.md), "Passo 5.3"): lista de `select`, botão direito, `alert`/`confirm`/`prompt`/`beforeunload`, escolher arquivo, login HTTP, permissão do site, instalar extensão, seletor de data e de cor, imprimir, passkey e compartilhar a tela ("Passo 5.8").
 
 O kit já desenha tudo em AppKit, em português. Ligue com uma linha:
 
@@ -147,9 +147,10 @@ engine.onUIRequest = { [weak engine] in await engine?.presentDefaultUI($0) ?? .c
 - Data, hora, mês e cor: popover junto do campo, com `NSDatePicker` (em UTC, para mostrar o dia do campo) ou `NSColorWell`, e **Cancelar** / **OK**. A resposta já vem no passo e na faixa do campo.
 - Imprimir: pede o PDF (`printPDF`), abre no PDFKit e mostra a folha de impressão do sistema (`NSPrintOperation`) na janela da vista; no fim responde cancelar, que é o "terminei" do protocolo.
 - Passkey: responde `NotAllowedError` por enquanto (o site segue pelo caminho sem passkey). Veja "Passkeys", abaixo.
+- Compartilhar a tela: ainda sem seletor do kit; responde cancelar (a página recebe `NotAllowedError`). Veja "Compartilhar a tela", abaixo.
 - Sem a vista da aba (ou sem janela, nas folhas), a resposta é cancelar.
 
-Para desenhar do seu jeito, troque o handler. `request.kind` diz o que é (`.select`, `.contextMenu`, `.dialog`, `.file`, `.auth`, `.permission`, `.extension`, `.date`, `.color`, `.print`, `.webauthn`), cada um com os campos do protocolo. Devolva o `UIAnswer` do mesmo kind, ou `.cancel`. Dá para chamar `presentDefaultUI` só nos kinds que você não quer desenhar.
+Para desenhar do seu jeito, troque o handler. `request.kind` diz o que é (`.select`, `.contextMenu`, `.dialog`, `.file`, `.auth`, `.permission`, `.extension`, `.date`, `.color`, `.print`, `.webauthn`, `.screenShare`), cada um com os campos do protocolo. Devolva o `UIAnswer` do mesmo kind, ou `.cancel`. Dá para chamar `presentDefaultUI` só nos kinds que você não quer desenhar.
 
 ```swift
 engine.onUIRequest = { [weak engine] request in
@@ -204,6 +205,17 @@ O arquivo é do motor (`0600`) e vale até o próximo `printPDF` da aba, a aba f
 **Passkeys.** `navigator.credentials.create`/`get` chegam como `.webauthn(PasskeyRequest)`: `type` (`.create`/`.get`), `origin`, `crossOrigin` e `request`, as opções do site em JSON do WebAuthn. Responda `.webauthn(response:)` com a credencial em JSON (`RegistrationResponseJSON` ou `AuthenticationResponseJSON`), ou `.webauthnError("InvalidStateError")` e afins; `.cancel` é `NotAllowedError`. O caminho de verdade é o app chamar `ASAuthorizationController` (iCloud Keychain, celular por QR, chave de segurança, na folha do sistema) e devolver o resultado nesse JSON; isso pede o direito de navegador para passkeys da Apple, que ainda não foi liberado. Até lá, `presentDefaultUI` responde `NotAllowedError`.
 
 **Cursor e IME.** A vista troca o cursor do mouse pelo `view.cursor` (o que ela não conhece vira seta) e põe a janela de candidatos do IME no lugar que `view.caret` diz.
+
+**Compartilhar a tela.** O `getDisplayMedia` da página chega como `.screenShare(ScreenShareRequest)`: `origin`, `types` (o que a página aceita: `.screen`, `.window`, `.tab`), `audio` (os tipos em que o som pode ir junto), `permission` (o macOS deixa o motor ver a tela; sem ela só vêm abas), `switching` e `sources`, cada uma com `id`, `type`, `title` e, quando há, `app` e `bundleID` (janela; o ícone sai de `NSWorkspace` pelo bundle id), `thumbnail` (tela e janela, PNG até 320 pontos de largura) e `favicon` (aba). Abas são as do mesmo ato, com o id de vista (`v5`). Enquanto o seletor está aberto, `engine.onUIUpdate` recebe o pedido inteiro de novo com as fontes e miniaturas novas (e a permissão, quando a pessoa a liga em Ajustes); redesenhe com ele. Responda `.screenShare(source: id, audio: true)` com o `id` de uma fonte da lista mais recente, ou `.cancel` (a página recebe `NotAllowedError`). Enquanto compartilha, `engine.tabs[tab]?.sharing` traz `kind`, `target` (o `id` da fonte), `title`, `audio` e `canSwitch`: desenhe a marca de compartilhando e os botões Parar (`try await engine.connection?.stopSharing(tab:)`) e Trocar (`switchSharing(tab:)`, que abre outro `.screenShare` com `switching` e só abas; a resposta troca o que vai para a página). `presentDefaultUI` ainda não tem seletor: responde `.cancel`. Motor mais antigo: o pedido não chega, e `stopSharing`/`switchSharing` lançam `unknown_op`.
+
+```swift
+engine.onUIUpdate = { request in picker.update(request) }  // o seletor já aberto
+engine.onUIRequest = { request in
+  guard case .screenShare(let share) = request.kind else { return await engine.presentDefaultUI(request) }
+  guard let chosen = await picker.show(share) else { return .cancel }   // o seu seletor
+  return .screenShare(source: chosen.id, audio: share.audio.contains(chosen.type))
+}
+```
 
 ## Apontar um elemento
 

@@ -14,6 +14,7 @@ Referência para quem escreve um cliente (o time do Agens, em Go). O plano e o p
 | 5.4 | `view.pick`, `view.pick.step`, `view.selection`, evento `view.picked` (apontar um elemento) | implementado |
 | 5.5 | `view.inspect`, ação `inspect` do botão direito (o DevTools); DevTools encaixado como vista (`dock`, `view.devtools.*`) | implementado |
 | 5.7 | `view.reopen`, `view.reopenable`, `view.find`, `view.find.stop`, `view.zoom`, `view.mute`, `view.volume`, eventos `view.find` e `view.zoom`, campos `muted` e `volume` em `view.tab` (reabrir aba, buscar na página, zoom, som) | implementado |
+| 5.8 | `ui.ask` `screen_share`, evento `ui.update`, `view.share.stop`, `view.share.switch`, campo `sharing` em `view.tab` (compartilhar a tela) | implementado |
 
 Um navegador de fase 1 responde `unknown_op` às demais. Trate `unknown_op` como "este navegador ainda não faz isso".
 
@@ -204,7 +205,7 @@ Quem desenha a interface é o app hospedeiro: barra de endereço, abas, atos, o 
 
 **Quem conecta no motor embutido.** O processo que abriu o motor, sempre. Outros apps só se forem assinados com o nosso Team ID e o identificador de assinatura deles estiver na lista que o hospedeiro passa ao abrir o motor (`--agens-allowed-clients=<id>,<id>`). Não há folha de conexão. Em build de desenvolvimento, `--agens-accept-unsigned` deixa entrar cliente sem assinatura.
 
-**O que a página abre por conta própria** (menu de `select`, botão direito, `alert`/`confirm`/`prompt`, escolher arquivo, login HTTP, pedido de permissão do site, instalar extensão, seletor de data e de cor, imprimir, passkey) chega ao hospedeiro como `ui.ask`, e o link para outro app (`mailto:`…) como `view.external`: veja "Passo 5.3", abaixo. Sem hospedeiro ligado, tudo isso é cancelado (ou recusado) na hora.
+**O que a página abre por conta própria** (menu de `select`, botão direito, `alert`/`confirm`/`prompt`, escolher arquivo, login HTTP, pedido de permissão do site, instalar extensão, seletor de data e de cor, imprimir, passkey, compartilhar a tela) chega ao hospedeiro como `ui.ask`, e o link para outro app (`mailto:`…) como `view.external`: veja "Passo 5.3", abaixo. Sem hospedeiro ligado, tudo isso é cancelado (ou recusado) na hora.
 
 ```
 → {"id": 1, "op": "host.attach"}
@@ -485,6 +486,32 @@ Também só adições à v1. Tudo só da conexão do hospedeiro (de outra, `unau
 
 **Erros novos.** Nenhum. **Operações novas:** `view.reopen`, `view.reopenable`, `view.find`, `view.find.stop`, `view.zoom`, `view.mute`, `view.volume`. **Eventos novos:** `view.find`, `view.zoom`. **Campos novos:** `muted` e `volume` em `view.tab`.
 
+#### Passo 5.8: compartilhar a tela
+
+Também só adições à v1. Quando a página chama `getDisplayMedia`, o motor embutido não mostra o seletor do Chromium (ele ficaria na janela escondida e o pedido nunca acabaria): manda ao hospedeiro `ui.ask` `screen_share`, com o mesmo mecanismo do passo 5.3 (só o hospedeiro, `ui.answer`, `ui.cancel`, sem hospedeiro é recusado na hora). Enquanto a página compartilha, `view.tab` da aba traz `sharing`, e o hospedeiro para ou troca com `view.share.stop` e `view.share.switch`. É o mesmo fluxo do seletor da casca (docs/casca.md), desenhado pelo hospedeiro. Motor mais antigo: o pedido fica no seletor do Chromium, sem `ui.ask`, e as operações dão `unknown_op`.
+
+```
+← {"event": "ui.ask", "ask": "u12", "kind": "screen_share", "tab": "v3", "origin": "https://meet.example", "types": ["screen", "window", "tab"], "audio": ["tab", "screen"], "permission": "granted", "switching": false, "sources": [{"id": "screen:1:0", "type": "screen", "title": "Tela inteira", "thumbnail": "iVBOR…"}, {"id": "window:4242:0", "type": "window", "title": "Figma — Projeto", "app": "Figma", "bundle_id": "com.figma.Desktop", "thumbnail": "iVBOR…"}, {"id": "v5", "type": "tab", "title": "Documento", "favicon": "iVBOR…"}]}
+← {"event": "ui.update", "ask": "u12", "kind": "screen_share", "tab": "v3", "permission": "granted", "sources": [{"id": "screen:1:0", "type": "screen", "title": "Tela inteira", "thumbnail": "iVBOR…"}, {"id": "window:4242:0", "type": "window", "title": "Figma — Projeto", "app": "Figma", "bundle_id": "com.figma.Desktop"}, {"id": "v5", "type": "tab", "title": "Documento"}]}
+→ {"id": 70, "op": "ui.answer", "ask": "u12", "source": "v5", "audio": true}
+← {"id": 70, "ok": true}
+← {"event": "view.tab", "tab": "v3", ..., "sharing": {"kind": "tab", "target": "v5", "title": "Documento", "audio": true, "switch": true}}
+→ {"id": 71, "op": "view.share.stop", "tab": "v3"}
+← {"id": 71, "ok": true}
+← {"event": "view.tab", "tab": "v3", ...}
+```
+
+- **`ui.ask` `screen_share`.** Campos: `origin` (de quem é o pedido: a origem do frame que chamou), `types` (o que a página aceita: `screen`, `window`, `tab`; a página pode tirar telas com `monitorTypeSurfaces: "exclude"`), `audio` (os tipos em que dá para levar o som junto: `tab` quando a página pediu áudio; `screen` também quando o macOS dá o som do sistema; nunca `window`; vazio sem áudio pedido), `permission` (`"granted"` ou `"missing"`: se o macOS deixa o motor ver a tela, a Gravação de Tela de Ajustes do Sistema), `switching` (`true` no pedido que `view.share.switch` abre) e `sources`.
+- **`sources`**: `[{id, type, title, app?, bundle_id?, thumbnail?, favicon?}]`. `type` é `screen`, `window` ou `tab`; `title` o nome da tela, o título da janela ou o da aba (até 200 caracteres). Abas são as do mesmo ato, e `id` é o id de vista delas (`v5`), com `favicon`. Telas e janelas têm `id` opaco (`screen:…`, `window:…`) e `thumbnail`; janela traz `app` (o nome do app dono) e `bundle_id` (para o hospedeiro desenhar o ícone do app) quando o macOS diz. `thumbnail` e `favicon` são PNG em base64; a miniatura cabe em 320×200 pontos. Com `permission: "missing"` não há telas nem janelas: só abas. O motor confere de novo a cada segundo e, quando a pessoa liga a permissão, as telas e janelas chegam num `ui.update` (o macOS pode pedir para reabrir o app antes de valer).
+- **Evento `ui.update {ask, kind, tab, ...campos}`**, só para o hospedeiro e só para `ui.ask` aberto: os campos que mudaram, que valem no lugar dos de antes; o que não vem fica como estava. Em `screen_share`, vêm `sources` (a lista inteira, a cada fonte nova, que saiu, mudou de nome ou de imagem) e `permission`. Para não repetir imagem: `thumbnail` e `favicon` só vêm quando a imagem é nova; sem eles, vale a última recebida para o mesmo `id`. Cada mensagem leva até 512 KiB de imagens; o resto vem no `ui.update` seguinte. As miniaturas se renovam mais ou menos a cada segundo enquanto o pedido está aberto.
+- **Resposta**: `ui.answer {ask, source, audio?}`, com `source` o `id` de uma fonte do último `sources` recebido; `audio` (padrão `false`) só vale nos tipos de `audio` e é ignorado nos outros. `source` que não está na lista, ou `audio` que não é booleano, dá `bad_request`. `cancel` recusa: a página recebe `NotAllowedError`, como quando a pessoa fecha o seletor. Fonte que sumiu entre a lista e a resposta também recusa.
+- **Quem responde**: só a pessoa, pelo hospedeiro, mesmo com um agente trabalhando na aba (como a permissão do site, item 6 do passo 5.3). A página precisa de um gesto da pessoa (clique ou tecla) para chamar `getDisplayMedia`; sem gesto, o Chromium recusa antes de perguntar. Um pedido por aba de cada vez; se a página navega ou a aba fecha, vem `ui.cancel`. `getViewportMedia` (só "esta aba", atrás de flag) não passa por aqui.
+- **`sharing` em `view.tab`** (e `view.tabs`), enquanto a aba captura: `{kind, target, title, audio, switch}`. `kind` é `screen`, `window` ou `tab`; `target` o `id` da fonte, como veio em `sources` (numa aba, o id de vista dela; `""` se o hospedeiro não conhece a aba); `title` o nome da janela ou o título atual da aba (`""` numa tela); `audio` se o som vai junto; `switch` se `view.share.switch` funciona (o Chromium só troca quando a página aceita, `surfaceSwitching`). Sem `sharing`, a aba não está compartilhando. Motor mais antigo não manda.
+- **`view.share.stop {tab}`** → `{ok}`: para o compartilhamento da aba, como o Parar da casca; a página vê a trilha acabar (`ended`) e o `view.tab` seguinte vem sem `sharing`. Vale também na aba de um agente: a pessoa sempre pode parar. Aba que não está compartilhando: `not_found`.
+- **`view.share.switch {tab}`** → `{ok}`: o Trocar da casca. Abre outro `ui.ask` `screen_share` para a mesma aba, com `switching: true` e só abas em `types` e `sources`; a resposta troca o que a página recebe sem pedir de novo (a trilha continua; `sharing.target` muda), e `cancel` deixa como estava. `audio` da resposta é ignorado: fica o que já era. Aba que não está compartilhando, ou com `switch: false`: `not_found`.
+
+**Erros novos.** Nenhum. **Operações novas:** `view.share.stop`, `view.share.switch`. **Eventos novos:** `ui.update`. **Campos novos:** `sharing` em `view.tab`; `kind` `screen_share` em `ui.ask`.
+
 ## Erros
 
 | Código | Quando |
@@ -512,6 +539,7 @@ Também só adições à v1. Tudo só da conexão do hospedeiro (de outra, `unau
 | `view.cursor` / `view.caret` | `tab`, `cursor` / `tab`, `x`, `y`, `width`, `height` | (passo 5.3, só o hospedeiro) O cursor sobre a página mudou / o texto em edição mudou de lugar. |
 | `view.agent_cursor` | `tab`, `x?`, `y?` | (passo 5.3, só o hospedeiro) Onde está o ponteiro do agente na página; sem `x` e `y`, não há o que desenhar. |
 | `view.agent_refused` | `tab`, `ato`, `agent`, `reason` | (só o hospedeiro) O motor recusou digitar para o agente: `"password"` (o campo, ou o foco, é de senha). |
+| `ui.update` | `ask`, `kind`, `tab?`, os campos que mudaram | (passo 5.8, só o hospedeiro) Um `ui.ask` aberto mudou (`screen_share`: `sources`, `permission`); o que não vem fica como estava. |
 | `ui.cancel` | `ask`, `reason` | (passo 5.3) O motor desistiu do pedido: `"closed"`, `"navigated"` ou `"gone"`. |
 | `view.external` | `tab`, `url`, `scheme`, `origin?`, `gesture` | (passo 5.3, item 11, só o hospedeiro) A página abriu um link de outro app (`mailto:`…); o hospedeiro decide onde abrir. |
 | `view.picked` | `tab`, `selector`, `html`, `truncated?`, `text`, `text_truncated?`, `x`, `y`, `width`, `height`, `styles`, `png?`, `png_skipped?` / `tab`, `cancelled` | (passo 5.4, só o hospedeiro) A pessoa escolheu um elemento com `view.pick` (ou `view.pick.step` mudou a escolha) / o modo acabou sem escolha, ou o destaque da escolha sumiu. |

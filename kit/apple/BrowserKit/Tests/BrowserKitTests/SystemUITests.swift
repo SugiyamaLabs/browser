@@ -140,6 +140,77 @@ import Testing
     #expect(BrowserEngine.color("red") == nil && BrowserEngine.color("#12345") == nil)
   }
 
+  @Test func screenShareIsReadUpdatedAndAnswered() async throws {
+    let fake = FakeEngine()
+    defer { fake.stop() }
+    let engine = try engine(fake)
+    let png = Data([0x89, 0x50, 0x4E, 0x47]), newer = Data([1, 2, 3])
+    var updates: [ScreenShareRequest] = []
+    engine.onUIUpdate = { request in if case .screenShare(let share) = request.kind { updates.append(share) } }
+    var asked: ScreenShareRequest?
+    engine.onUIRequest = { request in
+      guard case .screenShare(let share) = request.kind else { return .cancel }
+      asked = share
+      // Waits for the update that brings the window, as a picker does while the person looks.
+      while !updates.contains(where: { $0.permission }) { try? await Task.sleep(nanoseconds: 10_000_000) }
+      return .screenShare(source: "window:42:0", audio: false)
+    }
+    fake.send([
+      "event": "ui.ask", "ask": "u12", "kind": "screen_share", "tab": "v3", "origin": "https://meet.example",
+      "types": ["window", "tab", "hologram"], "audio": ["tab"], "permission": "missing", "switching": false,
+      "sources": [["id": "v5", "type": "tab", "title": "Documento", "favicon": png.base64EncodedString()],
+                  ["id": "x", "type": "hologram"]],
+    ])
+    #expect(await eventually { asked != nil })
+    #expect(asked == ScreenShareRequest(
+      origin: "https://meet.example", types: [.window, .tab], audio: [.tab], permission: false, switching: false,
+      sources: [ScreenShareSource(id: "v5", type: .tab, title: "Documento", favicon: png)]))
+    // Pictures the update leaves out are the last ones for the same id.
+    fake.send([
+      "event": "ui.update", "ask": "u12", "kind": "screen_share", "tab": "v3", "permission": "granted",
+      "sources": [["id": "window:42:0", "type": "window", "title": "Figma", "app": "Figma", "bundle_id": "com.figma.Desktop",
+                   "thumbnail": newer.base64EncodedString()],
+                  ["id": "v5", "type": "tab", "title": "Documento 2"]],
+    ])
+    #expect(await eventually { fake.received("ui.answer").count == 1 })
+    #expect(updates.last?.sources == [
+      ScreenShareSource(id: "window:42:0", type: .window, title: "Figma", app: "Figma", bundleID: "com.figma.Desktop", thumbnail: newer),
+      ScreenShareSource(id: "v5", type: .tab, title: "Documento 2", favicon: png),
+    ])
+    #expect(updates.last?.origin == "https://meet.example" && updates.last?.types == [.window, .tab])
+    #expect(answers(fake)["u12"] == ["op": "ui.answer", "ask": "u12", "source": "window:42:0", "audio": false])
+    // An update for an ask that is answered (or unknown) is dropped.
+    fake.send(["event": "ui.update", "ask": "u12", "kind": "screen_share", "permission": "missing", "sources": []])
+    try await Task.sleep(nanoseconds: 100_000_000)
+    #expect(updates.count == 1)
+  }
+
+  @Test func sharingIsInTheTabAndStopsAndSwitches() async throws {
+    let fake = FakeEngine()
+    defer { fake.stop() }
+    let engine = try engine(fake)
+    fake.send(["event": "view.tab", "tab": "v3", "ato": "Profile 1", "title": "Meet", "url": "https://meet.example/",
+               "sharing": ["kind": "tab", "target": "v5", "title": "Documento", "audio": true, "switch": true]])
+    #expect(await eventually { engine.tabs["v3"]?.sharing != nil })
+    let sharing = try #require(engine.tabs["v3"]?.sharing)
+    #expect(sharing.kind == .tab && sharing.target == "v5" && sharing.title == "Documento" && sharing.audio && sharing.canSwitch)
+    fake.send(["event": "view.tab", "tab": "v3", "ato": "Profile 1", "title": "Meet", "url": "https://meet.example/"])
+    #expect(await eventually { engine.tabs["v3"]?.title == "Meet" && engine.tabs["v3"]?.sharing == nil })
+    let connection = try #require(engine.connection)
+    try await connection.switchSharing(tab: "v3")
+    try await connection.stopSharing(tab: "v3")
+    #expect(fake.received.compactMap { $0["op"]?.string }.filter { $0.hasPrefix("view.share") } == ["view.share.switch", "view.share.stop"])
+    #expect(fake.received("view.share.stop").first?["tab"] == "v3")
+  }
+
+  @Test func theDefaultUICancelsScreenShareForNow() async throws {
+    let fake = FakeEngine()
+    defer { fake.stop() }
+    let engine = try engine(fake)
+    let request = try #require(UIRequest(message: ["ask": "u1", "kind": "screen_share", "tab": "v3", "sources": []]))
+    #expect(await engine.presentDefaultUI(request) == .cancel)
+  }
+
   @Test func theDefaultUIRefusesPasskeysForNow() async throws {
     let fake = FakeEngine()
     defer { fake.stop() }

@@ -299,7 +299,7 @@ import Testing
       case .auth: return .auth(username: "ana", password: "s3cr3t")
       case .permission: return .permission(allow: true, remember: true)
       case .extension: return .extension(allow: false)
-      case .date, .color, .print, .webauthn: return .cancel
+      case .date, .color, .print, .webauthn, .screenShare: return .cancel
       }
     }
     let events: [[String: Any]] = [

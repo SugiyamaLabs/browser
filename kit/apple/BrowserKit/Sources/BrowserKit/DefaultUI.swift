@@ -169,6 +169,11 @@ extension BrowserEngine {
       // come through ASAuthorizationController once Apple grants the browser entitlement. Until
       // then the site sees NotAllowedError, as when the person closes the sheet.
       return .webauthnError("NotAllowedError")
+
+    case .screenShare:
+      // shortcut: no picker of its own yet; the page sees NotAllowedError, as when the person
+      // closes the picker. Draw one with onUIRequest (sources, onUIUpdate) until the kit has it.
+      return .cancel
     }
   }
 

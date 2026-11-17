@@ -2,7 +2,7 @@ import Foundation
 
 /// Something the engine asks the host to draw (`ui.ask`): a `<select>` menu, the right-click menu,
 /// a page dialog, a file panel, an HTTP login, a site permission, an extension install, a date or
-/// color picker, a print or a passkey. The host
+/// color picker, a print, a passkey or the screen share picker. The host
 /// answers with a `UIAnswer` (`BrowserEngine.onUIRequest`), or lets the kit draw it
 /// (`BrowserEngine.presentDefaultUI`).
 public struct UIRequest: Sendable, Equatable {
@@ -24,6 +24,7 @@ public struct UIRequest: Sendable, Equatable {
     case color(ColorPicker)
     case print(PrintRequest)
     case webauthn(PasskeyRequest)
+    case screenShare(ScreenShareRequest)
   }
 
   /// Nil when the message lacks what its kind needs (or the kind is unknown).
@@ -104,6 +105,21 @@ public struct UIRequest: Sendable, Equatable {
         let origin = message["origin"]?.string, let request = message["request"]?.object
       else { return nil }
       kind = .webauthn(PasskeyRequest(type: type, origin: origin, crossOrigin: message["cross_origin"]?.bool ?? false, request: request))
+    case "screen_share":
+      guard let sources = message["sources"]?.array else { return nil }
+      func types(_ key: String) -> [ScreenShareSource.SourceType] { strings(key).compactMap(ScreenShareSource.SourceType.init(rawValue:)) }
+      kind = .screenShare(ScreenShareRequest(
+        origin: string("origin"), types: types("types"), audio: types("audio"),
+        permission: message["permission"]?.string != "missing", switching: message["switching"]?.bool ?? false,
+        sources: sources.compactMap { item in
+          guard let item = item.object, let id = item["id"]?.string,
+            let type = item["type"]?.string.flatMap(ScreenShareSource.SourceType.init(rawValue:))
+          else { return nil }
+          return ScreenShareSource(
+            id: id, type: type, title: item["title"]?.string ?? "", app: item["app"]?.string, bundleID: item["bundle_id"]?.string,
+            thumbnail: item["thumbnail"]?.string.flatMap { Data(base64Encoded: $0) },
+            favicon: item["favicon"]?.string.flatMap { Data(base64Encoded: $0) })
+        }))
     default:
       return nil
     }
@@ -297,6 +313,63 @@ public struct PasskeyRequest: Sendable, Equatable {
   public let request: [String: JSON]
 }
 
+/// A page's `getDisplayMedia` (`kind: "screen_share"`): what it may share, for the host's picker.
+/// While it is open the engine sends fresh `sources` and `permission` (`BrowserEngine.onUIUpdate`).
+/// Answer with `.screenShare(source:audio:)`, or `.cancel` (the page gets `NotAllowedError`).
+public struct ScreenShareRequest: Sendable, Equatable {
+  /// Who asks (the frame's origin).
+  public let origin: String
+  /// What the page accepts.
+  public let types: [ScreenShareSource.SourceType]
+  /// Where the sound can go with it (empty when the page asked for none).
+  public let audio: [ScreenShareSource.SourceType]
+  /// macOS lets the engine see the screen (Gravação de Tela). Without it there are no screens nor
+  /// windows; they come in an update once the person turns it on.
+  public let permission: Bool
+  /// The one `switchSharing` opened: only tabs, and the answer changes what is shared.
+  public let switching: Bool
+  public let sources: [ScreenShareSource]
+}
+
+/// A screen, a window or a tab of the same ato to share.
+public struct ScreenShareSource: Sendable, Equatable, Identifiable {
+  public enum SourceType: String, Sendable {
+    case screen, window, tab
+  }
+  /// What to answer; a tab's view id (`v5`) for a tab.
+  public let id: String
+  public let type: SourceType
+  public let title: String
+  /// A window's app, and its bundle id (for its icon), when macOS says.
+  public var app: String? = nil
+  public var bundleID: String? = nil
+  /// A screen's or window's picture (PNG, at most 320 points wide).
+  public var thumbnail: Data? = nil
+  /// A tab's icon (PNG).
+  public var favicon: Data? = nil
+}
+
+/// What a tab is sharing (`sharing` in `view.tab`): stop it with `stopSharing`, switch it with
+/// `switchSharing` when `canSwitch`.
+public struct ScreenSharing: Sendable, Equatable {
+  public let kind: ScreenShareSource.SourceType
+  /// The source's id as the request had it (a tab's view id); empty for a tab the host doesn't know.
+  public let target: String
+  /// The window's name or the shared tab's title now; empty for a screen.
+  public let title: String
+  public let audio: Bool
+  public let canSwitch: Bool
+
+  init?(_ json: JSON?) {
+    guard let object = json?.object, let kind = object["kind"]?.string.flatMap(ScreenShareSource.SourceType.init(rawValue:)) else { return nil }
+    self.kind = kind
+    target = object["target"]?.string ?? ""
+    title = object["title"]?.string ?? ""
+    audio = object["audio"]?.bool ?? false
+    canSwitch = object["switch"]?.bool ?? false
+  }
+}
+
 /// An extension to install (`kind: "extension"`).
 public struct ExtensionInstall: Sendable, Equatable {
   /// An ato it may go into as well (the prompt's "Onde instalar").
@@ -357,6 +430,8 @@ public enum UIAnswer: Sendable, Equatable {
   /// The `DOMException` the page gets: `NotAllowedError`, `InvalidStateError`,
   /// `NotSupportedError`, `SecurityError`, `AbortError`, `ConstraintError` or `UnknownError`.
   case webauthnError(String)
+  /// The `id` of one of `ScreenShareRequest.sources`; `audio` only counts for its `audio` types.
+  case screenShare(source: String, audio: Bool = false)
   case cancel
 
   /// The fields of `ui.answer`, besides `ask`.
@@ -376,6 +451,7 @@ public enum UIAnswer: Sendable, Equatable {
     case .color(let hex): ["value": .string(hex)]
     case .webauthn(let response): ["response": .object(response)]
     case .webauthnError(let name): ["error": .string(name)]
+    case .screenShare(let source, let audio): ["source": .string(source), "audio": .bool(audio)]
     case .cancel: ["cancel": true]
     }
   }
@@ -395,6 +471,19 @@ extension BrowserConnection {
   /// Answers a `ui.ask`; `.cancel` cancels it. An `ask` that is gone throws `not_found`.
   public func answerUI(_ ask: String, _ answer: UIAnswer) async throws(BrowserError) {
     try await send(op: "ui.answer", params: answer.params.merging(["ask": .string(ask)]) { $1 })
+  }
+
+  /// Stops what the tab shares (`view.share.stop`, also on an agent's tab); `sharing` goes from the
+  /// tab. A tab that shares nothing throws `not_found`.
+  public func stopSharing(tab: String) async throws(BrowserError) {
+    try await send(op: "view.share.stop", params: ["tab": .string(tab)])
+  }
+
+  /// Opens the picker again for the tab's share (`view.share.switch`): a new `.screenShare` request
+  /// with `switching`, only tabs; its answer changes what is shared. A tab that shares nothing that
+  /// can switch throws `not_found`.
+  public func switchSharing(tab: String) async throws(BrowserError) {
+    try await send(op: "view.share.switch", params: ["tab": .string(tab)])
   }
 
   /// The tab's page as a PDF (`view.print_pdf`), in a file of the engine's (mode 0600) that lives

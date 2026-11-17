@@ -16,11 +16,11 @@ EMBUTIDO_INSPECT="${EMBUTIDO_INSPECT:-0}"
 export APP OUT GATES REPO SITE_PORT EMBUTIDO_INSPECT
 
 SITE_PID=""
-if ! curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/camera"; then   # /camera: the newest page, so an older site is not reused
+if ! curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/tela"; then   # /tela: the newest page, so an older site is not reused
   python3 "$REPO/tools/sites-teste/serve.py" "$SITE_PORT" >"$OUT/site.log" 2>&1 &
   SITE_PID=$!
-  for _ in $(seq 20); do curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/camera" && break; sleep 0.25; done
-  curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/camera" || { echo "FAIL: the test site has no /camera (an older serve.py on port $SITE_PORT? try SITE_PORT=8766)"; exit 1; }
+  for _ in $(seq 20); do curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/tela" && break; sleep 0.25; done
+  curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/tela" || { echo "FAIL: the test site has no /tela (an older serve.py on port $SITE_PORT? try SITE_PORT=8766)"; exit 1; }
 fi
 
 # winids lists every normal window of a pid, also the ones off screen; this one counts only those
@@ -1310,6 +1310,71 @@ check("webauthn: isUVPAA follows webauthn_platform", titled(t, "uvpaa:true"))
 c.ask("host.settings", webauthn_platform=False)
 no_window("passkeys")
 c.ask("view.close", tab=t)
+
+# Passo 5.8: getDisplayMedia asks the host (ui.ask screen_share), a tab source starts the stream,
+# cancel rejects it; view.tab carries `sharing` until view.share.stop. The page leaves screens out;
+# windows come only when macOS lets the engine see the screen (their thumbnails then stay in memory).
+def no_pictures(a):  # an ask as shown in a failure, without the base64
+    return {**(a or {}), "sources": [{k: v for k, v in s.items() if k not in ("thumbnail", "favicon")} for s in (a or {}).get("sources", [])]}
+def sharing_of(tab, pred, timeout=10):  # the tab's `sharing` from view.tabs (a title change may share its view.tab event)
+    end = time.time() + timeout
+    while True:
+        x = next((x for x in c.ask("view.tabs", ato=ato).get("tabs", []) if x.get("tab") == tab), {})
+        if pred(x.get("sharing")) or time.time() > end: return x.get("sharing")
+        c.pump(0.3)
+st = ui_tab("/other"); tab_event(st, loaded("/other"))
+st2 = ui_tab("/find"); tab_event(st2, loaded("/find"))
+t = ui_tab("/tela")
+c.send_raw({"op": "view.focus", "tab": t, "on": True})
+titled(t, "tela:ready", 15)
+click(t, 190, 80)
+a = ui_ask("screen_share", t, 15)
+srcs = (a or {}).get("sources") or []
+check("screen_share: getDisplayMedia asks the host (origin, types without screen, audio for tabs, permission, switching false)",
+      bool(a) and a.get("origin") == SITE and "tab" in a.get("types", []) and "screen" not in a.get("types", [])
+      and "tab" in a.get("audio", []) and "window" not in a.get("audio", []) and a.get("permission") in ("granted", "missing")
+      and a.get("switching") is False, no_pictures(a))
+check("screen_share: the ato's tabs are sources by view id, with their titles",
+      any(s.get("id") == st and s.get("type") == "tab" and s.get("title") == "Other (test)" for s in srcs)
+      and all(s.get("id", "").startswith("v") for s in srcs if s.get("type") == "tab"), no_pictures(a))
+check("screen_share: windows only with the screen recording permission, never a screen",
+      (a or {}).get("permission") == "granted" or not any(s.get("type") == "window" for s in srcs)
+      and not any(s.get("type") == "screen" for s in srcs), no_pictures(a))
+check("screen_share: a source the ask did not offer is bad_request", err(answer(a, source="v999999")) == "bad_request")
+check("screen_share: audio that is not a boolean is bad_request", err(answer(a, source=st, audio="yes")) == "bad_request")
+check("screen_share: cancel rejects getDisplayMedia (NotAllowedError)",
+      err(answer(a, cancel=True)) == "ok" and titled(t, "tela:error NotAllowedError"))
+click(t, 190, 80)
+a = ui_ask("screen_share", t, 15)
+drop(t)
+check("screen_share: ui.answer with a tab source starts the stream",
+      err(answer(a, source=st, audio=True)) == "ok" and titled(t, "tela:live:browser", 15))
+sh = sharing_of(t, lambda x: (x or {}).get("target") == st) or {}
+check("view.tab carries sharing (kind tab, target the shared tab, its title, audio, switch)",
+      sh.get("kind") == "tab" and sh.get("title") == "Other (test)" and sh.get("audio") is True and isinstance(sh.get("switch"), bool), sh)
+if not sh.get("switch"):
+    skip("view.share.switch", "this share cannot switch")
+else:
+    r = c.ask("view.share.switch", tab=t)
+    a = ui_ask("screen_share", t, 15)
+    check("view.share.switch asks the host again (switching, only tabs)",
+          r.get("ok") and bool(a) and a.get("switching") is True and a.get("types") == ["tab"]
+          and all(s.get("type") == "tab" for s in (a or {}).get("sources", [])), (r, no_pictures(a)))
+    drop(t)
+    check("view.share.switch: the answer changes the shared tab (view.tab sharing.target)",
+          err(answer(a, source=st2)) == "ok" and (sharing_of(t, lambda x: (x or {}).get("target") == st2) or {}).get("target") == st2)
+drop(t)
+r = c.ask("view.share.stop", tab=t)
+ended = titled(t, "tela:ended")
+check("view.share.stop ends it: the page sees the track end", r.get("ok") and ended,
+      (r, [(e.get("title"), e.get("sharing")) for e in c.events if e["event"] == "view.tab" and e.get("tab") == t][-4:]))
+sh = sharing_of(t, lambda x: x is None)
+check("view.share.stop: view.tab drops sharing", sh is None, sh)
+check("view.share.stop on a tab that shares nothing is not_found", err(c.ask("view.share.stop", tab=t)) == "not_found")
+check("view.share.switch on a tab that shares nothing is not_found", err(c.ask("view.share.switch", tab=t)) == "not_found")
+check("view.share.stop from a connection that is not the host is unauthorized", err(c2.ask("view.share.stop", tab=t)) == "unauthorized")
+no_window("screen share")
+for x in (t, st, st2): c.ask("view.close", tab=x)
 
 # The same on a tab an agent works: nothing reaches the host, the page sees it refused.
 ap = Conn()

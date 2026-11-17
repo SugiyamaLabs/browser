@@ -30,6 +30,8 @@ public struct BrowserTab: Sendable, Equatable, Identifiable {
   /// Where the agent's pointer is on the page (`view.agent_cursor`), in points from the view's top left;
   /// nil when there is none to draw (no agent, it has not pointed yet, or the person took over).
   public var agentCursor: CGPoint?
+  /// What the page is sharing (`getDisplayMedia`); nil when nothing.
+  public var sharing: ScreenSharing?
 
   init?(message: [String: JSON]) {
     guard let id = message["tab"]?.string, let ato = message["ato"]?.string else { return nil }
@@ -43,6 +45,7 @@ public struct BrowserTab: Sendable, Equatable, Identifiable {
     volume = message["volume"]?.int ?? 100
     canGoBack = message["can_back"]?.bool ?? false
     canGoForward = message["can_forward"]?.bool ?? false
+    sharing = ScreenSharing(message["sharing"])
     control = message["control"]?.object.map {
       AgentControl(
         agent: $0["agent"]?.string ?? "", title: $0["title"]?.string ?? "", detail: $0["detail"]?.string ?? "",

@@ -178,6 +178,10 @@ public struct HostSettings: Sendable, Equatable {
   /// cancels the handler's task, so close what you drew in `withTaskCancellationHandler`, and
   /// sends nothing; the reason comes in `onEvent`.
   @ObservationIgnored public var onUIRequest: ((UIRequest) async -> UIAnswer)?
+  /// An open request changed (`ui.update`; a `.screenShare`'s sources and permission): the whole
+  /// request again, pictures the engine did not resend kept from before. Answer the first one as
+  /// usual; the answer may name any source of the latest.
+  @ObservationIgnored public var onUIUpdate: ((UIRequest) -> Void)?
   /// Picks of the element picker (`connection.pick`), and its ending without one.
   @ObservationIgnored public var onPick: ((PickResult) -> Void)?
   /// The count of a search (`connection.find`) on a tab, and 0 and 0 after `stopFind`.
@@ -229,6 +233,8 @@ public struct HostSettings: Sendable, Equatable {
   @ObservationIgnored private var splits: [String: WeakSplit] = [:]
   /// The handlers of the `ui.ask`s still open, by `ask`.
   @ObservationIgnored private var uiTasks: [String: Task<Void, Never>] = [:]
+  /// Their last message, for `ui.update` to change.
+  @ObservationIgnored private var uiMessages: [String: [String: JSON]] = [:]
   /// The popups `presentExtensionPopup` shows, by popup id.
   @ObservationIgnored var popups: [String: ExtensionPopupPresenter] = [:]
 
@@ -395,8 +401,13 @@ public struct HostSettings: Sendable, Equatable {
         answer(message)
       case "ui.ask":
         ask(message)
+      case "ui.update":
+        update(message)
       case "ui.cancel":
-        if let ask = message["ask"]?.string { uiTasks.removeValue(forKey: ask)?.cancel() }
+        if let ask = message["ask"]?.string {
+          uiTasks.removeValue(forKey: ask)?.cancel()
+          uiMessages[ask] = nil
+        }
       case "view.external":
         if let link = ExternalLink(message: message) {
           if let onExternalLink { onExternalLink(link) } else { NSWorkspace.shared.open(link.url) }
@@ -460,14 +471,36 @@ public struct HostSettings: Sendable, Equatable {
       connection?.request(op: "ui.answer", params: ["ask": .string(ask), "cancel": true])
       return
     }
+    uiMessages[ask] = message
     uiTasks[ask] = Task {
       var answer = await onUIRequest(request)
       guard !Task.isCancelled else { return }
       uiTasks[ask] = nil
+      uiMessages[ask] = nil
       if answer == .contextMenu(action: "inspect"), let dock = devToolsDock { answer = .inspect(dock: dock) }
       if answer == .contextMenu(action: "inspect") || answer == .inspect(dock: .window) { yieldActivationToEngine() }
       try? await connection?.answerUI(ask, answer)
     }
+  }
+
+  /// The fields of `ui.update` replace the request's; a source without its picture keeps the last one.
+  private func update(_ message: [String: JSON]) {
+    guard let ask = message["ask"]?.string, var merged = uiMessages[ask] else { return }
+    var pictures: [String: [String: JSON]] = [:]
+    for item in merged["sources"]?.array ?? [] {
+      guard let item = item.object, let id = item["id"]?.string else { continue }
+      pictures[id] = item.filter { $0.key == "thumbnail" || $0.key == "favicon" }
+    }
+    merged.merge(message) { $1 }
+    if let sources = message["sources"]?.array {
+      merged["sources"] = .array(sources.map { item in
+        guard let object = item.object, let id = object["id"]?.string, let old = pictures[id] else { return item }
+        return .object(object.merging(old) { new, _ in new })
+      })
+    }
+    merged["event"] = nil
+    uiMessages[ask] = merged
+    if let request = UIRequest(message: merged) { onUIUpdate?(request) }
   }
 
   private func answer(_ message: [String: JSON]) {
@@ -519,6 +552,7 @@ public struct HostSettings: Sendable, Equatable {
     splits.values.forEach { $0.split?.update() }
     uiTasks.values.forEach { $0.cancel() }
     uiTasks = [:]
+    uiMessages = [:]
     popups.values.forEach { $0.closed() }
     popups = [:]
     if let process, process.isRunning { process.terminate() }
