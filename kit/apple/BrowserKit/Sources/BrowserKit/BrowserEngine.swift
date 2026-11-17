@@ -14,6 +14,8 @@ public struct ApprovalRequest: Sendable, Equatable {
     case control
     /// `session`: an app wants cookies, localStorage or headers of an ato.
     case session
+    /// An agent wants to type on a page without HTTPS (`host`); "always" covers that host for the session.
+    case insecureTyping
     /// A kind this kit does not know (a newer engine): show `title` and `detail`.
     case other(String)
 
@@ -22,6 +24,7 @@ public struct ApprovalRequest: Sendable, Equatable {
       case "connect": self = .connect
       case "control": self = .control
       case "session": self = .session
+      case "insecure_typing": self = .insecureTyping
       default: self = .other(name)
       }
     }
@@ -46,7 +49,7 @@ public struct ApprovalRequest: Sendable, Equatable {
   /// The ato's id and name (control, session).
   public var ato: String? = nil
   public var atoName: String? = nil
-  /// The name the controlled tabs will show (control).
+  /// The name the controlled tabs will show (control, insecureTyping).
   public var agent: String? = nil
   /// The app's reason, when it gave one.
   public var reason: String? = nil
@@ -56,6 +59,15 @@ public struct ApprovalRequest: Sendable, Equatable {
   public var sharesWith: [String] = []
   /// What `session` asks for.
   public var items: [Item]? = nil
+  /// The page's host (insecureTyping).
+  public var host: String? = nil
+  /// The tab's view id (insecureTyping).
+  public var tab: String? = nil
+  /// The field's label, else its placeholder, else its name (insecureTyping; nil for a dialog's text).
+  public var field: String? = nil
+  /// The first 40 characters of what will be typed, and how many in all (insecureTyping; nil for paste).
+  public var textPreview: String? = nil
+  public var textLength: Int? = nil
 
   init(message: [String: JSON]) {
     ask = message["ask"] ?? .null
@@ -67,6 +79,11 @@ public struct ApprovalRequest: Sendable, Equatable {
     atoName = message["ato_name"]?.string
     agent = message["agent"]?.string
     reason = message["reason"]?.string
+    host = message["host"]?.string
+    tab = message["tab"]?.string
+    field = message["field"]?.string
+    textPreview = message["text_preview"]?.string
+    textLength = message["text_length"]?.int
     allow = message["allow"]?.array?.compactMap(\.string)
     sharesWith = message["shares_with"]?.array?.compactMap(\.string) ?? []
     items = message["items"]?.array?.compactMap { item in
@@ -82,6 +99,22 @@ public struct ApprovalRequest: Sendable, Equatable {
     self.title = title
     self.detail = detail
     self.offerAlways = offerAlways
+  }
+}
+
+/// The engine refused an agent's typing (`view.agent_refused`), for its pill to say why.
+public struct AgentRefusal: Sendable, Equatable {
+  public let tab: String
+  public let ato: String
+  public let agent: String
+  /// `password`: the field, or the focus, is a password field. A newer engine may send others.
+  public let reason: String
+
+  public init(tab: String, ato: String, agent: String, reason: String) {
+    self.tab = tab
+    self.ato = ato
+    self.agent = agent
+    self.reason = reason
   }
 }
 
@@ -185,6 +218,8 @@ public struct HostSettings: Sendable, Equatable {
   /// A link the page opens in another app (`view.external`). Without a handler the kit opens it
   /// with `NSWorkspace` (the system's app for that scheme).
   @ObservationIgnored public var onExternalLink: ((ExternalLink) -> Void)?
+  /// The engine refused an agent's typing (the agent itself only gets `denied`).
+  @ObservationIgnored public var onAgentRefused: ((AgentRefusal) -> Void)?
   /// Every event, after the kit has handled the ones it knows.
   @ObservationIgnored public var onEvent: ((String, [String: JSON]) -> Void)?
 
@@ -374,6 +409,12 @@ public struct HostSettings: Sendable, Equatable {
         }
       case "view.zoom":
         if let tab = message["tab"]?.string, let factor = message["factor"]?.double { onZoom?(tab, factor) }
+      case "view.agent_refused":
+        if let tab = message["tab"]?.string, let ato = message["ato"]?.string, let agent = message["agent"]?.string,
+          let reason = message["reason"]?.string
+        {
+          onAgentRefused?(AgentRefusal(tab: tab, ato: ato, agent: agent, reason: reason))
+        }
       case "extension.changed":
         if let ato = message["ato"]?.string, let id = message["extension"]?.string, let change = message["change"]?.string {
           onExtensionChange?(ExtensionChange(ato: ato, id: id, kind: ExtensionChange.Kind(change)))

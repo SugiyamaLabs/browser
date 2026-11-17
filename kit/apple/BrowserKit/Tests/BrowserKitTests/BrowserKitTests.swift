@@ -225,7 +225,12 @@ import Testing
     ])
     fake.send(["event": "approval.ask", "ask": "a3", "title": "t", "detail": "d", "offer_always": false, "kind": "payment"])
     fake.send(["event": "approval.ask", "ask": "a4", "title": "t", "detail": "d", "offer_always": false])
-    #expect(await eventually { asked.count == 4 })
+    fake.send([
+      "event": "approval.ask", "ask": "a5", "title": "t", "detail": "d", "offer_always": true, "kind": "insecure_typing",
+      "ato": "Profile 2", "ato_name": "Trabalho", "agent": "Popi", "host": "insecure.test",
+      "tab": "v7", "field": "E-mail", "text_preview": "ola", "text_length": 3,
+    ])
+    #expect(await eventually { asked.count == 5 })
     #expect(asked[0].kind == .control && asked[0].ato == "Profile 2" && asked[0].atoName == "Trabalho")
     #expect(asked[0].agent == "Popi" && asked[0].reason == "Ler e-mails" && asked[0].allow == ["clipboard", "eval"])
     #expect(asked[0].sharesWith == ["Casa"] && asked[0].items == nil)
@@ -233,7 +238,11 @@ import Testing
     #expect(asked[1].items == [ApprovalRequest.Item(type: "cookie", from: "https://app.example.test", name: "sid")])
     #expect(asked[2].kind == .other("payment") && asked[2].title == "t")  // a newer kind does not break it
     #expect(asked[3] == ApprovalRequest(ask: "a4", title: "t", detail: "d", offerAlways: false))  // an older engine
-    #expect(await eventually { fake.received("approval.answer").count == 4 })
+    #expect(asked[4].kind == .insecureTyping && asked[4].host == "insecure.test" && asked[4].agent == "Popi")
+    #expect(asked[4].atoName == "Trabalho" && asked[4].offerAlways && asked[0].host == nil)
+    #expect(asked[4].tab == "v7" && asked[4].field == "E-mail" && asked[4].textPreview == "ola" && asked[4].textLength == 3)
+    #expect(asked[0].tab == nil && asked[0].textLength == nil)
+    #expect(await eventually { fake.received("approval.answer").count == 5 })
   }
 
   @Test func hostSettings() async throws {

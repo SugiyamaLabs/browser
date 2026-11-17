@@ -60,6 +60,25 @@ import Testing
     #expect(sent == [["op": "view.mute", "tab": "v3", "muted": true], ["op": "view.mute", "tab": "v3", "muted": false]])
   }
 
+  @Test func volumeIsReadAndSent() async throws {
+    let fake = FakeEngine()
+    defer { fake.stop() }
+    let engine = BrowserEngine(executable: URL(fileURLWithPath: "/nonexistent"), dataDirectory: URL(fileURLWithPath: "/tmp"))
+    engine.attach(try BrowserConnection(socketPath: fake.path))
+    var audio: [String] = []
+    engine.onAudio = { tab, audible, muted in audio.append("\(tab) \(audible) \(muted)") }
+    let tab: [String: Any] = ["event": "view.tab", "tab": "v3", "ato": "Profile 1", "title": "Som", "audible": true, "muted": true]
+    fake.send(tab)  // an older engine: no volume
+    #expect(await eventually { engine.tabs["v3"] != nil })
+    #expect(engine.tabs["v3"]?.volume == 100)
+    try await engine.connection!.setVolume(30, in: "v3")
+    let sent = fake.received("view.volume").map { var message = $0; message["id"] = nil; return message }
+    #expect(sent == [["op": "view.volume", "tab": "v3", "volume": 30]])
+    fake.send(tab.merging(["volume": 30, "muted": false]) { $1 })  // changing the volume unmutes
+    #expect(await eventually { engine.tabs["v3"]?.volume == 30 })
+    #expect(audio == ["v3 true false"])
+  }
+
   @Test func nothingToReopenThrowsNotFound() async throws {
     let fake = FakeEngine()
     defer { fake.stop() }
@@ -89,5 +108,18 @@ import Testing
     #expect(await eventually { finds.count == 2 && zooms.count == 1 })
     #expect(finds == [FindResult(tab: "v3", matches: 3, active: 1), FindResult(tab: "v3", matches: 0, active: 0)])
     #expect(zooms == ["v3 1.25"])
+  }
+
+  @Test func agentRefusalReachesTheHandler() async throws {
+    let fake = FakeEngine()
+    defer { fake.stop() }
+    let engine = BrowserEngine(executable: URL(fileURLWithPath: "/nonexistent"), dataDirectory: URL(fileURLWithPath: "/tmp"))
+    engine.attach(try BrowserConnection(socketPath: fake.path))
+    var refused: [AgentRefusal] = []
+    engine.onAgentRefused = { refused.append($0) }
+    fake.send(["event": "view.agent_refused", "tab": "v3", "ato": "Profile 1"])  // incomplete: dropped
+    fake.send(["event": "view.agent_refused", "tab": "v3", "ato": "Profile 1", "agent": "Popi", "reason": "password"])
+    #expect(await eventually { refused.count == 1 })
+    #expect(refused == [AgentRefusal(tab: "v3", ato: "Profile 1", agent: "Popi", reason: "password")])
   }
 }

@@ -1225,10 +1225,10 @@ index 0000000000..e3c4343bf6
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_CONTROL_KEYS_H_
 diff --git a/chrome/browser/agens/bridge/control_ops.cc b/chrome/browser/agens/bridge/control_ops.cc
 new file mode 100644
-index 0000000000..ee38257775
+index 0000000000..2b20878c2e
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_ops.cc
-@@ -0,0 +1,1033 @@
+@@ -0,0 +1,1076 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The control session (docs/protocolo.md, "control, tab, page"): an app, after the person's OK,
 +// drives tabs of one ato. It belongs to the connection and ends on control.stop, when the
@@ -1255,6 +1255,7 @@ index 0000000000..ee38257775
 +#include "base/no_destructor.h"
 +#include "base/strings/string_number_conversions.h"
 +#include "base/strings/string_util.h"
++#include "base/strings/utf_string_conversion_utils.h"
 +#include "base/strings/utf_string_conversions.h"
 +#include "base/timer/timer.h"
 +#include "chrome/browser/agens/bridge/approval.h"
@@ -1262,6 +1263,8 @@ index 0000000000..ee38257775
 +#include "chrome/browser/agens/bridge/control_keys.h"
 +#include "chrome/browser/agens/bridge/control_page.h"
 +#include "chrome/browser/agens/bridge/ui_ops.h"
++#include "chrome/browser/agens/bridge/view_input.h"
++#include "chrome/browser/agens/bridge/view_ops.h"
 +#include "chrome/browser/agens/embed/agens_controlled.h"
 +#include "chrome/browser/agens/embed/agens_embedded.h"
 +#include "chrome/browser/agens/embed/agens_window.h"
@@ -1306,6 +1309,7 @@ index 0000000000..ee38257775
 +void StopByUser(uint64_t connection);
 +void Pause(uint64_t connection);
 +void Resume(uint64_t connection);
++void TellPasswordRefused(uint64_t connection, content::WebContents* contents);
 +content::JavaScriptDialogManager* Dialogs();
 +
 +// Where a controlled tab's dialog goes when the agent doesn't hold it: the browser's own, or,
@@ -1359,6 +1363,7 @@ index 0000000000..ee38257775
 +          }
 +        },
 +        contents);
++    page.on_password_refused = base::BindRepeating(&TellPasswordRefused, connection, contents);
 +    // Keeps rendering while in the background: input, screenshots and the accessibility tree work
 +    // on a tab that isn't the active one.
 +    capture_ = contents->IncrementCapturerCount(gfx::Size(), /*stay_hidden=*/true, /*stay_awake=*/false,
@@ -1659,12 +1664,38 @@ index 0000000000..ee38257775
 +  return nullptr;
 +}
 +
++// The host's pill says why the agent's typing was refused (view.agent_refused).
++void TellPasswordRefused(uint64_t connection, content::WebContents* contents) {
++  auto it = Sessions().find(connection);
++  if (!view::Host() || it == Sessions().end()) return;
++  base::DictValue fields;
++  fields.Set("tab", ViewTabName(view::TabNumber(contents)));
++  fields.Set("ato", it->second.ato.BaseName().AsUTF8Unsafe());
++  fields.Set("agent", it->second.agent);
++  fields.Set("reason", "password");
++  SendEventTo(view::Host(), "view.agent_refused", std::move(fields));
++}
++
++// What the insecure_typing ask says about the typing: the field (when there is one) and, when the
++// text is known (not paste), its first 40 characters and its length.
++constexpr size_t kTextPreviewChars = 40;
++base::DictValue TypingFacts(const std::string& field, const std::u16string* text) {
++  base::DictValue what;
++  if (!field.empty()) what.Set("field", field);
++  if (text) {
++    const std::string utf8 = base::UTF16ToUTF8(*text);
++    what.Set("text_preview", ClipChars(utf8, kTextPreviewChars));
++    what.Set("text_length", static_cast<int>(base::CountUnicodeCharacters(utf8).value_or(0)));
++  }
++  return what;
++}
++
 +// Typing on an insecure page (IsInsecurePage: http://, not local) waits for the person's OK; a
 +// page the network may have changed could steer the agent into typing what it shouldn't there.
 +// "Permitir sempre" covers that host for the rest of the session. `then` gets an error code and
 +// message, or an empty code to go on (the page is still on the host asked about).
 +using TypingCallback = base::OnceCallback<void(std::string_view code, std::string_view message)>;
-+void AskBeforeTyping(uint64_t connection, Tab& tab, TypingCallback then) {
++void AskBeforeTyping(uint64_t connection, Tab& tab, base::DictValue what, TypingCallback then) {
 +  const GURL url = tab.web_contents() ? tab.web_contents()->GetLastCommittedURL() : GURL();
 +  const std::string host(url.host());
 +  auto it = Sessions().find(connection);
@@ -1675,6 +1706,8 @@ index 0000000000..ee38257775
 +  const std::string ato = session.ato.BaseName().AsUTF8Unsafe();
 +  base::DictValue facts;
 +  facts.Set("kind", "insecure_typing");
++  facts.Set("tab", ViewTabName(view::TabNumber(tab.web_contents())));
++  facts.Merge(std::move(what));
 +  facts.Set("ato", ato);
 +  if (ProfileAttributesEntry* entry = FindAto(ato)) facts.Set("ato_name", AgensWindow::AtoName(entry));
 +  facts.Set("agent", session.agent);
@@ -1702,12 +1735,19 @@ index 0000000000..ee38257775
 +      std::move(facts));
 +}
 +
-+// A page op that types: AskBeforeTyping first, in the tab's queue, then `act`.
-+Page::Op TypingOp(uint64_t connection, Tab& tab, base::Value id, Page::Op act) {
++// A page op that types: AskBeforeTyping first, in the tab's queue, then `act`. `ref` is the field
++// ("" for the focused one); `text` what it types, nullopt when unknown (paste).
++Page::Op TypingOp(uint64_t connection,
++                  Tab& tab,
++                  base::Value id,
++                  std::string ref,
++                  std::optional<std::u16string> text,
++                  Page::Op act) {
 +  return base::BindOnce(
-+      [](uint64_t connection, base::WeakPtr<Tab> tab, base::Value id, Page::Op act, ReplyCallback reply) {
++      [](uint64_t connection, base::WeakPtr<Tab> tab, base::Value id, std::string ref,
++         std::optional<std::u16string> text, Page::Op act, ReplyCallback reply) {
 +        if (!tab) return std::move(reply).Run(ErrorReply(&id, kFailed, "the tab is no longer controlled"));
-+        AskBeforeTyping(connection, *tab,
++        AskBeforeTyping(connection, *tab, TypingFacts(tab->page.FieldLabel(ref), text ? &*text : nullptr),
 +                        base::BindOnce(
 +                            [](base::Value id, Page::Op act, ReplyCallback reply, std::string_view code,
 +                               std::string_view message) {
@@ -1716,7 +1756,7 @@ index 0000000000..ee38257775
 +                            },
 +                            std::move(id), std::move(act), std::move(reply)));
 +      },
-+      connection, tab.GetWeakPtr(), std::move(id), std::move(act));
++      connection, tab.GetWeakPtr(), std::move(id), std::move(ref), std::move(text), std::move(act));
 +}
 +
 +// Ends the session. Its tabs stay open and are no longer controlled, unless `close_tabs`.
@@ -2127,7 +2167,7 @@ index 0000000000..ee38257775
 +      tab->AnswerDialog(accept, nullptr);
 +      return std::move(reply).Run(OkReply(request.id));
 +    }
-+    AskBeforeTyping(connection, *tab,
++    AskBeforeTyping(connection, *tab, TypingFacts("", &text),
 +                    base::BindOnce(
 +                        [](base::WeakPtr<Tab> tab, base::Value id, std::u16string text, ReplyCallback reply,
 +                           std::string_view code, std::string_view message) {
@@ -2162,8 +2202,9 @@ index 0000000000..ee38257775
 +                                      "needs tab, ref and text (up to 10000 characters, no control characters)"));
 +      return;
 +    }
++    std::u16string typed = text16;  // for the ask; text16 goes to the op
 +    tab->page.Run(request.id.Clone(),
-+                  TypingOp(connection, *tab, request.id.Clone(),
++                  TypingOp(connection, *tab, request.id.Clone(), *ref, std::move(typed),
 +                           base::BindOnce(&Page::Type, base::Unretained(&tab->page), request.id.Clone(), *ref,
 +                                          std::move(text16))),
 +                  std::move(reply));
@@ -2178,8 +2219,10 @@ index 0000000000..ee38257775
 +      return;
 +    }
 +    const bool types = KeyTypes(*key);
++    std::optional<std::u16string> typed;  // paste: what it puts in is not known here
++    if (!TouchesClipboard(*key)) typed = key->text;
 +    Page::Op act = base::BindOnce(&Page::PressKey, base::Unretained(&tab->page), request.id.Clone(), std::move(*key));
-+    tab->page.Run(request.id.Clone(), types ? TypingOp(connection, *tab, request.id.Clone(), std::move(act)) : std::move(act),
++    tab->page.Run(request.id.Clone(), types ? TypingOp(connection, *tab, request.id.Clone(), "", std::move(typed), std::move(act)) : std::move(act),
 +                  std::move(reply));
 +  } else {
 +    std::move(reply).Run(ErrorReply(&request.id, kUnknownOp, op));
@@ -2300,10 +2343,10 @@ index 0000000000..d999ff7d50
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_CONTROL_OPS_H_
 diff --git a/chrome/browser/agens/bridge/control_page.cc b/chrome/browser/agens/bridge/control_page.cc
 new file mode 100644
-index 0000000000..52c43a2ac3
+index 0000000000..f15c420ea3
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_page.cc
-@@ -0,0 +1,739 @@
+@@ -0,0 +1,759 @@
 +// Copyright 2026 SugiyamaLabs.
 +
 +#include "chrome/browser/agens/bridge/control_page.h"
@@ -2716,6 +2759,19 @@ index 0000000000..52c43a2ac3
 +  return manager ? manager->GetFromID(it->second.second) : nullptr;
 +}
 +
++std::string Page::FieldLabel(const std::string& ref) {
++  ui::BrowserAccessibilityManager* root = ref.empty() ? RootManager() : nullptr;
++  ui::BrowserAccessibility* node = ref.empty() ? (root ? root->GetFocus() : nullptr) : Resolve(ref);
++  if (!node) return "";
++  std::string label = node->GetName();
++  if (label.empty()) label = node->GetData().GetStringAttribute(ax::mojom::StringAttribute::kPlaceholder);
++  // html_attributes is only filled in some accessibility modes: the name may be missing.
++  for (const auto& [key, value] : node->GetData().html_attributes) {
++    if (label.empty() && key == "name") label = value;
++  }
++  return Clip(label);
++}
++
 +content::RenderWidgetHost* Page::FocusedWidget() {
 +  content::RenderFrameHost* frame = web_contents()->GetFocusedFrame();
 +  return (frame ? frame : web_contents()->GetPrimaryMainFrame())->GetRenderWidgetHost();
@@ -2942,7 +2998,10 @@ index 0000000000..52c43a2ac3
 +void Page::Type(base::Value id, std::string ref, std::u16string text, ReplyCallback reply) {
 +  ui::BrowserAccessibility* node = Resolve(ref);
 +  if (!node) return Fail(id, reply, kNotFound, ref);
-+  if (IsPassword(node->GetData())) return Fail(id, reply, kDenied, "a password field");
++  if (IsPassword(node->GetData())) {
++    if (on_password_refused) on_password_refused.Run();
++    return Fail(id, reply, kDenied, "a password field");
++  }
 +  // The focus can't land on it (a label's text, a disabled field): the keys would go to the page
 +  // and be lost while the op answered ok.
 +  if (!node->HasState(ax::mojom::State::kFocusable)) {
@@ -2957,7 +3016,10 @@ index 0000000000..52c43a2ac3
 +         std::optional<bool> password) {
 +        if (!self) return Fail(id, reply, kFailed, "the tab is no longer controlled");
 +        if (!password) return Fail(id, reply, kFailed, "could not read the page");
-+        if (*password) return Fail(id, reply, kDenied, "the focus is on a password field");
++        if (*password) {
++          if (self->on_password_refused) self->on_password_refused.Run();
++          return Fail(id, reply, kDenied, "the focus is on a password field");
++        }
 +        // One character at a time (a surrogate pair is one).
 +        std::vector<Key> keys;
 +        for (size_t i = 0; i < text.size();) {
@@ -2985,6 +3047,7 @@ index 0000000000..52c43a2ac3
 +        if (!self) return Fail(id, reply, kFailed, "the tab is no longer controlled");
 +        if (!password) return Fail(id, reply, kFailed, "could not read the page");
 +        if (!KeyAllowed(key, *password, self->clipboard)) {
++          if (self->on_password_refused) self->on_password_refused.Run();
 +          return Fail(id, reply, kDenied, "the focus is on a password field: only keys that move");
 +        }
 +        if (self->paused) return Fail(id, reply, kPaused, "the person took over the tab");
@@ -3045,10 +3108,10 @@ index 0000000000..52c43a2ac3
 +}  // namespace agens::bridge::control
 diff --git a/chrome/browser/agens/bridge/control_page.h b/chrome/browser/agens/bridge/control_page.h
 new file mode 100644
-index 0000000000..e4b296e266
+index 0000000000..384ff8197c
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_page.h
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,156 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The page side of a controlled tab (page.* in docs/protocolo.md): its accessibility tree with
 +// refs, real input on its widget, and screenshots. UI thread. Password rules, checked against the
@@ -3108,6 +3171,8 @@ index 0000000000..e4b296e266
 +
 +  // Runs with the point (DIPs, from the page's top-left) of each real click, for the shell's cursor.
 +  base::RepeatingCallback<void(gfx::PointF)> on_pointer;
++  // Runs when typing is refused because the field is a password field, for the host's pill.
++  base::RepeatingClosure on_password_refused;
 +  // control.start's "clipboard": copy, cut and paste keys go through, also on a password field.
 +  bool clipboard = false;
 +  // control.start's "eval": page.eval may run (on a local page only).
@@ -3115,6 +3180,10 @@ index 0000000000..e4b296e266
 +  // The person took over: every op checks it right before it touches the page, and answers
 +  // `paused` instead. A step already sent stays sent.
 +  bool paused = false;
++
++  // The field at `ref` (the focused one when `ref` is empty) as the person sees it: its accessible
++  // name, else its placeholder, else its HTML name; "" when there is none or it can't tell.
++  std::string FieldLabel(const std::string& ref);
 +
 +  // The ops, for Run. Each answers `reply` once, for the request `id`.
 +  void Snapshot(base::Value id, ReplyCallback reply);
@@ -8327,10 +8396,10 @@ index 0000000000..e98cac0576
 +}
 diff --git a/chrome/browser/agens/bridge/view_ops.cc b/chrome/browser/agens/bridge/view_ops.cc
 new file mode 100644
-index 0000000000..787885abd3
+index 0000000000..4e31bf8941
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_ops.cc
-@@ -0,0 +1,1707 @@
+@@ -0,0 +1,1708 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The host draws the interface; the engine hands it the pages (docs/protocolo.md, "host e view").
 +// - One host: the connection that sent host.attach (the app that launched the engine).
@@ -9816,6 +9885,7 @@ index 0000000000..787885abd3
 +      return;
 +    }
 +    content::AgensSetAudioVolume(contents, *volume / 100.0);
++    contents->SetAudioMuted(false);  // moving the volume unmutes, like macOS (owner, 17/11)
 +    for (AgensWindow* window : S().windows) {  // nothing in Chromium watches it: send view.tab
 +      if (window->model()->GetIndexOfWebContents(contents) != TabStripModel::kNoTab) {
 +        window->model()->UpdateWebContentsState(contents, TabChangeType::kAll);
@@ -13571,7 +13641,7 @@ index 4eb24ab895..436be6abd7 100644
      progress_.Run(0, created ? "Criando o ato " + ato + "…" : "Usando o ato " + ato + "…");
      manager->CreateProfileAsync(
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
-index cfdc014cf4..939468d7f4 100644
+index cfdc014cf4..7369d06c2d 100644
 --- a/chrome/browser/agens/embed/native_shell.cc
 +++ b/chrome/browser/agens/embed/native_shell.cc
 @@ -4,6 +4,8 @@
@@ -13814,7 +13884,7 @@ index cfdc014cf4..939468d7f4 100644
  void agens_window_split(AgensWindow* w, int index, int layout) {
    TabStripModel* m = w->model();
    const int active = m->active_index();
-@@ -707,11 +821,44 @@ void agens_window_unsplit(AgensWindow* w, int index) {
+@@ -707,11 +821,45 @@ void agens_window_unsplit(AgensWindow* w, int index) {
  void agens_window_set_pinned(AgensWindow* w, int index, int pinned) {
    if (w->model()->ContainsIndex(index)) w->model()->SetTabPinned(index, pinned);
  }
@@ -13853,13 +13923,14 @@ index cfdc014cf4..939468d7f4 100644
 +  if (!w->model()->ContainsIndex(index)) return;
 +  content::WebContents* contents = w->model()->GetWebContentsAt(index);
 +  content::AgensSetAudioVolume(contents, std::clamp(percent, 0, 100) / 100.0);
++  contents->SetAudioMuted(false);  // moving the volume unmutes, like macOS (owner, 17/11)
 +  // Nothing in Chromium watches the volume: say it changed, for the casca and view.tab.
 +  w->model()->UpdateWebContentsState(contents, TabChangeType::kAll);
 +}
  void agens_window_navigate(AgensWindow* w, const char* text) {
    content::WebContents* active = w->model()->GetActiveWebContents();
    std::u16string input = base::UTF8ToUTF16(text ? text : "");
-@@ -760,8 +907,14 @@ void agens_window_show_site_info(AgensWindow* w) {
+@@ -760,8 +908,14 @@ void agens_window_show_site_info(AgensWindow* w) {
      ShowPageInfoDialog(active, base::DoNothing(), bubble_anchor_util::Anchor::kLocationBar);
    }
  }
@@ -13876,7 +13947,7 @@ index cfdc014cf4..939468d7f4 100644
  }
  void agens_window_stop(AgensWindow* w) {
    chrome::ExecuteCommand(w->browser, IDC_STOP);
-@@ -814,6 +967,13 @@ void NativeTabStateChanged(views::Widget*) {}
+@@ -814,6 +968,13 @@ void NativeTabStateChanged(views::Widget*) {}
  void ConfirmCloseWithDownloads(views::Widget*, int, base::OnceCallback<void(bool)> callback) {
    std::move(callback).Run(true);
  }
@@ -13890,7 +13961,7 @@ index cfdc014cf4..939468d7f4 100644
  #endif
  
  bool IsNativeStatusBubble(const StatusBubble* bubble) {
-@@ -840,6 +1000,12 @@ const char* NativeSectionFor(const GURL& url) {
+@@ -840,6 +1001,12 @@ const char* NativeSectionFor(const GURL& url) {
    if (host == "help") return "sobre";
    if (host != "settings") return nullptr;
    if (path == "/help") return "sobre";
@@ -13903,7 +13974,7 @@ index cfdc014cf4..939468d7f4 100644
    if (path == "/passwords") return "senhas";
    if (path == "/content" || path == "/privacy" || path == "/security" || path == "/clearBrowserData") return "privacidade";
    if (path == "/searchEngines") return "busca";
-@@ -872,6 +1038,12 @@ class NativePageThrottle : public content::NavigationThrottle {
+@@ -872,6 +1039,12 @@ class NativePageThrottle : public content::NavigationThrottle {
      if (IsBlockedHost(url.host())) return {BLOCK_REQUEST, net::ERR_BLOCKED_BY_CLIENT};
      const char* section = NativeSectionFor(url);
      if (!section || !navigation_handle()->IsInPrimaryMainFrame()) return PROCEED;

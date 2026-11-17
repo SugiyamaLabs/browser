@@ -288,6 +288,10 @@ extension BrowserConnection {
   public func mute(_ muted: Bool = true, in tab: String) async throws(BrowserError) {
     try await send(op: "view.mute", params: ["tab": .string(tab), "muted": .bool(muted)])
   }
+  /// Sets the tab's volume, 0 to 100 (the speaker popover); it also unmutes the tab. `view.tab` follows.
+  public func setVolume(_ volume: Int, in tab: String) async throws(BrowserError) {
+    try await send(op: "view.volume", params: ["tab": .string(tab), "volume": .number(Double(volume))])
+  }
 
   /// The tab's icon as PNG data.
   public func favicon(_ tab: String) async throws(BrowserError) -> Data? {

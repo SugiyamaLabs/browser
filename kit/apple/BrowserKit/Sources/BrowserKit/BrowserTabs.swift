@@ -20,6 +20,8 @@ public struct BrowserTab: Sendable, Equatable, Identifiable {
   public var audible: Bool
   /// The person muted it (`mute`); it stays `audible` while the page plays.
   public var muted: Bool
+  /// This tab's volume, 0 to 100 (`setVolume`); separate from `muted`. 100 from an older engine.
+  public var volume: Int
   public var canGoBack: Bool
   public var canGoForward: Bool
   public var control: AgentControl?
@@ -38,6 +40,7 @@ public struct BrowserTab: Sendable, Equatable, Identifiable {
     loading = message["loading"]?.bool ?? false
     audible = message["audible"]?.bool ?? false
     muted = message["muted"]?.bool ?? false
+    volume = message["volume"]?.int ?? 100
     canGoBack = message["can_back"]?.bool ?? false
     canGoForward = message["can_forward"]?.bool ?? false
     control = message["control"]?.object.map {

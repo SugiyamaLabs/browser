@@ -83,7 +83,7 @@ Navegação: `navigate(tab, to: texto)` (endereço ou busca, como na barra), `ba
 
 ## As abas e os dados delas
 
-`engine.tabs` é um modelo observável com as abas de cada ato: título, URL, carregando, áudio (`audible`, `muted`), se dá para voltar e avançar, ícone (PNG) e `control` quando um agente está usando a aba e `agentCursor`, o ponto onde está o ponteiro dele (o app desenha).
+`engine.tabs` é um modelo observável com as abas de cada ato: título, URL, carregando, áudio (`audible`, `muted`, `volume` de 0 a 100), se dá para voltar e avançar, ícone (PNG) e `control` quando um agente está usando a aba e `agentCursor`, o ponto onde está o ponteiro dele (o app desenha).
 
 ```swift
 try await engine.tabs.load(ato: ato)        // as abas que já existem (inclui as do agente)
@@ -108,9 +108,12 @@ engine.onApproval = { request in
 
 `title` e `detail` vêm sempre, prontos para mostrar. Para desenhar a folha em partes, `ApprovalRequest` traz também, quando o motor sabe (um motor mais antigo deixa tudo vazio):
 
-- `kind`: `.control` (um agente quer usar abas), `.session` (um app quer cookies, `localStorage` ou headers), `.connect`, ou `.other("…")` para um tipo que este kit não conhece; nesse caso, e com `kind` nulo, mostre `title` e `detail`.
+- `kind`: `.control` (um agente quer usar abas), `.session` (um app quer cookies, `localStorage` ou headers), `.insecureTyping` (um agente quer digitar numa página sem HTTPS), `.connect`, ou `.other("…")` para um tipo que este kit não conhece; nesse caso, e com `kind` nulo, mostre `title` e `detail`.
 - `ato`, `atoName`, `reason`.
 - `agent` e `allow` (`passwords`, `clipboard`, `eval`), em `.control`.
+- `agent` e `host` (o site sem HTTPS), em `.insecureTyping`. Os botões são os de sempre: `.allow` (Permitir, só esta digitação), `.always` (Permitir sempre neste site, até o fim da sessão do agente), `.deny` (Não permitir).
+  Também `tab` (o id da aba), `field` (o rótulo do campo, senão o placeholder, senão o `name`; nulo no texto de um diálogo), `textPreview` (os primeiros 40 caracteres) e `textLength` (o total); os dois últimos vêm nulos quando o agente cola.
+  Quando o motor recusa digitar num campo de senha, chega `engine.onAgentRefused` (`AgentRefusal`: `tab`, `ato`, `agent`, `reason`, hoje só `"password"`), para a pílula do agente dizer "Não digita em campo de senha"; o agente recebe só `denied`.
 - `items: [ApprovalRequest.Item]` (`type`, `from`, `name`), em `.session`.
 - `sharesWith`: nomes dos atos com que este divide cookies; vazio quando nenhum.
 
@@ -251,6 +254,10 @@ let reopened = try await engine.connection?.reopenClosedTab(ato: ato)   // o id;
 - Motor mais antigo lança `unknown_op` em todos.
 
 **Som.** `engine.onAudio = { tab, audible, muted in ... }` avisa quando a aba começa ou para de tocar e quando é silenciada; `try await engine.connection?.mute(in: tab)` silencia e `mute(false, in: tab)` devolve o som, como o ícone de som da aba do Chrome. Vale também na aba do agente. Silenciada, a aba segue `audible` enquanto a página toca. Motor mais antigo: `muted` fica `false` e `mute` lança `unknown_op`.
+
+**Volume da aba.** `tab.volume` vai de 0 a 100 (100 quando o motor não manda). `try await engine.connection?.setVolume(30, in: tab)` muda só esta aba, como o popover do alto-falante; também tira o silêncio (`muted: false`, e `onAudio` avisa). Volume 0 não é silenciar. Não é guardado: aba restaurada volta a 100. Motor mais antigo: `setVolume` lança `unknown_op`.
+
+**Página sem HTTPS.** `view.tab` não diz se a página é segura; para o "Não seguro" da barra, olhe `tab.url` (`http://` que não seja `localhost`, `*.localhost`, `127.0.0.1` ou `[::1]`, a mesma regra do motor).
 
 ## Inspecionar
 

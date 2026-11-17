@@ -386,15 +386,22 @@ if e:
     a = insecure_ask()
     check("page.type there asks the host (approval.ask insecure_typing, host, offer_always)",
           bool(a) and a.get("host") == "insecure.test" and a.get("offer_always") is True and a.get("ato") == ato, a)
+    itab_seen = [e for e in c.events if e["event"] == "view.tab" and "insecure.test" in e.get("url", "")]
+    check("the ask names the host's tab, the field, the text's start and length",
+          bool(a) and any(e.get("tab") == a.get("tab") for e in itab_seen) and a.get("field") == "Text"
+          and a.get("text_preview") == "no" and a.get("text_length") == 2, a)
     if a: c.ask("approval.answer", ask=a["ask"], answer="deny")
     check("deny: page.type answers denied", err(agent.wait(rid)) == "denied")
     rid = agent.send("page.type", tab=itab, ref=iref("textField", "Text"), text="ok1")
     a = insecure_ask()
+    check("a different text is a new ask (not merged with the last one)", bool(a) and a.get("text_preview") == "ok1", a)
     if a: c.ask("approval.answer", ask=a["ask"], answer="allow")
     check("allow: page.type goes through", bool(a) and agent.wait(rid).get("ok"))
     rid = agent.send("page.key", tab=itab, key="2")
     a = insecure_ask()
     check("allow covers one action: page.key with a character asks again", bool(a), a)
+    check("page.key's ask: the focused field and the character",
+          bool(a) and a.get("field") == "Text" and a.get("text_preview") == "2" and a.get("text_length") == 1, a)
     if a: c.ask("approval.answer", ask=a["ask"], answer="always")
     check("always: page.key goes through", agent.wait(rid).get("ok"))
     t3 = agent.ask("page.type", tab=itab, ref=iref("textField", "Text"), text="3")
@@ -404,6 +411,10 @@ if e:
     check("what was typed after the OKs is there (ok12)", got.get("value") == "ok12", got)
     pw = agent.ask("page.type", tab=itab, ref=iref("textField", "Password"), text="x")
     check("a password field there is still denied", err(pw) == "denied", pw)
+    rf = c.event(lambda e: e["event"] == "view.agent_refused", 10)
+    check("the host is told (view.agent_refused, reason password, the tab and agent)",
+          bool(rf) and rf.get("reason") == "password" and rf.get("ato") == ato and bool(rf.get("agent"))
+          and rf.get("tab") == (a or {}).get("tab"), rf)
     agent.ask("tab.navigate", tab=itab, url=INSECURE + "/secure-cookie")
     agent.ask("tab.navigate", tab=itab, url=INSECURE + "/cookies")
     sent = " ".join(n.get("name", "") for n in agent.ask("page.snapshot", tab=itab).get("nodes", []))
@@ -1791,6 +1802,10 @@ check("view.volume 0 is not muting: volume 0, muted false",
 check("view.volume past 100, below 0 or not a number is bad_request",
       err(c.ask("view.volume", tab=st, volume=101)) == "bad_request" and err(c.ask("view.volume", tab=st, volume=-1)) == "bad_request"
       and err(c.ask("view.volume", tab=st, volume="alto")) == "bad_request")
+c.ask("view.mute", tab=st, muted=True); tab_event(st, lambda e: e.get("muted") is True, 10)
+drop(st); r = c.ask("view.volume", tab=st, volume=60)
+check("view.volume on a muted tab unmutes it: volume 60, muted false",
+      r.get("ok") and bool(tab_event(st, lambda e: e.get("volume") == 60 and e.get("muted") is False, 10)), r)
 drop(st); r = c.ask("view.volume", tab=st, volume=100)
 check("view.volume 100 gives the volume back", r.get("ok") and bool(tab_event(st, lambda e: e.get("volume") == 100, 10)), r)
 c.ask("view.close", tab=st)
