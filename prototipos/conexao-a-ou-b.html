@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Conexão: A ou B</title>
+<style>
+:root{--bg:#0B0B0D;--card:#1A1A1F;--line:#2A2A31;--ink:#F2F2F4;--dim:#9A9AA3;--warm:#F3B26B}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 -apple-system,system-ui,sans-serif;padding:32px 16px}
+h1{font-size:20px;margin:0 0 6px}p.lead{color:var(--dim);margin:0 0 28px;max-width:760px}
+.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:28px;max-width:1100px}
+.col h2{font-size:16px;margin:0 0 4px}.col .sub{color:var(--dim);font-size:13px;margin:0 0 16px}
+.step{color:var(--dim);font-size:12px;margin:18px 0 8px;text-transform:uppercase;letter-spacing:.04em}
+.sheet{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px 20px}
+.hd{display:flex;gap:12px;align-items:center;margin-bottom:12px}
+.ic{width:40px;height:40px;border-radius:10px;background:linear-gradient(135deg,#A78BFA,#6D5BD0);display:grid;place-items:center;font-weight:700}
+.hd b{display:block;font-size:15px}.hd small{color:var(--dim)}
+.chip{display:inline-flex;gap:6px;align-items:center;border:1px solid var(--line);border-radius:8px;padding:3px 8px;font-size:12px;margin-bottom:10px}
+.dot{width:14px;height:14px;border-radius:4px;background:#B9A6F7;color:#000;font-size:10px;display:grid;place-items:center;font-weight:700}
+.g{color:var(--dim);font-size:12px;margin:4px 0 6px}
+ul{list-style:none;margin:0;padding:0;border:1px solid var(--line);border-radius:10px}
+li{padding:8px 12px;border-top:1px solid var(--line)}li:first-child{border-top:0}
+li.rep{outline:2px solid var(--warm);outline-offset:-2px;border-radius:8px}
+.acts{display:flex;gap:8px;justify-content:flex-end;margin-top:14px;flex-wrap:wrap}
+.btn{border:1px solid var(--line);border-radius:8px;padding:6px 12px;font-size:13px;background:transparent;color:var(--ink)}
+.btn.pri{background:var(--ink);color:#111}
+.note{margin-top:14px;font-size:13px;color:var(--warm)}
+.note.ok{color:#8FD19E}
+</style></head><body>
+<h1>Quando um app se conecta: A ou B?</h1>
+<p class="lead">O app "Zuca" se conecta ao AgensBrowser e logo depois quer mexer no ato Estúdio. São sempre duas janelas de pergunta, uma depois da outra. A diferença está no que a <b>primeira</b> diz.</p>
+<div class="cols">
+ <div class="col">
+  <h2>A · como o protótipo</h2><p class="sub">A primeira já lista tudo.</p>
+  <div class="step">1ª pergunta · conectar</div>
+  <div class="sheet"><div class="hd"><span class="ic">Z</span><div><b>Zuca quer usar o AgensBrowser</b><small>Zuca · com.exemplo.zuca</small></div></div>
+   <span class="chip"><span class="dot">E</span>Ato Estúdio</span>
+   <div class="g">Vai poder</div>
+   <ul><li class="rep">Abrir, fechar e trocar abas</li><li class="rep">Ler as páginas</li><li class="rep">Usar os logins do ato</li></ul>
+   <div class="acts"><button class="btn">Permitir</button><button class="btn">Permitir sempre</button><button class="btn pri">Não permitir ↩</button></div></div>
+  <div class="step">2ª pergunta · mexer no ato</div>
+  <div class="sheet"><div class="hd"><span class="ic">Z</span><div><b>Zuca quer controlar o ato Estúdio</b><small>pelo AgensBrowser</small></div></div>
+   <ul><li class="rep">Clicar, digitar e rolar nas abas</li><li class="rep">Abrir e fechar abas</li><li class="rep">Agir logado no Estúdio</li></ul>
+   <div class="acts"><button class="btn">Permitir</button><button class="btn pri">Não permitir ↩</button></div></div>
+  <p class="note">Os itens em laranja aparecem nas duas perguntas: você aprova a mesma coisa duas vezes.</p>
+ </div>
+ <div class="col">
+  <h2>B · recomendada</h2><p class="sub">Cada pergunta diz só o que ela libera.</p>
+  <div class="step">1ª pergunta · conectar</div>
+  <div class="sheet"><div class="hd"><span class="ic">Z</span><div><b>Zuca quer usar o AgensBrowser</b><small>Zuca · com.exemplo.zuca</small></div></div>
+   <div class="g">Vai poder</div>
+   <ul><li>Ver a lista dos seus atos</li><li>Pedir para usar um ato (você decide em outra pergunta)</li></ul>
+   <div class="acts"><button class="btn">Permitir</button><button class="btn">Permitir sempre</button><button class="btn pri">Não permitir ↩</button></div></div>
+  <div class="step">2ª pergunta · mexer no ato</div>
+  <div class="sheet"><div class="hd"><span class="ic">Z</span><div><b>Zuca quer controlar o ato Estúdio</b><small>pelo AgensBrowser</small></div></div>
+   <span class="chip"><span class="dot">E</span>Ato Estúdio</span>
+   <ul><li>Clicar, digitar e rolar nas abas</li><li>Abrir e fechar abas</li><li>Agir logado no Estúdio</li></ul>
+   <div class="acts"><button class="btn">Permitir</button><button class="btn pri">Não permitir ↩</button></div></div>
+  <p class="note ok">Nada se repete: a 1ª só abre a porta, a 2ª decide o que o app faz no ato.</p>
+ </div>
+</div>
+</body></html>
