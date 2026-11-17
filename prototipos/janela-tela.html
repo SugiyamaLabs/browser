@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="pt-BR" data-mode="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tela e atos que dormem</title>
+<!-- Compartilhar a tela (seletor nosso no lugar do getDisplayMedia do Chromium) e os ajustes de atos que dormem.
+     Tokens, janela, folha e pílula de janela-recursos.html; Configurações › Desempenho de janela-abas.html. -->
+<style>
+:root{--bg:#0B0B0D;--side:#111114;--raise:#16161A;--sunk:#0F0F12;--line:#24242A;--line-strong:#3A3A42;--line-hover:#4A4A54;--ink:#F2F2F4;--mute:#9A9AA4;--dim:#8A8A94;--hi:#F4F4F6;--on-hi:#0B0B0D;--warn:#F2C14E;
+  --hover-2:#1B1B20;--float:#1A1A1F;--light-2:#FFE9C7;--light-3:#FFC98A;--red:#F28B82;--kbd:rgba(255,255,255,.07);--off:#4A4A54;--shadow:rgba(0,0,0,.45);
+  --ui:-apple-system,"SF Pro Text",BlinkMacSystemFont,system-ui,sans-serif;--mono:ui-monospace,"SF Mono",Menlo,monospace;--s:10px;--ease:cubic-bezier(.16,1,.3,1)}
+:root[data-mode="light"]{--bg:#FAFAFB;--side:#F1F1F4;--raise:#FFFFFF;--sunk:#E9E9ED;--line:#E0E0E5;--line-strong:#CFCFD6;--line-hover:#B9B9C2;--ink:#16161A;--mute:#5C5C66;--dim:#71717B;--hi:#16161A;--on-hi:#FFFFFF;--warn:#B7791F;
+  --hover-2:#E4E4E9;--float:#FFFFFF;--light-2:#F7A95C;--light-3:#E8893A;--red:#C5453B;--kbd:rgba(0,0,0,.06);--off:#B9B9C2;--shadow:rgba(0,0,0,.14)}
+:root[data-mode="light"] .lights i{background:#D4D4DA}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 var(--ui);text-wrap:pretty;-webkit-font-smoothing:antialiased;transition:background .2s,color .2s}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+:focus-visible{outline:2px solid var(--light-2);outline-offset:2px;border-radius:8px}
+main{max-width:1180px;margin:0 auto;padding:32px 24px 64px}
+header{display:flex;gap:16px;align-items:flex-start}header div{flex:1}header h1{font-size:20px;margin:0 0 4px}header p{margin:0 0 8px;color:var(--dim);max-width:80ch}
+.toc{position:sticky;top:0;z-index:20;display:flex;gap:16px;flex-wrap:wrap;margin:0 -24px 24px;padding:10px 24px;background:var(--bg);border-bottom:1px solid var(--line)}.toc a{color:var(--mute);font-size:13px;text-decoration:none}.toc a:hover{color:var(--ink)}
+section.v{margin:0 0 48px;scroll-margin-top:56px}
+section.v>h2{font-size:13px;font-weight:600;color:var(--mute);margin:0 0 4px}
+p.cap{margin:0 0 10px;color:var(--dim);font-size:12.5px;max-width:780px}
+.seg{display:inline-flex;flex-wrap:wrap;gap:4px;border:1px solid var(--line);border-radius:9px;padding:2px;margin:0 0 12px}.seg button{padding:4px 10px;border-radius:7px;font-size:12.5px;color:var(--mute)}.seg button.on{background:var(--raise);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+.mode{flex:none}
+kbd{font:500 12px/1 var(--ui);padding:3px 5px;border-radius:5px;background:var(--kbd);color:var(--dim)}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:6px 13px;border:1px solid var(--line-strong);border-radius:10px;font-size:13px;white-space:nowrap;flex:none}
+.btn:hover{border-color:var(--line-hover);background:var(--hover-2)}
+.btn.pri{background:var(--hi);border-color:var(--hi);color:var(--on-hi);font-weight:600}
+.btn.pri kbd{background:rgba(128,128,128,.18);color:inherit;opacity:.6;margin-right:-6px}
+.btn.sm{padding:4px 10px;font-size:12.5px}
+.lnk{color:var(--mute);font-size:12.5px}.lnk:hover{color:var(--ink)}
+.logo{width:18px;height:18px;border-radius:5px;display:inline-grid;place-items:center;font:700 10.5px/1 var(--ui);flex:none;color:#0B0B0D}.l-est{background:#C9B6FF}.l-cli{background:#7FD1A8}.l-pes{background:#F2C14E}
+svg.i{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex:none}
+/* janela */
+.nav{position:relative;height:540px;border:1px solid var(--line);border-radius:14px;background:var(--side);overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.nav.sidev{flex-direction:row}
+.lights{display:flex;gap:8px;padding:0 12px 0 16px}.lights i{width:12px;height:12px;border-radius:50%;background:#2A2A30}
+.strip{display:flex;align-items:center;gap:4px;padding:8px 14px 0 0}
+.nav-tab{display:flex;align-items:center;gap:7px;padding:5px 10px;border-radius:8px;font-size:12.5px;color:var(--mute);flex:0 1 200px;min-width:0;overflow:hidden;white-space:nowrap;height:32px}.nav-tab.on{background:var(--raise);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+.nav-tab .t{flex:1;overflow:hidden;text-overflow:ellipsis}.nt{width:28px;height:28px;display:grid;place-items:center;color:var(--dim)}
+.fv{width:14px;height:14px;border-radius:4px;flex:none;display:grid;place-items:center;font:700 8.5px/1 var(--ui);color:#0B0B0D}
+.nav-row{display:flex;align-items:center;gap:6px;margin:8px 14px 10px;position:relative}
+.ib{position:relative;width:30px;height:30px;display:grid;place-items:center;border-radius:8px;color:var(--mute);flex:none}.ib.on,.ib:hover{background:var(--raise);color:var(--ink)}
+.nav-addr{flex:1;min-width:0;display:flex;align-items:center;gap:6px;padding:0 6px 0 6px;height:32px;border:1px solid var(--line);border-radius:10px;background:var(--sunk);color:var(--mute);font-size:13px;white-space:nowrap}
+.nav-addr .u{flex:1;overflow:hidden;text-overflow:ellipsis}.nav-addr .u b{color:var(--ink);font-weight:400}
+.ai{width:22px;height:22px;display:grid;place-items:center;border-radius:7px;color:var(--dim);flex:none}.ai:hover,.ai.on{background:var(--hover-2);color:var(--ink)}.ai svg.i{width:15px;height:15px}
+.ai.asking{color:var(--light-3)}
+.live{display:flex;align-items:center;gap:2px;padding:0 6px;height:22px;border-radius:7px;background:var(--hover-2);color:var(--light-3)}.live svg.i{width:14px;height:14px}
+.live::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--light-3);margin-right:3px;animation:blink 1.6s ease-in-out infinite}
+@keyframes blink{50%{opacity:.35}}
+.profs{border:1px solid var(--line);border-radius:9px;padding:2px;display:flex;gap:4px}.profs span{white-space:nowrap;display:flex;align-items:center;gap:6px;padding:4px 7px;border-radius:8px;font-size:12.5px;color:var(--mute)}.profs span.on{background:var(--raise);color:var(--ink)}
+.area{flex:1;min-height:0;margin:0 14px 14px;border:1px solid var(--line);border-radius:12px;overflow:hidden;position:relative;background:#fff;color:#15151A}
+.area.app{background:var(--bg);color:var(--ink)}
+.page{padding:26px 34px;font:15px/1.6 Georgia,"Times New Roman",serif;max-width:720px}
+.page h3{font:600 22px/1.25 var(--ui);margin:0 0 12px}.page p{margin:0 0 12px}.page a{color:#1A56C7}
+/* barra lateral (janela.html, abas na lateral) */
+.sb{width:220px;flex:none;display:flex;flex-direction:column;padding:12px 8px 10px;gap:2px}
+.sbh{display:flex;align-items:center;gap:8px;padding:12px 8px 10px;font-weight:600;font-size:13.5px}
+.sbt{display:flex;align-items:center;gap:8px;height:32px;padding:0 8px;border-radius:8px;font-size:12.5px;color:var(--mute);white-space:nowrap}.sbt .t{flex:1;overflow:hidden;text-overflow:ellipsis}.sbt.on{background:var(--raise);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+.sbt .rec{display:flex;gap:1px;color:var(--light-3)}.sbt .rec svg.i{width:13px;height:13px}
+.sbf{margin-top:auto;display:flex;gap:6px;padding:8px}.sbf .logo{width:24px;height:24px;border-radius:7px;opacity:.55}.sbf .logo.on{opacity:1;box-shadow:0 0 0 2px var(--side),0 0 0 3px var(--line-strong)}
+.col{flex:1;min-width:0;display:flex;flex-direction:column}
+/* popover com seta (menus-seta.html) */
+.menu{position:absolute;z-index:6;background:var(--float);border:1px solid var(--line-strong);border-radius:12px;padding:6px;filter:drop-shadow(0 10px 24px var(--shadow));color:var(--ink);font-size:13px;animation:rise .18s var(--ease)}
+@keyframes rise{from{opacity:0;transform:translateY(-3px)}}
+.menu .mi{display:flex;align-items:center;gap:10px;padding:5px 8px;border-radius:8px;font-size:13px}.menu .mi:hover{background:var(--raise)}.menu .mi span{flex:1}.menu .mi small{color:var(--dim);font-size:12px}
+.menu hr{border:0;border-top:1px solid var(--line);margin:5px 0}
+.menu[data-side]::after{content:"";position:absolute;width:var(--s);height:var(--s);background:var(--float);border:1px solid var(--line-strong);border-right:0;border-bottom:0;border-top-left-radius:2px;clip-path:polygon(-2px -2px,calc(100% + 2px) -2px,-2px calc(100% + 2px));left:var(--ax);top:0;transform:translate(-50%,-50%) rotate(45deg)}
+.ph{display:flex;align-items:center;gap:8px;padding:6px 8px 8px}.ph b{flex:1;font-weight:600}
+.pbody{padding:6px 8px 4px}.pbody .pt{font-weight:600;margin:0 0 2px}.pbody>small{display:block;color:var(--dim);font-size:12px;margin:0 0 10px}
+.acts{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}.acts.stack{flex-direction:column;align-items:stretch;gap:6px}
+/* downloads */
+.dlb svg.ring{position:absolute;inset:1px;width:28px;height:28px;transform:rotate(-90deg);fill:none;stroke-width:2}
+.dlb .ring .bgc{stroke:var(--line-strong)}.dlb .ring .fgc{stroke:var(--light-3);stroke-linecap:round;transition:stroke-dashoffset .3s}
+.dlb.new{animation:dlnew .2s var(--ease)}.dlb.new svg.arrow{animation:drop .6s var(--ease) 2}
+@keyframes dlnew{from{transform:scale(.6);opacity:0}}
+@keyframes drop{0%{transform:translateY(-5px);opacity:0}60%{transform:none;opacity:1}}
+.dot{position:absolute;right:3px;top:3px;width:7px;height:7px;border-radius:50%;background:var(--warn);box-shadow:0 0 0 2px var(--side)}
+.dlpop{width:350px}
+.dr{display:flex;gap:10px;padding:8px;border-radius:8px;align-items:flex-start}.dr:hover{background:var(--raise)}
+.ft{width:30px;height:36px;border-radius:5px;border:1px solid var(--line-strong);display:grid;place-items:end center;padding-bottom:4px;font:700 8.5px/1 var(--ui);color:var(--mute);flex:none;background:var(--sunk)}
+.dr .m{flex:1;min-width:0}.dr .n{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.dr .s{color:var(--dim);font-size:12px;font-variant-numeric:tabular-nums}
+.bar{height:3px;border-radius:2px;background:var(--line-strong);margin:5px 0 3px;overflow:hidden}.bar i{display:block;height:100%;background:var(--light-3);border-radius:2px}
+.dr.paused .bar i{background:var(--mute)}
+.da{display:flex;gap:2px}.da button{width:26px;height:26px;display:grid;place-items:center;border-radius:7px;color:var(--mute)}.da button:hover{background:var(--hover-2);color:var(--ink)}
+.dr .s.w{color:var(--warn)}
+.danger{margin:2px 0 4px;padding:10px;border:1px solid var(--warn);border-radius:10px;background:color-mix(in srgb,var(--warn) 8%,transparent)}
+.danger .row{display:flex;gap:10px}.danger .t{font-weight:600}.danger p{margin:2px 0 0;color:var(--mute);font-size:12px}.danger .acts{margin-top:10px}
+.empty{padding:22px 10px 18px;text-align:center;color:var(--dim);font-size:12.5px}.empty svg.i{width:26px;height:26px;margin:0 auto 6px;display:block;color:var(--mute)}
+/* senhas */
+.fl{display:flex;flex-direction:column;gap:3px;margin:0 0 8px}.fl label{font-size:12px;color:var(--dim)}
+.fld{height:30px;display:flex;align-items:center;gap:6px;padding:0 9px;border:1px solid var(--line-strong);border-radius:8px;background:var(--sunk);font-size:13px}.fld span:first-child{flex:1}
+.login{max-width:340px;margin:30px auto;font:14px/1.5 var(--ui)}.login h3{text-align:center}
+.login .in{position:relative;height:36px;border:1px solid #D0D0D8;border-radius:8px;padding:0 10px;display:flex;align-items:center;margin:4px 0 12px;color:#15151A}
+.login .in.focus{border-color:#1A56C7;box-shadow:0 0 0 3px rgba(26,86,199,.15)}.login .in.fill{background:#FFF7E8}
+.login label{font-size:13px;font-weight:600}.login .go{height:36px;border-radius:8px;background:#1F2328;color:#fff;display:grid;place-items:center;font-weight:600}
+.af{position:absolute;z-index:6;width:300px;background:var(--float);border:1px solid var(--line-strong);border-radius:10px;padding:5px;filter:drop-shadow(0 10px 24px var(--shadow));color:var(--ink);font:13px/1.4 var(--ui)}
+.af .r{display:flex;align-items:center;gap:10px;padding:6px 8px;border-radius:7px;cursor:pointer}.af .r:hover,.af .r.hl{background:var(--raise)}.af .r small{display:block;color:var(--dim);font-size:12px}
+.af .k{width:26px;height:26px;border-radius:7px;background:var(--sunk);display:grid;place-items:center;color:var(--mute);flex:none}
+.af .ff{padding:5px 8px 3px;color:var(--dim);font-size:11.5px;display:flex;justify-content:space-between}
+.set{display:flex;height:100%}.setnav{width:170px;border-right:1px solid var(--line);padding:14px 8px;display:flex;flex-direction:column;gap:2px;font-size:13px;background:var(--side)}.setnav span{padding:5px 10px;border-radius:7px;color:var(--mute)}.setnav span.on{background:var(--raise);color:var(--ink)}
+.setb{flex:1;padding:18px 22px;overflow:auto;min-width:0}.setb h4{margin:0 0 2px;font-size:16px}.setb>p{margin:0 0 12px;color:var(--dim);font-size:12.5px}
+.tools{display:flex;gap:8px;align-items:center;margin:0 0 10px;flex-wrap:wrap}
+.search{flex:1;min-width:160px;height:30px;display:flex;align-items:center;gap:7px;padding:0 9px;border:1px solid var(--line-strong);border-radius:8px;background:var(--sunk);color:var(--dim)}.search input{flex:1;background:none;border:0;outline:0;color:var(--ink);font:13px var(--ui)}
+.atoseg{display:flex;gap:2px;border:1px solid var(--line);border-radius:9px;padding:2px}.atoseg button{display:flex;align-items:center;gap:6px;padding:3px 9px 3px 5px;border-radius:7px;font-size:12.5px;color:var(--mute)}.atoseg button.on{background:var(--raise);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+.pl{border:1px solid var(--line);border-radius:10px;background:var(--sunk)}
+.pr{display:grid;grid-template-columns:22px 1.2fr 1.3fr 1fr auto;gap:10px;align-items:center;padding:7px 10px;font-size:13px}.pr+.pr{border-top:1px solid var(--line)}
+.pr .site{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pr .usr{color:var(--mute);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pr .pw{font-family:var(--mono);font-size:12.5px;color:var(--mute);white-space:nowrap;overflow:hidden}
+.pr .pw.shown{color:var(--ink)}.pr.gone{display:flex;color:var(--dim);font-size:12.5px}.pr.gone button{margin-left:auto}
+.tid{position:absolute;inset:0;z-index:8;background:rgba(5,5,7,.35);display:grid;place-items:center}
+.tidb{width:280px;background:#ECECEE;color:#1D1D1F;border-radius:14px;padding:18px 18px 14px;text-align:center;font:13px/1.4 var(--ui);box-shadow:0 20px 50px rgba(0,0,0,.4)}
+:root[data-mode="dark"] .tidb{background:#2C2C2E;color:#F2F2F4}
+.tidb .fp{width:46px;height:46px;margin:0 auto 10px;border-radius:50%;display:grid;place-items:center;background:linear-gradient(135deg,#FF6B8A,#FF9F45);color:#fff}.tidb .fp svg.i{width:26px;height:26px}
+.tidb b{display:block;margin-bottom:4px}.tidb small{opacity:.7}.tidb .tb{display:flex;gap:8px;margin-top:14px}.tidb .tb button{flex:1;padding:5px;border-radius:7px;background:rgba(128,128,128,.2)}
+.toast{position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:9;display:flex;align-items:center;gap:10px;background:var(--float);border:1px solid var(--line-strong);border-radius:10px;padding:7px 12px;font:13px/1.3 var(--ui);color:var(--ink);white-space:nowrap;filter:drop-shadow(0 8px 18px var(--shadow));animation:rise .18s var(--ease)}.toast small{color:var(--dim)}
+/* URL do link */
+.hvpage a{text-decoration:underline;cursor:pointer}
+.sbub{position:absolute;left:0;bottom:0;z-index:5;max-width:min(560px,calc(100% - 40px));padding:3px 9px;background:var(--float);color:var(--mute);border:1px solid var(--line-strong);border-left:0;border-bottom:0;border-radius:0 8px 0 0;font:12px/18px var(--ui);white-space:nowrap;transition:transform .15s var(--ease),opacity .12s}
+.sbub b{color:var(--ink);font-weight:500}.sbub.right{left:auto;right:0;border-left:1px solid var(--line-strong);border-right:0;border-radius:8px 0 0 0}
+.sbub.off{opacity:0}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:16px}.pair h5{margin:0 0 6px;font-size:12.5px;color:var(--mute);font-weight:500}.pair .nav{height:300px}
+/* permissões */
+.pli{display:flex;align-items:center;gap:10px;padding:5px 0;font-size:13px}.pli svg.i{color:var(--mute)}
+.si{width:320px}.si .sih{display:flex;gap:10px;align-items:center;padding:6px 8px 8px}.si .sih b{display:block;font-weight:600}.si .sih small{color:var(--dim);font-size:12px}
+.prow{display:flex;align-items:center;gap:10px;padding:6px 8px;border-radius:8px}.prow:hover{background:var(--raise)}.prow span{flex:1}.prow small{display:block;color:var(--dim);font-size:11.5px}.prow svg.i{color:var(--mute)}
+.sw{position:relative;width:30px;height:18px;flex:none}.sw input{position:absolute;opacity:0;inset:0;margin:0;cursor:pointer}.sw i{position:absolute;inset:0;border-radius:9px;background:var(--line-strong);transition:background .15s;pointer-events:none}.sw i::after{content:"";position:absolute;left:2px;top:2px;width:14px;height:14px;border-radius:50%;background:#fff;transition:transform .15s var(--ease)}
+.sw input:checked+i{background:var(--light-3)}.sw input:checked+i::after{transform:translateX(12px)}.sw input:focus-visible+i{outline:2px solid var(--light-2);outline-offset:2px}
+.meet{height:100%;background:#1E1F22;color:#eee;display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:10px;font:13px var(--ui)}.meet div{border-radius:10px;background:#2B2D31;display:grid;place-items:end start;padding:8px}
+/* folha de aprovação */
+.scrim{position:absolute;inset:0;z-index:7;background:rgba(5,5,7,.55);animation:fade .2s var(--ease)}:root[data-mode="light"] .scrim{background:rgba(20,20,26,.28)}
+@keyframes fade{from{opacity:0}}
+.ask{position:absolute;z-index:8;left:50%;top:0;width:min(470px,calc(100% - 32px));max-height:calc(100% - 12px);overflow:auto;transform:translateX(-50%);background:var(--float);border:1px solid var(--line-strong);border-top:0;border-radius:0 0 16px 16px;padding:18px 20px 16px;animation:sheet .25s var(--ease);filter:drop-shadow(0 16px 30px var(--shadow))}
+@keyframes sheet{from{transform:translate(-50%,-24px);opacity:0}}
+.area .ask{color:var(--ink);max-height:none;overflow:visible;top:14px;border-top:1px solid var(--line-strong);border-radius:16px}.nav:has(.ask){height:680px}.ask-hd{display:flex;gap:14px;align-items:center;margin:0 0 12px}.ask-hd h3{margin:0;font-size:16px;font-weight:600;line-height:1.3}.ask-hd small{color:var(--dim);font-size:12.5px}
+.appi{width:48px;height:48px;border-radius:12px;flex:none;display:grid;place-items:center;font:700 22px/1 var(--ui);color:#0B0B0D;background:linear-gradient(145deg,#FFE9C7,#FFC98A 55%,#E8893A)}
+.meta{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 4px}
+.chip{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 9px 0 5px;border:1px solid var(--line);border-radius:8px;font-size:12.5px;color:var(--mute);background:var(--sunk)}.chip b{color:var(--ink);font-weight:500}.chip code{font:12px var(--mono);color:var(--ink)}.chip svg.i{width:14px;height:14px}
+.chip.ok svg.i{color:var(--light-3)}.chip.bad{border-color:var(--warn);color:var(--warn)}
+.g{margin:14px 0 6px;color:var(--dim);font-size:12px}
+.l{border:1px solid var(--line);border-radius:10px;background:var(--sunk)}
+.r{display:flex;gap:10px;padding:8px 12px;font-size:13px}.r+.r{border-top:1px solid var(--line)}.r svg.i{color:var(--mute);margin-top:2px}.r b{font-weight:500;display:block}.r small{color:var(--dim);font-size:12px}
+.note{margin:10px 0 0;color:var(--dim);font-size:12px}.note.w{color:var(--warn)}
+.foot{display:block;margin-top:10px;color:var(--dim);font-size:12px;text-align:right}
+.res{position:absolute;inset:0;display:grid;place-items:center;z-index:2;font:13px var(--ui);color:#555}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+@media (max-width:900px){.pair{grid-template-columns:1fr}.profs span b{display:none}.sb{width:170px}.setnav{display:none}.pr{grid-template-columns:22px 1fr auto}.pr .usr,.pr .pw{display:none}}
+.settings{display:grid;grid-template-columns:200px 1fr;min-height:100%}
+.snav{padding:24px 10px;border-right:1px solid var(--line);display:flex;flex-direction:column;gap:1px}
+.snav span{padding:6px 10px;border-radius:8px;font-size:13px;color:var(--mute)}.snav span.on{background:var(--raise);color:var(--ink)}
+.spage{padding:24px 28px}.spage h2{font-size:18px;margin:0 0 4px}.crumb{color:var(--dim);font-size:12.5px;margin-bottom:16px}
+.grp{border:1px solid var(--line);border-radius:12px;margin-bottom:14px}
+.opt{display:flex;align-items:center;gap:12px;padding:11px 14px;border-top:1px solid var(--line);font-size:13px}.grp .opt:first-child{border-top:0}
+.opt .lb{flex:1 1 220px;min-width:200px}.opt .lb small{display:block;color:var(--dim);font-size:12px}
+.radio{width:16px;height:16px;border-radius:50%;border:1.6px solid var(--line-strong);flex:none}.radio.on{border:5px solid var(--hi)}
+.ghd{font-size:12px;color:var(--dim);margin:18px 0 6px}
+/* seletor de tela */
+.ask.pick{width:min(620px,calc(100% - 32px))}
+.ptabs{display:flex;gap:4px;border:1px solid var(--line);border-radius:9px;padding:2px;margin:0 0 12px;width:max-content}.ptabs button{padding:4px 12px;border-radius:7px;font-size:12.5px;color:var(--mute)}.ptabs button.on{background:var(--raise);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.th{display:flex;flex-direction:column;gap:6px;padding:6px;border:1px solid var(--line);border-radius:12px;background:var(--sunk);text-align:left;min-width:0}.th:hover{border-color:var(--line-hover)}
+.th.on{border-color:var(--light-3);box-shadow:0 0 0 1px var(--light-3)}
+.shot{aspect-ratio:16/10;border-radius:7px;overflow:hidden;position:relative;background:#2B2D31}
+.shot i{position:absolute;border-radius:3px;background:rgba(255,255,255,.14)}
+.th .cap2{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--mute);white-space:nowrap;overflow:hidden}.th .cap2 span:last-child{overflow:hidden;text-overflow:ellipsis}.th.on .cap2{color:var(--ink)}
+.appic{width:16px;height:16px;border-radius:4px;flex:none;display:grid;place-items:center;font:700 9px/1 var(--ui);color:#fff}
+.arow{display:flex;align-items:center;gap:10px;margin:12px 0 0;padding:8px 12px;border:1px solid var(--line);border-radius:10px;background:var(--sunk);font-size:13px}.arow span{flex:1}.arow small{display:block;color:var(--dim);font-size:12px}
+.btn:disabled{opacity:.4;cursor:default;pointer-events:none}
+.sharebar{position:absolute;z-index:6;left:50%;bottom:14px;transform:translateX(-50%);display:flex;align-items:center;gap:10px;padding:6px 6px 6px 12px;background:var(--float);border:1px solid var(--line-strong);border-radius:12px;color:var(--ink);font:13px/1.3 var(--ui);white-space:nowrap;filter:drop-shadow(0 8px 18px var(--shadow));animation:rise .18s var(--ease)}
+.sharebar::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--light-3);animation:blink 1.6s ease-in-out infinite}.sharebar small{color:var(--dim)}
+.syswarn{text-align:center;padding:8px 6px 2px}.syswarn .big{width:44px;height:44px;margin:0 auto 10px;border-radius:12px;display:grid;place-items:center;border:1px solid var(--warn);color:var(--warn)}.syswarn .big svg.i{width:24px;height:24px}.syswarn h3{margin:0 0 4px;font-size:16px}.syswarn p{margin:0 auto;color:var(--dim);font-size:12.5px;max-width:42ch}
+.steps{margin:12px 0 0;padding:0;list-style:none;text-align:left}.steps li{display:flex;gap:10px;padding:6px 12px;font-size:12.5px;color:var(--mute)}.steps li b{color:var(--ink);font-weight:500}.steps .n{width:18px;height:18px;border-radius:50%;border:1px solid var(--line-strong);display:grid;place-items:center;font-size:11px;flex:none}
+/* desempenho (janela-abas.html) */
+.area.app .settings{height:100%;overflow:auto}
+.opt.dis{opacity:.45}.opt.dis .sw input{pointer-events:none}
+.mini{display:inline-flex;gap:2px;border:1px solid var(--line);border-radius:9px;padding:2px}.mini button{padding:3px 9px;border-radius:7px;font-size:12.5px;color:var(--mute)}.mini button.on{background:var(--raise);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+.moon{position:relative}.moon::after{content:"☾";position:absolute;right:-5px;bottom:-5px;font-size:10px;color:var(--mute)}
+@media (max-width:900px){.grid{grid-template-columns:repeat(2,1fr)}.mini{flex-wrap:wrap;flex:0 1 auto;max-width:100%}@media (max-width:760px){.settings{grid-template-columns:1fr}.settings>:first-child{display:none}}.opt{flex-wrap:wrap}}
+.nav:has(.settings){height:1000px}</style>
+</head>
+<body>
+<main>
+<header><div><h1>Compartilhar a tela e atos que dormem · navegador sozinho</h1><p>Duas telas na casca (ato Estúdio). Folha desenhada sobre a página, pílula no endereço e Configurações › Desempenho no jeito já aprovado. Escolha o estado em cada seção; o que parece botão dentro da janela também responde.</p></div>
+<div class="seg mode" role="group" aria-label="Aparência"><button data-mode="dark" class="on">Escuro</button><button data-mode="light">Claro</button></div></header>
+<nav class="toc"><a href="#tela">1 · Compartilhar a tela</a><a href="#dormir">2 · Atos que dormem · ajustes</a></nav>
+<div id="out"></div>
+</main>
+<script>
+const P=d=>`<svg class="i" viewBox="0 0 20 20">${d}</svg>`;
+const IC={back:P('<path d="M12 4 6 10l6 6"/>'),fwd:P('<path d="m8 4 6 6-6 6"/>'),re:P('<path d="M16 10a6 6 0 1 1-2-4.5M16 3v3.5h-3.5"/>'),
+ more:P('<circle cx="5" cy="10" r=".8"/><circle cx="10" cy="10" r=".8"/><circle cx="15" cy="10" r=".8"/>'),
+ lock:P('<rect x="4.5" y="9" width="11" height="8" rx="2.5"/><path d="M7 9V6.5a3 3 0 0 1 6 0V9"/>'),
+ tune:P('<path d="M4 6h7M14 6h2M4 14h2M9 14h7"/><circle cx="12.5" cy="6" r="1.6"/><circle cx="7.5" cy="14" r="1.6"/>'),
+ key:P('<circle cx="7" cy="10" r="3.2"/><path d="M10.2 10H17M14.5 10v2.5M16.5 10v2"/>'),
+ dl:'<svg class="i arrow" viewBox="0 0 20 20"><path d="M10 4v9M6 9.5l4 4 4-4M5 16h10"/></svg>',
+ pause:P('<path d="M7.5 5v10M12.5 5v10"/>'),play:P('<path d="M7 5v10l8-5z"/>'),x:P('<path d="m6 6 8 8M14 6l-8 8"/>'),
+ folder:P('<path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H8l1.5 1.5h6A1.5 1.5 0 0 1 17 8v6.5a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 3 14.5z"/>'),
+ open:P('<path d="M8 5H5v10h10v-3M11 4h5v5M16 4l-7 7"/>'),retry:P('<path d="M16 10a6 6 0 1 1-2-4.5M16 3v3.5h-3.5"/>'),
+ warn:P('<path d="M10 3.5 17 16H3z"/><path d="M10 8.5v3.2M10 13.8v.1"/>'),eye:P('<path d="M2.5 10s2.8-5 7.5-5 7.5 5 7.5 5-2.8 5-7.5 5-7.5-5-7.5-5z"/><circle cx="10" cy="10" r="2.2"/>'),
+ copy:P('<rect x="7" y="7" width="9" height="9" rx="2"/><path d="M13 7V5.5A1.5 1.5 0 0 0 11.5 4h-6A1.5 1.5 0 0 0 4 5.5v6A1.5 1.5 0 0 0 5.5 13H7"/>'),
+ trash:P('<path d="M4 6h12M8 6V4.5h4V6M6 6l.7 9.5h6.6L14 6"/>'),srch:P('<circle cx="9" cy="9" r="4.5"/><path d="m12.5 12.5 3.5 3.5"/>'),
+ cam:P('<rect x="3" y="6" width="10" height="8" rx="2"/><path d="m13 9 4-2.5v7L13 11"/>'),mic:P('<rect x="7.5" y="3" width="5" height="9" rx="2.5"/><path d="M5 10a5 5 0 0 0 10 0M10 15v2"/>'),
+ loc:P('<path d="M10 17s5-4.6 5-8.5a5 5 0 0 0-10 0C5 12.4 10 17 10 17z"/><circle cx="10" cy="8.5" r="1.8"/>'),
+ bell:P('<path d="M6 13V9a4 4 0 0 1 8 0v4l1.5 2h-11zM8.5 16.5a1.5 1.5 0 0 0 3 0"/>'),
+ clip:P('<rect x="5" y="4.5" width="10" height="12" rx="2"/><path d="M8 4.5V3.5h4v1"/>'),
+ scr:P('<rect x="3" y="4" width="14" height="9.5" rx="1.5"/><path d="M7.5 16.5h5M10 13.5v3"/>'),
+ shield:P('<path d="M10 3 4.5 5v4.5c0 3.3 2.3 6 5.5 7.5 3.2-1.5 5.5-4.2 5.5-7.5V5z"/><path d="m7.5 10 1.8 1.8L12.8 8"/>'),
+ tab:P('<rect x="3" y="4.5" width="14" height="11" rx="2"/><path d="M3 8h14"/>'),cur:P('<path d="M5 3.5 15 9l-4.5 1.4L8.5 15z"/>'),
+ cookie:P('<path d="M16.5 10.5A6.5 6.5 0 1 1 9.5 3.5a2.5 2.5 0 0 0 3 3 2.5 2.5 0 0 0 4 4z"/><circle cx="8" cy="9" r=".6"/><circle cx="11" cy="13" r=".6"/>'),
+ read:P('<path d="M4 5h12M4 9h12M4 13h7"/>'),fp:P('<path d="M6 15c1-2 1-4 1-6a3 3 0 0 1 6 0c0 3-.4 5-1.4 7M10 9c0 3-.5 5-1.6 7.5M4.5 11.5c.2-1 .3-1.6.3-2.5a5.2 5.2 0 0 1 10.4 0c0 2-.2 3.5-.6 5"/>')};
+const PROF={"Estúdio":["l-est","E"],"Cliente A":["l-cli","C"],"Pessoal":["l-pes","P"]};
+const TABS=[["#6FA8FF","L","Linear"],["#7FD1A8","P","Planilha de preços"]];
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const urlHTML=u=>{const i=u.indexOf("/");return i<0?`<b>${u}</b>`:`<b>${u.slice(0,i)}</b>${u.slice(i)}`};
+const bar=o=>`<div class="nav-row"><span class="ib">${IC.back}</span><span class="ib">${IC.fwd}</span><span class="ib">${IC.re}</span>
+ <div class="nav-addr"><button class="ai${o.lockOn?" on":""}" data-lock aria-label="Informações do site">${o.permLock?IC.tune:IC.lock}</button><span class="u">${urlHTML(o.url||"docs.estudio.test/precos-2027")}</span>${o.addrx||""}</div>
+ ${o.dl||""}${o.side?"":`<div class="profs">${Object.keys(PROF).map(x=>`<span class="${x=="Estúdio"?"on":""}"><span class="logo ${PROF[x][0]}">${PROF[x][1]}</span>${x=="Estúdio"?`<b>${x}</b>`:""}</span>`).join("")}</div>`}<span class="ib" data-more>${IC.more}</span></div>`;
+const frame=(o={})=>{const tabs=o.tabs||TABS,area=`<div class="area${o.app?" app":""}">${o.page||""}${o.over||""}</div>`;
+ if(o.side)return `<div class="nav sidev"><aside class="sb"><div class="lights"><i></i><i></i><i></i></div><div class="sbh"><span class="logo l-est">E</span>Estúdio</div>${tabs.map((t,i)=>`<span class="sbt${i==tabs.length-1?" on":""}"><span class="fv" style="background:${t[0]}">${t[1]}</span><span class="t">${t[2]}</span>${t[3]||""}</span>`).join("")}<div class="sbf">${Object.keys(PROF).map(x=>`<span class="logo ${PROF[x][0]}${x=="Estúdio"?" on":""}">${PROF[x][1]}</span>`).join("")}</div></aside><div class="col"><div style="height:6px"></div>${bar(o)}${area}</div>${o.inner||""}</div>`;
+ return `<div class="nav"><div class="strip"><div class="lights"><i></i><i></i><i></i></div>${tabs.map((t,i)=>`<span class="nav-tab${i==tabs.length-1?" on":""}"><span class="fv" style="background:${t[0]}">${t[1]}</span><span class="t">${t[2]}</span>${t[3]||""}</span>`).join("")}<span class="nt">+</span></div>${bar(o)}${area}${o.inner||""}</div>`};
+const TXT=`<div class="page"><h3>Tabela de preços 2027</h3><p>O preço base sobe 4% em janeiro. Clientes antigos mantêm o preço atual até a renovação do contrato, e o desconto anual continua em 15%.</p><p>Para o plano Equipe, o preço por assento cai a partir de 20 pessoas.</p></div>`;
+const pop=(sel,cls,html,w)=>`<div class="menu ${cls}" data-pop data-for="${sel}"${w?` style="width:${w}px"`:""}>${html}</div>`;
+const sw=(on,lbl)=>`<label class="sw"><input type="checkbox"${on?" checked":""} aria-label="${lbl}"><i></i></label>`;
+IC.app=P('<rect x="3" y="4" width="14" height="12" rx="2"/><path d="M3 7.5h14"/>');IC.spk=P('<path d="M4 8h3l4-3v10l-4-3H4z"/><path d="M13.5 7.5a3.5 3.5 0 0 1 0 5"/>');
+IC.gear=P('<circle cx="10" cy="10" r="2.5"/><path d="M10 3v2M10 15v2M3 10h2M15 10h2M5 5l1.4 1.4M13.6 13.6 15 15M5 15l1.4-1.4M13.6 6.4 15 5"/>');
+const MEET=`<div class="meet"><div>Você</div><div>Ana · Cliente A</div><div>Bruno</div><div>Carla</div></div>`;
+const SHOT=(bg,bits)=>`<div class="shot" style="background:${bg}">${bits.map(b=>`<i style="left:${b[0]}%;top:${b[1]}%;width:${b[2]}%;height:${b[3]}%"></i>`).join("")}</div>`;
+// tipo, rótulo, ícone/cor, título, fundo; áudio só em tela e aba (macOS não dá o áudio de uma janela sozinha)
+const SRC={tela:{lbl:"Tela inteira",audio:1,items:[["Tela embutida","Mac",["#3A3A42",[[0,0,100,6],[8,16,50,62],[62,16,30,40]]]],["LG UltraFine","Monitor externo",["#2E3A4A",[[0,0,100,6],[10,18,80,66]]]]]},
+ janela:{lbl:"Janela",audio:0,items:[["Figma","Proposta 2027 · v3",["#1E1E1E",[[0,0,100,10],[20,22,60,60]]],"#A259FF","F"],["Keynote","Apresentação Cliente A",["#F4F4F6",[[0,0,100,10],[8,20,84,58]]],"#1F8FFF","K"],["Terminal","~/browser-work",["#101012",[[4,14,60,4],[4,24,40,4],[4,34,70,4]]],"#3A3A42","›_"],["Notas","Pauta da semana",["#FFF8DC",[[8,16,70,4],[8,26,50,4]]],"#F2C14E","N"]]},
+ aba:{lbl:"Aba",audio:1,items:[["Linear","linear.app · EST-482",["#191A23",[[0,0,22,100],[28,10,60,6],[28,22,50,6]]],"#6FA8FF","L"],["Planilha de preços","docs.estudio.test",["#FFFFFF",[[0,0,100,10],[6,18,88,70]]],"#7FD1A8","P"],["YouTube · aula 12","youtube.com",["#0F0F0F",[[10,10,80,55]]],"#FF6B6B","Y"]]}};
+let pick={src:"tela",i:-1,audio:true};
+const thumbs=()=>SRC[pick.src].items.map((t,i)=>`<button class="th${i==pick.i?" on":""}" data-th="${i}" aria-pressed="${i==pick.i}">${SHOT(...t[2])}<span class="cap2">${t[3]?`<span class="appic" style="background:${t[3]}">${t[4]}</span>`:IC.scr}<span>${pick.src=="tela"?`${t[0]} <small style="color:var(--dim)">· ${t[1]}</small>`:pick.src=="janela"?`${t[0]} · ${t[1]}`:t[0]}</span></span></button>`).join("");
+const PICKER=()=>`<div class="scrim"></div><div class="ask pick" role="dialog" aria-modal="true" aria-label="Compartilhar a tela"><div class="ask-hd"><span class="fv" style="background:#8AB4F8;width:40px;height:40px;border-radius:10px;font-size:18px">M</span><div><h3>meet.test quer ver sua tela</h3><small>No ato Estúdio. Escolha o que ele vai ver; nada é enviado antes de Compartilhar.</small></div></div>
+ <div class="ptabs" role="tablist">${Object.entries(SRC).map(([k,v])=>`<button role="tab" data-src="${k}" class="${k==pick.src?"on":""}">${v.lbl}</button>`).join("")}</div>
+ <div class="grid" data-grid>${thumbs()}</div>
+ ${pick.src=="aba"?`<p class="note">Só abas do ato Estúdio. Abas de outros atos não aparecem aqui.</p>`:""}
+ ${SRC[pick.src].audio?`<div class="arow">${IC.spk}<span>Compartilhar o áudio<small>${pick.src=="aba"?"O som desta aba vai junto":"O som do Mac inteiro vai junto"}</small></span>${sw(pick.audio,"Compartilhar o áudio")}</div>`:`<p class="note">O macOS não manda o som de uma janela sozinha. Para levar o som, escolha a tela ou uma aba.</p>`}
+ <div class="acts"><button class="btn pri" data-ans="cancel" autofocus>Cancelar <kbd>esc</kbd></button><button class="btn" data-share${pick.i<0?" disabled":""}>Compartilhar</button></div></div>`;
+const NOPERM=`<div class="scrim"></div><div class="ask" role="alertdialog" aria-modal="true" aria-label="Gravação de tela"><div class="syswarn"><div class="big">${IC.scr}</div><h3>Permita a gravação de tela em Ajustes do Sistema</h3><p>O macOS ainda não deixou o AgensBrowser ver a tela. Sem isso, meet.test não recebe nada.</p></div>
+ <ol class="steps"><li><span class="n">1</span><span>Abra <b>Privacidade e Segurança › Gravação de Tela e Áudio do Sistema</b></span></li><li><span class="n">2</span><span>Ligue o <b>AgensBrowser</b></span></li><li><span class="n">3</span><span>Volte aqui: o seletor abre sozinho</span></li></ol>
+ <div class="acts"><button class="btn" data-ans="cancel">Agora não</button><button class="btn pri" data-ans="sys">Abrir Ajustes do Sistema <kbd>↩</kbd></button></div></div>`;
+const shareName=()=>{const it=SRC[pick.src].items[Math.max(0,pick.i)];return pick.src=="tela"?"a tela inteira":pick.src=="janela"?`a janela ${it[0]}`:`a aba ${it[0]}`};
+const SLIVE=()=>`<span class="live" data-lock2 title="Compartilhando ${shareName()}">${IC.scr}${pick.src!="janela"&&pick.audio?IC.spk:""}</span>`;
+const STABS=()=>[["#6FA8FF","L","Linear"],["#8AB4F8","M","Reunião semanal",`<span class="rec">${IC.scr}</span>`]];
+const BAR=()=>`<div class="sharebar" role="status"><span>Compartilhando <b>${shareName()}</b> <small>com meet.test</small></span><button class="btn sm" data-swap>Trocar</button><button class="btn sm pri" data-stop>Parar</button></div>`;
+const TE={
+ seletor:["Seletor","O site chama getDisplayMedia; no lugar do seletor do Chromium, a folha desenhada desce sobre a página. Escolha uma fonte: Compartilhar só acende depois. Cancelar é o padrão (esc).",()=>frame({side:1,tabs:[["#6FA8FF","L","Linear"],["#8AB4F8","M","Reunião semanal"]],url:"meet.test/sala-semanal",page:MEET,inner:PICKER()})],
+ compartilhando:["Compartilhando","No endereço, a pílula com o ponto que pulsa e o ícone da tela (mais o alto-falante se o áudio vai junto), igual à câmera e ao microfone. Na aba, o ícone antes do ×. A barrinha flutua no pé da página da aba que compartilha.",()=>`<div class="pair"><div><h5>Abas na lateral</h5>${frame({side:1,tabs:STABS(),url:"meet.test/sala-semanal",page:MEET,addrx:SLIVE(),over:BAR()})}</div><div><h5>Abas em cima</h5>${frame({tabs:STABS(),url:"meet.test/sala-semanal",page:MEET,addrx:SLIVE(),over:BAR()})}</div></div>`],
+ semperm:["Sem permissão do macOS","Na primeira vez (ou se a pessoa tirou), o macOS não deixa ver a tela. Em vez do seletor vazio, a folha explica e abre o lugar certo em Ajustes do Sistema.",()=>frame({side:1,tabs:[["#6FA8FF","L","Linear"],["#8AB4F8","M","Reunião semanal"]],url:"meet.test/sala-semanal",page:MEET,inner:NOPERM})]};
+
+/* 2 · atos que dormem */
+const ATOS=[["Estúdio","l-est","E","acordado · 512 MB"],["Cliente A","l-cli","C","dormindo · 0 MB"],["Pessoal","l-pes","P","dormindo · 0 MB"]];
+let perf={after:"10 min",front:true,whole:true,never:["Cliente A"]};
+const PERF=()=>{const off=perf.after=="Nunca";return `<div class="settings"><div class="snav"><span>Aparência</span><span>Atos</span><span>Privacidade</span><span class="on">Desempenho</span><span>Downloads</span><span>Sobre</span></div><div class="spage"><h2>Desempenho</h2><div class="crumb">Abas e atos que dormem liberam memória sem fechar nada.</div>
+ <div class="grp"><div class="opt"><span class="lb">Pôr abas para dormir<small>Abas em segundo plano dormem depois de um tempo</small></span>${sw(1,"Pôr abas para dormir")}</div><div class="opt"><span class="lb">Dormir depois de</span><span class="btn sm">5 min ▾</span></div><div class="opt"><span class="lb">Mostrar a memória no cartão da aba</span>${sw(1,"Mostrar a memória")}</div></div>
+ <div class="ghd">Sites que nunca dormem</div><div class="grp"><div class="opt"><span class="fv" style="background:#6FA8FF">L</span><span class="lb">linear.app</span><span class="btn sm">Remover</span></div><div class="opt"><span class="lb" style="color:var(--dim)">Adicionar site…</span><span class="btn sm">Adicionar</span></div></div>
+ <div class="ghd">Atos</div><div class="grp">
+  <div class="opt"><span class="lb">Atos fora de uso dormem depois de<small>${off?"Nenhum ato dorme sozinho. Pôr o ato para dormir, no botão direito, continua valendo.":`Conta desde que o ato ficou sem aba à vista`}</small></span><span class="mini" role="radiogroup" aria-label="Dormem depois de">${["5 min","10 min","30 min","1 h","Nunca"].map(v=>`<button role="radio" aria-checked="${v==perf.after}" class="${v==perf.after?"on":""}" data-after="${v}">${v}</button>`).join("")}</span></div>
+  <div class="opt${off?" dis":""}"><span class="lb">A aba ativa e as fixadas também dormem<small>${perf.front?"O ato dorme todo, até a aba da frente; ao voltar, ela recarrega":"A aba da frente e as fixadas ficam acordadas; o resto dorme"}</small></span><label class="sw"><input type="checkbox" data-pf="front"${perf.front?" checked":""} aria-label="A aba ativa e as fixadas também dormem"><i></i></label></div>
+  <div class="opt${off?" dis":""}"><span class="lb">Atos fora de uso dormem inteiros<small>Só o ato aberto fica carregado</small></span><label class="sw"><input type="checkbox" data-pf="whole"${perf.whole?" checked":""} aria-label="Atos fora de uso dormem inteiros"><i></i></label></div></div>
+ <div class="ghd">Atos que nunca dormem sozinhos</div><div class="grp">${perf.never.length?perf.never.map(n=>{const a=ATOS.find(x=>x[0]==n);return `<div class="opt"><span class="logo ${a[1]}">${a[2]}</span><span class="lb">${n}<small>Fora da regra do tempo e do “dormem inteiros”</small></span><button class="btn sm" data-unnever="${n}">Remover</button></div>`}).join(""):`<div class="opt"><span class="lb" style="color:var(--dim)">Nenhum. Marque “Nunca pôr para dormir” no botão direito do ato.</span></div>`}
+  ${ATOS.filter(a=>!perf.never.includes(a[0])).length?`<div class="opt"><span class="lb" style="color:var(--dim)">Adicionar ato…</span>${ATOS.filter(a=>!perf.never.includes(a[0])).map(a=>`<button class="btn sm" data-never="${a[0]}"><span class="logo ${a[1]}" style="width:14px;height:14px;font-size:8px">${a[2]}</span>${a[0]}</button>`).join("")}</div>`:""}</div>
+ <p class="note">Mesma lista do botão direito do ato › Nunca pôr para dormir.</p></div></div>`};
+const DE={ajustes:["Configurações › Desempenho","Clique nos tempos e nos interruptores. Em Nunca, os dois interruptores de baixo ficam apagados (não há regra para afinar).",()=>frame({url:"agens://configuracoes/desempenho",app:1,page:PERF()})]};
+
+const SECS=[["tela","1 · Compartilhar a tela","Troca o seletor do getDisplayMedia do Chromium pela folha nossa, sobre a página, com os cantos arredondados (como a folha de aprovação de janela-recursos.html).",TE],
+ ["dormir","2 · Atos que dormem · ajustes","Em Configurações › Desempenho, no mesmo lugar de Sites que nunca dormem (janela-abas.html).",DE]];
+const state={tela:"seletor",dormir:"ajustes"};
+const out=document.getElementById("out");
+out.innerHTML=SECS.map(([id,t,c])=>`<section class="v" id="${id}"><h2>${t}</h2><p class="cap">${c}</p><div data-sec="${id}"></div></section>`).join("");
+function render(id){const S=SECS.find(s=>s[0]==id)[3],box=out.querySelector(`[data-sec="${id}"]`),cur=S[state[id]];
+ box.innerHTML=`${Object.keys(S).length>1?`<div class="seg">${Object.entries(S).map(([k,v])=>`<button data-st="${k}" class="${k==state[id]?"on":""}">${v[0]}</button>`).join("")}</div>`:""}<p class="cap">${cur[1]}</p>${cur[2]()}`;
+ box.querySelectorAll(".nav").forEach(n=>{const a=n.querySelector(".area");n.querySelectorAll(":scope>.scrim,:scope>.ask").forEach(e=>a.appendChild(e))})}
+["tela","dormir"].forEach(render);
+console.assert(SRC.janela.audio===0&&SRC.aba.audio===1,"áudio só em tela e aba");
+const toast=(nav,html)=>{const area=nav.querySelector(".area");area.querySelector(".toast")?.remove();area.insertAdjacentHTML("beforeend",`<div class="toast" role="status">${html}</div>`);setTimeout(()=>area.querySelector(".toast")?.remove(),2400)};
+const reset=()=>{pick={src:"tela",i:-1,audio:true}};
+document.addEventListener("click",e=>{const T=e.target,sec=T.closest("[data-sec]"),id=sec?.dataset.sec,nav=T.closest(".nav");
+ const md=T.closest("[data-mode]");if(md&&md.tagName=="BUTTON"){document.documentElement.dataset.mode=md.dataset.mode;document.querySelectorAll(".mode button").forEach(b=>b.classList.toggle("on",b==md));return}
+ const st=T.closest("[data-st]");if(st){if(st.dataset.st=="seletor")reset();if(st.dataset.st=="compartilhando"&&pick.i<0)pick.i=0;state[id]=st.dataset.st;render(id);return}
+ const s=T.closest("[data-src]");if(s){pick.src=s.dataset.src;pick.i=-1;render(id);return}
+ const th=T.closest("[data-th]");if(th){pick.i=+th.dataset.th;render(id);return}
+ if(T.closest("[data-share]")){state.tela="compartilhando";render(id);return}
+ if(T.closest("[data-swap]")){state.tela="seletor";render(id);return}
+ if(T.closest("[data-stop]")){nav.querySelector(".live")?.remove();nav.querySelectorAll(".rec").forEach(r=>r.remove());T.closest(".sharebar").remove();toast(nav,`Parou de compartilhar <small>meet.test não vê mais nada</small>`);return}
+ const ans=T.closest("[data-ans]");if(ans){if(ans.dataset.ans=="sys"){toast(nav,`Ajustes do Sistema › Gravação de Tela e Áudio do Sistema <small>abriu</small>`);return}nav.querySelector(".scrim")?.remove();nav.querySelector(".ask")?.remove();toast(nav,`meet.test recebeu “a pessoa cancelou” <small><button style="color:var(--light-3)" data-st="${state.tela}">mostrar de novo</button></small>`);return}
+ const af=T.closest("[data-after]");if(af){perf.after=af.dataset.after;render("dormir");return}
+ const nv=T.closest("[data-never]");if(nv){perf.never.push(nv.dataset.never);render("dormir");return}
+ const un=T.closest("[data-unnever]");if(un){perf.never=perf.never.filter(x=>x!=un.dataset.unnever);render("dormir");return}
+});
+document.addEventListener("change",e=>{const t=e.target;if(t.dataset.pf){perf[t.dataset.pf]=t.checked;render("dormir")}else if(t.closest(".arow")){pick.audio=t.checked}});
+document.addEventListener("keydown",e=>{if(e.key=="Escape"){const a=document.querySelector("[data-sec=tela] .ask [data-ans=cancel]");a?.click()}});
+</script>
+</body>
+</html>
