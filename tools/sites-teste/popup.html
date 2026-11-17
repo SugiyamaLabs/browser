@@ -1,3 +1,12 @@
 <!doctype html><meta charset="utf-8"><title>Popup (test)</title>
 <style>body{margin:0}#open{position:absolute;left:40px;top:40px;width:300px;height:120px}</style>
 <button id="open" onclick="window.open('/other', 'agens-popup', 'popup,width=320,height=240')">Open a popup window</button>
+<script>
+// "Popup ready" once painted: until the first contentful paint Chromium holds commits and drops
+// clicks (paint holding), and the title above arrives before that (as in fuga.html).
+new PerformanceObserver((list, observer) => {
+  if (!list.getEntriesByName("first-contentful-paint").length) return;
+  observer.disconnect();
+  if (document.title === "Popup (test)") document.title = "Popup ready";
+}).observe({type: "paint", buffered: true});
+</script>

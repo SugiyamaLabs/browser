@@ -14,6 +14,13 @@ body { margin: 0; font: 16px sans-serif; }
 <input id="pw" type="password" value="pick-secret-77">
 <p id="quote">Selected by the page</p>
 <script>
+// "Pick ready" once painted: until the first contentful paint Chromium holds commits and drops
+// clicks (paint holding), and the title above arrives before that (as in fuga.html).
+new PerformanceObserver((list, observer) => {
+  if (!list.getEntriesByName("first-contentful-paint").length) return;
+  observer.disconnect();
+  if (document.title === "Pick (element)") document.title = "Pick ready";
+}).observe({type: "paint", buffered: true});
 // Results go to the title: the gate's host sees only a tab's title and url.
 document.getElementById("check").onchange = e => { document.title = "checked:" + e.target.checked; };
 if (location.search === "?select") getSelection().selectAllChildren(document.getElementById("quote"));

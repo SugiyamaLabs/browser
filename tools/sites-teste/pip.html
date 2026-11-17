@@ -11,7 +11,12 @@ const g = canvas.getContext("2d");
 let n = 0;
 setInterval(() => { g.fillStyle = n++ % 2 ? "#3366cc" : "#cc6633"; g.fillRect(0, 0, 160, 120); }, 100);
 v.srcObject = canvas.captureStream(10);
-v.onloadedmetadata = () => { document.title = "PiP ready"; };
+// ...and painted: until the first contentful paint Chromium drops clicks (paint holding, fuga.html).
+const painted = new Promise(done => new PerformanceObserver((list, observer) => {
+  if (list.getEntriesByName("first-contentful-paint").length) { observer.disconnect(); done(); }
+}).observe({type: "paint", buffered: true}));
+const metadata = new Promise(done => { v.onloadedmetadata = done; });
+Promise.all([painted, metadata]).then(() => { document.title = "PiP ready"; });
 v.play();
 const say = t => { document.title = t; };
 document.getElementById("video").onclick = () =>

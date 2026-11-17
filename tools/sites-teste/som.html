@@ -2,6 +2,13 @@
 <style>body { margin: 0; } #play { position: absolute; left: 0; top: 0; width: 400px; height: 200px; }</style>
 <button id="play">Play tone</button>
 <script>
+// "Som ready" once painted: until the first contentful paint Chromium holds commits and drops
+// clicks (paint holding), and the title above arrives before that (as in fuga.html).
+new PerformanceObserver((list, observer) => {
+  if (!list.getEntriesByName("first-contentful-paint").length) return;
+  observer.disconnect();
+  if (document.title === "Som (test)") document.title = "Som ready";
+}).observe({type: "paint", buffered: true});
 // A click (the user gesture audio needs) starts a 440 Hz tone, very quiet but above Chromium's
 // audible threshold, until the tab closes. Result in the title: the gate's host sees only that.
 document.getElementById("play").onclick = () => {

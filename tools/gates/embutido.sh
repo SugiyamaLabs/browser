@@ -714,9 +714,13 @@ c.ask("host.settings", agent_extensions=True)
 # context_menu on a tab without an agent: a right click on the page
 t = ui_tab("/form"); titled(t, "Form (test)")
 def events(*names): return subprocess.run([f"{OUT}/events", *names], capture_output=True, text=True).stdout.split()
-for data in events("rightdown", "rightup"):
-    c.send_raw({"op": "view.mouse", "tab": t, "data": data, "x": 300, "y": 300})
-a = ui_ask("context_menu", t, 10)
+# /form keeps its title (many checks read it), so no "ready" title: a right click dropped before the
+# first paint (paint holding, see /fuga) is sent again; a second menu is harmless.
+for _ in range(3):
+    for data in events("rightdown", "rightup"):
+        c.send_raw({"op": "view.mouse", "tab": t, "data": data, "x": 300, "y": 300})
+    a = ui_ask("context_menu", t, 4)
+    if a: break
 actions = ((a or {}).get("context") or {}).get("actions", [])
 check("context_menu: a right click reaches the host (actions, x, y)",
       "reload" in actions and all(isinstance((a or {}).get(k), (int, float)) for k in ("x", "y")), a)
@@ -761,7 +765,7 @@ def pick_tab(path="/pick"):  # an attached 800 x 600 tab on a fresh /pick, and i
     t = c.ask("view.open", ato=ato, url=SITE + path).get("tab", "")
     c.ask("view.attach", tab=t, width=800, height=600, scale=1)
     layer = layer_event(t, 800) or {}
-    titled(t, "Pick (element)")
+    titled(t, "Pick ready", 15)  # first paint: clicks before it are dropped (as /fuga)
     return t, layer.get("scale", 1)
 def shows(p, *keys): return {k: p.get(k) for k in keys}
 
@@ -871,6 +875,7 @@ else:
     vt = (c.event(lambda e: e["event"] == "view.tab" and e.get("url", "").startswith(SITE + "/pick")
                   and isinstance(e.get("control"), dict), 10) or {}).get("tab")
     c.ask("view.attach", tab=vt, width=800, height=600, scale=1)
+    titled(vt, "Pick ready", 15)  # painted, so the right click below is not just dropped
     check("view.pick on a tab while its agent works is denied", err(c.ask("view.pick", tab=vt, on=True)) == "denied")
     check("view.inspect on a tab while its agent works is denied", err(c.ask("view.inspect", tab=vt, x=50, y=50)) == "denied")
     check("view.inspect docked on a tab while its agent works is denied",
@@ -1076,7 +1081,7 @@ def others(tab, path):  # the tabs that showed up on path, other than tab
     return [e for e in c.events if e["event"] == "view.tab" and e.get("tab") != tab and e.get("url", "").startswith(SITE + path)]
 
 c.events = [x for x in c.events if x["event"] != "view.tab"]
-t = ui_tab("/popup"); titled(t, "Popup (test)")
+t = ui_tab("/popup"); titled(t, "Popup ready", 15)
 click(t, 190, 100)
 e = c.event(lambda e: e["event"] == "view.tab" and e.get("tab") != t and e.get("url", "").startswith(SITE + "/other"), 10)
 check("a page's popup (window.open with features) becomes a tab of the same ato",
@@ -1569,7 +1574,7 @@ def devtools_event(tab, pred=lambda e: True, timeout=20):
     return c.event(lambda e: e["event"] == "view.devtools" and e.get("tab") == tab and pred(e), timeout)
 def devtools_closed(tab, timeout=20):
     return c.event(lambda e: e["event"] == "view.devtools.closed" and e.get("tab") == tab, timeout)
-t = ui_tab("/popup"); titled(t, "Popup (test)")
+t = ui_tab("/popup"); titled(t, "Popup ready", 15)
 check("view.inspect with a dock that is not bottom, right or window is bad_request",
       err(c.ask("view.inspect", tab=t, dock="left")) == "bad_request")
 check("view.devtools.dock on a tab with no DevTools is not_found", err(c.ask("view.devtools.dock", tab=t, dock="right")) == "not_found")
@@ -1773,6 +1778,7 @@ st = c.ask("view.open", ato=rato, url=SITE + "/som").get("tab", "")
 c.ask("view.attach", tab=st, width=600, height=400, scale=1)
 e = tab_event(st, loaded("/som"))
 check("view.tab carries muted (false) next to audible", bool(e) and e.get("muted") is False and e.get("audible") is False, e)
+titled(st, "Som ready", 15)  # first paint: clicks before it are dropped (as /fuga)
 click(st, 100, 100)
 check("a tone the page plays after a click: view.tab audible true", bool(tab_event(st, lambda e: e.get("audible") is True, 10)))
 r = c.ask("view.mute", tab=st, muted=True)
@@ -1789,7 +1795,7 @@ check("view.tab carries volume 100 by default", tabs.get(st, {}).get("volume") =
 drop(st); r = c.ask("view.volume", tab=st, volume=30)
 check("view.volume 30: ok, view.tab volume 30", r.get("ok") and bool(tab_event(st, lambda e: e.get("volume") == 30, 10)), r)
 drop(st); c.ask("view.reload", tab=st)
-tab_event(st, lambda e: e.get("loading"), 10); tab_event(st, loaded("/som"))
+tab_event(st, lambda e: e.get("loading"), 10); tab_event(st, loaded("/som")); titled(st, "Som ready", 15)
 tabs = {x["tab"]: x for x in c.ask("view.tabs", ato=rato).get("tabs", [])}
 check("the volume stays with the tab after a reload (view.tabs volume 30, not muted)",
       tabs.get(st, {}).get("volume") == 30 and tabs.get(st, {}).get("muted") is False, tabs.get(st))
@@ -1852,8 +1858,9 @@ e = titled4(vt, "camera:live")
 check("a page using the (fake) camera starts the video capture service", bool(e) and capture_service(engine4.pid) == 1,
       (e, capture_service(engine4.pid)))
 e = titled4(vt, "camera:stopped")
-gone_open = until(lambda: capture_service(engine4.pid) == 0, 20)
-print("INFO: camera stopped, tab still open: the service " + ("exited" if gone_open else "is still up (kept while the page's capture host lives)"), flush=True)
+# 2 s release + the service's own 5 s idle exit, with room to spare.
+check("camera stopped, tab still open: the video capture service exits within the timeout",
+      bool(e) and until(lambda: capture_service(engine4.pid) == 0, 20), (e, capture_service(engine4.pid)))
 c4.ask("view.close", tab=vt)
 check("no tab uses the camera: the video capture service exits", until(lambda: capture_service(engine4.pid) == 0, 30),
       capture_service(engine4.pid))
@@ -1867,7 +1874,7 @@ check("engine still running", engine.poll() is None)
 
 if os.environ.get("EMBUTIDO_INSPECT") == "1":
     # OPT-IN: this part puts a real DevTools window on screen and it takes the keyboard focus.
-    t = ui_tab("/popup"); titled(t, "Popup (test)")
+    t = ui_tab("/popup"); titled(t, "Popup ready", 15)
     r = c.ask("view.inspect", tab=t, x=190, y=100, dock="window")
     check("view.inspect dock window answers ok, with no view", r.get("ok") and "devtools" not in r, r)
     e = devtools_event(t, lambda e: e.get("dock") == "window")

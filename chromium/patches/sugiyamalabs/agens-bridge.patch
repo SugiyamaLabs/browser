@@ -280,10 +280,10 @@ index 0000000000..bcb1c5bf02
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_BRIDGE_H_
 diff --git a/chrome/browser/agens/bridge/bridge_mac.mm b/chrome/browser/agens/bridge/bridge_mac.mm
 new file mode 100644
-index 0000000000..e0731dea2c
+index 0000000000..706b89d8fe
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/bridge_mac.mm
-@@ -0,0 +1,631 @@
+@@ -0,0 +1,633 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The socket server on macOS: a Unix socket in the user data dir, the peer's code signature read
 +// from its audit token, and the approval of the person before a signed client gets in.
@@ -389,8 +389,8 @@ index 0000000000..e0731dea2c
 +  // and what "Permitir sempre" remembers it by.
 +  std::string bundle_id;  // from its bundle, "" for a bare executable
 +  std::string app_path;   // the bundle, or the executable
-+  std::string key;        // "<team id>/<bundle id>" when validly signed by a team, else the bundle id,
-+                          // else "path:<executable>"; "" when the process could not be read
++  std::string key;        // "<team id>/<bundle id>" (or "<team id>/path:<executable>") when validly
++                          // signed by a team; "" otherwise: only signed apps get "Permitir sempre"
 +};
 +
 +// The app's bundle id and path (a bare executable: no id, its own path).
@@ -463,12 +463,13 @@ index 0000000000..e0731dea2c
 +  }
 +  peer.name = AppName(code.get(), identifier.empty() ? peer.name : identifier);
 +  ReadBundle(code.get(), peer);
-+  // Another app can claim any bundle id, but not a team's valid signature: a signed app is
-+  // remembered with its team, so an unsigned copy never inherits its "Permitir sempre".
-+  if (!peer.bundle_id.empty()) {
-+    peer.key = signer.empty() ? peer.bundle_id : signer + "/" + peer.bundle_id;
++  // Another app can claim any bundle id or path, but not a team's valid signature: only a signed
++  // app is remembered (with its team); an unsigned one is asked every time (decision of 17/11/2026).
++  if (signer.empty()) {
++  } else if (!peer.bundle_id.empty()) {
++    peer.key = signer + "/" + peer.bundle_id;
 +  } else if (!peer.app_path.empty()) {
-+    peer.key = (signer.empty() ? "path:" : signer + "/path:") + peer.app_path;
++    peer.key = signer + "/path:" + peer.app_path;
 +  }
 +
 +  const std::string& team = TeamId();
@@ -521,6 +522,7 @@ index 0000000000..e0731dea2c
 +    std::move(done).Run(nullptr);
 +    return;
 +  }
++  // "" (unsigned): no "Permitir sempre", and an old entry for it in the list no longer counts.
 +  const std::string remember = peer.ours ? peer.identity : peer.key;
 +  if (!remember.empty() && AlwaysAllowed(remember)) {
 +    std::move(done).Run(nullptr);
@@ -10807,10 +10809,10 @@ index e62a9f607e..07183c509e 100644
  #endif
 diff --git a/chrome/browser/agens/embed/agens_ato_sleep.cc b/chrome/browser/agens/embed/agens_ato_sleep.cc
 new file mode 100644
-index 0000000000..aea085d455
+index 0000000000..31fef7f02c
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_ato_sleep.cc
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,224 @@
 +// Copyright 2026 SugiyamaLabs.
 +#include "chrome/browser/agens/embed/agens_ato_sleep.h"
 +
@@ -10851,12 +10853,22 @@ index 0000000000..aea085d455
 +
 +namespace agens {
 +
++// The wait comes from kAtoSleepAfterMinPref; an `after` given here (the hidden gate's 6 s) wins.
 +// Tune without rebuilding: --enable-features=AgensAtoSleep:after/30m; off: --disable-features=.
 +BASE_FEATURE(kAgensAtoSleep, base::FEATURE_ENABLED_BY_DEFAULT);
 +const base::FeatureParam<base::TimeDelta> kAgensAtoSleepAfter{&kAgensAtoSleep, "after",
 +                                                               base::Minutes(10)};
 +
 +namespace {
++
++// The wait, or Max() for "nunca".
++base::TimeDelta After() {
++  if (!base::GetFieldTrialParamValueByFeature(kAgensAtoSleep, "after").empty()) {
++    return kAgensAtoSleepAfter.Get();
++  }
++  const int minutes = g_browser_process->local_state()->GetInteger(kAtoSleepAfterMinPref);
++  return minutes > 0 ? base::Minutes(minutes) : base::TimeDelta::Max();
++}
 +
 +using performance_manager::policies::CannotDiscardReason;
 +using performance_manager::policies::CanDiscardResult;
@@ -10874,9 +10886,10 @@ index 0000000000..aea085d455
 +}
 +
 +// Chromium's own checks, minus the ones about attention: the active tab of a window no one sees,
-+// a pinned tab, and a title or icon change in the background (an unread count) don't keep a whole
-+// ato awake. What would lose something (audio, capture, upload, form edits...) still does.
-+bool MaySleep(content::WebContents* contents) {
++// a pinned tab (unless kAtoSleepActivePinnedPref is off), and a title or icon change in the
++// background (an unread count) don't keep a whole ato awake. What would lose something (audio,
++// capture, upload, form edits...) still does.
++bool MaySleep(content::WebContents* contents, bool active_and_pinned) {
 +  base::WeakPtr<performance_manager::PageNode> page =
 +      performance_manager::PerformanceManager::GetPrimaryPageNodeForWebContents(contents);
 +  auto* policy = DiscardEligibilityPolicy::GetFromGraph(performance_manager::PerformanceManager::GetGraph());
@@ -10888,8 +10901,8 @@ index 0000000000..aea085d455
 +  if (result == CanDiscardResult::kDisallowed) return false;
 +  for (CannotDiscardReason reason : reasons) {
 +    // kVisible: only a tab the embedded host never showed gets here (see `in_use`).
-+    if (reason != CannotDiscardReason::kVisible && reason != CannotDiscardReason::kActiveTab &&
-+        reason != CannotDiscardReason::kPinnedTab &&
++    const bool attention = reason == CannotDiscardReason::kActiveTab || reason == CannotDiscardReason::kPinnedTab;
++    if (reason != CannotDiscardReason::kVisible && !(attention && active_and_pinned) &&
 +        reason != CannotDiscardReason::kBackgroundActivity) {
 +      return false;
 +    }
@@ -10898,9 +10911,10 @@ index 0000000000..aea085d455
 +}
 +
 +// Keeps the footprint as "what sleeping freed" (the casca's MB on a sleeping tab).
-+void SleepTabs(const std::vector<content::WebContents*>& tabs, ::mojom::LifecycleUnitDiscardReason reason) {
++void SleepTabs(const std::vector<content::WebContents*>& tabs, ::mojom::LifecycleUnitDiscardReason reason,
++               bool active_and_pinned) {
 +  for (content::WebContents* contents : tabs) {
-+    if (contents->WasDiscarded() || !MaySleep(contents)) continue;
++    if (contents->WasDiscarded() || !MaySleep(contents, active_and_pinned)) continue;
 +    tabs::TabInterface* tab = tabs::TabInterface::MaybeGetFromContents(contents);
 +    TabResourceUsageTabHelper* usage = tab ? TabResourceUsageTabHelper::From(tab) : nullptr;
 +    if (auto* unit = resource_coordinator::TabLifecycleUnitExternal::FromWebContents(contents)) {
@@ -10931,8 +10945,8 @@ index 0000000000..aea085d455
 + public:
 +  void Start() {
 +    if (timer_.IsRunning() || !base::FeatureList::IsEnabled(kAgensAtoSleep)) return;
-+    // A quarter of the wait, between 1 s (tests) and 1 min.
-+    const base::TimeDelta every = std::clamp(kAgensAtoSleepAfter.Get() / 4, base::Seconds(1), base::Minutes(1));
++    // A quarter of the wait, between 1 s (tests) and 1 min; the pref's waits (5 min and up) give 1 min.
++    const base::TimeDelta every = std::clamp(After() / 4, base::Seconds(1), base::Minutes(1));
 +    timer_.Start(FROM_HERE, every, base::BindRepeating(&AtoSleep::Tick, base::Unretained(this)));
 +  }
 +
@@ -10941,6 +10955,8 @@ index 0000000000..aea085d455
 +    ProfileManager* manager = g_browser_process->profile_manager();
 +    if (!manager) return;
 +    const base::TimeTicks now = base::TimeTicks::Now();
++    const base::TimeDelta after = After();
++    const bool active_and_pinned = g_browser_process->local_state()->GetBoolean(kAtoSleepActivePinnedPref);
 +    std::map<base::FilePath, base::TimeTicks> seen;
 +    for (Profile* profile : manager->GetLoadedProfiles()) {
 +      if (profile->IsOffTheRecord()) continue;
@@ -10955,8 +10971,8 @@ index 0000000000..aea085d455
 +      auto it = last_used_.find(path);
 +      const base::TimeTicks last = in_use || it == last_used_.end() ? now : it->second;
 +      seen[path] = last;
-+      if (now - last < kAgensAtoSleepAfter.Get() || AtoNeverSleeps(path)) continue;
-+      SleepTabs(tabs, ::mojom::LifecycleUnitDiscardReason::PROACTIVE);
++      if (now - last < after || AtoNeverSleeps(path)) continue;
++      SleepTabs(tabs, ::mojom::LifecycleUnitDiscardReason::PROACTIVE, active_and_pinned);
 +      if (!IsEmbedded() && g_browser_process->local_state()->GetBoolean(kAtosSleepWholePref) &&
 +          IsAtoSleeping(profile)) {
 +        Unload(profile);
@@ -10985,7 +11001,9 @@ index 0000000000..aea085d455
 +}
 +
 +void SleepAto(Profile* profile) {
-+  SleepTabs(Tabs(profile->GetOriginalProfile()), ::mojom::LifecycleUnitDiscardReason::EXTERNAL);
++  // Asked for by name: the active and pinned tabs go too, whatever kAtoSleepActivePinnedPref says.
++  SleepTabs(Tabs(profile->GetOriginalProfile()), ::mojom::LifecycleUnitDiscardReason::EXTERNAL,
++            /*active_and_pinned=*/true);
 +}
 +
 +void WakeTab(content::WebContents* contents) {
@@ -11021,13 +11039,13 @@ index 0000000000..aea085d455
 +}  // namespace agens
 diff --git a/chrome/browser/agens/embed/agens_ato_sleep.h b/chrome/browser/agens/embed/agens_ato_sleep.h
 new file mode 100644
-index 0000000000..b32fb4d2af
+index 0000000000..fb02d2efb6
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_ato_sleep.h
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,48 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Atos that sleep (#9, docs/performance.md): an ato with no visible tab and no agent tab for
-+// AgensAtoSleep's `after` (10 min) discards its tabs, so its renderers go away; each tab keeps
++// kAtoSleepAfterMinPref (10 min) discards its tabs, so its renderers go away; each tab keeps
 +// its place, URL and history and reloads when shown again. Tabs Chromium protects from losing
 +// something stay awake (audio, capture, upload, form edits, PiP, DevTools, PDF, notifications,
 +// the "never sleep" sites). The ato stays loaded (atos.list "sleeping"; "asleep" is not loaded).
@@ -11062,6 +11080,11 @@ index 0000000000..b32fb4d2af
 +// the rule put to sleep also unloads (its windows close, the profile goes; atos "asleep"). Only in
 +// the AgensBrowser on its own: embedded, the host owns the windows and atos stay loaded.
 +inline constexpr char kAtosSleepWholePref[] = "agens.atos_sleep_whole";
++// Configurações › Abas que dormem (Local State; the casca reads and writes them with agens_pref_*):
++// the wait in minutes (5, 10, 30 or 60; 0 is "nunca"; default 10) and whether the active tab and
++// the pinned tabs sleep with the ato (default on).
++inline constexpr char kAtoSleepAfterMinPref[] = "agens.atos_sleep_after_min";
++inline constexpr char kAtoSleepActivePinnedPref[] = "agens.atos_sleep_active_pinned";
 +// True once after the rule unloaded the ato: its next window brings the tabs back (AgensWindow).
 +bool TakeUnloaded(const base::FilePath& dir);
 +
@@ -11580,7 +11603,7 @@ index 0000000000..48063dd9a1
 +
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_COOKIE_POOL_H_
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
-index 9d0bf4646d..4fe1799b5b 100644
+index 9d0bf4646d..20bf5fff60 100644
 --- a/chrome/browser/agens/embed/agens_embed.h
 +++ b/chrome/browser/agens/embed/agens_embed.h
 @@ -36,6 +36,16 @@ typedef struct {
@@ -11721,7 +11744,17 @@ index 9d0bf4646d..4fe1799b5b 100644
  
  // --- Settings (the browser's own; not part of what the Agens app embeds).
  
-@@ -219,11 +287,24 @@ typedef struct {
+@@ -172,6 +240,9 @@ int agens_pref_get_string(AgensWindow* window, AgensPrefStore store, const char*
+ void agens_pref_set_bool(AgensWindow* window, AgensPrefStore store, const char* name, int value);
+ void agens_pref_set_int(AgensWindow* window, AgensPrefStore store, const char* name, int value);
+ void agens_pref_set_string(AgensWindow* window, AgensPrefStore store, const char* name, const char* value);
++// Abas que dormem, atos (kAgensLocal): int "agens.atos_sleep_after_min" (5, 10, 30, 60; 0 = nunca;
++// default 10) and bool "agens.atos_sleep_active_pinned" (the active and pinned tabs sleep with the
++// ato; default on). Read on the rule's next pass (≤1 min).
+ // List-of-strings prefs (e.g. sites that never sleep). get calls `fn` now with the items.
+ typedef void (*AgensStringsFn)(void* context, const char* const* items, int count);
+ int agens_pref_get_list(AgensWindow* window, AgensPrefStore store, const char* name, AgensStringsFn fn, void* context);
+@@ -219,11 +290,24 @@ typedef struct {
    const char* name;
    const char* version;
    int enabled;
@@ -11747,7 +11780,7 @@ index 9d0bf4646d..4fe1799b5b 100644
  
  // Senhas salvas. The list carries no passwords; agens_password_get copies one (the UI asks for
  // Touch ID first). Indexes refer to the last list delivered.
-@@ -255,7 +336,7 @@ void agens_bookmark_add_folder(AgensWindow* window, const char* title);  // at t
+@@ -255,7 +339,7 @@ void agens_bookmark_add_folder(AgensWindow* window, const char* title);  // at t
  // Results arrive through the observer: the current match (1-based, 0 for none) and the total.
  typedef void (*AgensFindChanged)(void* context, int current, int total);
  void agens_window_set_find_observer(AgensWindow* window, AgensFindChanged observer, void* context);
@@ -11756,7 +11789,7 @@ index 9d0bf4646d..4fe1799b5b 100644
  void agens_find_stop(AgensWindow* window);
  
  // Saving a password the person just used on the active page. Fills `out` (strings valid until
-@@ -266,7 +347,9 @@ typedef struct {
+@@ -266,7 +350,9 @@ typedef struct {
    int update;  // a new password for a login already saved
  } AgensPasswordPrompt;
  int agens_password_prompt(AgensWindow* window, AgensPasswordPrompt* out);
@@ -11767,7 +11800,7 @@ index 9d0bf4646d..4fe1799b5b 100644
  void agens_password_answer(AgensWindow* window, AgensPasswordAnswer answer);
  
  // A site asks for permissions (camera, location…): agens_ui_permission_prompt shows them, the
-@@ -279,6 +362,16 @@ typedef enum {
+@@ -279,6 +365,16 @@ typedef enum {
  } AgensPermissionAnswer;
  void agens_window_permission_answer(AgensWindow* window, AgensPermissionAnswer answer);
  
@@ -11784,7 +11817,7 @@ index 9d0bf4646d..4fe1799b5b 100644
  // The site of the active page, for the panel behind the site icon. `pattern` is what
  // agens_site_exception_set takes for this site. Strings valid until the next call.
  typedef struct {
-@@ -291,13 +384,20 @@ AgensPermission agens_site_permission(AgensWindow* window, const char* kind);  /
+@@ -291,13 +387,20 @@ AgensPermission agens_site_permission(AgensWindow* window, const char* kind);  /
  // Cookies and storage of the active page's site only.
  void agens_site_clear_data(AgensWindow* window, AgensDoneFn done, void* context);
  
@@ -11808,7 +11841,7 @@ index 9d0bf4646d..4fe1799b5b 100644
  } AgensExtensionButton;
  typedef void (*AgensExtensionButtonsChanged)(void* context, const AgensExtensionButton* list, int count,
                                               const char* installed);
-@@ -340,6 +440,7 @@ typedef enum {
+@@ -340,6 +443,7 @@ typedef enum {
    kAgensCommandFindNext,     // ⌘G
    kAgensCommandFindPrevious, // ⌘⇧G
    kAgensCommandPasswordPrompt,  // the page has a password to save or update: ask (see below)
@@ -11816,7 +11849,7 @@ index 9d0bf4646d..4fe1799b5b 100644
  } AgensCommand;
  int agens_ui_command(void* chrome, AgensCommand command);
  // Opens Settings on a section ("senhas", "extensoes", "sobre"...; "" keeps the current one), or the
-@@ -354,10 +455,28 @@ void agens_ui_colors(void* chrome, unsigned* window, unsigned* page, unsigned* l
+@@ -354,10 +458,28 @@ void agens_ui_colors(void* chrome, unsigned* window, unsigned* page, unsigned* l
  // lights center on it; it follows the density).
  // Where the extensions button is (extension popups hang from it).
  AgensRect agens_ui_extensions_anchor(void* chrome);
@@ -21729,7 +21762,7 @@ index e496cb7ab4..f921d60a24 100644
    // Whether the profile is loaded and opening a new browser window is allowed.
    BOOL canOpenNewBrowser = [self canOpenNewBrowser];
 diff --git a/chrome/browser/browser_process_impl.cc b/chrome/browser/browser_process_impl.cc
-index 433fa42fa4..06fe18f9d1 100644
+index 433fa42fa4..bbab749123 100644
 --- a/chrome/browser/browser_process_impl.cc
 +++ b/chrome/browser/browser_process_impl.cc
 @@ -85,6 +85,11 @@
@@ -21767,7 +21800,7 @@ index 433fa42fa4..06fe18f9d1 100644
    // Mark all the profiles as clean.
    ProfileManager* pm = profile_manager();
    scoped_refptr<RundownTaskCounter> rundown_counter =
-@@ -1345,6 +1359,13 @@ BuildState* BrowserProcessImpl::GetBuildState() {
+@@ -1345,6 +1359,16 @@ BuildState* BrowserProcessImpl::GetBuildState() {
  // static
  void BrowserProcessImpl::RegisterPrefs(PrefRegistrySimple* registry) {
    sugiyamalabs::adblock::RegisterPrefs(registry);  // SugiyamaLabs
@@ -21778,10 +21811,13 @@ index 433fa42fa4..06fe18f9d1 100644
 +  registry->RegisterDictionaryPref("agens.atos");
 +  // SugiyamaLabs: "Atos fora de uso dormem inteiros" (agens::kAtosSleepWholePref; on, as in the prototype).
 +  registry->RegisterBooleanPref("agens.atos_sleep_whole", true);
++  // SugiyamaLabs: the atos' wait (minutes, 0 = never) and whether active/pinned tabs sleep with them.
++  registry->RegisterIntegerPref("agens.atos_sleep_after_min", 10);
++  registry->RegisterBooleanPref("agens.atos_sleep_active_pinned", true);
  
    registry->RegisterBooleanPref(prefs::kDefaultBrowserSettingEnabled, false);
  
-@@ -1706,6 +1727,9 @@ void BrowserProcessImpl::PreMainMessageLoopRun() {
+@@ -1706,6 +1730,9 @@ void BrowserProcessImpl::PreMainMessageLoopRun() {
  
    features_->PreMainMessageLoopRun();
    platform_part_->PreMainMessageLoopRun();
@@ -23988,6 +24024,64 @@ index da86c44a2a..d00fbce2f5 100644
  
  const base::FeatureParam<base::TimeDelta> kReleaseVideoSourceProviderTimeout{
      &kReleaseVideoSourceProviderIfNotInUse,
+diff --git a/content/browser/renderer_host/media/media_stream_manager.cc b/content/browser/renderer_host/media/media_stream_manager.cc
+index 6a04197434..8144205c92 100644
+--- a/content/browser/renderer_host/media/media_stream_manager.cc
++++ b/content/browser/renderer_host/media/media_stream_manager.cc
+@@ -4563,7 +4563,7 @@ void MediaStreamManager::RegisterVideoCaptureHost(
+ #if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+   if (base::FeatureList::IsEnabled(kReleaseVideoSourceProviderIfNotInUse)) {
+     media_devices_manager_->UpdateVideoCaptureHostsEmptyState(
+-        video_capture_hosts_.empty());
++        video_capture_hosts_live_ == 0);
+   }
+ #endif
+ }
+@@ -4888,7 +4888,18 @@ std::unique_ptr<MediaStreamUIProxy> MediaStreamManager::MakeFakeUIProxy(
+ void MediaStreamManager::OnVideoCaptureHostConnectionError() {
+   CHECK_CURRENTLY_ON(BrowserThread::IO, base::NotFatalUntil::M158);
+   media_devices_manager_->UpdateVideoCaptureHostsEmptyState(
+-      video_capture_hosts_.empty());
++      video_capture_hosts_live_ == 0);
++}
++
++void MediaStreamManager::OnVideoCaptureHostStreamsChanged(bool live) {
++  CHECK_CURRENTLY_ON(BrowserThread::IO, base::NotFatalUntil::M158);
++  video_capture_hosts_live_ += live ? 1 : -1;
++  // Null while shutting down (WillDestroyCurrentMessageLoop).
++  if (media_devices_manager_ &&
++      base::FeatureList::IsEnabled(kReleaseVideoSourceProviderIfNotInUse)) {
++    media_devices_manager_->UpdateVideoCaptureHostsEmptyState(
++        video_capture_hosts_live_ == 0);
++  }
+ }
+ #endif
+ 
+diff --git a/content/browser/renderer_host/media/media_stream_manager.h b/content/browser/renderer_host/media/media_stream_manager.h
+index 6c2cc4dde0..aae8ee2856 100644
+--- a/content/browser/renderer_host/media/media_stream_manager.h
++++ b/content/browser/renderer_host/media/media_stream_manager.h
+@@ -481,6 +481,12 @@ class CONTENT_EXPORT MediaStreamManager
+       std::unique_ptr<media::mojom::VideoCaptureHost> host,
+       mojo::PendingReceiver<media::mojom::VideoCaptureHost> receiver);
+   size_t num_video_capture_hosts() const { return video_capture_hosts_.size(); }
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
++  // AgensBrowser (#34): a VideoCaptureHost got its first live stream (or lost
++  // its last). The video source provider is released once none has one, not
++  // when the hosts go (a host lives as long as its frame).
++  void OnVideoCaptureHostStreamsChanged(bool live);
++#endif
+ 
+   std::optional<url::Origin> GetOriginByVideoSessionId(
+       const base::UnguessableToken& session_id);
+@@ -922,6 +928,7 @@ class CONTENT_EXPORT MediaStreamManager
+   mojo::UniqueReceiverSet<blink::mojom::MediaStreamDispatcherHost>
+       dispatcher_hosts_;
+   mojo::UniqueReceiverSet<media::mojom::VideoCaptureHost> video_capture_hosts_;
++  int video_capture_hosts_live_ = 0;  // AgensBrowser (#34)
+ 
+   GenerateStreamTestCallback generate_stream_test_callback_;
+ 
 diff --git a/content/browser/renderer_host/media/video_capture_devices_changed_observer.cc b/content/browser/renderer_host/media/video_capture_devices_changed_observer.cc
 index 1348127ac3..4386f9ad7a 100644
 --- a/content/browser/renderer_host/media/video_capture_devices_changed_observer.cc
@@ -24004,8 +24098,44 @@ index 1348127ac3..4386f9ad7a 100644
  }
  
  }  // namespace content
+diff --git a/content/browser/renderer_host/media/video_capture_host.cc b/content/browser/renderer_host/media/video_capture_host.cc
+index 26854d3689..de93e0fe05 100644
+--- a/content/browser/renderer_host/media/video_capture_host.cc
++++ b/content/browser/renderer_host/media/video_capture_host.cc
+@@ -10,6 +10,7 @@
+ #include "base/functional/callback_helpers.h"
+ #include "base/token.h"
+ #include "base/unguessable_token.h"
++#include "build/build_config.h"
+ #include "content/browser/browser_main_loop.h"
+ #include "content/browser/renderer_host/media/media_stream_manager.h"
+ #include "content/browser/renderer_host/media/video_capture_manager.h"
+@@ -573,6 +574,11 @@ void VideoCaptureHost::DeleteVideoCaptureController(
+ void VideoCaptureHost::NotifyStreamAdded() {
+   CHECK_CURRENTLY_ON(BrowserThread::IO, base::NotFatalUntil::M158);
+   ++number_of_active_streams_;
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
++  if (number_of_active_streams_ == 1) {
++    media_stream_manager_->OnVideoCaptureHostStreamsChanged(true);
++  }
++#endif
+   render_frame_host_delegate_->NotifyStreamAdded();
+ }
+ 
+@@ -585,6 +591,11 @@ void VideoCaptureHost::NotifyStreamRemoved() {
+   if (number_of_active_streams_ == 0)
+     return;
+   --number_of_active_streams_;
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
++  if (number_of_active_streams_ == 0) {
++    media_stream_manager_->OnVideoCaptureHostStreamsChanged(false);
++  }
++#endif
+   render_frame_host_delegate_->NotifyStreamRemoved();
+ }
+ 
 diff --git a/content/browser/renderer_host/render_process_host_impl.cc b/content/browser/renderer_host/render_process_host_impl.cc
-index 270de22cfb..22e6b2ee38 100644
+index 270de22cfb..426447fd08 100644
 --- a/content/browser/renderer_host/render_process_host_impl.cc
 +++ b/content/browser/renderer_host/render_process_host_impl.cc
 @@ -29,6 +29,7 @@
@@ -24028,23 +24158,24 @@ index 270de22cfb..22e6b2ee38 100644
    }
    uint64_t size_per_top_level_frame =
        private_memory_footprint /
-@@ -1428,6 +1432,15 @@ void AppendToCommaSeparatedSwitch(base::CommandLine* command_line,
+@@ -1428,6 +1432,16 @@ void AppendToCommaSeparatedSwitch(base::CommandLine* command_line,
                         : base::StrCat({existing_values, ",", new_value}));
  }
  
 +// SugiyamaLabs (#11): a V8 heap cap for each renderer (one site, a few of its
 +// tabs at most, #10): a runaway page ends as "out of memory" there instead of
 +// taking the machine. V8's own default here is a quarter of the RAM, up to 4 GB.
-+// Tune: --enable-features=AgensV8HeapCap:max_mb/1024; off: --disable-features=.
++// 1 GB is a ceiling for runaway pages; normal pages use far less.
++// Tune: --enable-features=AgensV8HeapCap:max_mb/2048; off: --disable-features=.
 +// A --js-flags=--max-old-space-size=... given to the browser wins.
 +BASE_FEATURE(kAgensV8HeapCap, base::FEATURE_ENABLED_BY_DEFAULT);
 +const base::FeatureParam<int> kAgensV8HeapCapMaxMb{&kAgensV8HeapCap, "max_mb",
-+                                                   2048};
++                                                   1024};
 +
  size_t GetOutermostMainFrameCountForFastShutdown(RenderProcessHost* process) {
    std::set<RenderFrameHost*> outermost_main_frames;
    process->ForEachRenderFrameHost(
-@@ -3819,6 +3832,15 @@ void RenderProcessHostImpl::AppendRendererCommandLine(
+@@ -3819,6 +3833,15 @@ void RenderProcessHostImpl::AppendRendererCommandLine(
      command_line->AppendSwitch(switches::kNoZygote);
    }
  

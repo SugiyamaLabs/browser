@@ -13,6 +13,13 @@ document.getElementById("create").onclick = () => navigator.credentials.create({
 document.getElementById("get").onclick = () => navigator.credentials.get({publicKey: {
   rpId: location.hostname, challenge: bytes("gate-challenge-0123456789abcdef"), timeout: 60000,
 }}).then(c => say("get:ok:" + c.id), failed("get"));
-if (!window.PublicKeyCredential) say("webauthn:missing");
-else PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable().then(v => say("uvpaa:" + v), failed("uvpaa"));
+// The first title after the first contentful paint: before it Chromium drops clicks (paint holding,
+// fuga.html), and the gate clicks right after "uvpaa:…".
+const painted = new Promise(done => new PerformanceObserver((list, observer) => {
+  if (list.getEntriesByName("first-contentful-paint").length) { observer.disconnect(); done(); }
+}).observe({type: "paint", buffered: true}));
+// Only over the first title: a click answered earlier (an agent's) keeps its result.
+const first = t => { if (document.title === "Passkey (test)") say(t); };
+if (!window.PublicKeyCredential) painted.then(() => first("webauthn:missing"));
+else PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable().then(v => painted.then(() => first("uvpaa:" + v)), failed("uvpaa"));
 </script>
