@@ -25669,6 +25669,48 @@ index cb50181f8d..d95817b275 100644
   private:
    // permissions::PermissionRequest:
    bool IsDuplicateOf(
+diff --git a/components/performance_manager/decorators/page_live_state_decorator.cc b/components/performance_manager/decorators/page_live_state_decorator.cc
+index cb35f58771..73e7cf13db 100644
+--- a/components/performance_manager/decorators/page_live_state_decorator.cc
++++ b/components/performance_manager/decorators/page_live_state_decorator.cc
+@@ -807,6 +807,17 @@ void PageLiveStateDecorator::OnBeforePageNodeRemoved(
+   }
+ }
+ 
++namespace {
++// SugiyamaLabs (#8): single-page apps keep setting their title and icons for a
++// few seconds after the load goes idle (YouTube: page title, then "YouTube",
++// then the video title). That is the page settling, not background activity;
++// counted, it kept those tabs from ever sleeping. Zero = no navigation yet.
++bool IsSettlingAfterNavigation(const PageNode* page_node) {
++  const base::TimeDelta since = page_node->GetTimeSinceLastNavigation();
++  return since.is_positive() && since < base::Seconds(30);
++}
++}  // namespace
++
+ void PageLiveStateDecorator::OnTitleUpdated(const PageNode* page_node) {
+   if (page_node->IsVisible()) {
+     return;
+@@ -819,6 +830,9 @@ void PageLiveStateDecorator::OnTitleUpdated(const PageNode* page_node) {
+       page_node->GetLoadingState() != PageNode::LoadingState::kLoadedIdle) {
+     return;
+   }
++  if (IsSettlingAfterNavigation(page_node)) {
++    return;
++  }
+   PageLiveStateDataImpl::GetOrCreate(PageNodeImpl::FromNode(page_node))
+       ->set_updated_title_or_favicon_in_background(true);
+ }
+@@ -840,6 +854,9 @@ void PageLiveStateDecorator::OnFaviconUpdated(
+       page_node->GetLoadingState() != PageNode::LoadingState::kLoadedIdle) {
+     return;
+   }
++  if (IsSettlingAfterNavigation(page_node)) {
++    return;
++  }
+   PageLiveStateDataImpl::GetOrCreate(PageNodeImpl::FromNode(page_node))
+       ->set_updated_title_or_favicon_in_background(true);
+ }
 diff --git a/components/performance_manager/user_tuning/prefs.cc b/components/performance_manager/user_tuning/prefs.cc
 index a1d12c38c5..71b53be698 100644
 --- a/components/performance_manager/user_tuning/prefs.cc
@@ -26439,7 +26481,7 @@ index 0000000000..de3bd93acd
 +
 +}  // namespace content
 diff --git a/content/browser/renderer_host/media/media_devices_manager.cc b/content/browser/renderer_host/media/media_devices_manager.cc
-index da86c44a2a..d00fbce2f5 100644
+index da86c44a2a..37d12eca23 100644
 --- a/content/browser/renderer_host/media/media_devices_manager.cc
 +++ b/content/browser/renderer_host/media/media_devices_manager.cc
 @@ -62,9 +62,16 @@ namespace content {
@@ -26460,6 +26502,20 @@ index da86c44a2a..d00fbce2f5 100644
  
  const base::FeatureParam<base::TimeDelta> kReleaseVideoSourceProviderTimeout{
      &kReleaseVideoSourceProviderIfNotInUse,
+@@ -942,6 +949,13 @@ void MediaDevicesManager::StartMonitoringAndPopulateCache(
+ 
+   monitoring_started_for_video_ |= start_video_device_monitoring_mode;
+   monitoring_started_for_audio_ |= start_audio_device_monitoring;
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
++  // AgensBrowser (#34): a page that only lists the devices (YouTube) connects
++  // the provider too, with no listener or camera to start the release timer.
++  if (base::FeatureList::IsEnabled(kReleaseVideoSourceProviderIfNotInUse)) {
++    MaybeScheduleDisconnectVideoSourceProviderTimer();
++  }
++#endif
+ }
+ 
+ void MediaDevicesManager::StopMonitoring() {
 diff --git a/content/browser/renderer_host/media/media_stream_manager.cc b/content/browser/renderer_host/media/media_stream_manager.cc
 index 6a04197434..8144205c92 100644
 --- a/content/browser/renderer_host/media/media_stream_manager.cc
