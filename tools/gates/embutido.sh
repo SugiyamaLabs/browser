@@ -13,7 +13,8 @@
 source "$(dirname "$0")/lib.sh"
 SITE_PORT="${SITE_PORT:-8765}"
 EMBUTIDO_INSPECT="${EMBUTIDO_INSPECT:-0}"
-export APP OUT GATES REPO SITE_PORT EMBUTIDO_INSPECT
+GATE_OUT="${GATE_OUT:-Dev}"
+export APP OUT GATES REPO SITE_PORT EMBUTIDO_INSPECT GATE_OUT
 
 SITE_PID=""
 if ! curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/tela"; then   # /tela: the newest page, so an older site is not reused
@@ -65,6 +66,10 @@ failed = []
 def check(name, ok, detail=""):
     print(("PASS: " if ok else "FAIL: ") + name + ("" if ok or not detail else f"  [{detail}]"), flush=True)
     if not ok: failed.append(name)
+def skip(name, why): print(f"SKIP: {name} ({why})", flush=True)
+# The official build compiles out the dev-only switches (agens_embedded_mac.mm, OFFICIAL_BUILD):
+# --agens-accept-unsigned and --agens-test-quit-signal; their checks are skipped there.
+OFFICIAL = os.environ.get("GATE_OUT") == "Default"
 
 profile = tempfile.mkdtemp(prefix="agens-e.", dir="/tmp")   # short: a socket path is limited to 104 bytes
 SOCK = profile + "/agens.sock"
@@ -156,15 +161,18 @@ r = other_process(SOCK, '{"id":1,"op":"hello"}', '{"id":2,"op":"hello"}')
 check("another process is refused at connect", len(r) == 2 and err(r[0]) == "unauthorized" and r[1].get("error") == "closed", r)
 
 # With --agens-accept-unsigned it gets in, but host.attach stays the parent's.
-profile2 = tempfile.mkdtemp(prefix="agens-u.", dir="/tmp")
-engine2 = launch(profile2, "--agens-accept-unsigned")
-r = other_process(profile2 + "/agens.sock", '{"id":1,"op":"hello"}', '{"id":2,"op":"host.attach"}')
-check("--agens-accept-unsigned lets another process in", len(r) == 2 and r[0].get("ok"), r)
-check("host.attach from another process is unauthorized", len(r) == 2 and err(r[1]) == "unauthorized", r)
-engine2.terminate()
-try: engine2.wait(15)
-except subprocess.TimeoutExpired: engine2.kill()
-subprocess.run(["rm", "-rf", profile2])
+if OFFICIAL:
+    skip("--agens-accept-unsigned lets another process in", "dev-only switch, compiled out of the official build")
+else:
+    profile2 = tempfile.mkdtemp(prefix="agens-u.", dir="/tmp")
+    engine2 = launch(profile2, "--agens-accept-unsigned")
+    r = other_process(profile2 + "/agens.sock", '{"id":1,"op":"hello"}', '{"id":2,"op":"host.attach"}')
+    check("--agens-accept-unsigned lets another process in", len(r) == 2 and r[0].get("ok"), r)
+    check("host.attach from another process is unauthorized", len(r) == 2 and err(r[1]) == "unauthorized", r)
+    engine2.terminate()
+    try: engine2.wait(15)
+    except subprocess.TimeoutExpired: engine2.kill()
+    subprocess.run(["rm", "-rf", profile2])
 
 # Atos that sleep (#9), on a short launch with a 6 s wait: an ato with no tab shown lets its pages
 # go (atos.list "sleeping"), and showing one of its tabs wakes it.
@@ -428,6 +436,11 @@ if e:
     seen = [e for e in c.events if e["event"] == "view.tab" and e.get("tab") == pt]
     check("the person's tab on that http:// site still stops before the page (HTTPS-Only strict)",
           bool(seen) and not any(e.get("title") == "Form (test)" for e in seen), [(e.get("title"), e.get("url")) for e in seen][-3:])
+    # Embedded, the warning is the full-page interstitial (drawn in the tab, titled), never the
+    # tab-modal dialog on the hidden window (a blank page titled with its address).
+    last = (seen[-1].get("title") or "") if seen else ""
+    check("that warning is the interstitial page in the tab (its title, not a blank page)",
+          bool(last) and "insecure.test" not in last, [(e.get("title"), e.get("url")) for e in seen][-3:])
     c.ask("view.close", tab=pt)
     c.ask("view.control", tab=e["tab"], action="end")
     check("view.control end: the agent's control stops",
@@ -439,7 +452,6 @@ c.ask("view.detach", tab=t1)
 
 # Step 5.3: the host draws menus, dialogs and requests (ui.ask / ui.answer). Every result is read from
 # the tab's title, the only thing this host sees of a page. Nothing here clicks or types on the system.
-def skip(name, why): print(f"SKIP: {name} ({why})", flush=True)
 def ui_ask(kind, tab=None, timeout=20):
     return c.event(lambda e: e["event"] == "ui.ask" and e.get("kind") == kind and (tab is None or e.get("tab") == tab), timeout)
 def ui_tab(path):  # a fresh attached tab, so no title or permission of an earlier check carries over
@@ -1521,14 +1533,17 @@ def restart_keeps_tabs():
         on = subprocess.run([f"{OUT}/onscreen", str(p2.pid)], capture_output=True, text=True).stdout.strip()
         check("no window on screen after the restore", on == "0", f"on screen: {on}")
         # The test switch's SIGUSR1: a quit Apple event to itself, with no reason, then for log out.
-        os.kill(p2.pid, signal.SIGUSR1)
-        try: p2.wait(15); quit_ok = True
-        except subprocess.TimeoutExpired: quit_ok = False
-        log2 = open(f"{OUT}/engine-restarted.log", errors="replace").read()
-        check("a quit Apple event with no reason (Activity Monitor, osascript) is refused",
-              "quit Apple event, no reason" in log2 and log2.count("agens: quit refused (embedded)") == 1)
-        check("a quit Apple event for log out quits the engine (it never blocks the Mac's log out or shutdown)",
-              quit_ok and "agens: quit allowed (embedded)" in log2, p2.returncode)
+        if OFFICIAL:
+            skip("quit Apple events (no reason refused, log out quits)", "--agens-test-quit-signal is compiled out of the official build")
+        else:
+            os.kill(p2.pid, signal.SIGUSR1)
+            try: p2.wait(15); quit_ok = True
+            except subprocess.TimeoutExpired: quit_ok = False
+            log2 = open(f"{OUT}/engine-restarted.log", errors="replace").read()
+            check("a quit Apple event with no reason (Activity Monitor, osascript) is refused",
+                  "quit Apple event, no reason" in log2 and log2.count("agens: quit refused (embedded)") == 1)
+            check("a quit Apple event for log out quits the engine (it never blocks the Mac's log out or shutdown)",
+                  quit_ok and "agens: quit allowed (embedded)" in log2, p2.returncode)
     finally:
         for x in (p, p2):
             if x and x.poll() is None:
@@ -1720,14 +1735,17 @@ c.ask("view.close", tab=t)
 
 # Quitting is the host's: cmd-Q as the menu bar takes it, and IDC_EXIT (the test switch's SIGUSR2,
 # no system input) are refused, and the host keeps its connection.
-os.kill(engine.pid, signal.SIGUSR2)
-time.sleep(3)
-log = open(f"{OUT}/engine.log", errors="replace").read()
-check("cmd-Q reaches the Quit menu item (the main menu takes the key)", "cmd-q to the main menu: taken" in log)
-check("cmd-Q and IDC_EXIT do not quit the embedded engine (two refusals logged, the host still answered)",
-      engine.poll() is None and log.count("agens: quit refused (embedded)") >= 2 and c.ask("hello").get("ok"),
-      log.count("agens: quit refused (embedded)"))
-no_window("cmd-Q and IDC_EXIT")
+if OFFICIAL:
+    skip("cmd-Q and IDC_EXIT do not quit the embedded engine", "--agens-test-quit-signal is compiled out of the official build")
+else:
+    os.kill(engine.pid, signal.SIGUSR2)
+    time.sleep(3)
+    log = open(f"{OUT}/engine.log", errors="replace").read()
+    check("cmd-Q reaches the Quit menu item (the main menu takes the key)", "cmd-q to the main menu: taken" in log)
+    check("cmd-Q and IDC_EXIT do not quit the embedded engine (two refusals logged, the host still answered)",
+          engine.poll() is None and log.count("agens: quit refused (embedded)") >= 2 and c.ask("hello").get("ok"),
+          log.count("agens: quit refused (embedded)"))
+    no_window("cmd-Q and IDC_EXIT")
 # Step 5.7: reopen a closed tab, find in page, zoom. A fresh ato: nothing closed in it yet, and the
 # site's zoom it remembers stays out of the other atos' pages.
 rato = c.ask("atos.create", name="Gate Reabrir").get("ato")

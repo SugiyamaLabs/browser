@@ -24885,6 +24885,28 @@ index e20ec3ac9e..c0045267b5 100644
    void BindMuter(
        mojo::PendingAssociatedReceiver<media::mojom::LocalMuter> receiver,
        const base::UnguessableToken& group_id) override;
+diff --git a/chrome/browser/ssl/https_only_mode_tab_helper.cc b/chrome/browser/ssl/https_only_mode_tab_helper.cc
+index d10cb5ecca..d31085ba7a 100644
+--- a/chrome/browser/ssl/https_only_mode_tab_helper.cc
++++ b/chrome/browser/ssl/https_only_mode_tab_helper.cc
+@@ -6,6 +6,7 @@
+ 
+ #include "base/feature_list.h"
+ #include "chrome/browser/ssl/ask_before_http_dialog_controller.h"
++#include "chrome/browser/ssl/https_upgrades_util.h"  // agens
+ #include "components/security_interstitials/core/features.h"
+ #include "components/tabs/public/tab_interface.h"
+ #include "content/public/browser/navigation_entry.h"
+@@ -69,8 +70,7 @@ void HttpsOnlyModeTabHelper::DidFinishNavigation(
+   // If dialog UI is enabled and this was a navigation cancelled by the
+   // throttle when we would interstitial the navigation, then trigger the
+   // dialog UI.
+-  if (base::FeatureList::IsEnabled(
+-          security_interstitials::features::kHttpsFirstDialogUi) &&
++  if (UseAskBeforeHttpDialog() &&  // agens
+       is_navigation_fallback_ &&
+       !navigation_handle->GetURL().SchemeIsCryptographic()) {
+     auto* tab = tabs::TabInterface::MaybeGetFromContents(
 diff --git a/chrome/browser/ssl/https_upgrades_interceptor.cc b/chrome/browser/ssl/https_upgrades_interceptor.cc
 index 6fff9bdd12..3cda3ae29d 100644
 --- a/chrome/browser/ssl/https_upgrades_interceptor.cc
@@ -24933,7 +24955,7 @@ index 6fff9bdd12..3cda3ae29d 100644
            tab_helper->fallback_url().GetHost(),
            web_contents->GetPrimaryMainFrame()->GetStoragePartition());
 diff --git a/chrome/browser/ssl/https_upgrades_navigation_throttle.cc b/chrome/browser/ssl/https_upgrades_navigation_throttle.cc
-index ddd4432f25..156a2c4fdf 100644
+index ddd4432f25..2d4bc67676 100644
 --- a/chrome/browser/ssl/https_upgrades_navigation_throttle.cc
 +++ b/chrome/browser/ssl/https_upgrades_navigation_throttle.cc
 @@ -105,6 +105,11 @@ HttpsUpgradesNavigationThrottle::~HttpsUpgradesNavigationThrottle() = default;
@@ -24948,7 +24970,17 @@ index ddd4432f25..156a2c4fdf 100644
    // If the navigation is fallback to HTTP, trigger the HTTP interstitial (if
    // enabled). The interceptor creates a redirect for the fallback navigation,
    // which will trigger MaybeCreateLoader() in the interceptor for the redirect
-@@ -194,6 +199,11 @@ HttpsUpgradesNavigationThrottle::WillFailRequest() {
+@@ -136,8 +141,7 @@ HttpsUpgradesNavigationThrottle::WillStartRequest() {
+       // Mark this as a fallback HTTP navigation and trigger the interstitial.
+       tab_helper->set_is_navigation_fallback(true);
+ 
+-      if (base::FeatureList::IsEnabled(
+-              security_interstitials::features::kHttpsFirstDialogUi)) {
++      if (UseAskBeforeHttpDialog()) {  // agens
+         // New dialog UI.
+         // Rewrite the response to a blank page. DidFinishNavigation will
+         // show the ABH dialog on top of this blank page.
+@@ -194,6 +198,11 @@ HttpsUpgradesNavigationThrottle::WillFailRequest() {
  
  content::NavigationThrottle::ThrottleCheckResult
  HttpsUpgradesNavigationThrottle::WillRedirectRequest() {
@@ -24960,6 +24992,16 @@ index ddd4432f25..156a2c4fdf 100644
    // If the navigation is doing a fallback redirect to HTTP, trigger the HTTP
    // interstitial (if enabled). The interceptor creates a redirect for the
    // fallback navigation, which will trigger MaybeCreateLoader() in the
+@@ -216,8 +225,7 @@ HttpsUpgradesNavigationThrottle::WillRedirectRequest() {
+     security_interstitials::https_only_mode::RecordInterstitialReason(
+         interstitial_state_);
+ 
+-    if (base::FeatureList::IsEnabled(
+-            security_interstitials::features::kHttpsFirstDialogUi)) {
++    if (UseAskBeforeHttpDialog()) {  // agens
+       // New dialog UI.
+       // Rewrite the response to a blank page and cancel the navigation.
+       // HttpsOnlyModeTabHelper::DidFinishNavigation() will
 diff --git a/chrome/browser/ssl/https_upgrades_navigation_throttle.h b/chrome/browser/ssl/https_upgrades_navigation_throttle.h
 index d51af888ca..d572690684 100644
 --- a/chrome/browser/ssl/https_upgrades_navigation_throttle.h
@@ -24975,18 +25017,27 @@ index d51af888ca..d572690684 100644
  };
  
 diff --git a/chrome/browser/ssl/https_upgrades_util.cc b/chrome/browser/ssl/https_upgrades_util.cc
-index 4790143c19..26b4607e9d 100644
+index 4790143c19..5b71da7ec6 100644
 --- a/chrome/browser/ssl/https_upgrades_util.cc
 +++ b/chrome/browser/ssl/https_upgrades_util.cc
-@@ -6,6 +6,7 @@
+@@ -6,6 +6,8 @@
  
  #include "base/feature_list.h"
  #include "base/values.h"
 +#include "chrome/browser/agens/embed/agens_controlled.h"  // agens nogncheck
++#include "chrome/browser/agens/embed/agens_embedded.h"  // agens nogncheck
  #include "chrome/browser/profiles/profile.h"
  #include "chrome/browser/safe_browsing/advanced_protection_status_manager.h"
  #include "chrome/browser/safe_browsing/advanced_protection_status_manager_factory.h"
-@@ -58,6 +59,12 @@ void AllowHttpForHostnamesForTesting(const std::vector<std::string>& hostnames,
+@@ -17,6 +19,7 @@
+ #include "components/content_settings/core/common/content_settings_pattern.h"
+ #include "components/prefs/pref_service.h"
+ #include "components/security_interstitials/content/stateful_ssl_host_state_delegate.h"
++#include "components/security_interstitials/core/features.h"
+ #include "components/security_interstitials/core/https_only_mode_metrics.h"
+ #include "content/public/browser/web_contents.h"
+ #include "net/base/url_util.h"
+@@ -58,6 +61,18 @@ void AllowHttpForHostnamesForTesting(const std::vector<std::string>& hostnames,
    prefs->SetList(prefs::kHttpAllowlist, std::move(allowed_hosts));
  }
  
@@ -24996,10 +25047,16 @@ index 4790143c19..26b4607e9d 100644
 +  return mark && !mark->paused;
 +}
 +
++bool UseAskBeforeHttpDialog() {
++  return base::FeatureList::IsEnabled(
++             security_interstitials::features::kHttpsFirstDialogUi) &&
++         !agens::IsEmbedded();
++}
++
  void ClearHttpAllowlistForHostnamesForTesting(PrefService* prefs) {
    base::ListValue empty_list;
    prefs->SetList(prefs::kHttpAllowlist, std::move(empty_list));
-@@ -65,7 +72,7 @@ void ClearHttpAllowlistForHostnamesForTesting(PrefService* prefs) {
+@@ -65,7 +80,7 @@ void ClearHttpAllowlistForHostnamesForTesting(PrefService* prefs) {
  
  security_interstitials::https_only_mode::HttpInterstitialState
  ComputeInterstitialState(content::WebContents* web_contents, const GURL& url) {
@@ -25009,10 +25066,10 @@ index 4790143c19..26b4607e9d 100644
    }
    Profile* profile =
 diff --git a/chrome/browser/ssl/https_upgrades_util.h b/chrome/browser/ssl/https_upgrades_util.h
-index 59f02d024b..dd573e16cf 100644
+index 59f02d024b..bc76279526 100644
 --- a/chrome/browser/ssl/https_upgrades_util.h
 +++ b/chrome/browser/ssl/https_upgrades_util.h
-@@ -42,6 +42,11 @@ void ClearHttpAllowlistForHostnamesForTesting(PrefService* prefs);
+@@ -42,6 +42,16 @@ void ClearHttpAllowlistForHostnamesForTesting(PrefService* prefs);
  security_interstitials::https_only_mode::HttpInterstitialState
  ComputeInterstitialState(content::WebContents* web_contents, const GURL& url);
  
@@ -25020,6 +25077,11 @@ index 59f02d024b..dd573e16cf 100644
 +// interstitial: http:// loads after a failed upgrade, remembered for that tab only, never in the
 +// profile's allowlist, so the person's tabs stay strict (docs/protocolo.md, "Páginas sem HTTPS").
 +bool IsAgensAgentTab(content::WebContents* web_contents);
++
++// agens: whether an http:// fallback asks with the tab-modal dialog (kHttpsFirstDialogUi) instead
++// of the full-page interstitial. Never embedded: the dialog would sit on the hidden window, out of
++// the host's sight; the interstitial is a page, drawn in the tab's view like any other.
++bool UseAskBeforeHttpDialog();
 +
  // Returns true if the HTTPS-First Balanced Mode feature flag is enabled.
  bool IsBalancedModeAvailable();
