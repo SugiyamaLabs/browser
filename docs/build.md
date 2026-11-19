@@ -115,6 +115,36 @@ GH_TOKEN=$(gh auth token --user WillianSugiyama) gh release create v<release> <p
 
 - Testado (19/11/2026): `sparkle.sh embed` + `sign.sh` com a Developer ID num clone do `out/Default` passam em `codesign --verify --deep --strict`; o framework assinado carrega e cria o `SPUStandardUpdaterController`; `sparkle.sh appcast` num `.dmg` local com chave descartável gera XML válido com `sparkle:edSignature` que o `sign_update --verify` confere, e para com erro quando a chave não bate. Não testado: notarização com o Sparkle dentro, a atualização de ponta a ponta (baixar, instalar, reabrir) e o `generate_appcast` com a chave do Keychain.
 
+## Widevine (conteúdo protegido)
+
+O Widevine **não vai no app** (licença do Google). O build já sai com `enable_widevine=true` (vem do `flags.gn` do ungoogled; nenhum arg nosso a mais): isso compila o suporte a EME e o instalador do componente, sem o CDM. O navegador baixa o CDM do Google na primeira abertura ([sem telemetria](sem-telemetria.md#widevine-conteúdo-protegido)).
+
+O ungoogled troca os domínios do Google no código (`domain_substitution.py`), o que deixa o component updater sem servidor. O `chromium/webstore.py` (roda no `fetch.sh`, depois da troca) devolve só o endereço `https://update.googleapis.com/service/update2/json` em `component_updater_url_constants.cc` (o reserva HTTP também vira HTTPS). Nosso código na árvore:
+
+| Arquivo | O que muda |
+|---|---|
+| `components/component_updater/component_updater_service.cc` | só o Widevine (`oimompecagnajdejgnnjijobebaeigek`) vai ao servidor, na checagem periódica e na pedida na hora; os outros componentes ficam registrados e nunca são perguntados |
+| `components/component_updater/configurator_impl.cc` | sem pings (relatórios de instalação) |
+| `components/update_client/update_checker.cc` | o ungoogled corta toda checagem aqui (`block-requests.patch`); passa só a que tem exatamente o Widevine |
+| `chrome/browser/component_updater/chrome_component_updater_configurator.cc` | sem o downloader de segundo plano do macOS (`NSURLSession`): o download passa pela rede do Chromium e aparece na NetLog |
+| `chrome/browser/component_updater/registration.cc` | registra o Widevine só com `agens.widevine.enabled`; desligado, apaga `WidevineCdm` |
+| `chrome/browser/component_updater/widevine_cdm_component_installer.*` | id exposto e `UpdateWidevineCdmComponentNow` (amigo do `OnDemandUpdater`) para baixar ao ligar |
+| `chrome/browser/browser_process_impl.cc` | a preferência `agens.widevine.enabled` (Local State, ligada) |
+| `chrome/browser/agens/embed/native_shell.cc`, `agens_embed.h` | `agens_widevine_status`, `agens_widevine_set_enabled`, `agens_widevine_remove` para a casca |
+| `chrome/browser/agens/ui/chrome_mac.mm` | Configurações › Privacidade › Conteúdo protegido |
+
+### VMP (Netflix em HD): assinatura da Castlabs
+
+Sem VMP, o Widevine funciona mas a Netflix e outros limitam a qualidade (ou recusam). O VMP é uma assinatura do app feita pelo serviço EVS da Castlabs, com conta própria (gratuita):
+
+```sh
+python3 -m pip install --upgrade castlabs-evs       # no venv do env.sh ($BROWSER_WORK/venv)
+python3 -m castlabs_evs.account signup              # uma vez; depois, reauth quando a sessão expirar
+AGENS_EVS=1 BROWSER_WORK=~/browser-work-2 ./chromium/release.sh ~/Releases/AgensBrowser
+```
+
+Com `AGENS_EVS=1`, o `release.sh` roda `python3 -m castlabs_evs.vmp sign-pkg <app>` depois do Sparkle e **antes** do `sign.sh`: no macOS a assinatura VMP tem de vir antes da do Apple, que sela os arquivos `.sig` que ela põe no bundle (ordem da documentação da Castlabs). Sem a variável, o passo não roda. Ainda não testado: falta a conta; não sabemos se o `sign-pkg` cobre os helpers e o framework do Chromium como cobre um app Electron.
+
 ## Rede durante o build
 
 O `fetch.sh` baixa o código de `chromium.googlesource.com` e o perfil de PGO do armazenamento do Google, e o `build.sh` baixa crates do crates.io para o bindgen. Isso acontece só no build. O navegador compilado não fala com o Google (é a base do ungoogled).

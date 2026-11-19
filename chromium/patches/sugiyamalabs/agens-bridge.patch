@@ -1,3 +1,42 @@
+diff --git a/chrome/BUILD.gn b/chrome/BUILD.gn
+index dd06f62905..13469734ad 100644
+--- a/chrome/BUILD.gn
++++ b/chrome/BUILD.gn
+@@ -1162,6 +1162,26 @@ if (is_win) {
+     }
+   }
+ 
++  # agens: page translation with Apple's Translation framework (Swift only; Chromium's Mac
++  # toolchain has none), built apart and loaded by the casca with dlopen on macOS 15+.
++  action("agens_translate_dylib") {
++    script = "//chrome/browser/agens/ui/build_translate.py"
++    sources = [ "//chrome/browser/agens/ui/translate_mac.swift" ]
++    outputs = [ "$root_out_dir/libagens_translate.dylib" ]
++    args = [
++      rebase_path(sources[0], root_build_dir),
++      rebase_path(outputs[0], root_build_dir),
++      current_cpu,
++      rebase_path(mac_sdk_path, root_build_dir),
++    ]
++  }
++
++  bundle_data("agens_translate_library") {
++    sources = [ "$root_out_dir/libagens_translate.dylib" ]
++    outputs = [ "{{bundle_contents_dir}}/Libraries/{{source_file_part}}" ]
++    public_deps = [ ":agens_translate_dylib" ]
++  }
++
+   # Add the SwiftShader .dylibs in the MODULE_DIR of Chromium.app
+   bundle_data("swiftshader_binaries") {
+     sources = [
+@@ -1387,6 +1407,7 @@ if (is_win) {
+     public_deps = [ ":chrome_dll" ]
+ 
+     bundle_deps = [
++      ":agens_translate_library",
+       ":aperitif_library",
+       ":chrome_framework_helpers",
+       ":chrome_framework_resources",
 diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
 index 08dba23b48..98caceb7f3 100644
 --- a/chrome/browser/BUILD.gn
@@ -11671,7 +11710,7 @@ index 0000000000..48063dd9a1
 +
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_COOKIE_POOL_H_
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
-index 9d0bf4646d..c40a16c47a 100644
+index 9d0bf4646d..d04db3f2eb 100644
 --- a/chrome/browser/agens/embed/agens_embed.h
 +++ b/chrome/browser/agens/embed/agens_embed.h
 @@ -36,6 +36,20 @@ typedef struct {
@@ -11695,7 +11734,7 @@ index 9d0bf4646d..c40a16c47a 100644
  } AgensTab;
  
  // What `AgensTab.indicators` carries (camera and microphone have their own fields above).
-@@ -66,11 +80,23 @@ void agens_window_new_tab(AgensWindow* window);
+@@ -66,11 +80,34 @@ void agens_window_new_tab(AgensWindow* window);
  void agens_window_activate_tab(AgensWindow* window, int index);
  void agens_window_close_tab(AgensWindow* window, int index);
  void agens_window_move_tab(AgensWindow* window, int from, int to);
@@ -11716,10 +11755,21 @@ index 9d0bf4646d..c40a16c47a 100644
  void agens_window_toggle_mute(AgensWindow* window, int index);
 +// The tab's volume, 0..100; kept with the tab until it closes (not saved).
 +void agens_window_set_volume(AgensWindow* window, int index, int percent);
++// Runs `script` in an isolated world of the tab's main frame (Chromium's translate world, kept per
++// document); `done` gets the result as JSON, "null" when the tab or frame went away first. Later,
++// on the UI thread.
++typedef void (*AgensScriptDone)(void* context, const char* json);
++void agens_window_run_script(AgensWindow* window, int index, const char* script, AgensScriptDone done, void* context);
++// The casca's translation (prototipos/janela-traduzir.html): while `label` is not empty (e.g.
++// "Traduzir para português") the active tab's right-click menu has it, on the page and on a
++// selection; choosing it calls `fn` with the selected text ("" for the page). Chromium's own
++// Google translation stays off.
++typedef void (*AgensTranslateFn)(void* context, const char* selection);
++void agens_window_set_translate(AgensWindow* window, const char* label, AgensTranslateFn fn, void* context);
  // Address or search text, as typed; the engine decides which it is.
  void agens_window_navigate(AgensWindow* window, const char* text);
  void agens_window_back(AgensWindow* window);
-@@ -79,14 +105,26 @@ void agens_window_reload(AgensWindow* window);
+@@ -79,14 +116,26 @@ void agens_window_reload(AgensWindow* window);
  void agens_window_stop(AgensWindow* window);
  // Adds the active page to Favoritos, or removes it if it's there.
  void agens_window_toggle_bookmark(AgensWindow* window);
@@ -11748,7 +11798,7 @@ index 9d0bf4646d..c40a16c47a 100644
  
  // Address suggestions, from local sources only (history, bookmarks, the typed search); remote
  // search suggestions stay off. Call suggest on every edit, with "" to stop.
-@@ -109,18 +147,38 @@ typedef struct {
+@@ -109,18 +158,38 @@ typedef struct {
    const char* name;  // UTF-8
    int active;        // this window's ato
    int asleep;        // not loaded in memory right now
@@ -11788,7 +11838,7 @@ index 9d0bf4646d..c40a16c47a 100644
  typedef enum {
    kAgensDownloading,
    kAgensDownloaded,
-@@ -132,6 +190,13 @@ typedef struct {
+@@ -132,6 +201,13 @@ typedef struct {
    long long received, total;  // bytes; total is 0 when unknown
    AgensDownloadState state;
    int paused;
@@ -11802,7 +11852,7 @@ index 9d0bf4646d..c40a16c47a 100644
  } AgensDownload;
  typedef void (*AgensDownloadsChanged)(void* context, const AgensDownload* downloads, int count,
                                        int started);
-@@ -140,6 +205,13 @@ void agens_window_set_downloads_observer(AgensWindow* window, AgensDownloadsChan
+@@ -140,6 +216,13 @@ void agens_window_set_downloads_observer(AgensWindow* window, AgensDownloadsChan
  void agens_window_download_open(AgensWindow* window, int index);       // the file
  void agens_window_download_show(AgensWindow* window, int index);       // in the Finder
  void agens_window_download_cancel(AgensWindow* window, int index);
@@ -11816,7 +11866,7 @@ index 9d0bf4646d..c40a16c47a 100644
  
  // --- Settings (the browser's own; not part of what the Agens app embeds).
  
-@@ -172,6 +244,9 @@ int agens_pref_get_string(AgensWindow* window, AgensPrefStore store, const char*
+@@ -172,6 +255,9 @@ int agens_pref_get_string(AgensWindow* window, AgensPrefStore store, const char*
  void agens_pref_set_bool(AgensWindow* window, AgensPrefStore store, const char* name, int value);
  void agens_pref_set_int(AgensWindow* window, AgensPrefStore store, const char* name, int value);
  void agens_pref_set_string(AgensWindow* window, AgensPrefStore store, const char* name, const char* value);
@@ -11826,7 +11876,7 @@ index 9d0bf4646d..c40a16c47a 100644
  // List-of-strings prefs (e.g. sites that never sleep). get calls `fn` now with the items.
  typedef void (*AgensStringsFn)(void* context, const char* const* items, int count);
  int agens_pref_get_list(AgensWindow* window, AgensPrefStore store, const char* name, AgensStringsFn fn, void* context);
-@@ -219,11 +294,24 @@ typedef struct {
+@@ -219,11 +305,24 @@ typedef struct {
    const char* name;
    const char* version;
    int enabled;
@@ -11852,7 +11902,7 @@ index 9d0bf4646d..c40a16c47a 100644
  
  // Senhas salvas. The list carries no passwords; agens_password_get copies one (the UI asks for
  // Touch ID first). Indexes refer to the last list delivered.
-@@ -232,9 +320,12 @@ typedef struct {
+@@ -232,9 +331,12 @@ typedef struct {
    const char* username;
  } AgensLogin;
  typedef void (*AgensLoginsFn)(void* context, const AgensLogin* logins, int count);
@@ -11868,7 +11918,7 @@ index 9d0bf4646d..c40a16c47a 100644
  
  // Favoritos of this window's ato, in order, folders before what they hold. `parent` is the id of
  // the folder a node is in; `bar` is the id of the bookmarks bar (its children show on the bar).
-@@ -255,7 +346,7 @@ void agens_bookmark_add_folder(AgensWindow* window, const char* title);  // at t
+@@ -255,7 +357,7 @@ void agens_bookmark_add_folder(AgensWindow* window, const char* title);  // at t
  // Results arrive through the observer: the current match (1-based, 0 for none) and the total.
  typedef void (*AgensFindChanged)(void* context, int current, int total);
  void agens_window_set_find_observer(AgensWindow* window, AgensFindChanged observer, void* context);
@@ -11877,7 +11927,7 @@ index 9d0bf4646d..c40a16c47a 100644
  void agens_find_stop(AgensWindow* window);
  
  // Saving a password the person just used on the active page. Fills `out` (strings valid until
-@@ -266,7 +357,23 @@ typedef struct {
+@@ -266,7 +368,23 @@ typedef struct {
    int update;  // a new password for a login already saved
  } AgensPasswordPrompt;
  int agens_password_prompt(AgensWindow* window, AgensPasswordPrompt* out);
@@ -11902,7 +11952,7 @@ index 9d0bf4646d..c40a16c47a 100644
  void agens_password_answer(AgensWindow* window, AgensPasswordAnswer answer);
  
  // A site asks for permissions (camera, location…): agens_ui_permission_prompt shows them, the
-@@ -279,6 +386,43 @@ typedef enum {
+@@ -279,6 +397,43 @@ typedef enum {
  } AgensPermissionAnswer;
  void agens_window_permission_answer(AgensWindow* window, AgensPermissionAnswer answer);
  
@@ -11946,7 +11996,7 @@ index 9d0bf4646d..c40a16c47a 100644
  // The site of the active page, for the panel behind the site icon. `pattern` is what
  // agens_site_exception_set takes for this site. Strings valid until the next call.
  typedef struct {
-@@ -291,13 +435,20 @@ AgensPermission agens_site_permission(AgensWindow* window, const char* kind);  /
+@@ -291,13 +446,20 @@ AgensPermission agens_site_permission(AgensWindow* window, const char* kind);  /
  // Cookies and storage of the active page's site only.
  void agens_site_clear_data(AgensWindow* window, AgensDoneFn done, void* context);
  
@@ -11970,7 +12020,7 @@ index 9d0bf4646d..c40a16c47a 100644
  } AgensExtensionButton;
  typedef void (*AgensExtensionButtonsChanged)(void* context, const AgensExtensionButton* list, int count,
                                               const char* installed);
-@@ -324,6 +475,11 @@ void agens_history_remove(AgensWindow* window, const char* url);
+@@ -324,6 +486,21 @@ void agens_history_remove(AgensWindow* window, const char* url);
  // Asks the system to make this browser the default for links (macOS shows its own prompt).
  void agens_window_set_default_browser(AgensWindow* window);
  
@@ -11979,10 +12029,20 @@ index 9d0bf4646d..c40a16c47a 100644
 +int agens_updates_available(void);
 +void agens_updates_check(void);
 +
++// Conteúdo protegido (Widevine), browser-wide; bool pref "agens.widevine.enabled" (kAgensLocal,
++// default on). On, the CDM downloads from Google's component updater on its own; off, Google is never
++// asked. set_enabled(0) and remove delete the installed CDM; set_enabled(1) asks for it now. After a
++// remove with the pref on, it downloads again at the next start. Status fills `version` when
++// installed. A CDM already loaded by a page stays loaded until the browser restarts.
++typedef enum { kAgensWidevineNotInstalled, kAgensWidevineDownloading, kAgensWidevineInstalled } AgensWidevineStatus;
++AgensWidevineStatus agens_widevine_status(char* version, int size);
++void agens_widevine_set_enabled(int on);
++void agens_widevine_remove(void);
++
  // Implemented by the interface. The chrome is a platform view (NSView* on macOS) the size of the
  // window, returned retained; it must let clicks through where the page sits. The engine puts the
  // page where agens_ui_layout says, and calls destroy when the window closes.
-@@ -340,6 +496,7 @@ typedef enum {
+@@ -340,6 +517,7 @@ typedef enum {
    kAgensCommandFindNext,     // ⌘G
    kAgensCommandFindPrevious, // ⌘⇧G
    kAgensCommandPasswordPrompt,  // the page has a password to save or update: ask (see below)
@@ -11990,7 +12050,7 @@ index 9d0bf4646d..c40a16c47a 100644
  } AgensCommand;
  int agens_ui_command(void* chrome, AgensCommand command);
  // Opens Settings on a section ("senhas", "extensoes", "sobre"...; "" keeps the current one), or the
-@@ -354,10 +511,32 @@ void agens_ui_colors(void* chrome, unsigned* window, unsigned* page, unsigned* l
+@@ -354,10 +532,32 @@ void agens_ui_colors(void* chrome, unsigned* window, unsigned* page, unsigned* l
  // lights center on it; it follows the density).
  // Where the extensions button is (extension popups hang from it).
  AgensRect agens_ui_extensions_anchor(void* chrome);
@@ -13747,7 +13807,7 @@ index 0000000000..a4c34b2b5b
 +  if (!shares.empty()) shares.front()->Switch(w);
 +}
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
-index 268d4dc7bd..14e36e85ee 100644
+index 268d4dc7bd..f473342646 100644
 --- a/chrome/browser/agens/embed/agens_window.h
 +++ b/chrome/browser/agens/embed/agens_window.h
 @@ -5,6 +5,7 @@
@@ -14323,7 +14383,7 @@ index 268d4dc7bd..14e36e85ee 100644
    void OnSplitTabChanged(const SplitTabChange&) override { Notify(); }
  
    void Suggest(const std::string& text) {
-@@ -577,11 +916,13 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -577,76 +916,118 @@ struct AgensWindow : public TabStripModelObserver,
    bool notify_pending = false;
    AgensStatusBubble status_bubble;
    raw_ptr<content::DownloadManager> downloads_manager = nullptr;
@@ -14337,7 +14397,12 @@ index 268d4dc7bd..14e36e85ee 100644
    raw_ptr<void> ui = nullptr;  // the chrome (agens_ui_*), set by the platform shell
    raw_ptr<views::View> extensions_anchor = nullptr;  // under the UI's extensions button
    AgensExtensionButtonsChanged extension_buttons_observer = nullptr;
-@@ -591,62 +932,99 @@ struct AgensWindow : public TabStripModelObserver,
+   raw_ptr<void> extension_buttons_context = nullptr;
+   std::map<std::string, std::vector<uint8_t>> extension_icons;
++  std::string translate_label;  // agens_window_set_translate: the menu item, "" for none
++  AgensTranslateFn translate_fn = nullptr;
++  raw_ptr<void> translate_context = nullptr;
+   std::set<std::string> extension_icons_loading;
    base::ScopedObservation<extensions::ExtensionRegistry, extensions::ExtensionRegistryObserver>
        extensions_observation{this};
  
@@ -14456,7 +14521,7 @@ index 268d4dc7bd..14e36e85ee 100644
    AgensFindChanged find_observer = nullptr;
    raw_ptr<void> find_context = nullptr;
    base::ScopedObservation<find_in_page::FindTabHelper, find_in_page::FindResultObserver> find_observation{this};
-@@ -655,7 +1033,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -655,7 +1036,7 @@ struct AgensWindow : public TabStripModelObserver,
      content::WebContents* active = model()->GetActiveWebContents();
      return active ? find_in_page::FindTabHelper::FromWebContents(active) : nullptr;
    }
@@ -14465,7 +14530,7 @@ index 268d4dc7bd..14e36e85ee 100644
      find_in_page::FindTabHelper* helper = ActiveFind();
      if (!helper) return;
      if (!find_observation.IsObservingSource(helper)) {
-@@ -667,7 +1045,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -667,7 +1048,7 @@ struct AgensWindow : public TabStripModelObserver,
        if (find_observer) find_observer(find_context, 0, 0);
        return;
      }
@@ -14507,19 +14572,22 @@ index 4eb24ab895..436be6abd7 100644
      progress_.Run(0, created ? "Criando o ato " + ato + "…" : "Usando o ato " + ato + "…");
      manager->CreateProfileAsync(
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
-index cfdc014cf4..6760847a0d 100644
+index cfdc014cf4..f3d7d023bd 100644
 --- a/chrome/browser/agens/embed/native_shell.cc
 +++ b/chrome/browser/agens/embed/native_shell.cc
-@@ -4,6 +4,8 @@
+@@ -4,6 +4,11 @@
  #include "chrome/browser/agens/embed/native_shell.h"
  
  #include "chrome/browser/agens/embed/agens_window.h"
++#include "base/json/json_writer.h"
++#include "chrome/common/chrome_isolated_world_ids.h"
++#include "mojo/public/cpp/bindings/callback_helpers.h"
 +#include "components/permissions/permission_request.h"
 +#include "components/permissions/permission_util.h"
  #include <algorithm>
  #include "base/task/single_thread_task_runner.h"
  #include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
-@@ -46,14 +48,25 @@
+@@ -46,14 +51,31 @@
  #include "components/password_manager/core/browser/password_store/password_store_consumer.h"
  #include "components/password_manager/core/browser/password_store/password_store_interface.h"
  #include "components/password_manager/core/browser/password_store/stored_credential.h"
@@ -14529,6 +14597,12 @@ index cfdc014cf4..6760847a0d 100644
 +#include "chrome/browser/browser_process.h"
 +#include "chrome/browser/profiles/profile_manager.h"
 +#include "components/os_crypt/async/browser/os_crypt_async.h"
++#include "chrome/browser/component_updater/widevine_cdm_component_installer.h"
++#include "components/component_updater/component_updater_service.h"
++#include "components/update_client/crx_update_item.h"
++#include "components/update_client/update_client.h"
++#include "base/functional/bind.h"
++#include "base/version.h"
 +#include "components/password_manager/core/browser/password_manager_constants.h"
 +#include "components/password_manager/core/browser/password_store/login_database.h"
  #include "content/public/browser/browsing_data_remover.h"
@@ -14545,7 +14619,7 @@ index cfdc014cf4..6760847a0d 100644
  #include "ui/base/window_open_disposition.h"
  #include "ui/views/view.h"
  
-@@ -61,6 +74,7 @@
+@@ -61,6 +83,7 @@
  #include "base/no_destructor.h"
  
  WEB_CONTENTS_USER_DATA_KEY_IMPL(AgensPageError);
@@ -14553,7 +14627,7 @@ index cfdc014cf4..6760847a0d 100644
  
  namespace {
  base::flat_set<const StatusBubble*>& NativeBubbles() {
-@@ -93,12 +107,34 @@ void agens_window_set_atos_observer(AgensWindow* w, AgensAtosChanged observer, v
+@@ -93,12 +116,34 @@ void agens_window_set_atos_observer(AgensWindow* w, AgensAtosChanged observer, v
    w->atos_context = context;
    w->NotifyAtos();
  }
@@ -14588,7 +14662,7 @@ index cfdc014cf4..6760847a0d 100644
  void agens_window_set_status_observer(AgensWindow* w, AgensStatusChanged observer, void* context) {
    w->status_bubble.observer = observer;
    w->status_bubble.context = context;
-@@ -117,6 +153,35 @@ void agens_window_download_show(AgensWindow* w, int index) {
+@@ -117,6 +162,35 @@ void agens_window_download_show(AgensWindow* w, int index) {
  void agens_window_download_cancel(AgensWindow* w, int index) {
    if (download::DownloadItem* item = w->DownloadAt(index)) item->Cancel(/*user_cancel=*/true);
  }
@@ -14624,7 +14698,55 @@ index cfdc014cf4..6760847a0d 100644
  void agens_window_set_color_mode(AgensWindow* w, AgensColorMode mode) {
    const auto scheme = mode == kAgensModeLight  ? ThemeService::BrowserColorScheme::kLight
                        : mode == kAgensModeDark ? ThemeService::BrowserColorScheme::kDark
-@@ -370,12 +435,23 @@ void agens_extensions(AgensWindow* w, AgensExtensionsFn fn, void* context) {
+@@ -228,6 +302,47 @@ void agens_pref_set_list(AgensWindow* w, AgensPrefStore store, const char* name,
+   Store(w, store)->SetList(name, std::move(list));
+ }
+ 
++AgensWidevineStatus agens_widevine_status(char* version, int size) {
++  component_updater::ComponentUpdateService* cus = g_browser_process->component_updater();
++  if (!cus) return kAgensWidevineNotInstalled;
++  std::string installed;
++  for (const component_updater::ComponentInfo& c : cus->GetComponents()) {
++    // Registered with nothing installed yet is 0.0.0.0.
++    if (c.id == component_updater::kWidevineCdmComponentId && c.version.IsValid() &&
++        c.version != base::Version("0.0.0.0")) {
++      installed = c.version.GetString();
++    }
++  }
++  using State = update_client::ComponentState;
++  update_client::CrxUpdateItem item;
++  if (cus->GetComponentDetails(component_updater::kWidevineCdmComponentId, &item) &&
++      ((item.state == State::kChecking && installed.empty()) ||
++       (item.state >= State::kCanUpdate && item.state <= State::kUpdating))) {
++    return kAgensWidevineDownloading;
++  }
++  if (installed.empty()) return kAgensWidevineNotInstalled;
++  if (version && size > 0) {
++    const size_t n = std::min(installed.size(), static_cast<size_t>(size - 1));
++    std::copy_n(installed.data(), n, version);
++    version[n] = 0;
++  }
++  return kAgensWidevineInstalled;
++}
++void agens_widevine_remove(void) {
++  // Unregistering uninstalls: the component's version folders under WidevineCdm are deleted.
++  if (component_updater::ComponentUpdateService* cus = g_browser_process->component_updater()) {
++    cus->UnregisterComponent(component_updater::kWidevineCdmComponentId);
++  }
++}
++void agens_widevine_set_enabled(int on) {
++  g_browser_process->local_state()->SetBoolean("agens.widevine.enabled", on != 0);
++  component_updater::ComponentUpdateService* cus = g_browser_process->component_updater();
++  if (!on || !cus) return agens_widevine_remove();
++  component_updater::RegisterWidevineCdmComponent(cus, base::BindOnce([] {
++    if (auto* c = g_browser_process->component_updater()) component_updater::UpdateWidevineCdmComponentNow(c);
++  }));
++}
++
+ static std::optional<ContentSettingsType> KindOf(const char* kind) {
+   static const std::pair<const char*, ContentSettingsType> kKinds[] = {
+       {"camera", ContentSettingsType::MEDIASTREAM_CAMERA},
+@@ -370,12 +485,23 @@ void agens_extensions(AgensWindow* w, AgensExtensionsFn fn, void* context) {
    extensions::ExtensionRegistry* registry = extensions::ExtensionRegistry::Get(profile);
    std::vector<scoped_refptr<const extensions::Extension>> shown;
    for (const auto& e : registry->GenerateInstalledExtensionsSet()) {
@@ -14652,7 +14774,7 @@ index cfdc014cf4..6760847a0d 100644
    }
    fn(context, out.data(), static_cast<int>(out.size()));
  }
-@@ -388,11 +464,21 @@ void agens_extension_set_enabled(AgensWindow* w, const char* id, int enabled) {
+@@ -388,11 +514,21 @@ void agens_extension_set_enabled(AgensWindow* w, const char* id, int enabled) {
      registrar->DisableExtension(id, {extensions::disable_reason::DISABLE_USER_ACTION});
    }
  }
@@ -14678,7 +14800,7 @@ index cfdc014cf4..6760847a0d 100644
  }
  
  namespace {
-@@ -454,32 +540,157 @@ class SavedLogins : public base::SupportsUserData::Data,
+@@ -454,32 +590,157 @@ class SavedLogins : public base::SupportsUserData::Data,
  };
  }  // namespace
  
@@ -14743,7 +14865,11 @@ index cfdc014cf4..6760847a0d 100644
 +    return true;
 +  }
 +  return false;
-+}
+ }
+-int agens_password_get(AgensWindow* w, int index, char* out, int size) {
+-  SavedLogins* saved = SavedLogins::For(w->browser->GetProfile());
+-  if (index < 0 || index >= static_cast<int>(saved->logins.size()) || size <= 0) return 0;
+-  const std::string password = base::UTF16ToUTF8(saved->logins[index].password_value.value());
 +
 +void DeliverLogins(const std::vector<password_manager::StoredCredential>& logins, AgensLoginsFn fn, void* context) {
 +  std::vector<std::string> sites, users;
@@ -14754,11 +14880,7 @@ index cfdc014cf4..6760847a0d 100644
 +  std::vector<AgensLogin> out;
 +  for (size_t i = 0; i < logins.size(); ++i) out.push_back({sites[i].c_str(), users[i].c_str()});
 +  fn(context, out.data(), static_cast<int>(out.size()));
- }
--int agens_password_get(AgensWindow* w, int index, char* out, int size) {
--  SavedLogins* saved = SavedLogins::For(w->browser->GetProfile());
--  if (index < 0 || index >= static_cast<int>(saved->logins.size()) || size <= 0) return 0;
--  const std::string password = base::UTF16ToUTF8(saved->logins[index].password_value.value());
++}
 +}  // namespace
 +
 +void agens_passwords(AgensWindow* w, const char* ato, AgensLoginsFn fn, void* context) {
@@ -14848,7 +14970,7 @@ index cfdc014cf4..6760847a0d 100644
      case kAgensPermissionDeny: delegate->Deny(options); break;
      case kAgensPermissionDismiss: delegate->Dismiss(options); break;
    }
-@@ -535,6 +746,7 @@ void agens_extension_click(AgensWindow* w, const char* id) {
+@@ -535,6 +796,7 @@ void agens_extension_click(AgensWindow* w, const char* id) {
    const extensions::Extension* extension =
        extensions::ExtensionRegistry::Get(profile)->enabled_extensions().GetByID(id ? id : "");
    content::WebContents* active = w->model()->GetActiveWebContents();
@@ -14856,7 +14978,7 @@ index cfdc014cf4..6760847a0d 100644
    auto* runner = active ? extensions::ExtensionActionRunner::GetForWebContents(active) : nullptr;
    if (!extension || !runner) return;
    if (runner->RunAction(extension, /*grant_tab_permissions=*/true) != extensions::ExtensionAction::ShowAction::kShowPopup) {
-@@ -559,8 +771,8 @@ void agens_window_set_find_observer(AgensWindow* w, AgensFindChanged observer, v
+@@ -559,8 +821,8 @@ void agens_window_set_find_observer(AgensWindow* w, AgensFindChanged observer, v
    w->find_observer = observer;
    w->find_context = context;
  }
@@ -14867,7 +14989,7 @@ index cfdc014cf4..6760847a0d 100644
  }
  void agens_find_stop(AgensWindow* w) {
    w->StopFind();
-@@ -608,9 +820,13 @@ int agens_password_prompt(AgensWindow* w, AgensPasswordPrompt* out) {
+@@ -608,9 +870,13 @@ int agens_password_prompt(AgensWindow* w, AgensPasswordPrompt* out) {
    controller->OnBubbleShown();  // our panel is the bubble
    return 1;
  }
@@ -14881,7 +15003,7 @@ index cfdc014cf4..6760847a0d 100644
    const bool update = controller->GetState() == password_manager::ui::PENDING_PASSWORD_UPDATE_STATE;
    if (answer == kAgensPasswordSave) {
      const password_manager::PasswordForm& form = controller->GetPendingPassword();
-@@ -688,6 +904,27 @@ void agens_window_move_tab(AgensWindow* w, int from, int to) {
+@@ -688,6 +954,27 @@ void agens_window_move_tab(AgensWindow* w, int from, int to) {
      w->model()->MoveWebContentsAt(from, to, /*select_after_move=*/false);
    }
  }
@@ -14909,7 +15031,7 @@ index cfdc014cf4..6760847a0d 100644
  void agens_window_split(AgensWindow* w, int index, int layout) {
    TabStripModel* m = w->model();
    const int active = m->active_index();
-@@ -707,11 +944,45 @@ void agens_window_unsplit(AgensWindow* w, int index) {
+@@ -707,11 +994,67 @@ void agens_window_unsplit(AgensWindow* w, int index) {
  void agens_window_set_pinned(AgensWindow* w, int index, int pinned) {
    if (w->model()->ContainsIndex(index)) w->model()->SetTabPinned(index, pinned);
  }
@@ -14952,10 +15074,32 @@ index cfdc014cf4..6760847a0d 100644
 +  // Nothing in Chromium watches the volume: say it changed, for the casca and view.tab.
 +  w->model()->UpdateWebContentsState(contents, TabChangeType::kAll);
 +}
++void agens_window_run_script(AgensWindow* w, int index, const char* script, AgensScriptDone done, void* context) {
++  content::RenderFrameHost* frame =
++      w->model()->ContainsIndex(index) ? w->model()->GetWebContentsAt(index)->GetPrimaryMainFrame() : nullptr;
++  if (!frame || !frame->IsRenderFrameLive()) {
++    done(context, "null");
++    return;
++  }
++  auto answer = base::BindOnce(
++      [](AgensScriptDone done, void* context, base::Value value) {
++        done(context, base::WriteJson(value).value_or("null").c_str());
++      },
++      done, context);
++  // Dropped without running (the frame went away): "null", so the casca lets go of its context.
++  frame->ExecuteJavaScriptInIsolatedWorld(base::UTF8ToUTF16(script ? script : ""),
++                                          mojo::WrapCallbackWithDefaultInvokeIfNotRun(std::move(answer), base::Value()),
++                                          ISOLATED_WORLD_ID_TRANSLATE);
++}
++void agens_window_set_translate(AgensWindow* w, const char* label, AgensTranslateFn fn, void* context) {
++  w->translate_label = label ? label : "";
++  w->translate_fn = fn;
++  w->translate_context = context;
++}
  void agens_window_navigate(AgensWindow* w, const char* text) {
    content::WebContents* active = w->model()->GetActiveWebContents();
    std::u16string input = base::UTF8ToUTF16(text ? text : "");
-@@ -760,8 +1031,14 @@ void agens_window_show_site_info(AgensWindow* w) {
+@@ -760,8 +1103,14 @@ void agens_window_show_site_info(AgensWindow* w) {
      ShowPageInfoDialog(active, base::DoNothing(), bubble_anchor_util::Anchor::kLocationBar);
    }
  }
@@ -14972,7 +15116,7 @@ index cfdc014cf4..6760847a0d 100644
  }
  void agens_window_stop(AgensWindow* w) {
    chrome::ExecuteCommand(w->browser, IDC_STOP);
-@@ -801,6 +1078,10 @@ std::unique_ptr<permissions::PermissionPrompt> CreateNativePermissionPrompt(
+@@ -801,6 +1150,10 @@ std::unique_ptr<permissions::PermissionPrompt> CreateNativePermissionPrompt(
      permissions::PermissionPrompt::Delegate*) {
    return nullptr;
  }
@@ -14983,7 +15127,7 @@ index cfdc014cf4..6760847a0d 100644
  float NativeTitlebarHeight(views::Widget*) {
    return 52;
  }
-@@ -814,6 +1095,13 @@ void NativeTabStateChanged(views::Widget*) {}
+@@ -814,6 +1167,13 @@ void NativeTabStateChanged(views::Widget*) {}
  void ConfirmCloseWithDownloads(views::Widget*, int, base::OnceCallback<void(bool)> callback) {
    std::move(callback).Run(true);
  }
@@ -14997,7 +15141,7 @@ index cfdc014cf4..6760847a0d 100644
  #endif
  
  bool IsNativeStatusBubble(const StatusBubble* bubble) {
-@@ -840,6 +1128,12 @@ const char* NativeSectionFor(const GURL& url) {
+@@ -840,6 +1200,12 @@ const char* NativeSectionFor(const GURL& url) {
    if (host == "help") return "sobre";
    if (host != "settings") return nullptr;
    if (path == "/help") return "sobre";
@@ -15010,7 +15154,7 @@ index cfdc014cf4..6760847a0d 100644
    if (path == "/passwords") return "senhas";
    if (path == "/content" || path == "/privacy" || path == "/security" || path == "/clearBrowserData") return "privacidade";
    if (path == "/searchEngines") return "busca";
-@@ -872,6 +1166,12 @@ class NativePageThrottle : public content::NavigationThrottle {
+@@ -872,6 +1238,12 @@ class NativePageThrottle : public content::NavigationThrottle {
      if (IsBlockedHost(url.host())) return {BLOCK_REQUEST, net::ERR_BLOCKED_BY_CLIENT};
      const char* section = NativeSectionFor(url);
      if (!section || !navigation_handle()->IsInPrimaryMainFrame()) return PROCEED;
@@ -15024,11 +15168,14 @@ index cfdc014cf4..6760847a0d 100644
      tabs::TabInterface* tab = tabs::TabInterface::MaybeGetFromContents(contents);
      BrowserWindowInterface* browser = tab ? tab->GetBrowserWindowInterface()
 diff --git a/chrome/browser/agens/embed/native_shell.h b/chrome/browser/agens/embed/native_shell.h
-index d81488f053..a7c28cfc63 100644
+index d81488f053..55cc07fcd0 100644
 --- a/chrome/browser/agens/embed/native_shell.h
 +++ b/chrome/browser/agens/embed/native_shell.h
-@@ -7,7 +7,9 @@
+@@ -5,9 +5,12 @@
+ #define CHROME_BROWSER_AGENS_EMBED_NATIVE_SHELL_H_
+ 
  #include <memory>
++#include <string>
  
  #include "base/feature_list.h"
 +#include "base/memory/weak_ptr.h"
@@ -15037,7 +15184,7 @@ index d81488f053..a7c28cfc63 100644
  #include "chrome/browser/extensions/extension_install_prompt.h"
  #include "chrome/browser/ui/login/login_handler.h"
  #include "components/javascript_dialogs/tab_modal_dialog_view.h"
-@@ -19,6 +21,10 @@ class StatusBubble;
+@@ -19,6 +22,10 @@ class StatusBubble;
  namespace content {
  class NavigationThrottleRegistry;
  }
@@ -15048,12 +15195,17 @@ index d81488f053..a7c28cfc63 100644
  namespace views {
  class View;
  class Widget;
-@@ -36,6 +42,12 @@ void FocusNativeLocationBar(views::Widget* widget);
+@@ -36,6 +43,17 @@ void FocusNativeLocationBar(views::Widget* widget);
  std::unique_ptr<permissions::PermissionPrompt> CreateNativePermissionPrompt(
      content::WebContents* contents,
      permissions::PermissionPrompt::Delegate* delegate);
 +// The native-shell window a tab is in (the casca's, not embedded); null otherwise.
 +AgensWindow* NativeWindowForContents(content::WebContents* contents);
++// The casca's "Traduzir para português" for the tab's right-click menu (agens_window_set_translate),
++// empty when it has none (another tab, Chromium's own window, macOS < 15). RunNativeTranslate runs
++// it, with the selected text or an empty string for the page.
++std::u16string NativeTranslateLabel(content::WebContents* contents);
++void RunNativeTranslate(content::WebContents* contents, const std::u16string& selection);
 +// The shell's list of saved logins under a login field, for a password popup in a native-shell
 +// window; null elsewhere and for other autofill (Chromium's popup then).
 +base::WeakPtr<autofill::AutofillPopupView> CreateNativeAutofillPopup(
@@ -15061,7 +15213,7 @@ index d81488f053..a7c28cfc63 100644
  // Where the window's traffic lights center (the shell's toolbar or tab strip height).
  float NativeTitlebarHeight(views::Widget* widget);
  // A site's HTTP login (user and password) as a native sheet on its window.
-@@ -68,6 +80,17 @@ void NativeTabStateChanged(views::Widget* widget);
+@@ -68,6 +86,17 @@ void NativeTabStateChanged(views::Widget* widget);
  // True for the native shell's bubble. Chromium casts status bubbles to StatusBubbleViews in a
  // couple of places; those check this first.
  bool IsNativeStatusBubble(const StatusBubble* bubble);
@@ -15080,7 +15232,7 @@ index d81488f053..a7c28cfc63 100644
  void ConfirmCloseWithDownloads(views::Widget* widget, int count, base::OnceCallback<void(bool)> callback);
  
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
-index 5d7ca90415..6ba6b2a061 100644
+index 5d7ca90415..eaa41838f5 100644
 --- a/chrome/browser/agens/embed/native_shell_mac.mm
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
 @@ -7,7 +7,28 @@
@@ -15215,7 +15367,7 @@ index 5d7ca90415..6ba6b2a061 100644
      auto activate = base::BindRepeating(
          [](BrowserWindowInterface* browser, content::WebContents* contents) {
            TabStripModel* model = browser->GetTabStripModel();
-@@ -122,13 +204,46 @@ explicit NativeShellView(BrowserWindowInterface* browser)
+@@ -122,14 +204,47 @@ explicit NativeShellView(BrowserWindowInterface* browser)
      chrome_ = (__bridge_transfer NSView*)agens_ui_create_chrome(window_.get());
      window_->ui = (__bridge void*)chrome_;
      window_->extensions_anchor = extensions_anchor_;
@@ -15232,15 +15384,15 @@ index 5d7ca90415..6ba6b2a061 100644
      contents_->SetWebContents(nullptr);
      contents2_->SetWebContents(nullptr);
 +    devtools_->SetWebContents(nullptr);
-+  }
-+
+   }
+ 
 +  // DevTools of one of this window's tabs opened, moved or closed: the tab list says where it is
 +  // (AgensTab.devtools) and the card makes room for it.
 +  void DevToolsChanged() {
 +    window_->Notify();
 +    InvalidateLayout();
 +    SchedulePaint();
-   }
++  }
 +  // The dock control: the active tab's DevTools out of the card into its window (2), into the card
 +  // (1) or closed (0).
 +  void MoveDevTools(int where) {
@@ -15259,9 +15411,10 @@ index 5d7ca90415..6ba6b2a061 100644
 +    devtools->SetAgensView(where == 1);
 +  }
 +  NSView* chrome() { return chrome_; }
- 
++
    void FocusAddress() { agens_ui_focus_address((__bridge void*)chrome_); }
    float TitlebarHeight() { return agens_ui_titlebar_height((__bridge void*)chrome_); }
+   AgensWindow* window() { return window_.get(); }
 @@ -171,6 +286,12 @@ void Layout(PassKey) override {
          split = nullptr;
        }
@@ -15528,7 +15681,7 @@ index 5d7ca90415..6ba6b2a061 100644
    }
    permissions::PermissionPromptDisposition GetPromptDisposition() const override {
      return permissions::PermissionPromptDisposition::ANCHORED_BUBBLE;
-@@ -407,9 +693,87 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
+@@ -407,9 +693,98 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
    }
  
   private:
@@ -15613,10 +15766,21 @@ index 5d7ca90415..6ba6b2a061 100644
 +  return shell && shell->window()->ui ? shell->window() : nullptr;
 +}
 +
++std::u16string NativeTranslateLabel(content::WebContents* contents) {
++  AgensWindow* w = NativeWindowForContents(contents);
++  if (!w || !w->translate_fn || w->model()->GetActiveWebContents() != contents) return std::u16string();
++  return base::UTF8ToUTF16(w->translate_label);
++}
++void RunNativeTranslate(content::WebContents* contents, const std::u16string& selection) {
++  if (NativeTranslateLabel(contents).empty()) return;
++  AgensWindow* w = NativeWindowForContents(contents);
++  w->translate_fn(w->translate_context, base::UTF16ToUTF8(selection).c_str());
++}
++
  std::unique_ptr<permissions::PermissionPrompt> CreateNativePermissionPrompt(
      content::WebContents* contents,
      permissions::PermissionPrompt::Delegate* delegate) {
-@@ -425,33 +789,415 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
+@@ -425,33 +800,415 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
  }
  
  namespace {
@@ -16050,7 +16214,7 @@ index 5d7ca90415..6ba6b2a061 100644
  }  // namespace
  
  class NativeLoginHandler : public LoginHandler {
-@@ -466,6 +1212,9 @@ void ShowNativeInstallDialog(std::unique_ptr<ExtensionInstallPromptShowParams> p
+@@ -466,6 +1223,9 @@ void ShowNativeInstallDialog(std::unique_ptr<ExtensionInstallPromptShowParams> p
    bool BuildViewImpl(const std::u16string& authority,
                       const std::u16string& explanation,
                       LoginModelData*) override {
@@ -16060,7 +16224,7 @@ index 5d7ca90415..6ba6b2a061 100644
      NSWindow* window = web_contents() ? web_contents()->GetTopLevelNativeWindow().GetNativeNSWindow() : nil;
      if (!window) return false;
      alert_ = [[NSAlert alloc] init];
-@@ -500,13 +1249,52 @@ bool BuildViewImpl(const std::u16string& authority,
+@@ -500,13 +1260,52 @@ bool BuildViewImpl(const std::u16string& authority,
    void CloseDialog() override {
      if (window_ && alert_.window.sheetParent) [window_ endSheet:alert_.window returnCode:NSModalResponseAbort];
      alert_ = nil;
@@ -16113,7 +16277,7 @@ index 5d7ca90415..6ba6b2a061 100644
  };
  
  // Owns itself: deleted when its sheet ends.
-@@ -520,6 +1308,13 @@ void CloseDialog() override {
+@@ -520,6 +1319,13 @@ void CloseDialog() override {
                   content::JavaScriptDialogManager::DialogClosedCallback callback,
                   base::OnceClosure force_closed)
        : callback_(std::move(callback)), force_closed_(std::move(force_closed)) {
@@ -16127,7 +16291,7 @@ index 5d7ca90415..6ba6b2a061 100644
      alert_ = [[NSAlert alloc] init];
      alert_.messageText = base::SysUTF16ToNSString(title);
      alert_.informativeText = base::SysUTF16ToNSString(message);
-@@ -558,6 +1353,8 @@ void CloseDialogWithoutCallback() override {
+@@ -558,6 +1364,8 @@ void CloseDialogWithoutCallback() override {
  
   private:
    void Finish(bool ok) {
@@ -16136,7 +16300,7 @@ index 5d7ca90415..6ba6b2a061 100644
      force_closed_.Reset();
      if (callback_) std::move(callback_).Run(ok, ok ? GetUserInput() : std::u16string());
      base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE, this);
-@@ -567,6 +1364,7 @@ void Finish(bool ok) {
+@@ -567,6 +1375,7 @@ void Finish(bool ok) {
    NSAlert* __strong alert_;
    NSTextField* __strong field_ = nil;
    NSWindow* __strong window_ = nil;
@@ -16144,7 +16308,7 @@ index 5d7ca90415..6ba6b2a061 100644
    base::WeakPtrFactory<NativeJsDialog> weak_{this};
  };
  
-@@ -589,10 +1387,28 @@ void Finish(bool ok) {
+@@ -589,10 +1398,28 @@ void Finish(bool ok) {
        ->GetWeakPtr();
  }
  
@@ -16173,11 +16337,52 @@ index 5d7ca90415..6ba6b2a061 100644
  float NativeTitlebarHeight(views::Widget* widget) {
    auto* shell = widget && widget->GetRootView()
                      ? views::AsViewClass<NativeShellView>(
+diff --git a/chrome/browser/agens/ui/build_translate.py b/chrome/browser/agens/ui/build_translate.py
+new file mode 100644
+index 0000000000..f537bf3c48
+--- /dev/null
++++ b/chrome/browser/agens/ui/build_translate.py
+@@ -0,0 +1,22 @@
++#!/usr/bin/env python3
++# Copyright 2026 SugiyamaLabs.
++# Builds translate_mac.swift into libagens_translate.dylib with the Command Line Tools' (or
++# Xcode's) swiftc, for macOS 15+ (Apple's Translation framework). Chromium's Mac toolchain has no
++# Swift tool (build/toolchain/apple/toolchain.gni), so this runs as a GN action.
++# Usage: build_translate.py <source.swift> <out.dylib> <arm64|x64> <sdk path>
++import os
++import subprocess
++import sys
++
++src, out, cpu, sdk = sys.argv[1:5]
++swiftc = '/Library/Developer/CommandLineTools/usr/bin/swiftc'
++if not os.path.exists(swiftc):
++  swiftc = subprocess.check_output(['xcrun', '--find', 'swiftc'], text=True).strip()
++arch = {'arm64': 'arm64', 'x64': 'x86_64'}[cpu]
++cache = os.path.join(os.path.dirname(os.path.abspath(out)), 'agens_translate_module_cache')
++subprocess.check_call([
++    swiftc, '-emit-library', '-module-name', 'AgensTranslate', '-swift-version', '5', '-O',
++    '-sdk', sdk, '-target', f'{arch}-apple-macos15.0', '-module-cache-path', cache,
++    '-Xlinker', '-install_name', '-Xlinker', '@rpath/libagens_translate.dylib',
++    '-o', out, src
++])
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
-index 3c18c4eab1..abc4d6e780 100644
+index 3c18c4eab1..1a2d4c529f 100644
 --- a/chrome/browser/agens/ui/chrome_mac.mm
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -21,6 +21,8 @@
+@@ -7,9 +7,12 @@
+ #import <AppKit/AppKit.h>
+ #import <objc/runtime.h>
+ #import <LocalAuthentication/LocalAuthentication.h>
++#import <NaturalLanguage/NaturalLanguage.h>
+ #import <QuartzCore/QuartzCore.h>
+ #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+ 
++#include <dlfcn.h>
++
+ #include <algorithm>
+ #include <map>
+ #include <set>
+@@ -21,6 +24,8 @@
  #include "chrome/browser/agens/embed/agens_import.h"
  #include "chrome/browser/agens/embed/agens_adblock.h"
  #include "chrome/browser/agens/ui/logo_svg.h"
@@ -16186,7 +16391,7 @@ index 3c18c4eab1..abc4d6e780 100644
  
  // ---------------------------------------------------------------------------------------------
  // Tokens (docs/visual.md, Grafite): each one dark and light, resolved by the view's appearance.
-@@ -93,7 +95,8 @@ unsigned solid(NSView* v) const {
+@@ -93,7 +98,8 @@ unsigned solid(NSView* v) const {
      kInk{0xF2F2F4, 0x16161A, 0xF8F0E7}, kMute{0x9A9AA4, 0x5C5C66, 0xB6A899},
      kDim{0x8A8A94, 0x71717B, 0xA09182}, kHover{0x18181C, 0xE8E8EC, 0x211913, 0x0FFFFFFF, 0x0D000000},
      kFloat{0x1A1A1F, 0xFFFFFF, 0x241B15, 0xE61E1E24, 0xF2FFFFFF},
@@ -16196,7 +16401,7 @@ index 3c18c4eab1..abc4d6e780 100644
  static NSString* const kThemeChanged = @"AgensThemeChanged";
  // Only the window color (Seu's tint and transparency): the engine repaints, nothing is rebuilt.
  // Sliders send it on every step while dragged.
-@@ -114,6 +117,8 @@ static CGColorRef CG(const Token& t, NSView* v) {
+@@ -114,6 +120,8 @@ static CGColorRef CG(const Token& t, NSView* v) {
  // Density (Configurações › Aparência; prototype .dense): compact lowers the bar, the tab strip
  // and the tabs.
  static NSString* const kDenseKey = @"AgensDense";
@@ -16205,7 +16410,7 @@ index 3c18c4eab1..abc4d6e780 100644
  static int g_dense = -1;
  static BOOL Dense() {
    if (g_dense < 0) g_dense = [NSUserDefaults.standardUserDefaults boolForKey:kDenseKey];
-@@ -167,6 +172,70 @@ static void SyncGlass(NSView* panel, CGFloat radius) {
+@@ -167,6 +175,70 @@ static void SyncGlass(NSView* panel, CGFloat radius) {
    }
  }
  static CGFloat Round() { return Theme() == 1 ? 1.45 : Theme() == 2 ? 1.3 : 1; }
@@ -16276,7 +16481,7 @@ index 3c18c4eab1..abc4d6e780 100644
  static BOOL Pill() { return Theme() == 1 || Theme() == 2; }
  
  static NSImage* Symbol(NSString* name, CGFloat size = 15) {
-@@ -192,6 +261,8 @@ static void SyncGlass(NSView* panel, CGFloat radius) {
+@@ -192,6 +264,8 @@ static void SyncGlass(NSView* panel, CGFloat radius) {
  static NSString* const kIconDown = @"<path d='M10 4v8.5M6.5 9l3.5 3.5L13.5 9M4.5 15.5h11'/>";
  static NSString* const kIconAparencia = @"<circle cx='10' cy='10' r='6.5'/><path d='M10 3.5a6.5 6.5 0 0 0 0 13z' fill='#000'/>";
  static NSString* const kIconSearch = @"<path d='M13.5 8.8A4.8 4.8 0 1 1 3.9 8.8A4.8 4.8 0 1 1 13.5 8.8Z M12.3 12.3L16.3 16.3'/>";
@@ -16285,7 +16490,7 @@ index 3c18c4eab1..abc4d6e780 100644
  static NSString* const kIconAtos = @"<rect x='3' y='4' width='6' height='6' rx='2'/><rect x='11' y='4' width='6' height='6' rx='2'/><rect x='3' y='12' width='6' height='4.5' rx='2'/><rect x='11' y='12' width='6' height='4.5' rx='2'/>";
  static NSString* const kIconLock = @"<rect x='4.5' y='9' width='11' height='8' rx='2.5'/><path d='M7 9V6.5a3 3 0 0 1 6 0V9'/>";
  static NSString* const kIconBlocker = @"<path d='M10 3l6 2.5v4.2c0 3.4-2.5 5.9-6 7.3-3.5-1.4-6-3.9-6-7.3V5.5z'/><path d='M7.5 7.8l5 5'/>";
-@@ -199,7 +270,8 @@ static void SyncGlass(NSView* panel, CGFloat radius) {
+@@ -199,7 +273,8 @@ static void SyncGlass(NSView* panel, CGFloat radius) {
  static NSString* const kIconPasswords = @"<rect x='3' y='6.5' width='14' height='7' rx='2.5'/><path d='M6.5 10h.01M9 10h.01M11.5 10h.01M14 10h.01'/>";
  static NSString* const kIconLanguages = @"<circle cx='10' cy='10' r='6.5'/><path d='M3.5 10h13M10 3.5c2 2 2.8 4.2 2.8 6.5s-.8 4.5-2.8 6.5c-2-2-2.8-4.2-2.8-6.5s.8-4.5 2.8-6.5z'/>";
  static NSString* const kIconAccessibility = @"<circle cx='10' cy='10' r='6.5'/><path d='M10 6.8h.01M7.2 8.6h5.6M10 8.6v2.4l-1.8 3M10 11l1.8 3'/>";
@@ -16295,12 +16500,43 @@ index 3c18c4eab1..abc4d6e780 100644
  static NSString* const kIconInicio = @"<rect x='3' y='4.5' width='14' height='11' rx='3'/><path d='M8.6 7.8l3.4 2.2-3.4 2.2z'/>";
  static NSString* const kIconMoon = @"<path d='M15.5 12.5A6.5 6.5 0 0 1 7.5 4.5a6.5 6.5 0 1 0 8 8z'/>";
  static NSString* const kIconWifiOff = @"<path d='M3 8.2a10 10 0 0 1 14 0 M5.6 11a6.3 6.3 0 0 1 8.8 0 M8.3 13.8a2.4 2.4 0 0 1 3.4 0 M10 16.4h.01 M3.5 3.5l13 13'/>";
-@@ -493,13 +565,25 @@ - (void)mouseDown:(NSEvent*)event {
+@@ -493,13 +568,56 @@ - (void)mouseDown:(NSEvent*)event {
    if (_enabled) [super mouseDown:event];
  }
  - (void)refresh {
 -  self.layer.backgroundColor = self.hovered && _enabled ? CG(kRaise, self) : NSColor.clearColor.CGColor;
 +  self.layer.backgroundColor = (self.hovered && _enabled) || self.selected ? CG(kRaise, self) : NSColor.clearColor.CGColor;
++}
++@end
++
++// A toolbar button the keyboard reaches (with macOS's keyboard navigation on, like its buttons):
++// Space or Return press it, ↓ runs onDown (the address's speaker opens its volume).
++@interface AgensFocusButton : AgensToolButton
++@property(nonatomic, copy) void (^onDown)(void);
++@end
++@implementation AgensFocusButton
++@synthesize onDown = _onDown;
++- (BOOL)acceptsFirstResponder {
++  return self.enabled && NSApp.isFullKeyboardAccessEnabled;
++}
++- (BOOL)becomeFirstResponder {
++  [self setKeyboardFocusRingNeedsDisplayInRect:self.bounds];
++  return YES;
++}
++- (BOOL)resignFirstResponder {
++  [self setKeyboardFocusRingNeedsDisplayInRect:self.bounds];
++  return YES;
++}
++- (void)drawFocusRingMask {
++  [[NSBezierPath bezierPathWithRoundedRect:self.bounds xRadius:7 yRadius:7] fill];
++}
++- (NSRect)focusRingMaskBounds {
++  return self.bounds;
++}
++- (void)keyDown:(NSEvent*)event {
++  if (event.keyCode == 125 && _onDown) return _onDown();  // ↓
++  if ((event.keyCode == 49 || event.keyCode == 36) && self.onPress) return self.onPress();  // Space, Return
++  [super keyDown:event];
  }
  @end
  
@@ -16322,7 +16558,7 @@ index 3c18c4eab1..abc4d6e780 100644
  @interface AgensTabRow : AgensHoverView
  @property(nonatomic) int index;
  @property(nonatomic) TabLook look;
-@@ -507,24 +591,46 @@ @interface AgensTabRow : AgensHoverView
+@@ -507,24 +625,46 @@ @interface AgensTabRow : AgensHoverView
  @property(nonatomic, copy) void (^onClose)(void);
  @property(nonatomic, copy) void (^onPin)(void);
  @property(nonatomic, copy) void (^onMute)(void);
@@ -16371,7 +16607,7 @@ index 3c18c4eab1..abc4d6e780 100644
  }
  @synthesize index = _index;
  @synthesize look = _look;
-@@ -532,22 +638,45 @@ @implementation AgensTabRow {
+@@ -532,22 +672,45 @@ @implementation AgensTabRow {
  @synthesize onClose = _onClose;
  @synthesize onPin = _onPin;
  @synthesize onMute = _onMute;
@@ -16422,7 +16658,7 @@ index 3c18c4eab1..abc4d6e780 100644
  }
  - (void)mouseUp:(NSEvent*)event {
    if (_dragging) {
-@@ -567,12 +696,30 @@ - (instancetype)initWithFrame:(NSRect)frame {
+@@ -567,12 +730,30 @@ - (instancetype)initWithFrame:(NSRect)frame {
      _title = Label(13, NSFontWeightRegular, kMute);
      _sound = [NSButton buttonWithImage:Symbol(@"speaker.wave.2.fill", 10) target:self action:@selector(mute:)];
      _sound.bordered = NO;
@@ -16454,7 +16690,7 @@ index 3c18c4eab1..abc4d6e780 100644
    }
    return self;
  }
-@@ -591,12 +738,14 @@ - (void)layout {
+@@ -591,12 +772,14 @@ - (void)layout {
    const CGFloat w = NSWidth(self.bounds), h = NSHeight(self.bounds);
    const CGFloat iconX = self.compact ? (w - 16) / 2 : _look == kLookTop ? 10 : 8;
    _favicon.frame = NSMakeRect(iconX, (h - 16) / 2, 16, 16);
@@ -16470,7 +16706,7 @@ index 3c18c4eab1..abc4d6e780 100644
    }
    const CGFloat titleX = NSMaxX(_favicon.frame) + (_look == kLookTop ? 8 : 10);
    const CGFloat titleEnd = (_sound.hidden ? NSMinX(_close.frame) : NSMinX(_sound.frame)) - 4;
-@@ -611,15 +760,29 @@ - (void)updateWith:(const AgensTab&)tab {
+@@ -611,15 +794,29 @@ - (void)updateWith:(const AgensTab&)tab {
    _title.stringValue = title;
    self.toolTip = title;
    self.accessibilityLabel = tab.sleeping ? [title stringByAppendingString:@", dormindo"] : title;
@@ -16503,7 +16739,7 @@ index 3c18c4eab1..abc4d6e780 100644
    if (tab.loading) {
      [_spinner startAnimation:nil];
    } else {
-@@ -629,13 +792,16 @@ - (void)updateWith:(const AgensTab&)tab {
+@@ -629,15 +826,18 @@ - (void)updateWith:(const AgensTab&)tab {
    _pinned = tab.pinned;
    _inSplit = tab.split != 0;
    _muted = tab.muted;
@@ -16524,9 +16760,12 @@ index 3c18c4eab1..abc4d6e780 100644
 +                     : tab.camera                   ? @"Usando a câmera"
 +                                                    : @"Usando o microfone";
    } else {
-     _sound.image = Symbol(_muted ? @"speaker.slash.fill" : @"speaker.wave.2.fill", 10);
+-    _sound.image = Symbol(_muted ? @"speaker.slash.fill" : @"speaker.wave.2.fill", 10);
++    _sound.image = Symbol(_muted ? @"speaker.slash.fill" : _volume < 50 ? @"speaker.wave.1.fill" : @"speaker.wave.2.fill", 10);
      _sound.toolTip = _muted ? @"Ativar o som da aba" : @"Silenciar a aba";
-@@ -647,13 +813,42 @@ - (void)updateWith:(const AgensTab&)tab {
+   }
+   _sound.accessibilityLabel = _sound.toolTip;
+@@ -647,13 +847,42 @@ - (void)updateWith:(const AgensTab&)tab {
  }
  - (void)refresh {
    [super refresh];
@@ -16571,7 +16810,7 @@ index 3c18c4eab1..abc4d6e780 100644
  }
  - (NSMenu*)menuForEvent:(NSEvent*)event {
    NSMenu* menu = [[NSMenu alloc] initWithTitle:@"Aba"];
-@@ -672,6 +867,7 @@ - (NSMenu*)menuForEvent:(NSEvent*)event {
+@@ -672,6 +901,7 @@ - (NSMenu*)menuForEvent:(NSEvent*)event {
      stacked.tag = 2;
      split.submenu = how;
    }
@@ -16579,7 +16818,7 @@ index 3c18c4eab1..abc4d6e780 100644
    [menu addItem:NSMenuItem.separatorItem];
    [menu addItemWithTitle:@"Fechar aba" action:@selector(closeTab:) keyEquivalent:@""].target = self;
    return menu;
-@@ -695,6 +891,40 @@ - (void)mute:(id)sender {
+@@ -695,6 +925,40 @@ - (void)mute:(id)sender {
    if (_capturing) return;  // the badge only tells; the site panel changes permissions
    if (_onMute) _onMute();
  }
@@ -16620,7 +16859,7 @@ index 3c18c4eab1..abc4d6e780 100644
  @end
  
  // One suggestion (prototype .sug): icon, text, detail on the right.
-@@ -747,30 +977,93 @@ - (void)refresh {
+@@ -747,30 +1011,93 @@ - (void)refresh {
  // One ato in the foot row: a 30x28 button (same box as "+") with the monogram tile centered.
  // The chrome draws the warm dot under the current one, outside the box (prototype .space::after).
  @interface AgensAtoButton : AgensHoverView
@@ -16718,7 +16957,7 @@ index 3c18c4eab1..abc4d6e780 100644
  }
  @end
  
-@@ -856,12 +1149,14 @@ - (void)layout {
+@@ -856,12 +1183,14 @@ - (void)layout {
  @interface AgensMenuRow : AgensHoverView
  - (instancetype)initWithIcon:(NSString*)icon title:(NSString*)title key:(NSString*)key;
  - (void)setIconImage:(NSImage*)image;
@@ -16733,7 +16972,7 @@ index 3c18c4eab1..abc4d6e780 100644
  - (instancetype)initWithIcon:(NSString*)icon title:(NSString*)title key:(NSString*)key {
    if ((self = [super initWithFrame:NSZeroRect])) {
      self.radius = 7;
-@@ -889,9 +1184,22 @@ - (void)layout {
+@@ -889,9 +1218,22 @@ - (void)layout {
    _title.frame = NSMakeRect(37, 8, w - 37 - (_key.stringValue.length ? 70 : 10), 18);
  }
  - (void)refresh {
@@ -16758,7 +16997,7 @@ index 3c18c4eab1..abc4d6e780 100644
  }
  - (void)setIconImage:(NSImage*)image {  // a picture of its own (an extension's icon), not tinted
    _icon.image = image;
-@@ -899,98 +1207,399 @@ - (void)setIconImage:(NSImage*)image {  // a picture of its own (an extension's
+@@ -899,98 +1241,399 @@ - (void)setIconImage:(NSImage*)image {  // a picture of its own (an extension's
  }
  @end
  
@@ -17219,7 +17458,7 @@ index 3c18c4eab1..abc4d6e780 100644
  }
  @end
  
-@@ -1003,25 +1612,279 @@ - (NSView*)hitTest:(NSPoint)point {
+@@ -1003,25 +1646,279 @@ - (NSView*)hitTest:(NSPoint)point {
  }
  @end
  
@@ -17515,7 +17754,7 @@ index 3c18c4eab1..abc4d6e780 100644
  @end
  
  @interface AgensFlippedView : NSView
-@@ -1032,32 +1895,625 @@ - (BOOL)isFlipped {
+@@ -1032,19 +1929,748 @@ - (BOOL)isFlipped {
  }
  @end
  
@@ -17536,19 +17775,6 @@ index 3c18c4eab1..abc4d6e780 100644
 -  std::vector<std::string> _engineKeywords;
 -  NSPopUpButton* _engines;
 -  NSString* _navKey;  // the section lit in the list (a sub-page lights its parent)
--  // Apagar dados
--  int _clearWhat, _clearPeriod;
--  NSString* _clearStatus;
--  NSString* _resetStatus;
--  // Exceções por site and extensions, as last listed (rows address them by tag)
--  std::vector<std::pair<std::string, std::string>> _exceptions;  // site, kind
--  std::vector<std::string> _extensionIds, _extensionNames;
--  // Senhas salvas
--  std::vector<std::pair<std::string, std::string>> _logins;  // site, username
--  BOOL _loginsFresh;
--  int _revealed;  // the login whose password shows, or -1
--  std::string _revealedPassword;
--  NSDate* _unlockedUntil;
 +// One source in the grid (prototype .th): the picture and its name; warm border when picked.
 +@interface AgensShareThumb : AgensHoverView
 +@property(nonatomic, readonly) NSImageView* shot;
@@ -18074,6 +18300,144 @@ index 3c18c4eab1..abc4d6e780 100644
 +// rows, Agens icons) and the section on the right. v1 has Aparência, Busca and Atos of our own;
 +// the other sections open Chromium's page for now.
 +
++// --- Page translation (prototipos/janela-traduzir.html) with Apple's Translation framework, in its
++// own dylib (translate_mac.swift: Swift only, SwiftUI-hosted session). Loaded on macOS 15+; before
++// that, or without the dylib, there is no translation UI at all.
++@protocol AgensTranslating <NSObject>
++- (instancetype)initWithView:(NSView*)view;
++- (void)statusFrom:(NSString*)from to:(NSString*)to done:(void (^)(NSInteger status))done;  // 0 on the Mac, 1 downloadable, 2 no
++- (void)installedTo:(NSString*)to done:(void (^)(NSArray<NSString*>* languages))done;
++- (void)downloadFrom:(NSString*)from to:(NSString*)to done:(void (^)(NSString* error))done;
++- (void)translate:(NSArray<NSString*>*)texts
++             from:(NSString*)from
++               to:(NSString*)to
++            batch:(NSInteger)batch
++             each:(void (^)(NSInteger start, NSArray<NSString*>* out))each
++             done:(void (^)(NSString* error))done;
++- (void)cancel;
++@end
++static Class TranslatorClass() {
++  static Class translator = nil;
++  static dispatch_once_t once;
++  dispatch_once(&once, ^{
++    if (@available(macOS 15.0, *)) {
++      // The framework's Libraries folder (chrome/BUILD.gn, agens_translate_library), next to its binary.
++      NSString* dir = [NSBundle bundleForClass:[AgensToolButton class]].executablePath.stringByDeletingLastPathComponent;
++      NSString* lib = [dir stringByAppendingPathComponent:@"Libraries/libagens_translate.dylib"];
++      if (dlopen(lib.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL)) translator = NSClassFromString(@"AgensTranslator");
++    }
++  });
++  return translator;
++}
++// `view` holds the SwiftUI session (Apple's download sheet points at it); clicks go through.
++static id<AgensTranslating> NewTranslator(NSView* view) {
++  Class c = TranslatorClass();
++  return c ? [(id<AgensTranslating>)[c alloc] initWithView:view] : nil;
++}
++static NSString* LangBase(NSString* code) {
++  return [code componentsSeparatedByString:@"-"].firstObject.lowercaseString ?: @"";
++}
++// "espanhol" (in Portuguese, like the rest of the casca); the code itself when macOS has no name.
++static NSString* LangName(NSString* code) {
++  NSString* name = [[NSLocale localeWithLocaleIdentifier:@"pt-BR"] localizedStringForLanguageCode:LangBase(code)];
++  return name.length ? name.lowercaseString : code;
++}
++static NSString* LangTitle(NSString* code) {  // "Espanhol"
++  NSString* name = LangName(code);
++  return name.length ? [[name substringToIndex:1].uppercaseString stringByAppendingString:[name substringFromIndex:1]] : name;
++}
++// The page's language: NaturalLanguage (on the Mac) over its text, else what the page declares.
++// shortcut: Chromium's own detector (CLD3) only reports through its Google translate client, which
++// stays off; switch if that client is ever kept.
++static NSString* DetectLanguage(NSString* text, NSString* declared) {
++  if (text.length >= 40) {
++    NLLanguageRecognizer* recognizer = [[NLLanguageRecognizer alloc] init];
++    [recognizer processString:text];
++    NSDictionary<NLLanguage, NSNumber*>* best = [recognizer languageHypothesesWithMaximum:1];
++    NLLanguage lang = best.allKeys.firstObject;
++    if (lang && ![lang isEqualToString:NLLanguageUndetermined] && best[lang].doubleValue >= 0.6) return lang;
++  }
++  return declared.length ? declared : nil;
++}
++// The person's language (Configurações › Idiomas): the first of Accept-Language.
++static NSString* TargetLanguage(AgensWindow* window) {
++  char langs[256] = "";
++  if (window) agens_pref_get_string(window, kAgensProfile, "intl.accept_languages", langs, sizeof langs);
++  NSString* first = [[@(langs) componentsSeparatedByString:@","].firstObject
++      stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
++  return first.length ? first : NSLocale.preferredLanguages.firstObject ?: @"pt-BR";
++}
++static void StringsListed(void* context, const char* const* items, int count);  // below, with the settings
++// One tab's page for the translate button: its address, language and where translating is.
++enum { kTrNone, kTrOffer, kTrTranslating, kTrTranslated };
++@interface AgensTrPage : NSObject
++@property(nonatomic, copy) NSString* url;
++@property(nonatomic, copy) NSString* lang;  // set once it is known to be foreign and translatable
++@property(nonatomic) int state;
++@property(nonatomic) double progress;
++@property(nonatomic) BOOL checked;  // its language was asked for
++@end
++@implementation AgensTrPage
++@synthesize url = _url;
++@synthesize lang = _lang;
++@synthesize state = _state;
++@synthesize progress = _progress;
++@synthesize checked = _checked;
++@end
++// Run in Chromium's translate world (agens_window_run_script), so the page's own scripts don't see
++// them. __agensTr keeps the text nodes and their original text, for "Mostrar original".
++// `kept`: this document is the one we translated (a frame loading late doesn't make a new page).
++static NSString* const kTrDetect = @"({lang: document.documentElement.lang || '', kept: !!(window.__agensTr && window.__agensTr.nodes), "
++                                   @"text: (document.body ? document.body.innerText : '').slice(0, 4000)})";
++// shortcut: text nodes one by one (a sentence split by <b> or <a> goes in pieces), attributes
++// (placeholder, title) stay; translate whole blocks if that reads badly.
++static NSString* const kTrCollect = @R"JS((() => {
++  const T = window.__agensTr = window.__agensTr || {};
++  if (T.nodes) T.nodes.forEach((n, i) => { n.nodeValue = T.orig[i]; });
++  T.nodes = []; T.orig = [];
++  const skip = 'script,style,noscript,textarea,code,pre,kbd,samp,svg,math,template,[translate=no],.notranslate,[contenteditable=""],[contenteditable=true]';
++  const walk = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT, {
++    acceptNode: n => /\p{L}/u.test(n.nodeValue) && !n.parentElement.closest(skip) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT
++  });
++  const out = [];
++  for (let n; out.length < 5000 && (n = walk.nextNode());) { T.nodes.push(n); T.orig.push(n.nodeValue); out.push(n.nodeValue.trim()); }
++  if (!document.getElementById('agens-tr-busy')) {
++    const s = document.createElement('style');
++    s.id = 'agens-tr-busy';
++    s.textContent = 'body{opacity:.55;transition:opacity .2s}';
++    (document.head || document.documentElement).appendChild(s);
++  }
++  return out;
++})())JS";
++// %@ the translated texts (a JSON array), %ld where they start.
++static NSString* const kTrApply = @R"JS((() => {
++  const T = window.__agensTr, a = %@, start = %ld;
++  if (!T || !T.nodes) return;
++  a.forEach((t, i) => {
++    const n = T.nodes[start + i], o = T.orig[start + i];
++    if (n) n.nodeValue = o.match(/^\s*/)[0] + t + o.match(/\s*$/)[0];
++  });
++})())JS";
++static NSString* const kTrDone = @"document.getElementById('agens-tr-busy')?.remove()";
++static NSString* const kTrRestore = @R"JS((() => {
++  const T = window.__agensTr;
++  if (T && T.nodes) T.nodes.forEach((n, i) => { n.nodeValue = T.orig[i]; });
++  if (T) T.nodes = T.orig = null;
++  document.getElementById('agens-tr-busy')?.remove();
++})())JS";
++static NSString* const kTrSelectionRect = @R"JS((() => {
++  const s = getSelection();
++  if (!s.rangeCount) return null;
++  const r = s.getRangeAt(0).getBoundingClientRect();
++  return {x: r.left, y: r.top, w: r.width, h: r.height};
++})())JS";
++static void ScriptDone(void* context, const char* json) {
++  void (^done)(id) = (__bridge_transfer void (^)(id))context;
++  NSData* data = [@(json ? json : "null") dataUsingEncoding:NSUTF8StringEncoding];
++  id value = [NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingFragmentsAllowed error:nil];
++  done(value == NSNull.null ? nil : value);
++}
++
 +// What the settings window needs from a browser window's chrome.
 +@protocol AgensSettingsHost <NSObject>
 +- (BOOL)collapsed;
@@ -18146,27 +18510,29 @@ index 3c18c4eab1..abc4d6e780 100644
 +  std::vector<std::string> _engineKeywords;
 +  NSPopUpButton* _engines;
 +  NSString* _navKey;  // the section lit in the list (a sub-page lights its parent)
-+  // Apagar dados
-+  int _clearWhat, _clearPeriod;
-+  NSString* _clearStatus;
-+  NSString* _resetStatus;
-+  // Exceções por site and extensions, as last listed (rows address them by tag)
-+  std::vector<std::pair<std::string, std::string>> _exceptions;  // site, kind
-+  std::vector<std::string> _extensionIds, _extensionNames;
++  id<AgensTranslating> _langTranslator;  // Idiomas: asks which languages are on the Mac
++  NSArray<NSString*>* _installedLangs;   // its answer, nil until it comes
+   // Apagar dados
+   int _clearWhat, _clearPeriod;
+   NSString* _clearStatus;
+@@ -1052,12 +2678,16 @@ @implementation AgensSettings {
+   // Exceções por site and extensions, as last listed (rows address them by tag)
+   std::vector<std::pair<std::string, std::string>> _exceptions;  // site, kind
+   std::vector<std::string> _extensionIds, _extensionNames;
 +  std::vector<size_t> _extensionAtos;  // how many atos have each
-+  // Senhas salvas
-+  std::vector<std::pair<std::string, std::string>> _logins;  // site, username
+   // Senhas salvas
+   std::vector<std::pair<std::string, std::string>> _logins;  // site, username
 +  std::string _loginsAto;  // whose logins show (AgensAto.id); "" until the page sets this window's
-+  BOOL _loginsFresh;
-+  int _revealed;  // the login whose password shows, or -1
-+  std::string _revealedPassword;
-+  NSDate* _unlockedUntil;
+   BOOL _loginsFresh;
+   int _revealed;  // the login whose password shows, or -1
+   std::string _revealedPassword;
+   NSDate* _unlockedUntil;
 +  int _revealGeneration;  // the 8 s hide of the shown password
 +  int _removing;          // apagada, still undoable (Desfazer), or -1
    NSSearchField* _loginSearch;
    CGFloat _loginsY;
    NSString* _passwordStatus;
-@@ -1128,6 +2584,7 @@ + (void)showFor:(AgensWindow*)window collapsed:(BOOL)collapsed chrome:(id<AgensS
+@@ -1128,6 +2758,7 @@ + (void)showFor:(AgensWindow*)window collapsed:(BOOL)collapsed chrome:(id<AgensS
  }
  + (void)forget:(AgensWindow*)window {
    if (g_settings && g_settings->_browser == window) {
@@ -18174,7 +18540,7 @@ index 3c18c4eab1..abc4d6e780 100644
      g_settings->_browser = nullptr;
      [g_settings close];
    }
-@@ -1152,6 +2609,7 @@ - (instancetype)init {
+@@ -1152,6 +2783,7 @@ - (instancetype)init {
      _clearWhat = kAgensClearHistory | kAgensClearCookies | kAgensClearCache;
      _importWhat = kAgensImportBookmarks | kAgensImportHistory | kAgensImportPasswords | kAgensImportCookies |
                    kAgensImportExtensions;
@@ -18182,7 +18548,7 @@ index 3c18c4eab1..abc4d6e780 100644
      _revealed = -1;
      AgensFlippedView* root = [[AgensFlippedView alloc] init];
      root.wantsLayer = YES;
-@@ -1253,31 +2711,35 @@ - (CGFloat)option:(NSString*)label detail:(NSString*)detail control:(NSView*)con
+@@ -1253,31 +2885,35 @@ - (CGFloat)option:(NSString*)label detail:(NSString*)detail control:(NSView*)con
    // Controls given a width (sliders, fields, color wells) keep it; the rest take their natural size.
    NSSize cs = control.fittingSize;
    if (NSWidth(control.frame) > 0) cs = NSMakeSize(NSWidth(control.frame), MAX(NSHeight(control.frame), cs.height));
@@ -18225,7 +18591,7 @@ index 3c18c4eab1..abc4d6e780 100644
  }
  - (NSSegmentedControl*)segments:(NSArray<NSString*>*)labels selected:(NSInteger)i action:(SEL)action {
    NSSegmentedControl* seg = [NSSegmentedControl segmentedControlWithLabels:labels
-@@ -1291,6 +2753,8 @@ - (NSSegmentedControl*)segments:(NSArray<NSString*>*)labels selected:(NSInteger)
+@@ -1291,6 +2927,8 @@ - (NSSegmentedControl*)segments:(NSArray<NSString*>*)labels selected:(NSInteger)
  - (void)showSection:(NSString*)key {
    if (![key isEqualToString:_section]) {  // leaving a page forgets what it showed
      _loginsFresh = NO;
@@ -18234,7 +18600,7 @@ index 3c18c4eab1..abc4d6e780 100644
      _revealed = -1;
      _revealedPassword.clear();
      _clearStatus = _resetStatus = _passwordStatus = nil;
-@@ -1356,7 +2820,14 @@ - (void)showSection:(NSString*)key {
+@@ -1356,7 +2994,14 @@ - (void)showSection:(NSString*)key {
                                     values:{1, 2, 5, 15, 30, 60, 120}];
      if (minutes == 120 && ![self sleepTimeChosen]) [after selectItemWithTag:5];  // never chosen: our 5 minutes apply
      y = [self option:@"Dormir depois de" detail:@"Áudio, câmera, upload, formulário e abas fixadas não dormem." control:after y:y];
@@ -18249,7 +18615,45 @@ index 3c18c4eab1..abc4d6e780 100644
    } else if ([key isEqualToString:@"atos"]) {
      y = [self fillAtos:y];
      y = [self option:@"Trazer de outro navegador" detail:@"Chrome, Brave, Arc, Edge, Safari e Firefox. Cada perfil vira um ato."
-@@ -1421,8 +2892,15 @@ - (void)showSection:(NSString*)key {
+@@ -1370,7 +3015,7 @@ - (void)showSection:(NSString*)key {
+     y = [self option:@"Buscador da barra de endereço" detail:@"Texto que não é endereço vai para ele." control:_engines y:y];
+     y = [self info:@"Sugestões enquanto digita" detail:@"Vêm do histórico e dos favoritos deste Mac. Não pergunta nada ao buscador." note:@"Só locais" y:y];
+   } else if ([key isEqualToString:@"privacidade"]) {
+-    y = [self info:@"Telemetria" detail:@"O navegador parado faz zero conexões (docs/sem-telemetria.md)." note:@"Não existe" y:y];
++    y = [self info:@"Telemetria" detail:@"Nada sobre você sai do navegador. Parado, ele só busca atualizações e as listas do bloqueador no nosso GitHub, e o Widevine no Google (desligáveis)." note:@"Não existe" y:y];
+     y = [self option:@"Bloquear cookies de terceiros" detail:nil control:[self intSwitch:"profile.cookie_controls_mode" on:1 off:0] y:y];
+     y = [self option:@"Sempre usar conexão segura (HTTPS)" detail:@"Avisa antes de abrir um site sem HTTPS." control:[self prefSwitch:"https_only_mode_enabled"] y:y];
+     y = [self option:@"Pedir aos sites para não rastrear" detail:@"Global Privacy Control e Do Not Track." control:[self dntSwitch] y:y];
+@@ -1378,6 +3023,7 @@ - (void)showSection:(NSString*)key {
+     y = [self option:@"Ao fechar, apagar os cookies" detail:@"Tira você dos logins a cada vez que fechar." control:[self cookiesOnCloseSwitch] y:y];
+     y = [self option:@"Apagar dados de navegação" detail:@"Histórico, cookies e cache." control:[self subButton:@"Apagar…" key:@"apagar"] y:y];
+     y = [self info:@"Impressão digital, rastreadores nos links, DNS seguro" detail:nil note:@"Ainda não existem" y:y];
++    y = [self protectedContent:y];
+   } else if ([key isEqualToString:@"bloqueador"]) {
+     y = [self adblockSection:y];
+   } else if ([key isEqualToString:@"permissoes"]) {
+@@ -1404,15 +3050,12 @@ - (void)showSection:(NSString*)key {
+     y = [self option:@"Perguntar onde salvar cada arquivo" detail:nil control:[self prefSwitch:"download.prompt_for_download"] y:y];
+     y = [self info:@"Uma pasta por ato" detail:nil note:@"Ainda não existe" y:y];
+   } else if ([key isEqualToString:@"idiomas"]) {
+-    char langs[256] = "";
+-    if (_browser) agens_pref_get_string(_browser, kAgensProfile, "intl.accept_languages", langs, sizeof langs);
+-    NSTextField* field = [NSTextField textFieldWithString:@(langs)];
+-    field.frame = NSMakeRect(0, 0, 200, 24);
+-    field.target = self;
+-    field.action = @selector(setLanguages:);
+-    y = [self option:@"Idiomas preferidos dos sites" detail:@"Em ordem, separados por vírgula (ex.: pt-BR,pt,en)." control:field y:y];
++    y = [self option:@"Idioma preferido" detail:@"Para onde as páginas são traduzidas e o que os sites recebem em Accept-Language."
++             control:[self languagePopup]
++                   y:y];
+     y = [self option:@"Correção ortográfica" detail:@"Do macOS, no próprio Mac." control:[self prefSwitch:"browser.enable_spellchecking"] y:y];
+-    y = [self info:@"Tradução de páginas" detail:@"Traduzir mandaria a página para um servidor de fora." note:@"Não existe" y:y];
++    y = TranslatorClass() ? [self translateLists:y]
++                          : [self info:@"Tradução de páginas" detail:@"Usa a Tradução da Apple no Mac, do macOS 15 em diante." note:@"Indisponível" y:y];
+   } else if ([key isEqualToString:@"acessibilidade"]) {
+     y = [self option:@"Tamanho da fonte" detail:nil control:[self intPopup:"webkit.webprefs.default_font_size" labels:@[ @"Pequena", @"Média", @"Grande", @"Muito grande" ] values:{12, 16, 20, 24}] y:y];
+     y = [self option:@"Tamanho mínimo da fonte" detail:nil control:[self intPopup:"webkit.webprefs.minimum_font_size" labels:@[ @"Nenhum", @"Pequeno", @"Médio", @"Grande" ] values:{0, 9, 12, 16}] y:y];
+@@ -1421,8 +3064,15 @@ - (void)showSection:(NSString*)key {
    } else if ([key isEqualToString:@"extensoes"]) {
      y = [self fillExtensions:y];
      // Like Brave: installs and updates come from Google's store (the only Google service we use).
@@ -18267,7 +18671,7 @@ index 3c18c4eab1..abc4d6e780 100644
                     y:y];
      y = [self option:@"Atualizar extensões sozinhas" detail:@"Pergunta à loja do Google por versões novas de tempos em tempos."
               control:[self prefSwitch:"agens.extensions.auto_update"]
-@@ -1432,10 +2910,15 @@ - (void)showSection:(NSString*)key {
+@@ -1432,10 +3082,15 @@ - (void)showSection:(NSString*)key {
      NSButton* proxy = [NSButton buttonWithTitle:@"Abrir…" target:self action:@selector(openProxy:)];
      y = [self option:@"Configurações de proxy" detail:@"Usa as do macOS." control:proxy y:y];
      y = [self option:@"Restaurar as configurações originais" detail:nil control:[self subButton:@"Restaurar…" key:@"restaurar"] y:y];
@@ -18284,7 +18688,7 @@ index 3c18c4eab1..abc4d6e780 100644
      y = [self option:@"Licença" detail:@"BSD-3-Clause" control:[self linkButton:@"github.com/SugiyamaLabs/browser" url:@"https://github.com/SugiyamaLabs/browser"] y:y];
      y = [self option:@"Avisos de código aberto" detail:@"Chromium, ungoogled-chromium e as listas do bloqueador." control:[self subButton:@"Ver…" key:@"avisos"] y:y];
    }
-@@ -1466,6 +2949,9 @@ - (NSSwitch*)prefSwitch:(const char*)name {
+@@ -1466,10 +3121,50 @@ - (NSSwitch*)prefSwitch:(const char*)name {
    sw.action = @selector(toggleBool:);
    return sw;
  }
@@ -18294,7 +18698,48 @@ index 3c18c4eab1..abc4d6e780 100644
  - (void)toggleBool:(NSSwitch*)sw {
    const char* name = sw.identifier.UTF8String;
    if (_browser) agens_pref_set_bool(_browser, [self storeFor:name], name, sw.state == NSControlStateValueOn);
-@@ -1521,7 +3007,7 @@ - (NSSwitch*)webrtcSwitch {
+ }
++// Conteúdo protegido (prototipos/janela-drm.html, section 2). Widevine comes from Google on its own
++// while on (docs/sem-telemetria.md); the page refreshes while it downloads.
++- (CGFloat)protectedContent:(CGFloat)y {
++  y = [self groupTitle:@"Conteúdo protegido" y:y];
++  NSSwitch* sw = [self prefSwitch:"agens.widevine.enabled"];
++  sw.action = @selector(toggleWidevine:);
++  y = [self option:@"Permitir conteúdo protegido (Widevine)"
++            detail:@"Netflix, Disney+, Spotify e outros sites com DRM. Desligado, não baixa nem fala com o Google."
++           control:sw
++                 y:y];
++  char version[64] = "";
++  const AgensWidevineStatus status = agens_widevine_status(version, sizeof version);
++  [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(refreshWidevine) object:nil];
++  if (status == kAgensWidevineDownloading) {
++    [self performSelector:@selector(refreshWidevine) withObject:nil afterDelay:1];
++  }
++  if (status == kAgensWidevineInstalled) {
++    return [self option:@"Componente"
++                 detail:[NSString stringWithFormat:@"Instalado · versão %s · Atualiza sozinho, do Google", version]
++                control:[self small:@"Remover componente" action:@selector(removeWidevine:) tag:0]
++                      y:y];
++  }
++  return [self info:@"Componente" detail:nil note:status == kAgensWidevineDownloading ? @"Baixando…" : @"Não instalado" y:y];
++}
++- (void)refreshWidevine {
++  if ([_section isEqualToString:@"privacidade"]) [self showSection:_section];
++}
++- (void)toggleWidevine:(NSSwitch*)sw {
++  agens_widevine_set_enabled(sw.state == NSControlStateValueOn);
++  [self refreshWidevine];
++  // Registering reads the disk first; the check starts a moment later.
++  [self performSelector:@selector(refreshWidevine) withObject:nil afterDelay:1];
++}
++- (void)removeWidevine:(id)sender {
++  agens_widevine_remove();
++  [self refreshWidevine];
++}
+ - (NSSwitch*)intSwitch:(const char*)name on:(int)onValue off:(int)offValue {
+   NSSwitch* sw = [[NSSwitch alloc] init];
+   int v = offValue;
+@@ -1521,7 +3216,7 @@ - (NSSwitch*)webrtcSwitch {
    NSSwitch* sw = [[NSSwitch alloc] init];
    char policy[64] = "";
    if (_browser) agens_pref_get_string(_browser, kAgensProfile, "webrtc.ip_handling_policy", policy, sizeof policy);
@@ -18303,7 +18748,7 @@ index 3c18c4eab1..abc4d6e780 100644
    sw.target = self;
    sw.action = @selector(toggleWebrtc:);
    return sw;
-@@ -1529,7 +3015,7 @@ - (NSSwitch*)webrtcSwitch {
+@@ -1529,7 +3224,7 @@ - (NSSwitch*)webrtcSwitch {
  - (void)toggleWebrtc:(NSSwitch*)sw {
    if (_browser) {
      agens_pref_set_string(_browser, kAgensProfile, "webrtc.ip_handling_policy",
@@ -18312,7 +18757,111 @@ index 3c18c4eab1..abc4d6e780 100644
    }
  }
  - (NSSwitch*)cookiesOnCloseSwitch {
-@@ -1602,7 +3088,10 @@ static void EnginesListed(void* context, const AgensSearchEngine* engines, int c
+@@ -1584,8 +3279,101 @@ - (void)changeDownloads:(id)sender {
+     [self showSection:@"downloads"];
+   }];
+ }
+-- (void)setLanguages:(NSTextField*)field {
+-  if (_browser && field.stringValue.length) agens_pref_set_string(_browser, kAgensProfile, "intl.accept_languages", field.stringValue.UTF8String);
++// Prototype #idiomas: the language pages are translated into, and Accept-Language in that order.
++// A list typed before (the old free field) shows as it is and stays until another is chosen.
++- (NSPopUpButton*)languagePopup {
++  char langs[256] = "";
++  if (_browser) agens_pref_get_string(_browser, kAgensProfile, "intl.accept_languages", langs, sizeof langs);
++  NSString* current = @(langs);
++  NSPopUpButton* popup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
++  NSArray<NSArray<NSString*>*>* choices = @[
++    @[ @"Português (Brasil)", @"pt-BR,pt,en-US,en" ], @[ @"Português (Portugal)", @"pt-PT,pt,en" ],
++    @[ @"Inglês", @"en-US,en" ], @[ @"Espanhol", @"es-ES,es,en" ]
++  ];
++  NSString* first = [current componentsSeparatedByString:@","].firstObject;
++  for (NSArray<NSString*>* c in choices) {
++    [popup addItemWithTitle:c[0]];
++    popup.lastItem.representedObject = c[1];
++    if ([[c[1] componentsSeparatedByString:@","].firstObject caseInsensitiveCompare:first] == NSOrderedSame) [popup selectItem:popup.lastItem];
++  }
++  if (current.length && popup.indexOfSelectedItem < 0) {
++    [popup addItemWithTitle:current];
++    popup.lastItem.representedObject = current;
++    [popup selectItem:popup.lastItem];
++  }
++  popup.target = self;
++  popup.action = @selector(setPreferredLanguage:);
++  popup.accessibilityLabel = @"Idioma preferido";
++  return popup;
++}
++- (void)setPreferredLanguage:(NSPopUpButton*)popup {
++  NSString* langs = popup.selectedItem.representedObject;
++  if (_browser && langs.length) agens_pref_set_string(_browser, kAgensProfile, "intl.accept_languages", langs.UTF8String);
++  _installedLangs = nil;  // "baixados" are per target language
++  [self showSection:@"idiomas"];
++}
++// Sempre / Nunca traduzir (profile lists of language codes, set from the translate popover) and
++// what macOS has downloaded. The framework lists no sizes and can't delete: macOS's settings do.
++- (CGFloat)translateLists:(CGFloat)y {
++  NSArray* lists = @[
++    @[ @"agens.translate.always", @"Sempre traduzir", @"Nenhum. Use “Sempre traduzir” no popover da tradução." ],
++    @[ @"agens.translate.never", @"Nunca traduzir", @"Nenhum. Use “Nunca traduzir” no popover da tradução." ],
++  ];
++  for (NSArray<NSString*>* list in lists) {
++    y = [self groupTitle:list[1] y:y];
++    std::vector<std::string> langs;
++    if (_browser) agens_pref_get_list(_browser, kAgensProfile, list[0].UTF8String, StringsListed, &langs);
++    if (langs.empty()) y = [self info:list[2] detail:nil note:@"" y:y];
++    for (size_t i = 0; i < langs.size(); ++i) {
++      NSButton* remove = [self small:@"Tirar" action:@selector(removeTranslateLanguage:) tag:(NSInteger)i];
++      remove.identifier = list[0];
++      remove.accessibilityLabel = [@"Tirar " stringByAppendingString:LangTitle(@(langs[i].c_str()))];
++      y = [self option:LangTitle(@(langs[i].c_str())) detail:nil control:[self buttons:@[ remove ]] y:y];
++    }
++  }
++  y = [self groupTitle:@"Idiomas baixados no Mac" y:y];
++  NSString* target = TargetLanguage(_browser);
++  if (!_installedLangs) {
++    if (!_langTranslator) _langTranslator = NewTranslator([[NSView alloc] init]);
++    __weak AgensSettings* weak = self;
++    [_langTranslator installedTo:target done:^(NSArray<NSString*>* languages) {
++      AgensSettings* strong = weak;
++      if (!strong) return;
++      strong->_installedLangs = languages ?: @[];
++      if ([strong->_section isEqualToString:@"idiomas"]) [strong showSection:@"idiomas"];
++    }];
++    y = [self info:@"Procurando…" detail:nil note:@"" y:y];
++  } else if (!_installedLangs.count) {
++    y = [self info:@"Nenhum idioma baixado." detail:nil note:@"" y:y];
++  }
++  // Regional variants (es-MX, en-GB…) come with their language: one row per language.
++  NSMutableOrderedSet<NSString*>* shown = [NSMutableOrderedSet orderedSet];
++  for (NSString* lang in _installedLangs) [shown addObject:LangBase(lang)];
++  for (NSString* lang in shown) {
++    y = [self info:[NSString stringWithFormat:@"%@ → %@", LangTitle(lang), LangTitle(target)] detail:nil note:@"" y:y];
++  }
++  y = [self option:@"Apagar idiomas baixados"
++            detail:@"Nos Ajustes do macOS › Geral › Idioma e Região › Idiomas da Tradução."
++           control:[self small:@"Abrir Ajustes" action:@selector(openTranslationLanguages:) tag:0]
++                 y:y];
++  return [self info:@"A tradução nunca sai do Mac"
++             detail:@"Tradução da Apple no próprio Mac; nada vai para o Google nem para nós. A única conexão é baixar um idioma da Apple, com o seu OK."
++               note:@""
++                  y:y];
++}
++- (void)removeTranslateLanguage:(NSButton*)sender {
++  if (!_browser) return;
++  std::vector<std::string> langs;
++  agens_pref_get_list(_browser, kAgensProfile, sender.identifier.UTF8String, StringsListed, &langs);
++  if (sender.tag < 0 || sender.tag >= (NSInteger)langs.size()) return;
++  langs.erase(langs.begin() + sender.tag);
++  std::vector<const char*> items;
++  for (const std::string& l : langs) items.push_back(l.c_str());
++  agens_pref_set_list(_browser, kAgensProfile, sender.identifier.UTF8String, items.data(), (int)items.size());
++  [self showSection:@"idiomas"];
++}
++- (void)openTranslationLanguages:(id)sender {
++  [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:@"x-apple.systempreferences:com.apple.Localization-Settings.extension"]];
+ }
+ - (void)openProxy:(id)sender {
+   [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:@"x-apple.systempreferences:com.apple.Network-Settings.extension"]];
+@@ -1602,7 +3390,10 @@ static void EnginesListed(void* context, const AgensSearchEngine* engines, int c
  - (CGFloat)fillAtos:(CGFloat)y {
    // The atos list comes from the chrome (it already observes them); rename in place.
    NSArray<NSString*>* names = [_chrome atoNamesForSettings];
@@ -18324,7 +18873,7 @@ index 3c18c4eab1..abc4d6e780 100644
      NSTextField* field = [NSTextField textFieldWithString:names[i]];
      field.tag = i;
      field.delegate = self;
-@@ -1610,12 +3099,18 @@ - (CGFloat)fillAtos:(CGFloat)y {
+@@ -1610,12 +3401,18 @@ - (CGFloat)fillAtos:(CGFloat)y {
      field.action = @selector(renameAto:);
      field.frame = NSMakeRect(0, 0, 220, 24);
      y = [self option:[NSString stringWithFormat:@"Ato %lu", (unsigned long)i + 1] detail:nil control:field y:y];
@@ -18344,7 +18893,7 @@ index 3c18c4eab1..abc4d6e780 100644
    note.frame = NSMakeRect(32, y + 44, NSWidth(_pane.bounds) - 64, 16);
    [_pane addSubview:note];
    return y + 70;
-@@ -1772,6 +3267,98 @@ - (CGFloat)neverSleepList:(CGFloat)y {
+@@ -1772,6 +3569,98 @@ - (CGFloat)neverSleepList:(CGFloat)y {
    }
    return y;
  }
@@ -18443,7 +18992,7 @@ index 3c18c4eab1..abc4d6e780 100644
  - (void)addNeverSleepButton:(NSButton*)button {
    [self addNeverSleep:objc_getAssociatedObject(button, "field")];
  }
-@@ -1818,6 +3405,48 @@ - (void)setEngine:(NSPopUpButton*)popup {
+@@ -1818,6 +3707,48 @@ - (void)setEngine:(NSPopUpButton*)popup {
  - (void)renameAto:(NSTextField*)field {
    if (_browser && field.stringValue.length) agens_window_rename_ato(_browser, (int)field.tag, field.stringValue.UTF8String);
  }
@@ -18492,7 +19041,7 @@ index 3c18c4eab1..abc4d6e780 100644
  - (void)newAto:(id)sender {
    if (_browser) agens_window_new_ato(_browser);
  }
-@@ -1926,7 +3555,16 @@ - (CGFloat)adblockSection:(CGFloat)y {
+@@ -1926,7 +3857,16 @@ - (CGFloat)adblockSection:(CGFloat)y {
    y = [self option:@"Listas"
              detail:_adblockStatus ?: last
             control:[self buttons:@[ now ]] y:y];
@@ -18510,7 +19059,7 @@ index 3c18c4eab1..abc4d6e780 100644
  }
  - (void)setAdblockLevel:(NSSegmentedControl*)seg {
    agens_adblock_set_level((int)seg.selectedSegment);
-@@ -2265,39 +3903,68 @@ - (void)removeException:(NSButton*)button {
+@@ -2265,39 +4205,68 @@ - (void)removeException:(NSButton*)button {
    [self showSection:@"excecoes"];
  }
  
@@ -18591,7 +19140,7 @@ index 3c18c4eab1..abc4d6e780 100644
    }
    return y;
  }
-@@ -2305,11 +3972,34 @@ - (void)toggleExtension:(NSSwitch*)sw {
+@@ -2305,11 +4274,34 @@ - (void)toggleExtension:(NSSwitch*)sw {
    const size_t i = sw.tag;
    if (_browser && i < _extensionIds.size()) {
      agens_extension_set_enabled(_browser, _extensionIds[i].c_str(), sw.state == NSControlStateValueOn);
@@ -18626,7 +19175,7 @@ index 3c18c4eab1..abc4d6e780 100644
    NSAlert* alert = [[NSAlert alloc] init];
    alert.messageText = [NSString stringWithFormat:@"Remover %@?", @(_extensionNames[i].c_str())];
    alert.informativeText = @"Sai deste ato junto com os dados dela.";
-@@ -2320,17 +4010,49 @@ - (void)confirmRemoveExtension:(NSButton*)button {
+@@ -2320,17 +4312,49 @@ - (void)confirmRemoveExtension:(NSButton*)button {
    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
      AgensSettings* strong = weak;
      if (r != NSAlertFirstButtonReturn || !strong || !strong->_browser) return;
@@ -18680,7 +19229,7 @@ index 3c18c4eab1..abc4d6e780 100644
      return [self info:@"Carregando…" detail:nil note:@"" y:y];
    }
    if (!_loginSearch) {
-@@ -2340,6 +4062,19 @@ - (CGFloat)passwordsPage:(CGFloat)y {
+@@ -2340,6 +4364,19 @@ - (CGFloat)passwordsPage:(CGFloat)y {
      _loginSearch.action = @selector(searchLogins:);
      _loginSearch.sendsSearchStringImmediately = YES;
    }
@@ -18700,7 +19249,7 @@ index 3c18c4eab1..abc4d6e780 100644
    _loginSearch.frame = NSMakeRect(32, y, NSWidth(_pane.bounds) - 64, 28);
    [_pane addSubview:_loginSearch];
    _loginsY = y + 40;
-@@ -2360,15 +4095,23 @@ - (CGFloat)fillLogins {
+@@ -2360,15 +4397,23 @@ - (CGFloat)fillLogins {
      NSString* site = @(_logins[i].first.c_str());
      NSString* user = _logins[i].second.empty() ? @"(sem usuário)" : @(_logins[i].second.c_str());
      if (q.length && ![site.lowercaseString containsString:q] && ![user.lowercaseString containsString:q]) continue;
@@ -18725,7 +19274,7 @@ index 3c18c4eab1..abc4d6e780 100644
    for (NSUInteger k = before; k < _pane.subviews.count; ++k) _pane.subviews[k].identifier = @"login";
    NSRect f = _pane.frame;
    f.size.height = MAX(y + 40, NSHeight(_paneScroll.frame));
-@@ -2383,6 +4126,19 @@ - (void)setLogins:(const AgensLogin*)logins count:(int)count {
+@@ -2383,6 +4428,19 @@ - (void)setLogins:(const AgensLogin*)logins count:(int)count {
  - (void)searchLogins:(NSSearchField*)field {
    [self fillLogins];
  }
@@ -18745,7 +19294,7 @@ index 3c18c4eab1..abc4d6e780 100644
  - (void)unlockThen:(void (^)(void))then {
    if (_unlockedUntil && _unlockedUntil.timeIntervalSinceNow > 0) {
      then();
-@@ -2396,14 +4152,14 @@ - (void)unlockThen:(void (^)(void))then {
+@@ -2396,14 +4454,14 @@ - (void)unlockThen:(void (^)(void))then {
                        dispatch_async(dispatch_get_main_queue(), ^{
                          AgensSettings* strong = weak;
                          if (!ok || !strong) return;
@@ -18762,7 +19311,7 @@ index 3c18c4eab1..abc4d6e780 100644
    std::string out = buf;
    std::fill(std::begin(buf), std::end(buf), 0);
    return out;
-@@ -2423,6 +4179,15 @@ - (void)revealPassword:(NSButton*)button {
+@@ -2423,6 +4481,15 @@ - (void)revealPassword:(NSButton*)button {
      strong->_revealed = i;
      strong->_revealedPassword = [strong passwordAt:i];
      [strong fillLogins];
@@ -18778,7 +19327,7 @@ index 3c18c4eab1..abc4d6e780 100644
    }];
  }
  - (void)copyPassword:(NSButton*)button {
-@@ -2432,31 +4197,45 @@ - (void)copyPassword:(NSButton*)button {
+@@ -2432,31 +4499,45 @@ - (void)copyPassword:(NSButton*)button {
      AgensSettings* strong = weak;
      if (!strong) return;
      const std::string password = [strong passwordAt:i];
@@ -18844,7 +19393,7 @@ index 3c18c4eab1..abc4d6e780 100644
  }
  @end
  
-@@ -2634,7 +4413,7 @@ - (void)showStep:(int)step {
+@@ -2634,7 +4715,7 @@ - (void)showStep:(int)step {
        _atoName = [NSTextField textFieldWithString:@"Pessoal"];
        _atoName.frame = NSMakeRect(170, y + 30, 300, 26);
        NSTextField* cookies = Label(12, NSFontWeightRegular, kDim);
@@ -18853,7 +19402,7 @@ index 3c18c4eab1..abc4d6e780 100644
        cookies.frame = NSMakeRect(90, y + 76, 460, 16);
        cookies.alignment = NSTextAlignmentCenter;
        for (NSView* v in @[ label, _atoName, cookies ]) [_body addSubview:v];
-@@ -3116,6 +4895,9 @@ - (void)layout {
+@@ -3116,6 +5197,9 @@ - (void)layout {
      if ([v isKindOfClass:AgensListRow.class]) {
        v.frame = NSMakeRect(x0 - 10, y, cw + 20, 32);  // the hover box reaches past the text, like .row's padding
        y += 33;
@@ -18863,7 +19412,7 @@ index 3c18c4eab1..abc4d6e780 100644
      } else {  // a group's header, or the empty text
        y += 22;
        v.frame = NSMakeRect(x0, y, cw, 25);
-@@ -3192,38 +4974,220 @@ - (void)setVisits:(const AgensVisit*)visits count:(int)count {
+@@ -3192,20 +5276,202 @@ - (void)setVisits:(const AgensVisit*)visits count:(int)count {
  }
  @end
  
@@ -18887,24 +19436,6 @@ index 3c18c4eab1..abc4d6e780 100644
  - (instancetype)init {
 -  return [super initWithTitle:@"Favoritos" search:@"Buscar nos favoritos" action:@"Nova pasta"
 -                         note:@"Os favoritos ficam só neste Mac, por ato. A estrela na barra de endereço guarda a página aberta."];
--}
--- (void)setBookmarks:(const std::vector<BookmarkItem>&)bookmarks {
--  _bookmarks = bookmarks;
--  [self reload];
--}
--- (NSString*)pathOf:(long long)folder {
--  NSMutableArray<NSString*>* names = [NSMutableArray array];
--  for (long long id = folder; id;) {
--    long long next = 0;
--    for (const BookmarkItem& b : _bookmarks) {
--      if (b.id != id) continue;
--      [names insertObject:@(b.title.c_str()) atIndex:0];
--      next = b.parent;
--    }
--    id = next;
--  }
--  [names removeObject:@""];  // the invisible root
--  return [names componentsJoinedByString:@" › "];
 +  return [super initWithTitle:@"Downloads" search:@"Buscar downloads" action:@"Abrir a pasta"
 +                         note:@"Pasta: ~/Downloads · os de antes desta janela vêm do histórico; os arquivos ficam lá."];
 +}
@@ -19093,28 +19624,10 @@ index 3c18c4eab1..abc4d6e780 100644
 +- (instancetype)init {
 +  return [super initWithTitle:@"Favoritos" search:@"Buscar nos favoritos" action:@"Nova pasta"
 +                         note:@"Os favoritos ficam só neste Mac, por ato. A estrela na barra de endereço guarda a página aberta."];
-+}
-+- (void)setBookmarks:(const std::vector<BookmarkItem>&)bookmarks {
-+  _bookmarks = bookmarks;
-+  [self reload];
-+}
-+- (NSString*)pathOf:(long long)folder {
-+  NSMutableArray<NSString*>* names = [NSMutableArray array];
-+  for (long long id = folder; id;) {
-+    long long next = 0;
-+    for (const BookmarkItem& b : _bookmarks) {
-+      if (b.id != id) continue;
-+      [names insertObject:@(b.title.c_str()) atIndex:0];
-+      next = b.parent;
-+    }
-+    id = next;
-+  }
-+  [names removeObject:@""];  // the invisible root
-+  return [names componentsJoinedByString:@" › "];
  }
- - (void)reload {
-   NSString* q = self.query.lowercaseString;
-@@ -3316,7 +5280,10 @@ - (void)refresh {
+ - (void)setBookmarks:(const std::vector<BookmarkItem>&)bookmarks {
+   _bookmarks = bookmarks;
+@@ -3316,7 +5582,10 @@ - (void)refresh {
  @interface AgensErrorView : NSView
  @property(nonatomic, copy) void (^onRetry)(void);
  @property(nonatomic, copy) void (^onProceed)(void);  // security stops: go on anyway
@@ -19125,7 +19638,7 @@ index 3c18c4eab1..abc4d6e780 100644
  - (void)refreshTheme;
  @end
  @implementation AgensErrorView {
-@@ -3326,10 +5293,14 @@ @implementation AgensErrorView {
+@@ -3326,10 +5595,14 @@ @implementation AgensErrorView {
    NSTextField* _code;
    NSButton* _retry;
    NSButton* _proceed;
@@ -19140,7 +19653,7 @@ index 3c18c4eab1..abc4d6e780 100644
  - (instancetype)initWithFrame:(NSRect)frame {
    if ((self = [super initWithFrame:frame])) {
      self.wantsLayer = YES;
-@@ -3347,7 +5318,9 @@ - (instancetype)initWithFrame:(NSRect)frame {
+@@ -3347,7 +5620,9 @@ - (instancetype)initWithFrame:(NSRect)frame {
      _proceed.bordered = NO;
      _proceed.font = [NSFont systemFontOfSize:12];
      _proceed.contentTintColor = kDim.color();
@@ -19151,7 +19664,7 @@ index 3c18c4eab1..abc4d6e780 100644
      [self refreshTheme];
    }
    return self;
-@@ -3371,7 +5344,7 @@ - (void)showError:(int)error name:(NSString*)name stop:(BOOL)stop {
+@@ -3371,7 +5646,7 @@ - (void)showError:(int)error name:(NSString*)name stop:(BOOL)stop {
    switch (error) {
      case -106:  // ERR_INTERNET_DISCONNECTED
        title = @"Sem conexão com a internet";
@@ -19160,7 +19673,7 @@ index 3c18c4eab1..abc4d6e780 100644
        offline = YES;
        break;
      case -105:  // ERR_NAME_NOT_RESOLVED
-@@ -3407,6 +5380,8 @@ - (void)showError:(int)error name:(NSString*)name stop:(BOOL)stop {
+@@ -3407,6 +5682,8 @@ - (void)showError:(int)error name:(NSString*)name stop:(BOOL)stop {
    }
    _retry.title = stop ? @"Voltar" : @"Tentar de novo";
    _proceed.hidden = !stop;
@@ -19169,7 +19682,7 @@ index 3c18c4eab1..abc4d6e780 100644
    _icon.image = AgensIcon(stop || certificate ? kIconLock : offline ? kIconWifiOff : kIconAbout, 40);
    _title.stringValue = title;
    _detail.stringValue = detail;
-@@ -3414,10 +5389,44 @@ - (void)showError:(int)error name:(NSString*)name stop:(BOOL)stop {
+@@ -3414,10 +5691,44 @@ - (void)showError:(int)error name:(NSString*)name stop:(BOOL)stop {
    self.accessibilityLabel = [NSString stringWithFormat:@"%@. %@", title, detail];
    self.needsLayout = YES;
  }
@@ -19214,7 +19727,7 @@ index 3c18c4eab1..abc4d6e780 100644
    const CGFloat total = 40 + 14 + 28 + 6 + 18 + 4 + 16 + 18 + NSHeight(_retry.frame);
    CGFloat y = MAX(24, (h - total) / 2);
    _icon.frame = NSMakeRect((w - 40) / 2, y, 40, 40);
-@@ -3428,7 +5437,9 @@ - (void)layout {
+@@ -3428,7 +5739,9 @@ - (void)layout {
    y += 18 + 4;
    _code.frame = NSMakeRect(24, y, w - 48, 16);
    y += 16 + 18;
@@ -19225,7 +19738,7 @@ index 3c18c4eab1..abc4d6e780 100644
    [_proceed sizeToFit];
    _proceed.frame = NSMakeRect((w - NSWidth(_proceed.frame)) / 2, NSMaxY(_retry.frame) + 14, NSWidth(_proceed.frame), 18);
  }
-@@ -3436,12 +5447,14 @@ - (void)proceed:(id)sender {
+@@ -3436,12 +5749,14 @@ - (void)proceed:(id)sender {
    if (_onProceed) _onProceed();
  }
  - (void)retry:(id)sender {
@@ -19242,7 +19755,7 @@ index 3c18c4eab1..abc4d6e780 100644
  @interface AgensFindBar : NSView <NSTextFieldDelegate>
  @property(nonatomic) AgensWindow* engine;
  - (void)open;
-@@ -3451,33 +5464,55 @@ - (void)setCurrent:(int)current total:(int)total;
+@@ -3451,33 +5766,55 @@ - (void)setCurrent:(int)current total:(int)total;
  - (void)refreshTheme;
  @end
  @implementation AgensFindBar {
@@ -19303,7 +19816,7 @@ index 3c18c4eab1..abc4d6e780 100644
      [self refreshTheme];
    }
    return self;
-@@ -3486,24 +5521,53 @@ - (BOOL)isFlipped {
+@@ -3486,24 +5823,53 @@ - (BOOL)isFlipped {
    return YES;
  }
  - (void)refreshTheme {
@@ -19368,7 +19881,7 @@ index 3c18c4eab1..abc4d6e780 100644
  }
  - (void)open {
    self.hidden = NO;
-@@ -3516,8 +5580,7 @@ - (void)close {
+@@ -3516,8 +5882,7 @@ - (void)close {
    if (_engine) agens_find_stop(_engine);
  }
  - (void)search:(BOOL)forward {
@@ -19378,7 +19891,7 @@ index 3c18c4eab1..abc4d6e780 100644
  }
  - (void)step:(BOOL)forward {
    if (self.hidden) {
-@@ -3526,11 +5589,25 @@ - (void)step:(BOOL)forward {
+@@ -3526,11 +5891,25 @@ - (void)step:(BOOL)forward {
    }
    [self search:forward];
  }
@@ -19408,7 +19921,7 @@ index 3c18c4eab1..abc4d6e780 100644
  }
  - (void)controlTextDidChange:(NSNotification*)note {
    [self search:YES];
-@@ -3549,13 +5626,223 @@ - (BOOL)control:(NSControl*)control textView:(NSTextView*)textView doCommandBySe
+@@ -3549,13 +5928,223 @@ - (BOOL)control:(NSControl*)control textView:(NSTextView*)textView doCommandBySe
  @end
  
  static void SiteDataCleared(void* context) {
@@ -19634,7 +20147,17 @@ index 3c18c4eab1..abc4d6e780 100644
  // ---------------------------------------------------------------------------------------------
  // The chrome.
  
-@@ -3602,6 +5889,14 @@ static void SuggestionsChanged(void* context, const AgensSuggestion* suggestions
+@@ -3576,6 +6165,9 @@ static void TabsChanged(void* context, const AgensTab* tabs, int count) {
+ static void AtosChanged(void* context, const AgensAto* atos, int count) {
+   [(__bridge AgensChrome*)context setAtos:atos count:count];
+ }
++@interface AgensChrome (Translate)
++- (void)translateChosen:(NSString*)selection;  // the right-click item (agens_window_set_translate)
++@end
+ @interface AgensChrome (StatusAndDownloads)
+ - (void)setStatus:(const char*)text;
+ - (void)setDownloads:(const AgensDownload*)downloads count:(int)count started:(BOOL)started;
+@@ -3602,6 +6194,14 @@ static void SuggestionsChanged(void* context, const AgensSuggestion* suggestions
    [(__bridge AgensChrome*)context setSuggestions:suggestions count:count];
  }
  
@@ -19649,7 +20172,7 @@ index 3c18c4eab1..abc4d6e780 100644
  @implementation AgensChrome {
    AgensWindow* _window;  // owned by the engine; null after detach
    AgensToolButton* _back;
-@@ -3620,11 +5915,30 @@ @implementation AgensChrome {
+@@ -3620,11 +6220,30 @@ @implementation AgensChrome {
    AgensHoverView* _newTab;
    NSMutableArray<AgensTabRow*>* _rows;
    NSScrollView* _tabsScroll;  // the tab list scrolls between "Nova aba" and the atos
@@ -19682,11 +20205,13 @@ index 3c18c4eab1..abc4d6e780 100644
    int _activeAto;
    NSView* _atosLine;
    NSMutableArray<AgensAtoButton*>* _atoButtons;
-@@ -3633,10 +5947,35 @@ @implementation AgensChrome {
+@@ -3632,11 +6251,47 @@ @implementation AgensChrome {
+   NSView* _atoDot;
    AgensToolButton* _toggle;
    AgensToolButton* _star;  // in the address, right side (prototype .star)
-   AgensToolButton* _sound;  // in the address, left of the star, while the page plays or is muted
+-  AgensToolButton* _sound;  // in the address, left of the star, while the page plays or is muted
 -  AgensToolButton* _capture;  // in the address: camera/microphone in use (opens the site panel)
++  AgensFocusButton* _sound;  // first in the address, while the page plays or is muted: opens the tab's volume
 +  AgensLiveView* _capture;
 +  BOOL _cameraOn, _micOn;  // in the address: camera/microphone in use (opens the site panel)
 +  AgensToolButton* _asking;
@@ -19713,6 +20238,17 @@ index 3c18c4eab1..abc4d6e780 100644
 +  NSTextField* _volumeMute;
 +  NSImageView* _volumeMuteIcon;
 +  NSButton* _volumeSpeaker;
++  NSSlider* _volumeSlider;
++  BOOL _volumeFromKeys;  // opened with ↓ on the address's speaker: closing gives it the focus back
++  AgensToolButton* _trButton;  // translate, at the address's end (prototipos/janela-traduzir.html)
++  CAShapeLayer* _trRing;       // around it: the progress while translating
++  id<AgensTranslating> _translator;  // the page's; nil before macOS 15 (no translation UI then)
++  id<AgensTranslating> _trSelection;  // a selection's, apart so it doesn't stop the page's
++  NSMutableDictionary<NSNumber*, AgensTrPage*>* _trPages;  // by tab id
++  NSMutableDictionary<NSNumber*, NSNumber*>* _tabIndexById;  // tab id → index, from the last setTabs
++  NSMutableSet<NSString*>* _trOffered;  // sites whose offer already opened by itself (this session)
++  int _trRunTab;   // the tab being translated, 0 none: one at a time per window
++  BOOL _trAsked;   // a translate popover is open
 +  NSView* _zoomNotice;      // "Zoom 125%" for 1.5 s over the page's top (prototype .toast)
 +  NSTextField* _zoomNoticeText;
 +  int _zoomNoticeSeq;
@@ -19721,7 +20257,7 @@ index 3c18c4eab1..abc4d6e780 100644
    AgensToolButton* _newTabTop;  // "+" at the end of the top strip
    AgensStripView* _strip;       // holds the tabs on top; scrolls when they don't fit
    CGFloat _stripOffset;
-@@ -3647,17 +5986,26 @@ @implementation AgensChrome {
+@@ -3647,17 +6302,26 @@ @implementation AgensChrome {
    CGFloat _tabStep, _listX;  // top strip: the width of one unpinned tab plus the gap, and where they start
    AgensToolButton* _menu;  // "⋯" after the address
    NSView* _menuView;       // the open panel (menu or downloads), shown under its button
@@ -19752,7 +20288,7 @@ index 3c18c4eab1..abc4d6e780 100644
    BOOL _bookmarked;
    NSImageView* _newTabPlus;
    NSTextField* _newTabLabel;
-@@ -3670,11 +6018,18 @@ @implementation AgensChrome {
+@@ -3670,11 +6334,18 @@ @implementation AgensChrome {
    // shortcut: Chromium's history page still loads under ours (one renderer more); serve a blank page for chrome://history if memory needs it.
    AgensHistoryView* _history;
    AgensBookmarksView* _bookmarksPage;  // same shortcut as the history page
@@ -19773,7 +20309,7 @@ index 3c18c4eab1..abc4d6e780 100644
    AgensErrorView* _error;
    BOOL _stopPage;  // the active tab shows a security stop page
    int _split;            // the active tab's split (0 none, 1 side by side, 2 stacked)
-@@ -3691,6 +6046,27 @@ @implementation AgensChrome {
+@@ -3691,6 +6362,27 @@ @implementation AgensChrome {
    NSString* _url;
    BOOL _loading;
    NSRect _page;
@@ -19801,7 +20337,21 @@ index 3c18c4eab1..abc4d6e780 100644
  }
  
  - (instancetype)initWithWindow:(AgensWindow*)window {
-@@ -3737,12 +6113,27 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3727,22 +6419,36 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+     _star = [[AgensToolButton alloc] initWithSymbol:@"star" label:@"Adicionar aos favoritos (⌘D)" size:12];
+     _star.radius = 7;
+     _star.onPress = ^{ [weak run:agens_window_toggle_bookmark]; };
+-    _sound = [[AgensToolButton alloc] initWithSymbol:@"speaker.wave.2.fill" label:@"Silenciar a aba" size:12];
++    // Prototype #som: clicking opens the tab's volume (it no longer mutes); ↓ opens it on the slider.
++    _sound = [[AgensFocusButton alloc] initWithSymbol:@"speaker.wave.2.fill" label:@"Volume desta aba" size:12];
+     _sound.radius = 7;
+     _sound.hidden = YES;
+-    _sound.onPress = ^{
+-      AgensChrome* strong = weak;
+-      if (strong && strong->_window) agens_window_toggle_mute(strong->_window, strong->_activeIndex);
+-    };
++    _sound.onPress = ^{ [weak addressVolume:NO]; };
++    _sound.onDown = ^{ [weak addressVolume:YES]; };
      [_omni addSubview:_omniIcon];
      [_omni addSubview:_address];
      [_omni addSubview:_sound];
@@ -19832,7 +20382,7 @@ index 3c18c4eab1..abc4d6e780 100644
      {
        // One small icon per Chromium address-bar indicator; they all open the site panel.
        struct { NSString* symbol; NSString* label; } kInd[] = {
-@@ -3762,20 +6153,13 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3762,23 +6468,41 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
          [list addObject:b];
        }
        _indicators = list;
@@ -19858,7 +20408,35 @@ index 3c18c4eab1..abc4d6e780 100644
        [_omni addSubview:_zoom];
      }
      [_omni addSubview:_star];
-@@ -3786,11 +6170,12 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
++    _trButton = [[AgensToolButton alloc] initWithSymbol:@"translate" label:@"Traduzir página" size:12];
++    [_trButton setImage:AgensIcon(@"<path d='M3 5h7M6.5 3.5V5M4.5 5c.6 2.6 2.4 4.6 4.5 5.5M8.5 5c-.5 2.5-2.2 4.8-5 6'/>"
++                                  @"<path d='m10.5 17 3-7.5 3 7.5M11.6 14.5h3.8'/>",
++                                  15)];
++    _trButton.radius = 7;
++    _trButton.hidden = YES;
++    _trButton.frame = NSMakeRect(0, 0, 26, 26);
++    _trButton.onPress = ^{ [weak toggleTranslate]; };
++    _trRing = [CAShapeLayer layer];
++    _trRing.frame = CGRectMake(0, 0, 26, 26);
++    CGPathRef ring = CGPathCreateWithEllipseInRect(CGRectMake(2.5, 2.5, 21, 21), nullptr);
++    _trRing.path = ring;
++    CGPathRelease(ring);
++    _trRing.fillColor = NSColor.clearColor.CGColor;
++    _trRing.lineWidth = 2;
++    _trRing.lineCap = kCALineCapRound;
++    _trRing.strokeEnd = 0;
++    _trRing.hidden = YES;
++    _trRing.transform = CATransform3DMakeRotation(-M_PI_2, 0, 0, 1);  // starts at the top
++    [_trButton.layer addSublayer:_trRing];
++    [_omni addSubview:_trButton];
++    _translator = NewTranslator(_trButton);
++    _trPages = [NSMutableDictionary dictionary];
++    _tabIndexById = [NSMutableDictionary dictionary];
++    _trOffered = [NSMutableSet set];
+     _siteButton = [[AgensHoverView alloc] init];
+     _siteButton.radius = 7;
+     _siteButton.toolTip = @"Ver informações do site";
+@@ -3786,11 +6510,12 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
      _siteButton.onPress = ^{ [weak showSiteInfo]; };
      [_omni addSubview:_siteButton positioned:NSWindowBelow relativeTo:_omniIcon];
      _extensions = [NSMutableArray array];
@@ -19872,7 +20450,7 @@ index 3c18c4eab1..abc4d6e780 100644
      [_downloadsButton setImage:AgensIcon(kIconDown)];
      _downloadsButton.hidden = YES;
      _downloadsButton.onPress = ^{ [weak toggleDownloads]; };
-@@ -3803,12 +6188,13 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3803,12 +6528,13 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
      _loadGlow.endPoint = CGPointMake(1, 0.5);
      _loadGlow.cornerRadius = 1;
      [_loadbar.layer addSublayer:_loadGlow];
@@ -19891,7 +20469,7 @@ index 3c18c4eab1..abc4d6e780 100644
      _menu = [[AgensToolButton alloc] initWithSymbol:@"ellipsis" label:@"Menu"];
      _menu.onPress = ^{ [weak showMenu]; };
  
-@@ -3858,7 +6244,25 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3858,7 +6584,25 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
      _tabsScroll.borderType = NSNoBorder;
      _tabsDoc = [[AgensDragView alloc] init];
      _tabsScroll.documentView = _tabsDoc;
@@ -19917,7 +20495,7 @@ index 3c18c4eab1..abc4d6e780 100644
      _moreAtos = [[AgensToolButton alloc] initWithSymbol:@"ellipsis" label:@"Todos os atos" size:13];
      _moreAtos.onPress = ^{ [weak showAtosMenu]; };
      _addAto = [[AgensToolButton alloc] initWithSymbol:@"plus" label:@"Novo ato"];
-@@ -3875,6 +6279,13 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3875,6 +6619,13 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
                                         AgensChrome* strong = weak;
                                         NSEventModifierFlags mods = event.modifierFlags &
                                             NSEventModifierFlagDeviceIndependentFlagsMask;
@@ -19931,7 +20509,7 @@ index 3c18c4eab1..abc4d6e780 100644
                                         if (!strong || event.window != strong.window ||
                                             ![event.charactersIgnoringModifiers.lowercaseString isEqualToString:@"s"]) {
                                           return event;
-@@ -3902,7 +6313,9 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3902,7 +6653,9 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
                                         }
                                         NSPoint p = [strong.superview convertPoint:event.locationInWindow fromView:nil];
                                         NSView* hit = [strong hitTest:p];
@@ -19942,7 +20520,7 @@ index 3c18c4eab1..abc4d6e780 100644
                                         NSMenu* menu = [hit menuForEvent:event];
                                         if (!menu) return event;
                                         [NSMenu popUpContextMenu:menu withEvent:event forView:hit];
-@@ -3936,18 +6349,37 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3936,18 +6689,37 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
          agens_window_reload(strong->_window);
        }
      };
@@ -19980,7 +20558,7 @@ index 3c18c4eab1..abc4d6e780 100644
      _bar = [[NSView alloc] init];
      _bar.accessibilityRole = NSAccessibilityToolbarRole;
      _bar.accessibilityLabel = @"Barra de favoritos";
-@@ -3966,9 +6398,47 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3966,9 +6738,47 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
      _ntp.field.delegate = self;
  
      for (NSView* v in @[ _toggle, _back, _forward, _reload, _omni, _extButton, _downloadsButton, _menu, _tabsScroll, _moreAtos, _atoTile, _atoName, _separator, _newTab, _newTabTop,
@@ -20029,7 +20607,7 @@ index 3c18c4eab1..abc4d6e780 100644
      [self refreshTheme];
      ApplyAppearance(agens_window_color_mode(_window));  // the saved choice, from the first window on
      agens_window_set_tabs_observer(_window, TabsChanged, (__bridge void*)self);
-@@ -3998,7 +6468,6 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
+@@ -3998,7 +6808,6 @@ - (instancetype)initWithWindow:(AgensWindow*)window {
  - (void)refreshTheme {
    _omni.layer.cornerRadius = 10 * Round();
    _suggest.layer.cornerRadius = 12 * Round();
@@ -20037,7 +20615,7 @@ index 3c18c4eab1..abc4d6e780 100644
    _omni.layer.backgroundColor = CG(kSunk, self);
    _omni.layer.borderColor = CG(_address.currentEditor ? kLineStrong : kLine, self);
    _suggest.layer.backgroundColor = CG(kFloat, self);
-@@ -4007,8 +6476,12 @@ - (void)refreshTheme {
+@@ -4007,8 +6816,12 @@ - (void)refreshTheme {
    _separator.layer.backgroundColor = CG(kLine, self);
    _atosLine.layer.backgroundColor = CG(kLine, self);
    _atoDot.layer.backgroundColor = CG(kLight3, self);
@@ -20052,7 +20630,7 @@ index 3c18c4eab1..abc4d6e780 100644
    SyncGlass(_suggest, 12 * Round());
    [self runLoadbar];  // the glow's color
  }
-@@ -4028,6 +6501,13 @@ static void RefreshTree(NSView* v) {
+@@ -4028,6 +6841,13 @@ static void RefreshTree(NSView* v) {
  // window color with alpha over it, the chrome draws on top.
  - (void)viewDidMoveToWindow {
    [super viewDidMoveToWindow];
@@ -20066,7 +20644,7 @@ index 3c18c4eab1..abc4d6e780 100644
    if (!self.window || _backdrop) return;
    _backdrop = [[NSView alloc] initWithFrame:self.window.contentView.superview.bounds];
    _backdrop.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-@@ -4138,6 +6618,7 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4138,6 +6958,7 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
    _strip.hidden = !top;
    for (AgensTabRow* row in _rows) {
      NSView* parent = top ? _strip : row.pinned ? self : _tabsDoc;
@@ -20074,7 +20652,7 @@ index 3c18c4eab1..abc4d6e780 100644
      if (row.superview != parent) {
        if (parent == self) {
          [self addSubview:row positioned:NSWindowBelow relativeTo:_ntp];
-@@ -4160,13 +6641,21 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4160,13 +6981,21 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
    CGFloat omniX = top ? NSMaxX(_reload.frame) + 10 : MAX(columnEnd + kGap, navX + 126);
    _menu.frame = NSMakeRect(width - kPad - 28, btnY, 28, 28);
    CGFloat omniEnd = NSMinX(_menu.frame) - 4;
@@ -20099,20 +20677,26 @@ index 3c18c4eab1..abc4d6e780 100644
    }
  
    // Atos: only what fits (6 in the open column, 5 collapsed, 4 on the bar); past that the last
-@@ -4193,6 +6682,7 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4193,26 +7022,36 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
        v.frame = NSMakeRect(x, btnY, 30, 28);
        x += 32;
      }
 +    placeDownloads();
    }
    _omni.frame = NSMakeRect(omniX, barY + (bar - omniH) / 2, omniEnd - omniX, omniH);
-   _omniIcon.frame = NSMakeRect(12, (omniH - 14) / 2, 14, 14);
-@@ -4200,17 +6690,23 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+-  _omniIcon.frame = NSMakeRect(12, (omniH - 14) / 2, 14, 14);
++  // Prototype #som: the speaker first, before the site icon; translate last, before the star.
++  const CGFloat lead = _sound.hidden ? 0 : 26;
++  _sound.frame = NSMakeRect(5, (omniH - 26) / 2, 26, 26);
++  _omniIcon.frame = NSMakeRect(12 + lead, (omniH - 14) / 2, 14, 14);
+   _siteButton.frame = NSInsetRect(_omniIcon.frame, -6, -6);
    _star.frame = NSMakeRect(NSWidth(_omni.frame) - 4 - 26, (omniH - 26) / 2, 26, 26);
-   _sound.frame = NSMakeRect(NSMinX(_star.frame) - 26, (omniH - 26) / 2, 26, 26);
-   const CGFloat afterSound = _sound.hidden ? NSMinX(_star.frame) : NSMinX(_sound.frame);
+-  _sound.frame = NSMakeRect(NSMinX(_star.frame) - 26, (omniH - 26) / 2, 26, 26);
+-  const CGFloat afterSound = _sound.hidden ? NSMinX(_star.frame) : NSMinX(_sound.frame);
 -  _capture.frame = NSMakeRect(afterSound - 26, (omniH - 26) / 2, 26, 26);
 -  CGFloat addressEnd = _capture.hidden ? afterSound : NSMinX(_capture.frame);
++  _trButton.frame = NSMakeRect(NSMinX(_star.frame) - 26, (omniH - 26) / 2, 26, 26);
++  const CGFloat afterSound = _trButton.hidden ? NSMinX(_star.frame) : NSMinX(_trButton.frame);
 +  const CGFloat liveW = [_capture width];
 +  _capture.frame = NSMakeRect(afterSound - liveW - 2, (omniH - 22) / 2, liveW, 22);
 +  CGFloat addressEnd = _capture.hidden ? afterSound : NSMinX(_capture.frame) - 2;
@@ -20134,9 +20718,12 @@ index 3c18c4eab1..abc4d6e780 100644
 +    addressEnd -= zw + 4;
 +    _zoom.frame = NSMakeRect(addressEnd, (omniH - 22) / 2, zw, 22);
    }
-   _address.frame = NSMakeRect(33, (omniH - 18) / 2, addressEnd - 6 - 33, 18);
+-  _address.frame = NSMakeRect(33, (omniH - 18) / 2, addressEnd - 6 - 33, 18);
++  _address.frame = NSMakeRect(33 + lead, (omniH - 18) / 2, addressEnd - 6 - 33 - lead, 18);
  
-@@ -4254,7 +6750,7 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+   NSMutableArray<AgensTabRow*>* pins = [NSMutableArray array];
+   NSMutableArray<AgensTabRow*>* list = [NSMutableArray array];
+@@ -4254,7 +7093,7 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
      int slot = 0;
      for (AgensTabRow* row in list) {
        if (row == _dragged) continue;  // it follows the pointer (dragRow:by:)
@@ -20145,7 +20732,7 @@ index 3c18c4eab1..abc4d6e780 100644
        row.frame = NSMakeRect(x, (strip - rowH) / 2, w, rowH);
        row.hidden = NO;
        x += w + 4;
-@@ -4272,14 +6768,29 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4272,14 +7111,29 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
      y += rowH + 6;
      // Pinned (prototype .pinned): a grid of four 36 pt tiles; one per line in the rail.
      const CGFloat tileW = narrow ? side : (side - 12) / 4, tileH = narrow ? rowH : (Dense() ? 32 : 36);
@@ -20169,19 +20756,19 @@ index 3c18c4eab1..abc4d6e780 100644
 +      if (row == _dragged) continue;
 +      if (slotShown && (int)tiles == _dropSlot) _dropRect = tile(tiles++);
 +      row.frame = tile(tiles++);
-+    }
+     }
+-    if (pins.count) y += ((narrow ? pins.count : (pins.count + 3) / 4) * (tileH + 4)) + 2;
 +    if (slotShown && (int)tiles == _dropSlot) _dropRect = tile(tiles++);
 +    _pinSlot.hidden = !slotShown;
 +    if (slotShown) {
 +      _pinSlot.frame = _dropRect;
 +      [self paintPinSlot];
-     }
--    if (pins.count) y += ((narrow ? pins.count : (pins.count + 3) / 4) * (tileH + 4)) + 2;
++    }
 +    if (tiles) y += ((narrow ? tiles : (tiles + 3) / 4) * (tileH + 4)) + 2;
      _separator.frame = NSMakeRect(kPad + (narrow ? 6 : 8), y, side - (narrow ? 12 : 16), 1);
      y += 7;
      _newTab.frame = NSMakeRect(kPad, y, side, rowH);
-@@ -4324,15 +6835,23 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4324,15 +7178,23 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
      _tabsScroll.frame = NSMakeRect(kPad, y, side, MAX(0, footY - 6 - y));
      CGFloat rowY = 0;
      int slot = 0;
@@ -20207,7 +20794,7 @@ index 3c18c4eab1..abc4d6e780 100644
      _tabsDoc.frame = NSMakeRect(0, 0, side, MAX(rowY, NSHeight(_tabsScroll.frame)));
      page = NSMakeRect(columnEnd + kGap, bar, width - (columnEnd + kGap) - kPad, height - bar - kPad);
      page = [self roomForBar:page];
-@@ -4340,8 +6859,13 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4340,8 +7202,13 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
  
    _page = page;
    // Our pages over the card (new tab, errors…) cover the active tab's pane only; the engine splits
@@ -20222,7 +20809,7 @@ index 3c18c4eab1..abc4d6e780 100644
    if (_split) {
      const CGFloat gap = 8;
      if (_split == 2) {
-@@ -4367,15 +6891,27 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4367,15 +7234,27 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
      _ntp2.frame = NSInsetRect(other, 1, 1);
      _ntp2Click.frame = _ntp2.frame;
    }
@@ -20254,7 +20841,7 @@ index 3c18c4eab1..abc4d6e780 100644
  
    NSRect anchor = [self editingField] == _ntp.field ? [_ntp convertRect:_ntp.well.frame toView:self]
                                                       : _omni.frame;
-@@ -4384,11 +6920,38 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
+@@ -4384,11 +7263,38 @@ - (AgensRect)layoutForWidth:(int)width height:(int)height {
    for (NSUInteger i = 0; i < _suggestionRows.count; ++i) {
      _suggestionRows[i].frame = NSMakeRect(5, 5 + i * 34, NSWidth(anchor) - 10, 34);
    }
@@ -20295,41 +20882,15 @@ index 3c18c4eab1..abc4d6e780 100644
  }
  - (AgensRect)siteIconRect {
    NSRect r = [_omni convertRect:_omniIcon.frame toView:self];
-@@ -4398,44 +6961,218 @@ - (void)relayout {
+@@ -4398,13 +7304,185 @@ - (void)relayout {
    [self layoutForWidth:(int)NSWidth(self.bounds) height:(int)NSHeight(self.bounds)];
  }
  
--- (void)setTabs:(const AgensTab*)tabs count:(int)count {
 +// --- DevTools in the card.
 +
 +- (void)makeDevToolsViews {
 +  if (_devtoolsBar) return;
-   __weak AgensChrome* weak = self;
--  while ((int)_rows.count < count) {
--    AgensTabRow* row = [[AgensTabRow alloc] initWithFrame:NSMakeRect(0, 0, kSide, RowH())];
--    __weak AgensTabRow* weakRow = row;
--    row.onPress = ^{ [weak activate:weakRow.index]; };
--    row.onDrag = ^(NSPoint delta) { [weak dragRow:weakRow by:delta]; };
--    row.onDrop = ^{ [weak dropRow:weakRow]; };
--    row.onClose = ^{ [weak close:weakRow.index]; };
--    row.onPin = ^{
--      AgensChrome* strong = weak;
--      if (strong && strong->_window) agens_window_set_pinned(strong->_window, weakRow.index, !weakRow.pinned);
--    };
--    row.onMute = ^{
--      AgensChrome* strong = weak;
--      if (strong && strong->_window) agens_window_toggle_mute(strong->_window, weakRow.index);
--    };
--    row.onSplit = ^(int layout) {
--      AgensChrome* strong = weak;
--      if (strong && strong->_window) agens_window_split(strong->_window, weakRow.index, layout);
--    };
--    row.onUnsplit = ^{
--      AgensChrome* strong = weak;
--      if (strong && strong->_window) agens_window_unsplit(strong->_window, weakRow.index);
--    };
--    [_tabsDoc addSubview:row];
--    [_rows addObject:row];
++  __weak AgensChrome* weak = self;
 +  _devtoolsDivider = [[AgensDevToolsDivider alloc] initWithFrame:NSZeroRect];
 +  _devtoolsDivider.onDrag = ^(NSPoint p, BOOL done) { [weak dragDevTools:p done:done]; };
 +  _devtoolsBar = [[AgensDevToolsBar alloc] initWithFrame:NSZeroRect];
@@ -20363,10 +20924,7 @@ index 3c18c4eab1..abc4d6e780 100644
 +    line = NSMakeRect(NSMinX(inner), NSMaxY(_devtoolsPage), NSWidth(inner), 1);
 +    _devtoolsDivider.frame = NSInsetRect(line, 0, -4);
 +    _devtoolsBar.frame = NSMakeRect(NSMinX(inner), NSMaxY(line), NSWidth(inner), kDevToolsBar);
-   }
--  while ((int)_rows.count > count) {
--    [_rows.lastObject removeFromSuperview];
--    [_rows removeLastObject];
++  }
 +  if (_devtoolsDivider.vertical != right) _devtoolsDivider.vertical = right;
 +  _devtoolsTools = NSMakeRect(NSMinX(_devtoolsBar.frame), NSMaxY(_devtoolsBar.frame), NSWidth(_devtoolsBar.frame),
 +                              NSMaxY(inner) - NSMaxY(_devtoolsBar.frame));
@@ -20382,13 +20940,7 @@ index 3c18c4eab1..abc4d6e780 100644
 +  if (!shown) {
 +    _devtoolsSize.hidden = YES;
 +    return;
-   }
--  int activeTab = -1;
--  _pinnedCount = 0;
--  _partner = -1;
--  BOOL partnerIsNewTab = NO;
--  for (int i = 0; i < count; ++i) {  // a split's tabs sit next to each other
--    if (!tabs[i].active || !tabs[i].split) continue;
++  }
 +  [self splitDevTools];
 +  auto rect = [](NSRect r) {
 +    return AgensRect{(int)NSMinX(r), (int)NSMinY(r), (int)NSWidth(r), (int)NSHeight(r)};
@@ -20439,7 +20991,7 @@ index 3c18c4eab1..abc4d6e780 100644
 +  }
 +}
 +
-+- (void)setTabs:(const AgensTab*)tabs count:(int)count {
+ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
 +  // Rows follow their tab (AgensTab.id), so what hangs on a row (the volume popover, a drag) stays
 +  // with that tab when others open, close or move.
 +  NSMutableDictionary<NSNumber*, AgensTabRow*>* old = [NSMutableDictionary dictionary];
@@ -20507,49 +21059,54 @@ index 3c18c4eab1..abc4d6e780 100644
 +  }];
 +}
 +- (AgensTabRow*)makeTabRow {
-+  __weak AgensChrome* weak = self;
+   __weak AgensChrome* weak = self;
+-  while ((int)_rows.count < count) {
 +  {
-+    AgensTabRow* row = [[AgensTabRow alloc] initWithFrame:NSMakeRect(0, 0, kSide, RowH())];
-+    __weak AgensTabRow* weakRow = row;
-+    row.onPress = ^{ [weak activate:weakRow.index]; };
+     AgensTabRow* row = [[AgensTabRow alloc] initWithFrame:NSMakeRect(0, 0, kSide, RowH())];
+     __weak AgensTabRow* weakRow = row;
+     row.onPress = ^{ [weak activate:weakRow.index]; };
+-    row.onDrag = ^(NSPoint delta) { [weak dragRow:weakRow by:delta]; };
 +    row.onDrag = ^(NSPoint delta, NSPoint where) { [weak dragRow:weakRow by:delta at:where]; };
-+    row.onDrop = ^{ [weak dropRow:weakRow]; };
-+    row.onClose = ^{ [weak close:weakRow.index]; };
-+    row.onPin = ^{
-+      AgensChrome* strong = weak;
-+      if (strong && strong->_window) agens_window_set_pinned(strong->_window, weakRow.index, !weakRow.pinned);
-+    };
-+    row.onMute = ^{
-+      AgensChrome* strong = weak;
-+      if (strong && strong->_window) agens_window_toggle_mute(strong->_window, weakRow.index);
-+    };
+     row.onDrop = ^{ [weak dropRow:weakRow]; };
+     row.onClose = ^{ [weak close:weakRow.index]; };
+     row.onPin = ^{
+@@ -4415,6 +7493,9 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+       AgensChrome* strong = weak;
+       if (strong && strong->_window) agens_window_toggle_mute(strong->_window, weakRow.index);
+     };
 +    row.onVolume = ^(NSView* sound) { [weak showVolume:weakRow sound:sound]; };
 +    row.onHoverCard = ^(BOOL show) { [weak tabCard:weakRow show:show]; };
 +    row.extendMenu = ^(NSMenu* menu) { [weak extendTabMenu:menu row:weakRow]; };
-+    row.onSplit = ^(int layout) {
-+      AgensChrome* strong = weak;
-+      if (strong && strong->_window) agens_window_split(strong->_window, weakRow.index, layout);
-+    };
-+    row.onUnsplit = ^{
-+      AgensChrome* strong = weak;
-+      if (strong && strong->_window) agens_window_unsplit(strong->_window, weakRow.index);
-+    };
-+    [_tabsDoc addSubview:row];
+     row.onSplit = ^(int layout) {
+       AgensChrome* strong = weak;
+       if (strong && strong->_window) agens_window_split(strong->_window, weakRow.index, layout);
+@@ -4424,13 +7505,12 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+       if (strong && strong->_window) agens_window_unsplit(strong->_window, weakRow.index);
+     };
+     [_tabsDoc addSubview:row];
+-    [_rows addObject:row];
+-  }
+-  while ((int)_rows.count > count) {
+-    [_rows.lastObject removeFromSuperview];
+-    [_rows removeLastObject];
 +    return row;
-+  }
+   }
 +}
 +- (void)setTabsRest:(const AgensTab*)tabs count:(int)count opened:(NSArray<AgensTabRow*>*)opened {
-+  int activeTab = -1;
+   int activeTab = -1;
 +  _controller = nil;
-+  _pinnedCount = 0;
-+  _partner = -1;
-+  BOOL partnerIsNewTab = NO;
-+  for (int i = 0; i < count; ++i) {  // a split's tabs sit next to each other
-+    if (!tabs[i].active || !tabs[i].split) continue;
-     const int j = tabs[i].split_first ? i + 1 : i - 1;
-     if (j >= 0 && j < count && tabs[j].split) {
-       _partner = j;
-@@ -4448,6 +7185,7 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+   _pinnedCount = 0;
+   _partner = -1;
+   BOOL partnerIsNewTab = NO;
+@@ -4442,49 +7522,88 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+       partnerIsNewTab = !tabs[j].url[0];
+     }
+   }
++  [_tabIndexById removeAllObjects];
+   for (int i = 0; i < count; ++i) {
+     _rows[i].index = i;
++    _tabIndexById[@(tabs[i].id)] = @(i);
+     [_rows[i] updateWith:tabs[i]];
      if (tabs[i].pinned) ++_pinnedCount;
      if (tabs[i].active) activeTab = i;
      if (!tabs[i].active) continue;
@@ -20557,9 +21114,16 @@ index 3c18c4eab1..abc4d6e780 100644
      if (_activeIndex != i) {
        [_find close];  // a find belongs to the page it ran on
        _stripFollowActive = YES;
-@@ -4458,33 +7196,63 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+     }
+     _activeIndex = i;
+     _sound.hidden = !(tabs[i].audible || tabs[i].muted);
+-    [_sound setSymbol:tabs[i].muted ? @"speaker.slash.fill" : @"speaker.wave.2.fill"];
++    // Under 50% one wave: a quiet tab shows from afar (prototype #som).
++    [_sound setSymbol:tabs[i].muted ? @"speaker.slash.fill" : tabs[i].volume_percent < 50 ? @"speaker.wave.1.fill" : @"speaker.wave.2.fill"];
      [_sound setTint:tabs[i].muted ? kLight3 : kDim];
-     _sound.accessibilityLabel = tabs[i].muted ? @"Ativar o som da aba" : @"Silenciar a aba";
+-    _sound.accessibilityLabel = tabs[i].muted ? @"Ativar o som da aba" : @"Silenciar a aba";
++    _sound.accessibilityLabel = tabs[i].muted ? @"Volume desta aba, silenciada"
++                                              : [NSString stringWithFormat:@"Volume desta aba, %d%%", tabs[i].volume_percent];
      _sound.toolTip = _sound.accessibilityLabel;
 -    _capture.hidden = !(tabs[i].camera || tabs[i].microphone);
 -    [_capture setSymbol:tabs[i].camera ? @"video.fill" : @"mic.fill"];
@@ -20612,6 +21176,10 @@ index 3c18c4eab1..abc4d6e780 100644
      _back.enabled = tabs[i].can_go_back;
      _forward.enabled = tabs[i].can_go_forward;
 +    [self readControl:tabs[i] index:i];
++    [self translateCheck:tabs[i] index:i];
++  }
++  for (NSNumber* tab in _trPages.allKeys) {  // closed tabs
++    if (!_tabIndexById[tab]) [_trPages removeObjectForKey:tab];
 +  }
 +  // The other pane of a split shows too: its control counts when the active tab has none.
 +  if (!_controller && _partner >= 0) [self readControl:tabs[_partner] index:_partner];
@@ -20631,7 +21199,7 @@ index 3c18c4eab1..abc4d6e780 100644
    [_reload setSymbol:_loading ? @"xmark" : @"arrow.clockwise"];
    [_star setSymbol:_bookmarked ? @"star.fill" : @"star"];
    [_star setTint:_bookmarked ? kLight3 : kDim];
-@@ -4493,29 +7261,70 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
+@@ -4493,29 +7612,70 @@ - (void)setTabs:(const AgensTab*)tabs count:(int)count {
    _siteButton.hidden = _url.length == 0;
    _reload.accessibilityLabel = _loading ? @"Parar" : @"Recarregar";
    BOOL secure = [_url hasPrefix:@"https://"];
@@ -20667,6 +21235,7 @@ index 3c18c4eab1..abc4d6e780 100644
    if (!_ntp.hidden && !wasNTP) _ntp.field.stringValue = @"";
    [self relayout];
    if (activeTab >= 0 && _rows[activeTab].superview == _tabsDoc) [_tabsDoc scrollRectToVisible:_rows[activeTab].frame];
+-}
 +  if (_volumeRow && ![_rows containsObject:_volumeRow]) {
 +    [self closeMenu];  // its tab closed (the row may still be fading out)
 +  } else if (_volumeRow) {
@@ -20676,7 +21245,7 @@ index 3c18c4eab1..abc4d6e780 100644
 +      [self pointPanel];
 +    }
 +  }
- }
++}
  
 -// Chromium's internal pages show as agens:// (typing agens:// opens them: url_fixer, agens-scheme.patch).
 +// Chromium's internal pages show as agens://, with our names for ours (prototype #paginas):
@@ -20707,7 +21276,7 @@ index 3c18c4eab1..abc4d6e780 100644
    NSString* s = AgensScheme(_url);
    for (NSString* p in @[ @"https://", @"www." ]) {
      if ([s hasPrefix:p]) s = [s substringFromIndex:p.length];
-@@ -4531,6 +7340,8 @@ - (void)setAtos:(const AgensAto*)atos count:(int)count {
+@@ -4531,6 +7691,8 @@ - (void)setAtos:(const AgensAto*)atos count:(int)count {
      AgensAtoButton* b = [[AgensAtoButton alloc] initWithFrame:NSZeroRect];
      int index = (int)_atoButtons.count;
      b.onPress = ^{ [weak switchAto:index]; };
@@ -20716,7 +21285,7 @@ index 3c18c4eab1..abc4d6e780 100644
      [self addSubview:b positioned:NSWindowBelow relativeTo:_ntp];
      [_atoButtons addObject:b];
    }
-@@ -4539,14 +7350,18 @@ - (void)setAtos:(const AgensAto*)atos count:(int)count {
+@@ -4539,14 +7701,18 @@ - (void)setAtos:(const AgensAto*)atos count:(int)count {
      [_atoButtons removeLastObject];
    }
    [_atoNames removeAllObjects];
@@ -20736,7 +21305,7 @@ index 3c18c4eab1..abc4d6e780 100644
    }
    [self relayout];
  }
-@@ -4571,7 +7386,191 @@ - (void)newAtoFromMenu:(id)sender {
+@@ -4571,7 +7737,191 @@ - (void)newAtoFromMenu:(id)sender {
    [self run:agens_window_new_ato];
  }
  - (void)switchAto:(int)index {
@@ -20929,7 +21498,7 @@ index 3c18c4eab1..abc4d6e780 100644
  }
  
  // --- Address and suggestions.
-@@ -4671,13 +7670,25 @@ - (void)showMenu {
+@@ -4671,13 +8021,25 @@ - (void)showMenu {
      NSString* title;
      NSString* key;
      void (^action)(void);
@@ -20956,7 +21525,7 @@ index 3c18c4eab1..abc4d6e780 100644
    const CGFloat w = 280, rowH = 33;
    NSView* panel = [self popoverWidth:w height:std::size(items) * rowH + 10 under:_menu];
    panel.accessibilityRole = NSAccessibilityMenuRole;
-@@ -4685,6 +7696,7 @@ - (void)showMenu {
+@@ -4685,6 +8047,7 @@ - (void)showMenu {
    CGFloat y = NSHeight(panel.frame) - 5 - rowH;  // the panel isn't flipped
    for (const Item& it : items) {
      AgensMenuRow* row = [[AgensMenuRow alloc] initWithIcon:it.icon title:it.title key:it.key];
@@ -20964,7 +21533,7 @@ index 3c18c4eab1..abc4d6e780 100644
      void (^action)(void) = it.action;
      row.onPress = ^{
        [weak closeMenu];
-@@ -4694,7 +7706,7 @@ - (void)showMenu {
+@@ -4694,7 +8057,7 @@ - (void)showMenu {
      [panel addSubview:row];
      y -= rowH;
    }
@@ -20973,7 +21542,7 @@ index 3c18c4eab1..abc4d6e780 100644
  }
  
  // Our floating panels (prototype .menu): float background, strong border, 12 pt corners.
-@@ -4709,11 +7721,18 @@ - (NSView*)popoverWidth:(CGFloat)w height:(CGFloat)h under:(NSView*)anchor {
+@@ -4709,11 +8072,18 @@ - (NSView*)popoverWidth:(CGFloat)w height:(CGFloat)h under:(NSView*)anchor {
    return panel;
  }
  - (void)presentPopover:(NSView*)panel anchor:(NSView*)anchor {
@@ -20992,7 +21561,7 @@ index 3c18c4eab1..abc4d6e780 100644
    // Rise in, as the prototype (.2s); a click anywhere else or Esc closes it.
    _menuView.alphaValue = 0;
    [NSAnimationContext runAnimationGroup:^(NSAnimationContext* ctx) {
-@@ -4735,16 +7754,61 @@ - (void)presentPopover:(NSView*)panel anchor:(NSView*)anchor {
+@@ -4735,16 +8105,61 @@ - (void)presentPopover:(NSView*)panel anchor:(NSView*)anchor {
                                       NSPoint p = [strong convertPoint:event.locationInWindow fromView:nil];
                                       if (event.window != strong.window ||
                                           (!NSPointInRect(p, strong->_menuView.frame) &&
@@ -21058,7 +21627,7 @@ index 3c18c4eab1..abc4d6e780 100644
  }
  
  - (void)setDownloads:(const AgensDownload*)downloads count:(int)count started:(BOOL)started {
-@@ -4752,16 +7816,50 @@ - (void)setDownloads:(const AgensDownload*)downloads count:(int)count started:(B
+@@ -4752,16 +8167,50 @@ - (void)setDownloads:(const AgensDownload*)downloads count:(int)count started:(B
    for (int i = 0; i < count; ++i) _downloadNames.push_back(downloads[i].name);
    _downloads.assign(downloads, downloads + count);
    for (int i = 0; i < count; ++i) _downloads[i].name = _downloadNames[i].c_str();  // keep our copies
@@ -21118,7 +21687,7 @@ index 3c18c4eab1..abc4d6e780 100644
  }
  - (void)toggleDownloads {
    if (_downloadsPanel) {
-@@ -4771,62 +7869,311 @@ - (void)toggleDownloads {
+@@ -4771,62 +8220,743 @@ - (void)toggleDownloads {
    }
  }
  - (void)showDownloads {
@@ -21287,8 +21856,15 @@ index 3c18c4eab1..abc4d6e780 100644
 +  }
 +  _zoomValue = nil;
 +  _zoom.selected = NO;
++  if (_volumeFromKeys) {
++    _volumeFromKeys = NO;
++    if (!_sound.hidden) [self.window makeFirstResponder:_sound];
++  }
 +  _volumeRow = nil;
 +  _volumeValue = nil;
++  _volumeSlider = nil;
++  _trAsked = NO;
++  _trButton.selected = NO;
    if (_clickMonitor) [NSEvent removeMonitor:_clickMonitor];
    _clickMonitor = nil;
  }
@@ -21359,13 +21935,31 @@ index 3c18c4eab1..abc4d6e780 100644
 +  _volumeMute = muteText;
 +  _volumeMuteIcon = muteIcon;
 +  _volumeSpeaker = speaker;
++  _volumeSlider = slider;
 +  [self fillVolume];
++}
++// The address's speaker (prototype #som): its tab's volume, the arrow on it. A second click
++// closes it; ↓ opens it with the focus on the slider, and closing gives the focus back.
++- (void)addressVolume:(BOOL)keys {
++  if (_activeIndex < 0 || _activeIndex >= (int)_rows.count) return;
++  AgensTabRow* row = _rows[_activeIndex];
++  if (_volumeRow == row && _popoverAnchor == _sound) {
++    if (!keys) return [self closeMenu];
++  } else {
++    if (_volumeRow) [self closeMenu];  // open from the tab's speaker: move it here
++    [self showVolume:row sound:_sound];
++  }
++  if (keys && _volumeSlider) {
++    [self.window makeFirstResponder:_volumeSlider];
++    _volumeFromKeys = YES;
++  }
 +}
 +- (void)fillVolume {
 +  if (!_volumeValue) return;
 +  _volumeValue.stringValue = [NSString stringWithFormat:@"%d%%", _volumeRow.volume];
 +  const BOOL muted = _volumeRow.muted;
-+  _volumeMute.stringValue = muted ? @"Ativar o som desta aba" : @"Silenciar esta aba";
++  if (muted) _volumeValue.stringValue = @"Sem som";
++  _volumeMute.stringValue = muted ? @"Ativar som" : @"Silenciar esta aba";
 +  _volumeMute.superview.accessibilityLabel = _volumeMute.stringValue;
 +  _volumeMuteIcon.image = Symbol(muted ? @"speaker.wave.2.fill" : @"speaker.slash.fill", 11);
 +  _volumeSpeaker.image = Symbol(muted ? @"speaker.slash.fill" : @"speaker.wave.2.fill", 11);
@@ -21377,6 +21971,413 @@ index 3c18c4eab1..abc4d6e780 100644
 +}
 +- (void)volumeSlid:(NSSlider*)slider {
 +  if (_window && _volumeRow) agens_window_set_volume(_window, _volumeRow.index, (int)lround(slider.doubleValue));
++}
++// --- Traduzir página (prototipos/janela-traduzir.html): Apple's Translation on the Mac, never a
++// server. The icon at the address's end shows while the active page is in another language.
++static void TranslateChosen(void* context, const char* selection) {
++  [(__bridge AgensChrome*)context translateChosen:@(selection ? selection : "")];
++}
++- (void)runScript:(NSString*)script index:(int)index done:(void (^)(id result))done {
++  if (!_window) return;
++  agens_window_run_script(_window, index, script.UTF8String, ScriptDone, (__bridge_retained void*)[done copy]);
++}
++- (NSArray<NSString*>*)translateList:(const char*)name {
++  std::vector<std::string> items;
++  if (_window) agens_pref_get_list(_window, kAgensProfile, name, StringsListed, &items);
++  NSMutableArray<NSString*>* list = [NSMutableArray array];
++  for (const std::string& item : items) [list addObject:@(item.c_str())];
++  return list;
++}
++- (void)addLanguage:(NSString*)lang toList:(const char*)name {
++  NSArray<NSString*>* list = [self translateList:name];
++  if (!_window || [list containsObject:LangBase(lang)]) return;
++  std::vector<std::string> items;
++  for (NSString* item in list) items.push_back(item.UTF8String);
++  items.push_back(LangBase(lang).UTF8String);
++  std::vector<const char*> raw;
++  for (const std::string& item : items) raw.push_back(item.c_str());
++  agens_pref_set_list(_window, kAgensProfile, name, raw.data(), (int)raw.size());
++}
++// From setTabs, for the active tab: a new address starts over; loading again (a reload, or only a
++// frame) asks again once loaded, and detectLanguage tells the two apart.
++- (void)translateCheck:(const AgensTab&)tab index:(int)index {
++  if (!_translator) return;
++  NSString* url = @(tab.url);
++  AgensTrPage* page = _trPages[@(tab.id)];
++  if (!page || ![page.url isEqualToString:url]) {
++    if (_trRunTab == tab.id) {
++      [_translator cancel];
++      _trRunTab = 0;
++    }
++    page = [[AgensTrPage alloc] init];
++    page.url = url;
++    _trPages[@(tab.id)] = page;
++  }
++  if (tab.loading) page.checked = NO;
++  const BOOL web = [url hasPrefix:@"https://"] || [url hasPrefix:@"http://"];
++  if (web && !tab.loading && !tab.error && !page.checked) {
++    page.checked = YES;
++    [self detectLanguage:tab.id index:index];
++  }
++  [self paintTranslate];
++}
++- (void)detectLanguage:(int)tabId index:(int)index {
++  __weak AgensChrome* weak = self;
++  [self runScript:kTrDetect index:index done:^(id result) {
++    AgensChrome* strong = weak;
++    AgensTrPage* page = strong ? strong->_trPages[@(tabId)] : nil;
++    if (!page || ![result isKindOfClass:NSDictionary.class]) return;
++    if (page.lang && [result[@"kept"] boolValue]) return;  // still the page we translated
++    if (strong->_trRunTab == tabId) {  // reloaded under a translation
++      [strong->_translator cancel];
++      strong->_trRunTab = 0;
++    }
++    page.lang = nil;
++    page.state = kTrNone;
++    page.progress = 0;
++    [strong paintTranslate];
++    NSString* text = [result[@"text"] isKindOfClass:NSString.class] ? result[@"text"] : @"";
++    NSString* declared = [result[@"lang"] isKindOfClass:NSString.class] ? result[@"lang"] : @"";
++    NSString* lang = DetectLanguage(text, declared);
++    NSString* target = TargetLanguage(strong->_window);
++    if (!lang.length || [LangBase(lang) isEqualToString:LangBase(target)] ||
++        [[strong translateList:"agens.translate.never"] containsObject:LangBase(lang)]) {
++      return;
++    }
++    [strong->_translator statusFrom:lang to:target done:^(NSInteger status) {
++      AgensChrome* s = weak;
++      if (!s || status == 2 || s->_trPages[@(tabId)] != page) return;
++      page.lang = lang;
++      page.state = kTrOffer;
++      [s paintTranslate];
++      if (status == 0 && [[s translateList:"agens.translate.always"] containsObject:LangBase(lang)]) {
++        [s translateTab:tabId];
++        return;
++      }
++      // The offer opens by itself once per site, quietly: only on the front window with nothing open.
++      NSString* site = SiteHost(page.url);
++      if (tabId == s->_activeTabId && s.window.isKeyWindow && !s->_menuView && site.length && ![s->_trOffered containsObject:site]) {
++        [s->_trOffered addObject:site];
++        [s showTranslatePopover];
++      }
++    }];
++  }];
++}
++// The icon (lit once translated, a ring while translating) and the right-click item.
++- (void)paintTranslate {
++  AgensTrPage* page = _trPages[@(_activeTabId)];
++  const int state = _translator && page.lang ? page.state : kTrNone;
++  if (_trButton.hidden != (state == kTrNone)) {
++    _trButton.hidden = state == kTrNone;
++    [self relayout];
++  }
++  [_trButton setTint:state == kTrTranslated ? kLight3 : kDim];
++  _trRing.strokeColor = CG(kLight3, self);
++  _trRing.hidden = state != kTrTranslating;
++  _trRing.strokeEnd = page.progress;
++  NSString* name = page.lang ? LangName(page.lang) : @"";
++  _trButton.accessibilityLabel = state == kTrTranslating ? [NSString stringWithFormat:@"Traduzindo, %d%%", (int)lround(page.progress * 100)]
++                                 : state == kTrTranslated ? [@"Página traduzida do " stringByAppendingString:name]
++                                                          : @"Traduzir página";
++  _trButton.toolTip = _trButton.accessibilityLabel;
++  if (!_window) return;
++  NSString* label = [@"Traduzir para " stringByAppendingString:LangName(TargetLanguage(_window))];
++  agens_window_set_translate(_window, state == kTrNone ? "" : label.UTF8String, TranslateChosen, (__bridge void*)self);
++}
++- (void)toggleTranslate {
++  if (_menuView && _trAsked) return [self closeMenu];
++  if (_trPages[@(_activeTabId)].state != kTrTranslating) [self showTranslatePopover];
++}
++// Prototype .tpop: a, the offer; c, translated. "Mostrar original" leaves the offer again.
++- (void)showTranslatePopover {
++  AgensTrPage* page = _trPages[@(_activeTabId)];
++  if (!page.lang || _trButton.hidden) return;
++  __weak AgensChrome* weak = self;
++  NSString* name = LangName(page.lang), *target = LangName(TargetLanguage(_window));
++  if (page.state == kTrTranslated) {
++    const BOOL always = [[self translateList:"agens.translate.always"] containsObject:LangBase(page.lang)];
++    NSString* lang = page.lang;
++    [self translatePanel:[@"Traduzida do " stringByAppendingString:name]
++                  detail:[NSString stringWithFormat:@"Para %@, no Mac.", target]
++                 buttons:@[
++                   @[ @"Mostrar original", @0, ^{ [weak showOriginal]; } ],
++                   @[ always ? [LangTitle(lang) stringByAppendingString:@" sempre será traduzido"] : [@"Sempre traduzir " stringByAppendingString:name],
++                      always ? @3 : @0, ^{
++                        AgensChrome* s = weak;
++                        [s addLanguage:lang toList:"agens.translate.always"];
++                        [s showTranslatePopover];
++                      } ],
++                 ]
++                 stacked:YES
++                    note:@"Traduzido no Mac pela Apple. O texto não sai daqui."
++                    icon:@"<rect x='3' y='4' width='14' height='9.5' rx='1.5'/><path d='M7.5 16.5h5M10 13.5v3'/>"];
++    return;
++  }
++  NSString* lang = page.lang;
++  [self translatePanel:[@"Esta página está em " stringByAppendingString:name]
++                detail:[NSString stringWithFormat:@"Traduzir para %@?", target]
++               buttons:@[
++                 @[ [@"Nunca traduzir " stringByAppendingString:name], @2, ^{
++                   AgensChrome* s = weak;
++                   if (!s) return;
++                   [s addLanguage:lang toList:"agens.translate.never"];
++                   s->_trPages[@(s->_activeTabId)].state = kTrNone;
++                   [s closeMenu];
++                   [s paintTranslate];
++                 } ],
++                 @[ @"Agora não", @0, ^{ [weak closeMenu]; } ],
++                 @[ @"Traduzir", @1, ^{ [weak startTranslate]; } ],
++               ]
++               stacked:NO
++                  note:@"Traduzido no Mac pela Apple. O texto não sai daqui."
++                  icon:@"<rect x='3' y='4' width='14' height='9.5' rx='1.5'/><path d='M7.5 16.5h5M10 13.5v3'/>"];
++}
++// d: the first time for a language, Apple's download, with our OK first. Apple's own sheet then
++// shows the download (the framework gives no progress to draw ours).
++- (void)askDownload:(NSString*)lang then:(void (^)(void))then {
++  if (_trButton.hidden) return;
++  __weak AgensChrome* weak = self;
++  NSString* name = LangName(lang), *target = TargetLanguage(_window);
++  [self translatePanel:[NSString stringWithFormat:@"Baixar o idioma %@?", name]
++                detail:[NSString stringWithFormat:@"Da Apple. Fica no Mac e serve para todas as traduções de %@ para %@, sem internet depois.",
++                                                  name, LangName(target)]
++               buttons:@[
++                 @[ @"Cancelar", @0, ^{ [weak closeMenu]; } ],
++                 @[ @"Baixar", @1, ^{
++                   AgensChrome* s = weak;
++                   if (!s) return;
++                   [s closeMenu];
++                   [s->_translator downloadFrom:lang to:target done:^(NSString* error) {
++                     if (!error) then();
++                   }];
++                 } ],
++               ]
++               stacked:NO
++                  note:@"Única conexão: o download do idioma, direto da Apple. Apaga nos Ajustes do macOS."
++                  icon:@"<path d='M10 3 4.5 5v4.5c0 3.3 2.3 6 5.5 7.5 3.2-1.5 5.5-4.2 5.5-7.5V5z'/><path d='m7.5 10 1.8 1.8L12.8 8'/>"];
++}
++// Title, a line, the buttons (a row at the right, a link-kind one at the left; or stacked) and
++// the note under a line. Kinds: 0 plain, 1 primary, 2 link, 3 done (disabled).
++- (void)translatePanel:(NSString*)title
++                detail:(NSString*)detail
++               buttons:(NSArray<NSArray*>*)buttons
++               stacked:(BOOL)stacked
++                  note:(NSString*)note
++                  icon:(NSString*)icon {
++  const CGFloat w = 320, x = 14, tw = w - 2 * x;
++  AgensFlippedView* content = [[AgensFlippedView alloc] initWithFrame:NSMakeRect(0, 0, w, 0)];
++  auto wrapped = [&](NSString* text, CGFloat size, NSFontWeight weight, const Token& color, CGFloat left, CGFloat width, CGFloat y) {
++    NSTextField* label = Label(size, weight, color);
++    label.stringValue = text;
++    label.lineBreakMode = NSLineBreakByWordWrapping;
++    label.maximumNumberOfLines = 0;
++    label.preferredMaxLayoutWidth = width;
++    const CGFloat h = ceil([label sizeThatFits:NSMakeSize(width, CGFLOAT_MAX)].height);
++    label.frame = NSMakeRect(left, y, width, h);
++    [content addSubview:label];
++    return y + h;
++  };
++  CGFloat y = wrapped(title, 13, NSFontWeightSemibold, kInk, x, tw, 12) + 2;
++  y = wrapped(detail, 12.5, NSFontWeightRegular, kMute, x, tw, y) + 12;
++  CGFloat right = w - x;
++  for (NSArray* b in stacked ? buttons : buttons.reverseObjectEnumerator.allObjects) {
++    AgensPillButton* button = [[AgensPillButton alloc] init];
++    const int kind = [b[1] intValue];
++    button.label.stringValue = b[0];
++    button.primary = kind == 1;
++    button.label.font = [NSFont systemFontOfSize:12.5 weight:kind == 1 ? NSFontWeightSemibold : NSFontWeightRegular];
++    if (kind == 2) button.label.textColor = kMute.color();
++    button.accessibilityLabel = b[0];
++    void (^press)(void) = b[2];
++    if (kind != 3) button.onPress = press;
++    if (kind == 3) button.alphaValue = 0.6;
++    const CGFloat bw = ceil(button.label.fittingSize.width) + 22;
++    if (stacked) {
++      button.frame = NSMakeRect(x, y, tw, 30);
++      y += 36;
++    } else if (kind == 2) {
++      button.frame = NSMakeRect(x - 8, y, bw, 28);
++    } else {
++      right -= bw;
++      button.frame = NSMakeRect(right, y, bw, 28);
++      right -= 8;
++    }
++    [content addSubview:button];
++  }
++  if (!stacked) y += 28 + 12;
++  NSView* line = [[NSView alloc] initWithFrame:NSMakeRect(x, y, tw, 1)];
++  line.wantsLayer = YES;
++  line.layer.backgroundColor = CG(kLine, self);
++  [content addSubview:line];
++  y += 9;
++  NSImageView* glyph = [NSImageView imageViewWithImage:AgensIcon(icon, 14)];
++  glyph.contentTintColor = kDim.color();
++  glyph.frame = NSMakeRect(x, y + 1, 14, 14);
++  [content addSubview:glyph];
++  y = wrapped(note, 11.5, NSFontWeightRegular, kDim, x + 20, tw - 20, y) + 12;
++  NSView* panel = [self popoverWidth:w height:y under:_trButton];
++  content.frame = panel.bounds;
++  [panel addSubview:content];
++  panel.accessibilityRole = NSAccessibilityGroupRole;
++  panel.accessibilityLabel = title;
++  [self presentPopover:panel anchor:_trButton pointingAt:_trButton];
++  _trAsked = YES;
++  _trButton.selected = YES;
++}
++// Traduzir (the popover or the right-click menu): on the Mac already, it runs; else, download first.
++- (void)startTranslate {
++  [self closeMenu];
++  AgensTrPage* page = _trPages[@(_activeTabId)];
++  if (!page.lang || page.state == kTrTranslating) return;
++  const int tabId = _activeTabId;
++  NSString* lang = page.lang;
++  __weak AgensChrome* weak = self;
++  [_translator statusFrom:lang to:TargetLanguage(_window) done:^(NSInteger status) {
++    AgensChrome* s = weak;
++    if (!s) return;
++    if (status == 0) [s translateTab:tabId];
++    if (status == 1 && tabId == s->_activeTabId) [s askDownload:lang then:^{ [weak translateTab:tabId]; }];
++  }];
++}
++// b: the page's text nodes, translated in batches and written back in place; the ring follows.
++- (void)translateTab:(int)tabId {
++  AgensTrPage* page = _trPages[@(tabId)];
++  NSNumber* index = _tabIndexById[@(tabId)];
++  if (!page.lang || !index || page.state == kTrTranslating) return;
++  if (_trRunTab) [self stopTranslate:_trRunTab];
++  _trRunTab = tabId;
++  page.state = kTrTranslating;
++  page.progress = 0;
++  [self paintTranslate];
++  NSString* from = page.lang, *to = TargetLanguage(_window);
++  __weak AgensChrome* weak = self;
++  [self runScript:kTrCollect index:index.intValue done:^(id texts) {
++    AgensChrome* s = weak;
++    if (!s || s->_trRunTab != tabId) return;
++    if (![texts isKindOfClass:NSArray.class] || ![texts count]) return [s translateFinished:tabId ok:NO];
++    const double total = [texts count];
++    [s->_translator translate:texts
++        from:from
++        to:to
++        batch:24
++        each:^(NSInteger start, NSArray<NSString*>* out) {
++          AgensChrome* s2 = weak;
++          NSNumber* at = s2 ? s2->_tabIndexById[@(tabId)] : nil;
++          if (!at || s2->_trRunTab != tabId) return;
++          NSData* json = [NSJSONSerialization dataWithJSONObject:out options:0 error:nil];
++          if (!json) return;
++          NSString* script = [NSString stringWithFormat:kTrApply, [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding], (long)start];
++          [s2 runScript:script index:at.intValue done:^(id) {}];
++          page.progress = (start + out.count) / total;
++          if (tabId == s2->_activeTabId) [s2 paintTranslate];
++        }
++        done:^(NSString* error) {
++          [weak translateFinished:tabId ok:!error];
++        }];
++  }];
++}
++- (void)translateFinished:(int)tabId ok:(BOOL)ok {
++  if (_trRunTab != tabId) return;  // stopped, or another page took over
++  _trRunTab = 0;
++  _trPages[@(tabId)].state = ok ? kTrTranslated : kTrOffer;
++  NSNumber* at = _tabIndexById[@(tabId)];
++  if (at) [self runScript:ok ? kTrDone : kTrRestore index:at.intValue done:^(id) {}];
++  [self paintTranslate];
++}
++// Back to the page's own text (and stops a translation running on it).
++- (void)stopTranslate:(int)tabId {
++  if (_trRunTab == tabId) {
++    _trRunTab = 0;
++    [_translator cancel];
++  }
++  _trPages[@(tabId)].state = kTrOffer;
++  NSNumber* at = _tabIndexById[@(tabId)];
++  if (at) [self runScript:kTrRestore index:at.intValue done:^(id) {}];
++}
++- (void)showOriginal {
++  [self closeMenu];
++  [self stopTranslate:_activeTabId];
++  [self paintTranslate];
++}
++// e: the right-click item. On a selection the translation shows in a bubble over it; the page stays.
++- (void)translateChosen:(NSString*)selection {
++  if (!selection.length) return [self startTranslate];
++  AgensTrPage* page = _trPages[@(_activeTabId)];
++  NSString* target = TargetLanguage(_window);
++  NSString* from = DetectLanguage(selection, nil);
++  if (!from || [LangBase(from) isEqualToString:LangBase(target)]) from = page.lang;
++  if (!from) return;
++  if (!_trSelection) _trSelection = NewTranslator(_trButton);
++  __weak AgensChrome* weak = self;
++  [_translator statusFrom:from to:target done:^(NSInteger status) {
++    AgensChrome* s = weak;
++    if (!s) return;
++    if (status == 1) [s askDownload:from then:^{ [weak translateChosen:selection]; }];
++    if (status != 0) return;
++    __block NSString* translated = nil;
++    [s->_trSelection translate:@[ selection ]
++        from:from
++        to:target
++        batch:1
++        each:^(NSInteger start, NSArray<NSString*>* out) { translated = out.firstObject; }
++        done:^(NSString* error) {
++          if (!error && translated.length) [weak showSelectionBubble:translated from:from];
++        }];
++  }];
++}
++- (void)showSelectionBubble:(NSString*)text from:(NSString*)lang {
++  NSNumber* at = _tabIndexById[@(_activeTabId)];
++  if (!at) return;
++  __weak AgensChrome* weak = self;
++  [self runScript:kTrSelectionRect index:at.intValue done:^(id rect) {
++    AgensChrome* s = weak;
++    if (!s) return;
++    const CGFloat w = 300, x = 12, tw = w - 2 * x;
++    NSTextField* body = Label(13, NSFontWeightMedium, kInk);
++    body.stringValue = text;
++    body.lineBreakMode = NSLineBreakByWordWrapping;
++    body.maximumNumberOfLines = 0;
++    body.preferredMaxLayoutWidth = tw;
++    body.selectable = YES;
++    const CGFloat bh = ceil([body sizeThatFits:NSMakeSize(tw, CGFLOAT_MAX)].height);
++    const CGFloat h = 10 + bh + 6 + 18 + 8;
++    NSView* panel = [s popoverWidth:w height:h under:s->_trButton];
++    AgensFlippedView* content = [[AgensFlippedView alloc] initWithFrame:panel.bounds];
++    [panel addSubview:content];
++    body.frame = NSMakeRect(x, 10, tw, bh);
++    NSTextField* from = Label(11.5, NSFontWeightRegular, kDim);
++    from.stringValue = [NSString stringWithFormat:@"Do %@, no Mac ·", LangName(lang)];
++    [from sizeToFit];
++    from.frame = NSMakeRect(x, 10 + bh + 7, NSWidth(from.frame), 16);
++    AgensPillButton* copy = [[AgensPillButton alloc] init];
++    copy.label.stringValue = @"Copiar";
++    copy.label.font = [NSFont systemFontOfSize:11.5];
++    copy.frame = NSMakeRect(NSMaxX(from.frame) + 2, 10 + bh + 4, ceil(copy.label.fittingSize.width) + 14, 22);
++    __weak AgensPillButton* weakCopy = copy;
++    copy.onPress = ^{
++      [NSPasteboard.generalPasteboard clearContents];
++      [NSPasteboard.generalPasteboard setString:text forType:NSPasteboardTypeString];
++      weakCopy.label.stringValue = @"Copiada";
++    };
++    for (NSView* v in @[ body, from, copy ]) [content addSubview:v];
++    // Under the selection (CSS pixels times the zoom, from the page's top-left); the page's top
++    // when the selection is in a frame and its rect didn't come.
++    const NSRect page = s->_page;
++    const double zoom = (s->_zoomPercent ?: 100) / 100.0;
++    CGFloat left = NSMidX(page) - w / 2, top = NSMinY(page) + 12;
++    if ([rect isKindOfClass:NSDictionary.class]) {
++      left = NSMinX(page) + [rect[@"x"] doubleValue] * zoom;
++      top = NSMinY(page) + ([rect[@"y"] doubleValue] + [rect[@"h"] doubleValue]) * zoom + 8;
++    }
++    left = MAX(NSMinX(page) + 8, MIN(left, NSMaxX(page) - w - 8));
++    top = MAX(NSMinY(page) + 8, MIN(top, NSMaxY(page) - h - 8));
++    panel.frame = NSMakeRect(round(left), round(top), w, h);
++    panel.accessibilityRole = NSAccessibilityGroupRole;
++    panel.accessibilityLabel = [@"Tradução: " stringByAppendingString:text];
++    [s presentPopover:panel anchor:panel pointingAt:nil];
++    NSAccessibilityPostNotificationWithUserInfo(panel, NSAccessibilityAnnouncementRequestedNotification,
++                                                @{NSAccessibilityAnnouncementKey : text});
++  }];
 +}
 +- (void)toggleZoom {
 +  if (_menuView && _zoomValue) {
@@ -21458,7 +22459,7 @@ index 3c18c4eab1..abc4d6e780 100644
  - (void)menuBookmarks:(id)sender {
    if (_window) agens_window_open_page(_window, kAgensBookmarks);
  }
-@@ -4839,14 +8186,18 @@ - (void)menuSettings:(id)sender {
+@@ -4839,14 +8969,18 @@ - (void)menuSettings:(id)sender {
  // chrome://settings, extensions, downloads... land here (native_shell.cc): a Settings section, or
  // the downloads panel.
  - (void)openSection:(NSString*)key {
@@ -21480,7 +22481,7 @@ index 3c18c4eab1..abc4d6e780 100644
  // "Reduzir movimento". Each frame lays out the chrome and asks the engine to move the page.
  - (BOOL)collapsed {
    return _collapsed;
-@@ -4854,6 +8205,119 @@ - (BOOL)collapsed {
+@@ -4854,6 +8988,119 @@ - (BOOL)collapsed {
  - (NSArray<NSString*>*)atoNamesForSettings {
    return [_atoNames copy];
  }
@@ -21600,7 +22601,7 @@ index 3c18c4eab1..abc4d6e780 100644
  - (void)toggleSidebar {
    _collapsed = !_collapsed;
    [NSUserDefaults.standardUserDefaults setBool:_collapsed forKey:kCollapsedKey];
-@@ -4863,7 +8327,7 @@ - (void)toggleSidebar {
+@@ -4863,7 +9110,7 @@ - (void)toggleSidebar {
      [self setSideWidth:to];
      return;
    }
@@ -21609,7 +22610,7 @@ index 3c18c4eab1..abc4d6e780 100644
    __weak AgensChrome* weak = self;
    _sideTimer = [NSTimer timerWithTimeInterval:1.0 / 120 repeats:YES block:^(NSTimer* timer) {
      AgensChrome* strong = weak;
-@@ -4888,38 +8352,399 @@ - (void)run:(void (*)(AgensWindow*))action {
+@@ -4888,38 +9135,399 @@ - (void)run:(void (*)(AgensWindow*))action {
  - (void)reloadOrStop {
    [self run:_loading ? agens_window_stop : agens_window_reload];
  }
@@ -22029,7 +23030,7 @@ index 3c18c4eab1..abc4d6e780 100644
  }
  // Tabs on top or in the column (⌘⇧S and Configurações › Aparência), for every window.
  - (BOOL)tabsOnTop {
-@@ -4945,7 +8770,7 @@ - (void)close:(int)index {
+@@ -4945,7 +9553,7 @@ - (void)close:(int)index {
    if (_window) agens_window_close_tab(_window, index);
  }
  - (void)go:(NSTextField*)sender {
@@ -22038,7 +23039,7 @@ index 3c18c4eab1..abc4d6e780 100644
    [self closeSuggestions];
  }
  - (void)detach {
-@@ -4959,6 +8784,10 @@ - (void)detach {
+@@ -4959,6 +9567,10 @@ - (void)detach {
    _keyMonitor = nil;
    if (_menuMonitor) [NSEvent removeMonitor:_menuMonitor];
    _menuMonitor = nil;
@@ -22049,7 +23050,17 @@ index 3c18c4eab1..abc4d6e780 100644
    if (_window) {
      agens_window_set_tabs_observer(_window, nullptr, nullptr);
      agens_window_set_atos_observer(_window, nullptr, nullptr);
-@@ -4975,22 +8804,36 @@ - (void)detach {
+@@ -4968,29 +9580,46 @@ - (void)detach {
+     agens_window_set_bookmarks_observer(_window, nullptr, nullptr);
+     agens_window_set_find_observer(_window, nullptr, nullptr);
+     agens_window_set_extension_buttons_observer(_window, nullptr, nullptr);
++    agens_window_set_translate(_window, "", nullptr, nullptr);
+   }
++  [_translator cancel];
++  [_trSelection cancel];
+   _window = nullptr;
+ }
+ // --- Extensions: the button, its panel (one row per extension; a click runs its action, whose
  // popup hangs from the button), and the "installed" notice.
  - (void)setExtensions:(const AgensExtensionButton*)list count:(int)count installed:(const char*)installed {
    [_extensions removeAllObjects];
@@ -22092,7 +23103,7 @@ index 3c18c4eab1..abc4d6e780 100644
    }
  }
  - (NSImage*)extensionIcon:(NSString*)extensionId {
-@@ -4999,43 +8842,128 @@ - (NSImage*)extensionIcon:(NSString*)extensionId {
+@@ -4999,43 +9628,128 @@ - (NSImage*)extensionIcon:(NSString*)extensionId {
    }
    return nil;
  }
@@ -22236,7 +23247,7 @@ index 3c18c4eab1..abc4d6e780 100644
    manage.frame = NSMakeRect(5, y, w - 10, rowH);
    manage.onPress = ^{
      AgensChrome* strong = weak;
-@@ -5044,7 +8972,62 @@ - (void)showExtensions:(NSString*)notice {
+@@ -5044,7 +9758,62 @@ - (void)showExtensions:(NSString*)notice {
      [g_settings showSection:@"extensoes"];
    };
    [panel addSubview:manage];
@@ -22299,7 +23310,7 @@ index 3c18c4eab1..abc4d6e780 100644
  }
  
  // --- Favoritos: the page, the bar and its menus.
-@@ -5094,6 +9077,89 @@ - (NSRect)roomForBar:(NSRect)page {
+@@ -5094,6 +9863,89 @@ - (NSRect)roomForBar:(NSRect)page {
    page.size.height -= 32;
    return page;
  }
@@ -22389,7 +23400,7 @@ index 3c18c4eab1..abc4d6e780 100644
  - (void)toggleBookmarkBar {
    [NSUserDefaults.standardUserDefaults setBool:!_barShown forKey:kBookmarkBarKey];
    [NSNotificationCenter.defaultCenter postNotificationName:kThemeChanged object:nil];  // every window
-@@ -5135,7 +9201,7 @@ - (void)showFolder:(long long)folder under:(NSView*)button {
+@@ -5135,7 +9987,7 @@ - (void)showFolder:(long long)folder under:(NSView*)button {
      none.frame = NSMakeRect(14, 11, w - 28, 18);
      [panel addSubview:none];
    }
@@ -22398,7 +23409,7 @@ index 3c18c4eab1..abc4d6e780 100644
  }
  - (void)openBookmark:(NSString*)url {
    if (_window && url.length) agens_window_navigate(_window, url.UTF8String);
-@@ -5160,201 +9226,736 @@ - (void)newBookmarkFolder {
+@@ -5160,201 +10012,736 @@ - (void)newBookmarkFolder {
  }
  // "Salvar a senha?" under the address bar, on its right (where Chrome shows its key). Closing the
  // panel any other way counts as "Agora não".
@@ -23287,7 +24298,7 @@ index 3c18c4eab1..abc4d6e780 100644
  }
  - (int)command:(AgensCommand)command {
    switch (command) {
-@@ -5376,6 +9977,9 @@ - (int)command:(AgensCommand)command {
+@@ -5376,6 +10763,9 @@ - (int)command:(AgensCommand)command {
      case kAgensCommandFindPrevious:
        [_find step:NO];
        return 1;
@@ -23297,7 +24308,7 @@ index 3c18c4eab1..abc4d6e780 100644
      default:
        return 0;
    }
-@@ -5398,6 +10002,12 @@ - (void)focusAddress {
+@@ -5398,6 +10788,12 @@ - (void)focusAddress {
  AgensRect agens_ui_layout(void* chrome, int width, int height) {
    return [(__bridge AgensChrome*)chrome layoutForWidth:width height:height];
  }
@@ -23310,7 +24321,7 @@ index 3c18c4eab1..abc4d6e780 100644
  AgensRect agens_ui_site_icon_rect(void* chrome) {
    return [(__bridge AgensChrome*)chrome siteIconRect];
  }
-@@ -5407,17 +10017,47 @@ void agens_ui_focus_address(void* chrome) {
+@@ -5407,17 +10803,47 @@ void agens_ui_focus_address(void* chrome) {
  void agens_ui_colors(void* chrome, unsigned* window, unsigned* page, unsigned* line) {
    [(__bridge AgensChrome*)chrome colorsWindow:window page:page line:line];
  }
@@ -23540,6 +24551,163 @@ index 0000000000..d0e7b0382f
 +}  // namespace agens::ui
 +
 +#endif  // CHROME_BROWSER_AGENS_UI_POPOVER_ARROW_H_
+diff --git a/chrome/browser/agens/ui/translate_mac.swift b/chrome/browser/agens/ui/translate_mac.swift
+new file mode 100644
+index 0000000000..3fdffbd180
+--- /dev/null
++++ b/chrome/browser/agens/ui/translate_mac.swift
+@@ -0,0 +1,151 @@
++// Copyright 2026 SugiyamaLabs.
++// Page translation on the Mac (prototipos/janela-traduzir.html), with Apple's Translation framework
++// (macOS 15+), never a server. The framework is Swift only and its session is SwiftUI only
++// (.translationTask); Chromium's Mac toolchain has no Swift, so this file builds on its own into
++// libagens_translate.dylib (build_translate.py, chrome/BUILD.gn puts it in the framework's
++// Libraries) and the casca (chrome_mac.mm) loads it with dlopen on macOS 15+ and talks to it
++// through the Objective-C runtime: NSClassFromString(@"AgensTranslator").
++import AppKit
++import SwiftUI
++import Translation
++
++@available(macOS 15.0, *)
++private final class Model: ObservableObject {
++  @Published var config: TranslationSession.Configuration?
++  var job: ((TranslationSession) async -> Void)?
++}
++
++@available(macOS 15.0, *)
++private struct Host: View {
++  @ObservedObject var model: Model
++  var body: some View {
++    Color.clear.translationTask(model.config) { session in
++      guard let job = model.job else { return }
++      model.job = nil
++      await job(session)
++    }
++  }
++}
++
++// Sits over the casca's translate button (Apple's download sheet points at it) and lets every click
++// through to it.
++@available(macOS 15.0, *)
++private final class PassThroughHost: NSHostingView<Host> {
++  override func hitTest(_ point: NSPoint) -> NSView? { nil }
++}
++
++@objc(AgensTranslator) public final class AgensTranslator: NSObject {
++  private var model: AnyObject?
++  private var current: Task<Void, Never>?
++
++  private weak var anchor: NSView?
++
++  // The SwiftUI view goes into `view` only when a session is needed (macOS 15, or a download):
++  // no SwiftUI in the browser until then.
++  @objc(initWithView:) public init(view: NSView) {
++    anchor = view
++    super.init()
++  }
++
++  // 0 installed, 1 the Mac can download it, 2 not supported (or before macOS 15).
++  @objc(statusFrom:to:done:) public func status(from: String, to: String, done: @escaping (Int) -> Void) {
++    guard #available(macOS 15.0, *) else { return done(2) }
++    Task { @MainActor in
++      let s = await LanguageAvailability().status(from: Locale.Language(identifier: from), to: Locale.Language(identifier: to))
++      done(s == .installed ? 0 : s == .supported ? 1 : 2)
++    }
++  }
++
++  // The languages already on the Mac for translating into `to` (Configurações › Idiomas). The
++  // framework has no list, sizes or delete: this asks each supported language.
++  @objc(installedTo:done:) public func installed(to: String, done: @escaping ([String]) -> Void) {
++    guard #available(macOS 15.0, *) else { return done([]) }
++    Task { @MainActor in
++      let a = LanguageAvailability(), target = Locale.Language(identifier: to)
++      var out: [String] = []
++      for l in await a.supportedLanguages where await a.status(from: l, to: target) == .installed {
++        out.append(l.minimalIdentifier)
++      }
++      done(out)
++    }
++  }
++
++  // Apple's own download sheet for the pair (the casca asked first); nil when it's on the Mac.
++  @objc(downloadFrom:to:done:) public func download(from: String, to: String, done: @escaping (String?) -> Void) {
++    guard #available(macOS 15.0, *) else { return done("macOS 15") }
++    run(from, to) { session in
++      do {
++        try await session.prepareTranslation()
++        done(nil)
++      } catch {
++        done(String(describing: error))
++      }
++    }
++  }
++
++  // Translates `texts` `batch` at a time; `each(start, out)` per batch, then `done(error or nil)`.
++  // macOS 26+ translates an installed pair without SwiftUI (TranslationSession(installedSource:));
++  // macOS 15 only has the session .translationTask hands out.
++  @objc(translate:from:to:batch:each:done:) public func translate(
++      _ texts: [String], from: String, to: String, batch: Int,
++      each: @escaping (Int, [String]) -> Void, done: @escaping (String?) -> Void) {
++    guard #available(macOS 15.0, *) else { return done("macOS 15") }
++    let work: (TranslationSession) async -> Void = { session in
++      do {
++        var start = 0
++        while start < texts.count {
++          try Task.checkCancellation()
++          let part = Array(texts[start..<min(start + max(1, batch), texts.count)])
++          let requests = part.enumerated().map { TranslationSession.Request(sourceText: $0.element, clientIdentifier: String($0.offset)) }
++          var out = part
++          for r in try await session.translations(from: requests) {
++            if let id = r.clientIdentifier, let k = Int(id), k < out.count { out[k] = r.targetText }
++          }
++          each(start, out)
++          start += part.count
++        }
++        done(nil)
++      } catch {
++        done(String(describing: error))
++      }
++    }
++    if #available(macOS 26.0, *) {
++      current?.cancel()
++      current = Task { @MainActor in
++        await work(TranslationSession(installedSource: Locale.Language(identifier: from), target: Locale.Language(identifier: to)))
++      }
++    } else {
++      run(from, to, work)
++    }
++  }
++
++  // Stops what is running (the page went away, or "Mostrar original" while translating).
++  @objc public func cancel() {
++    current?.cancel()
++    current = nil
++    guard #available(macOS 15.0, *), let m = model as? Model else { return }
++    m.job = nil
++    m.config = nil
++  }
++
++  // One job at a time: a new one replaces the waiting one; a new pair restarts the session.
++  @available(macOS 15.0, *)
++  private func run(_ from: String, _ to: String, _ job: @escaping (TranslationSession) async -> Void) {
++    if model == nil, let view = anchor {
++      let m = Model()
++      model = m
++      let host = PassThroughHost(rootView: Host(model: m))
++      host.frame = view.bounds
++      host.autoresizingMask = [.width, .height]
++      view.addSubview(host)
++    }
++    guard let m = model as? Model else { return }
++    m.job = job
++    let c = TranslationSession.Configuration(source: Locale.Language(identifier: from), target: Locale.Language(identifier: to))
++    if m.config?.source == c.source && m.config?.target == c.target {
++      m.config?.invalidate()  // same pair: runs the task again
++    } else {
++      m.config = c
++    }
++  }
++}
 diff --git a/chrome/browser/agens_adblock/cosmetic_engine.cc b/chrome/browser/agens_adblock/cosmetic_engine.cc
 index 54099fce10..96fe1c0e63 100644
 --- a/chrome/browser/agens_adblock/cosmetic_engine.cc
@@ -24201,7 +25369,7 @@ index e496cb7ab4..f921d60a24 100644
    // Whether the profile is loaded and opening a new browser window is allowed.
    BOOL canOpenNewBrowser = [self canOpenNewBrowser];
 diff --git a/chrome/browser/browser_process_impl.cc b/chrome/browser/browser_process_impl.cc
-index 433fa42fa4..bbab749123 100644
+index 433fa42fa4..35b5626fc6 100644
 --- a/chrome/browser/browser_process_impl.cc
 +++ b/chrome/browser/browser_process_impl.cc
 @@ -85,6 +85,11 @@
@@ -24239,7 +25407,7 @@ index 433fa42fa4..bbab749123 100644
    // Mark all the profiles as clean.
    ProfileManager* pm = profile_manager();
    scoped_refptr<RundownTaskCounter> rundown_counter =
-@@ -1345,6 +1359,16 @@ BuildState* BrowserProcessImpl::GetBuildState() {
+@@ -1345,6 +1359,19 @@ BuildState* BrowserProcessImpl::GetBuildState() {
  // static
  void BrowserProcessImpl::RegisterPrefs(PrefRegistrySimple* registry) {
    sugiyamalabs::adblock::RegisterPrefs(registry);  // SugiyamaLabs
@@ -24253,10 +25421,13 @@ index 433fa42fa4..bbab749123 100644
 +  // SugiyamaLabs: the atos' wait (minutes, 0 = never) and whether active/pinned tabs sleep with them.
 +  registry->RegisterIntegerPref("agens.atos_sleep_after_min", 10);
 +  registry->RegisterBooleanPref("agens.atos_sleep_active_pinned", true);
++  // SugiyamaLabs: Conteúdo protegido. On: the Widevine CDM downloads from Google on its own;
++  // off: never asked for, and removed (component_updater/registration.cc, native_shell.cc).
++  registry->RegisterBooleanPref("agens.widevine.enabled", true);
  
    registry->RegisterBooleanPref(prefs::kDefaultBrowserSettingEnabled, false);
  
-@@ -1706,6 +1730,9 @@ void BrowserProcessImpl::PreMainMessageLoopRun() {
+@@ -1706,6 +1733,9 @@ void BrowserProcessImpl::PreMainMessageLoopRun() {
  
    features_->PreMainMessageLoopRun();
    platform_part_->PreMainMessageLoopRun();
@@ -24408,6 +25579,110 @@ index 002d492ffe..d399397341 100644
    // A privileged WebContents (see //chrome's PrivilegedWebContents) must not
    // create related windows: the new window would share an opener relationship
    // (and, for same-site targets, a process) with the privileged page. Deny
+diff --git a/chrome/browser/component_updater/chrome_component_updater_configurator.cc b/chrome/browser/component_updater/chrome_component_updater_configurator.cc
+index 744a905fa1..72612b28da 100644
+--- a/chrome/browser/component_updater/chrome_component_updater_configurator.cc
++++ b/chrome/browser/component_updater/chrome_component_updater_configurator.cc
+@@ -262,7 +262,9 @@ ChromeConfigurator::GetPatcherFactory() {
+ 
+ bool ChromeConfigurator::EnabledBackgroundDownloader() const {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+-  return configurator_impl_.EnabledBackgroundDownloader();
++  // SugiyamaLabs: the Widevine download goes through our network stack (proxy, NetLog), not the
++  // system's background NSURLSession.
++  return false;
+ }
+ 
+ bool ChromeConfigurator::EnabledCupSigning() const {
+diff --git a/chrome/browser/component_updater/registration.cc b/chrome/browser/component_updater/registration.cc
+index c8ac220977..4390ba8c0e 100644
+--- a/chrome/browser/component_updater/registration.cc
++++ b/chrome/browser/component_updater/registration.cc
+@@ -88,6 +88,8 @@
+ 
+ #if BUILDFLAG(ENABLE_WIDEVINE_CDM_COMPONENT)
+ #include "chrome/browser/component_updater/widevine_cdm_component_installer.h"
++#include "components/component_updater/component_updater_paths.h"
++#include "third_party/widevine/cdm/widevine_cdm_common.h"
+ #endif  // BUILDFLAG(ENABLE_WIDEVINE_CDM_COMPONENT)
+ 
+ #if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX) || \
+@@ -148,7 +150,17 @@ void RegisterComponentsForUpdate() {
+ #endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
+ 
+ #if BUILDFLAG(ENABLE_WIDEVINE_CDM_COMPONENT)
+-  RegisterWidevineCdmComponent(cus);
++  // SugiyamaLabs: Conteúdo protegido. Off, Google is never asked and the CDM is removed.
++  if (g_browser_process->local_state()->GetBoolean("agens.widevine.enabled")) {
++    RegisterWidevineCdmComponent(cus);
++  } else if (base::FilePath dir;
++             base::PathService::Get(DIR_COMPONENT_USER, &dir)) {
++    // Not BEST_EFFORT: those can wait for the end of startup, which the hidden engine may never signal.
++    base::ThreadPool::PostTask(
++        FROM_HERE, {base::TaskPriority::USER_VISIBLE, base::MayBlock()},
++        base::GetDeletePathRecursivelyCallback(
++            dir.AppendASCII(kWidevineCdmBaseDirectory)));
++  }
+ #endif  // BUILDFLAG(ENABLE_WIDEVINE_CDM_COMPONENT)
+ 
+   // SugiyamaLabs: the ad blocker ruleset ships with the app, never downloaded.
+diff --git a/chrome/browser/component_updater/widevine_cdm_component_installer.cc b/chrome/browser/component_updater/widevine_cdm_component_installer.cc
+index c88a637e72..8f42ec036c 100644
+--- a/chrome/browser/component_updater/widevine_cdm_component_installer.cc
++++ b/chrome/browser/component_updater/widevine_cdm_component_installer.cc
+@@ -435,10 +435,16 @@ void WidevineCdmComponentInstallerPolicy::UpdateCdmPath(
+ #endif
+ }
+ 
+-void RegisterWidevineCdmComponent(ComponentUpdateService* cus) {
++void RegisterWidevineCdmComponent(ComponentUpdateService* cus,
++                                  base::OnceClosure registered) {
+   auto installer = base::MakeRefCounted<ComponentInstaller>(
+       std::make_unique<WidevineCdmComponentInstallerPolicy>());
+-  installer->Register(cus, base::OnceClosure());
++  installer->Register(cus, std::move(registered));
++}
++
++void UpdateWidevineCdmComponentNow(ComponentUpdateService* cus) {
++  cus->GetOnDemandUpdater().OnDemandUpdate(
++      kWidevineCdmComponentId, OnDemandUpdater::Priority::FOREGROUND, {});
+ }
+ 
+ }  // namespace component_updater
+diff --git a/chrome/browser/component_updater/widevine_cdm_component_installer.h b/chrome/browser/component_updater/widevine_cdm_component_installer.h
+index 232974f899..f818226072 100644
+--- a/chrome/browser/component_updater/widevine_cdm_component_installer.h
++++ b/chrome/browser/component_updater/widevine_cdm_component_installer.h
+@@ -5,10 +5,16 @@
+ #ifndef CHROME_BROWSER_COMPONENT_UPDATER_WIDEVINE_CDM_COMPONENT_INSTALLER_H_
+ #define CHROME_BROWSER_COMPONENT_UPDATER_WIDEVINE_CDM_COMPONENT_INSTALLER_H_
+ 
++#include "base/functional/callback.h"
++
+ namespace component_updater {
+ 
+ class ComponentUpdateService;
+ 
++// SugiyamaLabs: the CRX id, for Configurações › Privacidade › Conteúdo protegido.
++inline constexpr char kWidevineCdmComponentId[] =
++    "oimompecagnajdejgnnjijobebaeigek";
++
+ // Our job is to:
+ // 1) Find what Widevine CDM is installed (if any).
+ // 2) Register with the component updater to download the latest version when
+@@ -16,7 +22,11 @@ class ComponentUpdateService;
+ // 3) Copy the Widevine CDM adapter bundled with chrome to the install path.
+ // 4) Register the Widevine CDM (via the adapter) with Chrome.
+ // The first part is IO intensive so we do it asynchronously in the file thread.
+-void RegisterWidevineCdmComponent(ComponentUpdateService* cus);
++// `registered` runs on the UI thread once the component is registered.
++void RegisterWidevineCdmComponent(ComponentUpdateService* cus,
++                                  base::OnceClosure registered = {});
++// Asks for the CDM now instead of at the next scheduled check.
++void UpdateWidevineCdmComponentNow(ComponentUpdateService* cus);
+ 
+ }  // namespace component_updater
+ 
 diff --git a/chrome/browser/devtools/devtools_window.cc b/chrome/browser/devtools/devtools_window.cc
 index 7613579e79..0f484af82a 100644
 --- a/chrome/browser/devtools/devtools_window.cc
@@ -24931,6 +26206,21 @@ index b02065efac..428a514d60 100644
    // Create or update |pip_window_controller_| for the current WebContents, if
    // it is a WebContents based video PIP.
    if (!pip_window_controller_ ||
+diff --git a/chrome/browser/prefs/browser_prefs.cc b/chrome/browser/prefs/browser_prefs.cc
+index 5571500f70..edbf9e64be 100644
+--- a/chrome/browser/prefs/browser_prefs.cc
++++ b/chrome/browser/prefs/browser_prefs.cc
+@@ -1848,6 +1848,10 @@ void RegisterLocalState(PrefRegistrySimple* registry) {
+ void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry,
+                           const std::string& locale) {
+   TRACE_EVENT0("browser", "chrome::RegisterProfilePrefs");
++  // agens: the casca's translation (Configurações › Idiomas): languages (ISO codes, e.g. "es")
++  // always translated, and never offered.
++  registry->RegisterListPref("agens.translate.always");
++  registry->RegisterListPref("agens.translate.never");
+   // User prefs. Please keep this list alphabetized.
+   AccessibilityLabelsService::RegisterProfilePrefs(registry);
+   registry->RegisterBooleanPref(prefs::kRendererAccessibilityEnabled, true);
 diff --git a/chrome/browser/printing/print_view_manager.cc b/chrome/browser/printing/print_view_manager.cc
 index 25f1aa604a..f997148b37 100644
 --- a/chrome/browser/printing/print_view_manager.cc
@@ -25039,6 +26329,58 @@ index 64e5e13970..ccc9d6de92 100644
        if (!profile_base_name || profile_base_name->empty() ||
            *profile_base_name ==
                base::FilePath(chrome::kSystemProfileDir).AsUTF8Unsafe()) {
+diff --git a/chrome/browser/renderer_context_menu/render_view_context_menu.cc b/chrome/browser/renderer_context_menu/render_view_context_menu.cc
+index 2ace27d0d9..57adab2c6e 100644
+--- a/chrome/browser/renderer_context_menu/render_view_context_menu.cc
++++ b/chrome/browser/renderer_context_menu/render_view_context_menu.cc
+@@ -1578,6 +1578,17 @@ void RenderViewContextMenu::InitMenu() {
+         menu_model_.RemoveItemAt(i);
+       }
+     }
++    // The casca's translation (Apple's, on the Mac; Chromium's Google one stays off): after
++    // Recarregar on the page, after Copiar on a selection (prototipos/janela-traduzir.html).
++    const std::u16string translate = agens::NativeTranslateLabel(source_web_contents_);
++    const bool on_selection = !params_.selection_text.empty();
++    const int translate_id = on_selection ? IDC_CONTENT_CONTEXT_PARTIAL_TRANSLATE : IDC_CONTENT_CONTEXT_TRANSLATE;
++    std::optional<size_t> after =
++        menu_model_.GetIndexOfCommandId(on_selection ? IDC_CONTENT_CONTEXT_COPY : IDC_RELOAD);
++    if (!translate.empty() && after && !menu_model_.GetIndexOfCommandId(translate_id)) {
++      menu_model_.InsertItemAt(*after + 1, translate_id, translate);
++      if (!on_selection) menu_model_.InsertSeparatorAt(*after + 1, ui::NORMAL_SEPARATOR);
++    }
+   }
+ 
+   // Remove any redundant trailing separator.
+@@ -3539,7 +3550,8 @@ bool RenderViewContextMenu::IsCommandIdEnabled(int id) const {
+       return IsDevCommandEnabled(id);
+ 
+     case IDC_CONTENT_CONTEXT_TRANSLATE:
+-      return navigation_allowed && IsTranslateEnabled();
++      return navigation_allowed &&
++             (IsTranslateEnabled() || !agens::NativeTranslateLabel(source_web_contents_).empty());
+ 
+     case IDC_CONTENT_CONTEXT_PARTIAL_TRANSLATE:
+       return navigation_allowed;
+@@ -4214,11 +4226,15 @@ void RenderViewContextMenu::ExecuteCommand(int id, int event_flags) {
+       break;
+ 
+     case IDC_CONTENT_CONTEXT_TRANSLATE:
+-      ExecTranslate();
+-      break;
+-
+     case IDC_CONTENT_CONTEXT_PARTIAL_TRANSLATE:
+-      ExecPartialTranslate();
++      if (!agens::NativeTranslateLabel(source_web_contents_).empty()) {
++        agens::RunNativeTranslate(source_web_contents_, id == IDC_CONTENT_CONTEXT_TRANSLATE ? std::u16string()
++                                                                                           : params_.selection_text);
++      } else if (id == IDC_CONTENT_CONTEXT_TRANSLATE) {
++        ExecTranslate();
++      } else {
++        ExecPartialTranslate();
++      }
+       break;
+ 
+     case IDC_CONTENT_CONTEXT_RELOADFRAME:
 diff --git a/chrome/browser/sessions/session_restore.cc b/chrome/browser/sessions/session_restore.cc
 index e21bf8de37..a896a86d0d 100644
 --- a/chrome/browser/sessions/session_restore.cc
@@ -25678,7 +27020,7 @@ index 728ff34b3d..180cba0016 100644
    map.AddWebUIConfig(std::make_unique<FeedbackUIConfig>());
    if (!light_pages) map.AddWebUIConfig(std::make_unique<HistoryUIConfig>());  // agens
 diff --git a/chrome/browser/ui/webui_browser/BUILD.gn b/chrome/browser/ui/webui_browser/BUILD.gn
-index 98ada3ff32..6ab4a25b35 100644
+index 98ada3ff32..eb76995a25 100644
 --- a/chrome/browser/ui/webui_browser/BUILD.gn
 +++ b/chrome/browser/ui/webui_browser/BUILD.gn
 @@ -81,9 +81,14 @@ source_set("impl") {
@@ -25696,7 +27038,7 @@ index 98ada3ff32..6ab4a25b35 100644
      "//chrome/browser/agens/embed/agens_window.h",
      "//chrome/browser/agens/embed/native_shell.cc",
      "//chrome/browser/agens/embed/agens_import.cc",
-@@ -97,17 +102,48 @@ source_set("impl") {
+@@ -97,17 +102,49 @@ source_set("impl") {
  
    if (is_mac) {
      sources += [
@@ -25739,13 +27081,14 @@ index 98ada3ff32..6ab4a25b35 100644
      ]
      frameworks = [
        "LocalAuthentication.framework",
++      "NaturalLanguage.framework",  # agens: the page's language, for translating it (on the Mac)
        "Security.framework",  # agens: importing from other browsers reads their Keychain key
      ]  # agens: Touch ID before showing a password
 +    libs = [ "bsm" ]  # agens: the socket peer's pid from its audit token
    }
  
    deps = [
-@@ -152,6 +188,8 @@ source_set("impl") {
+@@ -152,6 +189,8 @@ source_set("impl") {
      "//chrome/browser/ui/toolbar",
      "//chrome/browser/ui/views:bubble_anchor_util_views",
      "//components/webui/about",  # agens: the credits page parses its about_credits.html
@@ -25754,7 +27097,7 @@ index 98ada3ff32..6ab4a25b35 100644
      "//chrome/browser/ui/views:find_bar_views",
      "//chrome/browser/ui/views:tab_search_bubble_host",
      "//chrome/browser/ui/views/exclusive_access",
-@@ -173,6 +211,8 @@ source_set("impl") {
+@@ -173,6 +212,8 @@ source_set("impl") {
      "//components/browser_apis/ui_controllers/toolbar:mojom",
      "//components/guest_contents/browser",
      "//components/input",
@@ -25763,7 +27106,7 @@ index 98ada3ff32..6ab4a25b35 100644
      "//components/omnibox/browser:vector_icons",
      "//components/sharing_message",
      "//components/surface_embed/browser",
-@@ -192,6 +232,7 @@ source_set("impl") {
+@@ -192,6 +233,7 @@ source_set("impl") {
  
    if (is_mac) {
      deps += [
@@ -25906,6 +27249,122 @@ index 2ac338faac..6ac9cf9eaf 100644
  
  // Disable downloads of unsafe file types over insecure transports if initiated
  // from a secure page. As of M89, mixed downloads are blocked on all platforms.
+diff --git a/components/component_updater/component_updater_service.cc b/components/component_updater/component_updater_service.cc
+index 4469686690..14750b0009 100644
+--- a/components/component_updater/component_updater_service.cc
++++ b/components/component_updater/component_updater_service.cc
+@@ -7,6 +7,7 @@
+ #include <stdint.h>
+ 
+ #include <algorithm>
++#include <iterator>
+ #include <map>
+ #include <memory>
+ #include <optional>
+@@ -58,6 +59,11 @@ enum UpdateType {
+ 
+ namespace component_updater {
+ 
++// SugiyamaLabs: the update server is Google's (component_updater_url_constants.cc). Only the
++// Widevine CDM may ask it; every other component stays as installed, never checked
++// (docs/sem-telemetria.md). Its id is in widevine_cdm_component_installer.cc.
++constexpr char kAgensUpdatableComponent[] = "oimompecagnajdejgnnjijobebaeigek";
++
+ ComponentInfo::ComponentInfo(const std::string& id,
+                              const std::string& fingerprint,
+                              const std::u16string& name,
+@@ -421,6 +427,15 @@ void CrxUpdateService::OnDemandUpdateInternal(const std::string& id,
+                                               Callback callback) {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+ 
++  if (id != kAgensUpdatableComponent) {  // SugiyamaLabs
++    if (!callback.is_null()) {
++      base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++          FROM_HERE, base::BindOnce(std::move(callback),
++                                    update_client::Error::INVALID_ARGUMENT));
++    }
++    return;
++  }
++
+   UMA_HISTOGRAM_ENUMERATION("ComponentUpdater.Calls", UPDATE_TYPE_MANUAL,
+                             UPDATE_TYPE_COUNT);
+ 
+@@ -442,7 +457,13 @@ bool CrxUpdateService::CheckForUpdates(
+   UMA_HISTOGRAM_ENUMERATION("ComponentUpdater.Calls", UPDATE_TYPE_AUTOMATIC,
+                             UPDATE_TYPE_COUNT);
+ 
+-  if (components_order_.empty()) {
++  // SugiyamaLabs: only Widevine is ever sent to the update server.
++  std::vector<std::string> ids;
++  std::ranges::copy_if(components_order_, std::back_inserter(ids),
++                       [](const std::string& id) {
++                         return id == kAgensUpdatableComponent;
++                       });
++  if (ids.empty()) {
+     base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+         FROM_HERE, std::move(on_finished));
+     return true;
+@@ -451,7 +472,7 @@ bool CrxUpdateService::CheckForUpdates(
+   config_->GetCrxCache()->RemoveIfNot(
+       components_order_,
+       base::BindOnce(
+-          &UpdateClient::Update, update_client_, components_order_,
++          &UpdateClient::Update, update_client_, ids,
+           base::BindOnce(&CrxUpdateService::GetCrxComponents,
+                          weak_ptr_factory_.GetWeakPtr()),
+           base::DoNothing(), false,
+diff --git a/components/component_updater/component_updater_service.h b/components/component_updater/component_updater_service.h
+index 999198d5e1..f5b2efe561 100644
+--- a/components/component_updater/component_updater_service.h
++++ b/components/component_updater/component_updater_service.h
+@@ -247,6 +247,8 @@ class OnDemandUpdater {
+   friend class PlatformRuntimeComponentInstallerPolicy;
+   friend void UpdateAIEmbeddingsComponentOnDemand(Priority priority,
+                                                   Callback callback);
++  // SugiyamaLabs: Conteúdo protegido turned on (widevine_cdm_component_installer.cc).
++  friend void UpdateWidevineCdmComponentNow(ComponentUpdateService* cus);
+ 
+   // Triggers an update check for a component. |id| is a value
+   // returned by GetCrxComponentID(). If an update for this component is already
+diff --git a/components/component_updater/component_updater_url_constants.cc b/components/component_updater/component_updater_url_constants.cc
+index 44834fe06e..6480ed8a86 100644
+--- a/components/component_updater/component_updater_url_constants.cc
++++ b/components/component_updater/component_updater_url_constants.cc
+@@ -15,9 +15,9 @@ namespace component_updater {
+ // The value of |kDefaultUrlSource| can be overridden with
+ // --component-updater=url-source=someurl.
+ const char kUpdaterJSONDefaultUrl[] =
+-    "https://update.9oo91eapis.qjz9zk/service/update2/json";
++    "https://update.googleapis.com/service/update2/json";
+ 
+ const char kUpdaterJSONFallbackUrl[] =
+-    "http://update.9oo91eapis.qjz9zk/service/update2/json";
++    "https://update.googleapis.com/service/update2/json";
+ 
+ }  // namespace component_updater
+diff --git a/components/component_updater/configurator_impl.cc b/components/component_updater/configurator_impl.cc
+index 2ff9716b24..0b324dd7bf 100644
+--- a/components/component_updater/configurator_impl.cc
++++ b/components/component_updater/configurator_impl.cc
+@@ -7,6 +7,7 @@
+ #include <algorithm>
+ #include <optional>
+ #include <string>
++#include <tuple>
+ #include <vector>
+ 
+ #include "base/containers/flat_map.h"
+@@ -91,7 +92,9 @@ std::vector<GURL> ConfiguratorImpl::UpdateUrl() const {
+ 
+ std::vector<GURL> ConfiguratorImpl::PingUrl() const {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+-  return pings_enabled_ ? UpdateUrl() : std::vector<GURL>();
++  // SugiyamaLabs: no install/uninstall reports to Google; only the update check itself.
++  std::ignore = pings_enabled_;
++  return std::vector<GURL>();
+ }
+ 
+ const base::Version& ConfiguratorImpl::GetBrowserVersion() const {
 diff --git a/components/custom_handlers/register_protocol_handler_permission_request.h b/components/custom_handlers/register_protocol_handler_permission_request.h
 index cb50181f8d..d95817b275 100644
 --- a/components/custom_handlers/register_protocol_handler_permission_request.h
@@ -26061,6 +27520,24 @@ index 26a877e3a6..fde7d6e0a0 100644
    // Ensure that:
    //  - A window with an invisible parent is not made visible.
    //  - A parent changing visibility updates child window visibility.
+diff --git a/components/update_client/update_checker.cc b/components/update_client/update_checker.cc
+index 8f0a98e5bc..ed172d0e40 100644
+--- a/components/update_client/update_checker.cc
++++ b/components/update_client/update_checker.cc
+@@ -104,7 +104,12 @@ void UpdateCheckerImpl::CheckForUpdates(
+     scoped_refptr<UpdateContext> context,
+     const base::flat_map<std::string, std::string>& additional_attributes,
+     UpdateCheckCallback update_check_callback) {
+-  return;
++  // ungoogled blocks every update check here. SugiyamaLabs: only the Widevine CDM gets through
++  // (component_updater_service.cc picks it; docs/sem-telemetria.md).
++  if (context->components_to_check_for_updates !=
++      std::vector<std::string>{"oimompecagnajdejgnnjijobebaeigek"}) {
++    return;
++  }
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+ 
+   update_check_callback_ = std::move(update_check_callback);
 diff --git a/content/app_shim_remote_cocoa/render_widget_host_ns_view_bridge.mm b/content/app_shim_remote_cocoa/render_widget_host_ns_view_bridge.mm
 index 2eda2e79d7..1bd592d898 100644
 --- a/content/app_shim_remote_cocoa/render_widget_host_ns_view_bridge.mm

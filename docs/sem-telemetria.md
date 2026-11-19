@@ -1,6 +1,6 @@
 # Sem telemetria: como provamos
 
-Promessa: o navegador não fala com ninguém que a pessoa não pediu. A exceção é a procura de atualização, uma vez por dia no GitHub ([abaixo](#atualizações)). Baixar um idioma para traduzir vai à Apple só depois do OK da pessoa ([abaixo](#idiomas-da-tradução)). Esta página diz como isso é medido e o último resultado.
+Promessa: o navegador não fala com ninguém que a pessoa não pediu. As exceções são a procura de atualização, uma vez por dia no GitHub ([abaixo](#atualizações)), e o Widevine, baixado do Google para tocar vídeo protegido ([abaixo](#widevine-conteúdo-protegido)). Baixar um idioma para traduzir vai à Apple só depois do OK da pessoa ([abaixo](#idiomas-da-tradução)). Esta página diz como isso é medido e o último resultado.
 
 ## Como medir
 
@@ -36,6 +36,28 @@ A única conexão que o navegador faz sem a pessoa pedir: **uma vez por dia**, o
 - Desligar: na janela do Sparkle (aparece ao ter atualização, ou por **Procurar atualizações…** no menu AgensBrowser e no Sobre), desmarcando a procura automática; o Sparkle guarda a escolha nas preferências do app (`SUEnableAutomaticChecks`).
 - Não existe no motor embutido no Agens, nem no build dev (sem `--agens-updates`).
 - O `idle_audit.py` de 09/11/2026 é de antes disso. Num perfil novo o Sparkle só procura depois do intervalo, então 10 minutos parado ainda devem dar 0 conexões; não foi medido de novo.
+
+## Widevine (conteúdo protegido)
+
+Netflix, Disney+, Spotify e outros sites com DRM precisam do Widevine, um componente do Google. Ele não vem no app (licença): o navegador baixa sozinho, em segundo plano, pelo component updater do Chromium. Vem **ligado**.
+
+- **Quando conecta:** cerca de 1 minuto depois de abrir, e de novo a cada 5 horas com o navegador aberto (o ciclo normal do component updater), pergunta se há versão nova. Na primeira vez, ou havendo versão nova, baixa o pacote (≈ 10 MB).
+- **Para onde:** a pergunta vai a `https://update.googleapis.com/service/update2/json` (o protocolo Omaha do Google, com assinatura CUP na resposta). O download vem do endereço que a resposta der; no teste foi `http://edgedl.me.gvt1.com/edgedl/release2/chrome_component/…/oimompecagnajdejgnnjijobebaeigek_4.10.3112.0_mac_arm64_….crx3`, em **HTTP** (é o que o servidor do Google oferece; o pacote é um CRX3 assinado, conferido contra o hash fixo do Widevine antes de instalar, então não dá para trocá-lo no caminho, mas quem olha a rede vê que é o Widevine). O download passa pela rede do próprio Chromium (proxy, NetLog), nunca pelo `NSURLSession` de segundo plano do sistema (`chrome_component_updater_configurator.cc`).
+- **O que vai:** o pedido padrão do component updater: o id do Widevine (`oimompecagnajdejgnnjijobebaeigek`) e a versão instalada, a versão do navegador, sistema, arquitetura e os ids de sessão e pedido do protocolo. Só o Widevine: os outros componentes do Chromium continuam registrados mas nunca são perguntados (`component_updater_service.cc`), e os relatórios de instalação (pings) estão desligados (`configurator_impl.cc`).
+- **Onde fica:** `WidevineCdm/<versão>/` dentro da pasta de dados (`~/Library/Application Support/AgensBrowser`, ou a pasta do motor no Agens). Roda no Mac e conversa só com o site que toca o vídeo.
+- **Desligar:** Configurações › Privacidade › Conteúdo protegido, "Permitir conteúdo protegido (Widevine)" (`agens.widevine.enabled`, Local State). Desligado, o componente nem é registrado: nenhum pedido ao Google; desligar apaga a versão instalada na hora, e a cada abertura com ele desligado a pasta `WidevineCdm` inteira é apagada. **Remover componente** apaga a versão instalada; com o interruptor ligado, ela volta a baixar na próxima abertura. Um vídeo que já carregou o Widevine continua com ele até o navegador fechar.
+- **Motor embutido no Agens:** o mesmo comportamento e a mesma preferência (ligada), na pasta de dados do motor. Lá não há Configurações; desligar é pela preferência.
+- Por isso o `idle_audit.py` de um perfil novo agora mostra `update.googleapis.com` e o download depois do primeiro minuto.
+
+Medido em 19/11/2026 (build dev, motor escondido `--agens-embedded`, perfis novos, NetLog; script de teste fora do repo):
+
+| Caso | Google na NetLog | Resultado |
+|---|---|---|
+| Ligado (padrão) | `update.googleapis.com/service/update2/json` (1 pedido) e o `.crx3` em `edgedl.me.gvt1.com` | `WidevineCdm/4.10.3112.0/` no perfil em ~3 min; nenhum outro componente perguntado |
+| Mesmo perfil, reaberto | nada nos ~10 s do teste | `requestMediaKeySystemAccess('com.widevine.alpha')` + `createMediaKeys()` numa página local: ok |
+| Desligado (`agens.widevine.enabled` false), 100 s, com uma pasta `WidevineCdm/1.0.0.0` posta antes | nada | pasta apagada |
+
+As outras conexões do perfil novo no mesmo teste foram só as listas do bloqueador no GitHub ([bloqueador](bloqueador.md)). Não medido: tocar um vídeo com DRM de verdade (Netflix, Spotify), o interruptor e o Remover pela tela (sem abrir janela), e o build oficial.
 
 ## Idiomas da tradução
 
