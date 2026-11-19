@@ -152,3 +152,32 @@ Arquivo `chrome/browser/agens/embed/agens_ato_sleep.cc`:
 - Ajustar sem rebuild: `--enable-features=AgensAtoSleep:after/30m` (o `after` passado vence a preferência); desligar: `--disable-features=AgensAtoSleep`. O gate escondido usa `after/6s`.
 
 Medido no motor escondido (build dev, 16/11/2026, 20 abas de `tabs.txt` divididas em 3 atos, uma aba do primeiro ato à vista, `after/2m`, abas que dormem desligadas para isolar): aos 2 min, **3.956 MB e 14 renderers**; aos 3 min, com os 2 atos fora de uso dormindo, **2.137 MB e 7 renderers**. Os renderers dos 2 atos somam zero; o que sobra deles está no processo do navegador (perfil carregado). Tempo para acordar: o de carregar a página de novo (não medido nas 20 abas; o gate confere que volta em menos de 20 s).
+
+## Rolagem "um pouco lagada" (investigação de 19/11/2026)
+
+Relato: rolagem com pequenos travamentos no build oficial notarizado. Medido no build oficial (`out/Default`, HEAD `7a08fcc6ac`), perfil descartável, rolagem por script (`Input.synthesizeScrollGesture` pelo DevTools, ~2.500 px/s, 3 traços de 4.000 px) e trace do DevTools. A máquina estava com a tampa fechada e dois monitores externos: o principal a **60 Hz** (1080p) e o outro a **144 Hz** (1440p). As medições foram no de 144 Hz. Contamos "frames de rolagem perdidos" pelo `PipelineReporter` (`STATE_DROPPED` com rolagem ativa) e o ritmo de `requestAnimationFrame` na página.
+
+| Cenário (aquecido, 2 rodadas) | rAF | Frames de rolagem perdidos |
+|---|---|---|
+| Wikipédia (Brazil), 1400×1000, casca | 144,0 fps | 0 de ~610 |
+| Mesma página, UI do Chromium (`--disable-features=AgensNativeShell`) | 144,0 fps | 0 de ~615 |
+| Wikipédia, 2560×1320, casca / UI do Chromium | 144,0 / 143,6 fps | 0 / 0 |
+| UOL, casca, bloqueador ligado / desligado | 143,5 / 134 fps | 0–1 / 0–5 |
+| YouTube (busca), bloqueador ligado / desligado | 121 / 98–117 fps | 0 / 0–108 |
+| Janela aberta na tela de 60 Hz e movida para a de 144 Hz | 144,0 fps | 0 |
+
+O que isso descarta:
+- **Cantos arredondados do cartão (12 pt):** o recorte é o `SetNativeViewCornerRadii` do `ui::Layer` (canto rápido), que vira camada do CoreAnimation (`CARendererLayerTree`). Não cai na composição pela GPU do frame inteiro: o processo da GPU gasta ~0,06 ms por frame em `CommitScheduledCALayers`, igual à UI do Chromium (13 contra 15 ms/s em `Display::DrawAndSwap`).
+- **Preso em 60 Hz:** não. Segue a tela (144 Hz) e troca ao mover a janela de tela.
+- **Bloqueador (CSS cosmético e scriptlets):** ligado é melhor ou igual. No UOL, a thread principal gasta 192 ms/s ligado contra 332–396 ms/s desligado; o `UpdateLayoutTree` é o mesmo.
+- **Economia de energia:** na tomada fica desligada (estado `kEnabledOnBattery` do Chromium). Abas por processo (#10), teto do V8 (#11), sono de abas e atos: nada disso roda durante a rolagem da aba visível; no trace não aparece tarefa nossa na thread da UI.
+- **Bolha de link (`SetURL`):** só atualiza o texto e a posição de uma `NSView` quando o link muda.
+
+O que apareceu: na **primeira rolagem com o perfil novo**, uma tarefa de raster na GPU de 183 ms (`RasterDecoderImpl::DoEndRasterCHROMIUM::Flush`) fez 24 frames seguidos se perderem. Com o perfil aquecido, isso não volta: é a compilação dos shaders, que fica guardada no perfil (`GraphiteDawnCache`, `GPUPersistentCache`). Se esse cache se perde a cada build novo, os primeiros minutos depois de instalar travam um pouco. **Não verificado.**
+
+Não deu para medir (motivo entre parênteses):
+- **Rolagem de trackpad de verdade** (`NSEvent` passando pela casca, com momento). O script injeta a rolagem depois do AppKit. Para mandar evento só para o nosso processo (`CGEventPostToPid`), o terminal precisa da permissão de Acessibilidade, e ela não está dada.
+- **O que chega na tela** (composição do WindowServer com a `NSView` da casca por cima da página). As janelas de teste ficaram cobertas pelas janelas do dia a dia. Os números acima são da produção dos frames (com `--disable-backgrounding-occluded-windows`), não do que aparece no vidro.
+- **ProMotion da tela do MacBook** (tampa fechada). O modo sem janela (`--headless=new`, motor escondido) não tem casca, display link de verdade nem 120 Hz, então não serve para isso.
+
+Próximo passo, com a pessoa na máquina: rolar a mesma página no AgensBrowser e no Brave, na mesma tela e com a tampa aberta. Ou gravar o template "Animation Hitches" do Instruments só no processo do AgensBrowser. Se der diferença, vale olhar o caminho do `NSEvent` na casca (`hitTest:` da `AgensChrome`, monitores locais de evento). Atenção: a tela principal hoje é de 60 Hz, e nela qualquer navegador fica em 60.
