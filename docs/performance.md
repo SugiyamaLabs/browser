@@ -181,3 +181,20 @@ Não deu para medir (motivo entre parênteses):
 - **ProMotion da tela do MacBook** (tampa fechada). O modo sem janela (`--headless=new`, motor escondido) não tem casca, display link de verdade nem 120 Hz, então não serve para isso.
 
 Próximo passo, com a pessoa na máquina: rolar a mesma página no AgensBrowser e no Brave, na mesma tela e com a tampa aberta. Ou gravar o template "Animation Hitches" do Instruments só no processo do AgensBrowser. Se der diferença, vale olhar o caminho do `NSEvent` na casca (`hitTest:` da `AgensChrome`, monitores locais de evento). Atenção: a tela principal hoje é de 60 Hz, e nela qualquer navegador fica em 60.
+
+## Serviço de áudio só com áudio em uso (#34, 19/11/2026)
+
+Corrige o "áudio fica vivo" da seção de captura de vídeo. O Chromium não tem prazo de ocioso para o serviço de áudio (`utility:audio`; procurado: `audio_service.cc`, `services/audio`, nada parecido com `kAudioServiceIdleTimeout`). Uma página que só chama `enumerateDevices()` (YouTube) o abria e ele ficava até fechar o navegador. Agora:
+
+- **Prazo no serviço** (`content/browser/audio/audio_service.cc`): o navegador usa o rastreio de ocioso do mojo (`reset_on_idle_timeout`) no remote do serviço. Sem nenhuma interface dele aberta (stream de saída ou entrada, lista de dispositivos, escuta de troca), depois do prazo o remote é solto e o processo sai. O próximo uso abre outro, sem a página perceber.
+- **Escuta de troca de dispositivo de áudio** (`media_devices_manager.cc`): era o que segurava o serviço. É solta depois do mesmo prazo quando nenhuma página ouve `devicechange` de áudio e nenhum microfone está aberto (`AudioInputDeviceManager::HasOpenedDevices`). Junto, a lista de áudio guardada é jogada fora; a próxima `enumerateDevices()` volta a escutar e pergunta ao serviço.
+- **Modelos de ML do áudio** (`services/audio/service.cc`): o Chrome liga o `MlModelManager` a cada abertura do serviço e segura; essa ligação não conta mais para manter o serviço vivo (os modelos são reenviados quando ele abre de novo).
+- **Volume e mudo por aba:** o `ForwardingAudioStreamFactory` já reenvia o volume do grupo (`SetGroupVolume`) e o mudo quando liga de novo ao serviço, o que já acontecia toda vez que a aba ficava sem stream. Nada novo.
+
+Configurar: `--enable-features=AudioServiceIdleRelease:audio_service_idle_timeout/30s` (padrão 60 s); desligar: `--disable-features=AudioServiceIdleRelease`. Só vale com o serviço fora do processo (o padrão no Mac).
+
+**Tempo:** o prazo conta duas vezes no caso do YouTube: 60 s até soltar a escuta, mais 60 s de ocioso. Medido no build dev (motor escondido, `/dispositivos`, 1 rodada cada): o serviço sai **~120 s** depois da lista, com a aba aberta ou fechada (antes: vivo até fechar o navegador). RSS do processo antes de sair: ~113 MB (RSS conta memória compartilhada; os ~23 MB da medição de 09/11 são outra métrica).
+
+**Gate escondido** (`audio_service_idle_timeout/2s`, launch própria): `/dispositivos` abre o serviço; com a aba aberta e sem som ele sai em até 20 s; `view.volume 30` com o serviço fechado, depois um tom em `/som` abre o serviço de novo e a aba fica com volume 30, audível, sem mudo; `view.volume` e `view.mute` respondem; tocando (mudo) o serviço fica; fechando a aba ele sai de novo. 447/0/4.
+
+Limites: uma página que ouve `devicechange` segura o serviço enquanto estiver aberta (como no vídeo). Com microfone aberto a escuta fica; a checagem de "ainda precisa" roda a cada prazo, então depois de fechar o microfone a saída pode levar até 3 prazos. O gate confere que o volume volta a valer no navegador (estado da aba), não o nível do som que sai: o `audible` é medido antes do volume do grupo.

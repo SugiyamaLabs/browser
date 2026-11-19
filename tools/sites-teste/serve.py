@@ -8,7 +8,7 @@ PAGES = {"/login": "login.html", "/app/": "app.html", "/form": "form.html", "/ot
          "/ui/dialog": "ui-dialog.html", "/ui/perm": "ui-perm.html", "/ui/pick": "ui-pick.html", "/ext": "ext.html", "/pick": "pick.html",
          "/popup": "popup.html", "/pip": "pip.html", "/fuga": "fuga.html", "/janela": "janela.html",
          "/imprimir": "imprimir.html", "/passkey": "passkey.html", "/find": "find.html", "/som": "som.html",
-         "/camera": "camera.html", "/tela": "tela.html"}
+         "/camera": "camera.html", "/dispositivos": "dispositivos.html", "/tela": "tela.html"}
 SID = "sid-fake-123"  # fake test values only
 SEEN = {}  # /whoami tag -> whether that request carried the login cookie (in memory only)
 

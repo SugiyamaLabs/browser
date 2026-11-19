@@ -1591,6 +1591,56 @@ def restart_keeps_tabs():
                 try: x.wait(15)
                 except subprocess.TimeoutExpired: x.kill()
         subprocess.run(["rm", "-rf", profile4])
+
+# Issue #34: the audio service exits when nothing uses audio and comes back on the next sound, with
+# the tab's volume. Its own short launch: listener release and idle exit after 2 s instead of 60 s.
+profile5 = tempfile.mkdtemp(prefix="agens-a.", dir="/tmp")
+engine5 = launch(profile5, "--enable-features=AudioServiceIdleRelease:audio_service_idle_timeout/2s", name="audio")
+c5 = Conn(profile5 + "/agens.sock")
+c5.ask("hello"); c5.ask("host.attach")
+def audio_service(pid):
+    return len(subprocess.run(["pgrep", "-P", str(pid), "-f", "audio.mojom.AudioService"], capture_output=True, text=True).stdout.split())
+def titled5(tab, prefix, timeout=20):
+    return c5.event(lambda e: e["event"] == "view.tab" and e.get("tab") == tab and e.get("title", "").startswith(prefix), timeout)
+def until5(pred, timeout):
+    end = time.time() + timeout
+    while time.time() < end and not pred(): c5.pump(0.5)
+    return pred()
+def tabs5(): return {x["tab"]: x for x in c5.ask("view.tabs", ato=ato5).get("tabs", [])}
+ato5 = (c5.ask("atos.list").get("atos") or [{}])[0].get("id")
+dt = c5.ask("view.open", ato=ato5, url=SITE + "/dispositivos").get("tab", "")
+e = titled5(dt, "devices:")
+check("a page that only lists the devices starts the audio service (as YouTube does)",
+      bool(e) and not e["title"].startswith("devices:error") and until5(lambda: audio_service(engine5.pid) == 1, 10),
+      (e, audio_service(engine5.pid)))
+# 2 s listener release + 2 s idle exit, with room to spare.
+check("tab still open, no sound: the audio service exits within the timeout",
+      until5(lambda: audio_service(engine5.pid) == 0, 20), audio_service(engine5.pid))
+c5.ask("view.close", tab=dt)
+st5 = c5.ask("view.open", ato=ato5, url=SITE + "/som").get("tab", "")
+c5.ask("view.attach", tab=st5, width=600, height=400, scale=1)
+titled5(st5, "Som ready", 15)
+r = c5.ask("view.volume", tab=st5, volume=30)   # set while the service is down: sent when it comes back
+for data in CLICK: c5.send_raw({"op": "view.mouse", "tab": st5, "data": data, "x": 100, "y": 100})
+check("a tone after that starts the audio service again", bool(titled5(st5, "tone:running", 10))
+      and until5(lambda: audio_service(engine5.pid) == 1, 10), audio_service(engine5.pid))
+until5(lambda: tabs5().get(st5, {}).get("audible") is True, 10)
+t5 = tabs5().get(st5, {})
+check("view.volume set while it was down holds: volume 30, audible, not muted",
+      r.get("ok") and t5.get("volume") == 30 and t5.get("audible") is True and t5.get("muted") is False, (r, t5))
+r = c5.ask("view.volume", tab=st5, volume=60)
+r2 = c5.ask("view.mute", tab=st5, muted=True)
+check("view.volume and view.mute on the relaunched service answer ok",
+      r.get("ok") and r2.get("ok") and until5(lambda: tabs5().get(st5, {}).get("muted") is True, 10), (r, r2, tabs5().get(st5)))
+time.sleep(5)
+check("while the tab plays (muted) the audio service stays", audio_service(engine5.pid) == 1, audio_service(engine5.pid))
+c5.ask("view.close", tab=st5)
+check("tab with sound closed: the audio service exits again", until5(lambda: audio_service(engine5.pid) == 0, 20),
+      audio_service(engine5.pid))
+engine5.terminate()
+try: engine5.wait(15)
+except subprocess.TimeoutExpired: engine5.kill()
+subprocess.run(["rm", "-rf", profile5])
 restart_keeps_tabs()
 
 # 15. After a normal quit (SIGTERM, as the host does) the engine starts with no tabs; the ato is
