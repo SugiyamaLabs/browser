@@ -13735,7 +13735,7 @@ index 0000000000..a4c34b2b5b
 +  if (!shares.empty()) shares.front()->Switch(w);
 +}
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
-index 268d4dc7bd..1f6d80de66 100644
+index 268d4dc7bd..14e36e85ee 100644
 --- a/chrome/browser/agens/embed/agens_window.h
 +++ b/chrome/browser/agens/embed/agens_window.h
 @@ -5,6 +5,7 @@
@@ -13746,13 +13746,15 @@ index 268d4dc7bd..1f6d80de66 100644
  #include <map>
  #include <set>
  #include <string>
-@@ -15,7 +16,15 @@
+@@ -15,7 +16,17 @@
  #include "base/task/sequenced_task_runner.h"
  #include "base/strings/utf_string_conversions.h"
  #include "chrome/app/chrome_command_ids.h"
 +#include "chrome/browser/agens/embed/agens_ato_sleep.h"
 +#include "chrome/browser/agens/embed/agens_controlled.h"
  #include "chrome/browser/agens/embed/agens_embed.h"
++#include "chrome/browser/agens/embed/agens_embedded.h"
++#include "chrome/browser/agens/embed/native_shell.h"
 +#include "chrome/browser/agens/embed/agens_cookie_pool.h"
 +#include "chrome/browser/agens/embed/agens_extensions.h"
 +#include "chrome/browser/agens/embed/agens_screen_share.h"
@@ -13762,7 +13764,7 @@ index 268d4dc7bd..1f6d80de66 100644
  #include "chrome/browser/autocomplete/autocomplete_classifier_factory.h"
  #include "chrome/browser/autocomplete/chrome_autocomplete_provider_client.h"
  #include "chrome/browser/autocomplete/chrome_autocomplete_scheme_classifier.h"
-@@ -25,6 +34,7 @@
+@@ -25,6 +36,7 @@
  #include "base/strings/stringprintf.h"
  #include "chrome/common/chrome_constants.h"
  #include "chrome/browser/bookmarks/bookmark_model_factory.h"
@@ -13770,7 +13772,7 @@ index 268d4dc7bd..1f6d80de66 100644
  #include "chrome/browser/browser_process.h"
  #include "components/bookmarks/browser/bookmark_model.h"
  #include "components/bookmarks/browser/base_bookmark_model_observer.h"
-@@ -46,9 +56,16 @@
+@@ -46,9 +58,16 @@
  #include "chrome/browser/profiles/profile_attributes_entry.h"
  #include "chrome/browser/profiles/profile_attributes_storage.h"
  #include "chrome/browser/profiles/profile_manager.h"
@@ -13787,7 +13789,7 @@ index 268d4dc7bd..1f6d80de66 100644
  #include "components/search_engines/default_search_manager.h"
  #include "components/search_engines/template_url.h"
  #include "components/search_engines/template_url_data_util.h"
-@@ -60,6 +77,12 @@
+@@ -60,6 +79,12 @@
  #include "chrome/browser/ui/browser_element_identifiers.h"
  #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
  #include "chrome/browser/ui/tabs/tab_strip_model.h"
@@ -13800,7 +13802,7 @@ index 268d4dc7bd..1f6d80de66 100644
  #include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
  #include "components/favicon/content/content_favicon_driver.h"
  #include "chrome/browser/favicon/favicon_service_factory.h"
-@@ -69,6 +92,7 @@
+@@ -69,6 +94,7 @@
  #include "components/omnibox/browser/autocomplete_controller.h"
  #include "components/omnibox/browser/autocomplete_input.h"
  #include "components/omnibox/browser/autocomplete_match.h"
@@ -13808,7 +13810,15 @@ index 268d4dc7bd..1f6d80de66 100644
  #include "content/public/browser/navigation_controller.h"
  #include "content/public/browser/web_contents.h"
  #include "content/public/browser/navigation_handle.h"
-@@ -189,15 +213,48 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -91,6 +117,7 @@
+ #include "components/url_formatter/url_formatter.h"
+ #include "content/public/browser/download_manager.h"
+ #include "ui/base/base_window.h"
++#include "ui/views/widget/widget.h"
+ #include "ui/gfx/codec/png_codec.h"
+ #include "ui/gfx/geometry/rect.h"
+ #include "ui/gfx/image/image_skia.h"
+@@ -189,15 +216,50 @@ struct AgensWindow : public TabStripModelObserver,
                       public download::DownloadItem::Observer,
                       public bookmarks::BaseBookmarkModelObserver,
                       public find_in_page::FindResultObserver,
@@ -13817,6 +13827,8 @@ index 268d4dc7bd..1f6d80de66 100644
 +                     public agens::ext::Observer,
 +                     public TabResourceUsageCollector::Observer {
    explicit AgensWindow(BrowserWindowInterface* browser) : browser(browser) {
++    became_active =
++        browser->RegisterDidBecomeActive(base::BindRepeating(&AgensWindow::ShownAgain, base::Unretained(this)));
      browser->GetTabStripModel()->AddObserver(this);
 +    TabResourceUsageCollector::Get()->AddObserver(this);
      Storage().AddObserver(this);
@@ -13858,7 +13870,7 @@ index 268d4dc7bd..1f6d80de66 100644
    }
  
    // Each ato starts searching with DuckDuckGo. Only while nobody has picked a default yet: once
-@@ -230,18 +287,32 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -230,18 +292,32 @@ struct AgensWindow : public TabStripModelObserver,
      }
    }
    ~AgensWindow() override {
@@ -13896,7 +13908,7 @@ index 268d4dc7bd..1f6d80de66 100644
    }
    void ManagerGoingDown(content::DownloadManager* manager) override {
      for (download::DownloadItem* item : downloads) item->RemoveObserver(this);
-@@ -274,8 +345,16 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -274,8 +350,16 @@ struct AgensWindow : public TabStripModelObserver,
          case download::DownloadItem::INTERRUPTED: state = kAgensDownloadFailed; break;
          default: break;
        }
@@ -13914,7 +13926,7 @@ index 268d4dc7bd..1f6d80de66 100644
      }
      downloads_observer(downloads_context, out.data(), static_cast<int>(out.size()), started);
    }
-@@ -284,7 +363,81 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -284,7 +368,81 @@ struct AgensWindow : public TabStripModelObserver,
      return g_browser_process->profile_manager()->GetProfileAttributesStorage();
    }
  
@@ -13997,7 +14009,7 @@ index 268d4dc7bd..1f6d80de66 100644
      // Creation order, so an ato keeps its place and color: Chromium names profile folders
      // "Default", then "Profile 1", "Profile 2"…
      std::vector<ProfileAttributesEntry*> atos;
-@@ -304,40 +457,163 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -304,65 +462,219 @@ struct AgensWindow : public TabStripModelObserver,
    void NotifyAtos() {
      if (!atos_observer) return;
      std::vector<ProfileAttributesEntry*> entries = Atos();
@@ -14096,12 +14108,12 @@ index 268d4dc7bd..1f6d80de66 100644
 +    const base::FilePath next = (it == atos.begin() ? atos[1] : *(it - 1))->GetPath();
 +    profiles::SwitchToProfile(next, /*always_create=*/false,
 +                              base::BindOnce(
-+                                  [](decltype(remove) remove, const gfx::Rect& bounds, const base::FilePath& path,
-+                                     BrowserWindowInterface* other) {
-+                                    PlaceOver(bounds, other);
++                                  [](decltype(remove) remove, base::WeakPtr<AgensWindow> from,
++                                     const base::FilePath& path, BrowserWindowInterface* other) {
++                                    PlaceOver(from, other);
 +                                    if (other) remove(path);  // not when the neighbor did not open
 +                                  },
-+                                  remove, browser->GetWindow()->GetBounds(), path));
++                                  remove, weak.GetWeakPtr(), path));
 +  }
 +  // The address goes to the other ato in a new tab (no session: that ato has its own cookies).
 +  void MoveTabToAto(int index, int ato) {
@@ -14114,11 +14126,10 @@ index 268d4dc7bd..1f6d80de66 100644
 +    GURL url = contents->GetLastCommittedURL().is_empty() ? contents->GetVisibleURL() : contents->GetLastCommittedURL();
 +    if (!url.is_valid()) url = GURL(chrome::kChromeUINewTabURL);
 +    tabs::TabHandle handle = model()->GetTabAtIndex(index)->GetHandle();
-+    const gfx::Rect bounds = browser->GetWindow()->GetBounds();
 +    g_browser_process->profile_manager()->LoadProfileByPath(
 +        atos[ato]->GetPath(), /*incognito=*/false,
 +        base::BindOnce(
-+            [](GURL url, tabs::TabHandle handle, gfx::Rect bounds, Profile* profile) {
++            [](GURL url, tabs::TabHandle handle, base::WeakPtr<AgensWindow> from, Profile* profile) {
 +              if (!profile) return;
 +              for (BrowserWindowInterface* bwi : GetAllBrowserWindowInterfaces()) {
 +                if (bwi->GetType() == BrowserWindowInterface::TYPE_NORMAL && bwi->GetProfile() == profile) {
@@ -14130,16 +14141,17 @@ index 268d4dc7bd..1f6d80de66 100644
 +              // No window for that ato yet: open it as switching does (its session comes back), then add the tab.
 +              profiles::OpenBrowserWindowForProfile(
 +                  base::BindOnce(
-+                      [](GURL url, tabs::TabHandle handle, gfx::Rect bounds, BrowserWindowInterface* bwi) {
++                      [](GURL url, tabs::TabHandle handle, base::WeakPtr<AgensWindow> from,
++                         BrowserWindowInterface* bwi) {
 +                        if (!bwi) return;
-+                        PlaceOver(bounds, bwi);
++                        PlaceOver(from, bwi);
 +                        bwi->OpenGURL(url, WindowOpenDisposition::NEW_FOREGROUND_TAB);
 +                        CloseTab(handle);
 +                      },
-+                      url, handle, bounds),
++                      url, handle, from),
 +                  /*always_create=*/false, /*is_new_profile=*/false, /*open_command_line_urls=*/false, profile);
 +            },
-+            url, handle, bounds));
++            url, handle, weak.GetWeakPtr()));
 +  }
 +  static void CloseTab(tabs::TabHandle handle) {
 +    if (tabs::TabInterface* tab = handle.Get()) tab->Close();
@@ -14148,19 +14160,19 @@ index 268d4dc7bd..1f6d80de66 100644
    void SwitchAto(int index) {
      std::vector<ProfileAttributesEntry*> atos = Atos();
      if (index < 0 || static_cast<size_t>(index) >= atos.size()) return;
-     const gfx::Rect bounds = browser->GetWindow()->GetBounds();
+-    const gfx::Rect bounds = browser->GetWindow()->GetBounds();
      profiles::SwitchToProfile(atos[index]->GetPath(), /*always_create=*/false,
 -                              base::BindOnce(&AgensWindow::PlaceOver, bounds));
 +                              base::BindOnce(
-+                                  [](const gfx::Rect& bounds, BrowserWindowInterface* other) {
-+                                    PlaceOver(bounds, other);
++                                  [](base::WeakPtr<AgensWindow> from, BrowserWindowInterface* other) {
++                                    PlaceOver(from, other);
 +                                    // A sleeping ato wakes only its front tab; the rest when shown.
 +                                    if (content::WebContents* front =
 +                                            other ? other->GetTabStripModel()->GetActiveWebContents() : nullptr) {
 +                                      agens::WakeTab(front);
 +                                    }
 +                                  },
-+                                  bounds));
++                                  weak.GetWeakPtr()));
    }
  
    void NewAto() {
@@ -14172,12 +14184,65 @@ index 268d4dc7bd..1f6d80de66 100644
 -      dir = manager->user_data_dir().AppendASCII(base::StringPrintf("Profile %d", i));
 -      if (!manager->GetProfileByPath(dir) && !Storage().GetProfileAttributesWithPath(dir)) break;
 -    }
+-    const gfx::Rect bounds = browser->GetWindow()->GetBounds();
 +    const base::FilePath dir = FreeAtoDir();
 +    SetAtoExtras(dir, std::nullopt);  // nothing left from an ato that had this folder
-     const gfx::Rect bounds = browser->GetWindow()->GetBounds();
      const std::u16string name = base::UTF8ToUTF16(base::StringPrintf("Ato %zu", Atos().size() + 1));
      manager->CreateProfileAsync(
-@@ -362,7 +638,10 @@ struct AgensWindow : public TabStripModelObserver,
+         dir, base::BindOnce(
+-                 [](const gfx::Rect& bounds, const std::u16string& name, Profile* profile) {
++                 [](base::WeakPtr<AgensWindow> from, const std::u16string& name, Profile* profile) {
+                    if (!profile) return;
+                    if (ProfileAttributesEntry* entry =
+                            Storage().GetProfileAttributesWithPath(profile->GetPath())) {
+                      entry->SetLocalProfileName(name, /*is_default_name=*/false);
+                    }
+                    profiles::OpenBrowserWindowForProfile(
+-                       base::BindOnce(&AgensWindow::PlaceOver, bounds), /*always_create=*/true,
++                       base::BindOnce(&AgensWindow::PlaceOver, from), /*always_create=*/true,
+                        /*is_new_profile=*/true, /*open_command_line_urls=*/false, profile);
+                  },
+-                 bounds, name));
++                 weak.GetWeakPtr(), name));
+   }
+ 
+-  // The ato's window takes this window's place, so switching feels like one window.
+-  static void PlaceOver(const gfx::Rect& bounds, BrowserWindowInterface* other) {
+-    if (other) other->GetWindow()->SetBounds(bounds);
++  // The ato's window takes this window's place (frame, full screen) and this one hides, not closes:
++  // atos feel like one window (docs/casca.md). Only the visible window is in ⌘`, the Window menu
++  // and Mission Control; its tabs stay alive or sleep by the usual rules. `from` gone (closed while
++  // the ato loaded): the other window just comes up where it was.
++  static void PlaceOver(base::WeakPtr<AgensWindow> from, BrowserWindowInterface* other) {
++    if (!from || !other || other == from->browser.get()) return;
++    ui::BaseWindow* here = from->browser->GetWindow();
++    ui::BaseWindow* there = other->GetWindow();
++    if (agens::IsEmbedded()) return there->SetBounds(here->GetBounds());  // off-screen windows, as before
++    if (!here->IsVisible()) return;  // already done (ShownAgain got there first)
++    there->SetBounds(here->GetRestoredBounds());  // the frame under full screen, if it is
++    if (views::Widget* widget = views::Widget::GetWidgetForNativeWindow(there->GetNativeWindow());
++        widget && widget->IsFullscreen() != here->IsFullscreen()) {
++      widget->SetFullscreen(here->IsFullscreen());
++    }
++    here->Hide();
++    from->hidden_by_switch = true;
++  }
++  // A window a switch hid that comes back another way (a notification click, a site focusing
++  // itself, the Dock) still takes the place of the window in front: never one ato behind another.
++  void ShownAgain(BrowserWindowInterface*) {
++    if (!std::exchange(hidden_by_switch, false)) return;
++    AgensWindow* front = nullptr;
++    ForEachCurrentBrowserWindowInterfaceOrderedByActivation([&](BrowserWindowInterface* other) {
++      if (other != browser.get() && other->GetType() == BrowserWindowInterface::TYPE_NORMAL &&
++          other->GetWindow()->IsVisible()) {
++        front = agens::NativeWindowForContents(other->GetTabStripModel()->GetActiveWebContents());
++      }
++      return !front;
++    });
++    if (front) PlaceOver(front->weak.GetWeakPtr(), browser);
+   }
++  bool hidden_by_switch = false;
++  base::CallbackListSubscription became_active;
  
    // ProfileAttributesStorage::Observer:
    void OnProfileAdded(const base::FilePath&) override { NotifyAtos(); }
@@ -14189,7 +14254,7 @@ index 268d4dc7bd..1f6d80de66 100644
    void OnProfileNameChanged(const base::FilePath&, const std::u16string&) override { NotifyAtos(); }
  
    TabStripModel* model() { return browser->GetTabStripModel(); }
-@@ -370,6 +649,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -370,6 +682,7 @@ struct AgensWindow : public TabStripModelObserver,
    // Loading pages change a tab many times a frame (title, URL, favicon, loading); the UI gets one
    // update per run of the message loop instead of one per change.
    void Notify() {
@@ -14197,7 +14262,7 @@ index 268d4dc7bd..1f6d80de66 100644
      if (notify_pending) return;
      notify_pending = true;
      base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
-@@ -406,7 +686,8 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -406,7 +719,8 @@ struct AgensWindow : public TabStripModelObserver,
      const int count = model()->count();
      bookmarks::BookmarkModel* bookmarks =
          BookmarkModelFactory::GetForBrowserContextIfExists(browser->GetProfile());
@@ -14207,7 +14272,7 @@ index 268d4dc7bd..1f6d80de66 100644
      std::vector<std::vector<uint8_t>> icons(count);
      std::vector<AgensTab> tabs(count);
      struct Split { int layout = 0, first = 0; double ratio = 0.5; };
-@@ -455,6 +736,26 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -455,6 +769,26 @@ struct AgensWindow : public TabStripModelObserver,
                   zoom::ZoomController::FromWebContents(contents)
                       ? zoom::ZoomController::FromWebContents(contents)->GetZoomPercent()
                       : 100};
@@ -14234,7 +14299,7 @@ index 268d4dc7bd..1f6d80de66 100644
      }
      observer(context, tabs.data(), static_cast<int>(tabs.size()));
    }
-@@ -466,6 +767,11 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -466,6 +800,11 @@ struct AgensWindow : public TabStripModelObserver,
      NotifyAtos();  // cheap; keeps "asleep" fresh as atos load and unload
    }
    void OnTabChangedAt(tabs::TabInterface*, TabChangeType) override { Notify(); }
@@ -14246,7 +14311,7 @@ index 268d4dc7bd..1f6d80de66 100644
    void OnSplitTabChanged(const SplitTabChange&) override { Notify(); }
  
    void Suggest(const std::string& text) {
-@@ -577,11 +883,13 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -577,11 +916,13 @@ struct AgensWindow : public TabStripModelObserver,
    bool notify_pending = false;
    AgensStatusBubble status_bubble;
    raw_ptr<content::DownloadManager> downloads_manager = nullptr;
@@ -14260,7 +14325,7 @@ index 268d4dc7bd..1f6d80de66 100644
    raw_ptr<void> ui = nullptr;  // the chrome (agens_ui_*), set by the platform shell
    raw_ptr<views::View> extensions_anchor = nullptr;  // under the UI's extensions button
    AgensExtensionButtonsChanged extension_buttons_observer = nullptr;
-@@ -591,62 +899,99 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -591,62 +932,99 @@ struct AgensWindow : public TabStripModelObserver,
    base::ScopedObservation<extensions::ExtensionRegistry, extensions::ExtensionRegistryObserver>
        extensions_observation{this};
  
@@ -14379,7 +14444,7 @@ index 268d4dc7bd..1f6d80de66 100644
    AgensFindChanged find_observer = nullptr;
    raw_ptr<void> find_context = nullptr;
    base::ScopedObservation<find_in_page::FindTabHelper, find_in_page::FindResultObserver> find_observation{this};
-@@ -655,7 +1000,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -655,7 +1033,7 @@ struct AgensWindow : public TabStripModelObserver,
      content::WebContents* active = model()->GetActiveWebContents();
      return active ? find_in_page::FindTabHelper::FromWebContents(active) : nullptr;
    }
@@ -14388,7 +14453,7 @@ index 268d4dc7bd..1f6d80de66 100644
      find_in_page::FindTabHelper* helper = ActiveFind();
      if (!helper) return;
      if (!find_observation.IsObservingSource(helper)) {
-@@ -667,7 +1012,7 @@ struct AgensWindow : public TabStripModelObserver,
+@@ -667,7 +1045,7 @@ struct AgensWindow : public TabStripModelObserver,
        if (find_observer) find_observer(find_context, 0, 0);
        return;
      }
@@ -24863,6 +24928,37 @@ index b673362fe8..567e2c1ccf 100644
  
    content::RenderFrameHost& render_frame_host = CurrentTargetFrame();
    if (!render_frame_host.IsActive()) {
+diff --git a/chrome/browser/profiles/profile_manager.cc b/chrome/browser/profiles/profile_manager.cc
+index 64e5e13970..ccc9d6de92 100644
+--- a/chrome/browser/profiles/profile_manager.cc
++++ b/chrome/browser/profiles/profile_manager.cc
+@@ -44,6 +44,8 @@
+ #include "build/chromeos_buildflags.h"
+ #include "chrome/browser/accessibility/accessibility_labels_service.h"
+ #include "chrome/browser/accessibility/accessibility_labels_service_factory.h"
++#include "chrome/browser/agens/embed/agens_embedded.h"  // agens
++#include "chrome/browser/agens/embed/native_shell.h"     // agens
+ #include "chrome/browser/browser_features.h"
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/browsing_data/chrome_browsing_data_lifetime_manager.h"
+@@ -597,8 +599,17 @@ std::vector<Profile*> ProfileManager::GetLastOpenedProfiles() {
+     // Make a copy because the list might change in the calls to GetProfile.
+     const base::ListValue profile_list =
+         local_state->GetList(prefs::kProfilesLastActive).Clone();
++    // agens: atos switch inside one window and the others stay hidden (docs/casca.md), so only
++    // the ato last in front comes back; the others' tabs wait in their sessions until switched to.
++    const bool agens_one_window =
++        agens::IsNativeShellEnabled() && !agens::IsEmbedded();
+     for (const auto& entry : profile_list) {
+       const std::string* profile_base_name = entry.GetIfString();
++      if (agens_one_window && profile_base_name &&
++          base::FilePath::FromUTF8Unsafe(*profile_base_name) !=
++              GetLastUsedProfileBaseName()) {
++        continue;
++      }
+       if (!profile_base_name || profile_base_name->empty() ||
+           *profile_base_name ==
+               base::FilePath(chrome::kSystemProfileDir).AsUTF8Unsafe()) {
 diff --git a/chrome/browser/sessions/session_restore.cc b/chrome/browser/sessions/session_restore.cc
 index e21bf8de37..a896a86d0d 100644
 --- a/chrome/browser/sessions/session_restore.cc
