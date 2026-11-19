@@ -1,6 +1,6 @@
 # Sem telemetria: como provamos
 
-Promessa: o navegador não fala com ninguém que a pessoa não pediu. A exceção é a procura de atualização, uma vez por dia no GitHub ([abaixo](#atualizações)). Esta página diz como isso é medido e o último resultado.
+Promessa: o navegador não fala com ninguém que a pessoa não pediu. A exceção é a procura de atualização, uma vez por dia no GitHub ([abaixo](#atualizações)). Baixar um idioma para traduzir vai à Apple só depois do OK da pessoa ([abaixo](#idiomas-da-tradução)). Esta página diz como isso é medido e o último resultado.
 
 ## Como medir
 
@@ -37,6 +37,15 @@ A única conexão que o navegador faz sem a pessoa pedir: **uma vez por dia**, o
 - Não existe no motor embutido no Agens, nem no build dev (sem `--agens-updates`).
 - O `idle_audit.py` de 09/11/2026 é de antes disso. Num perfil novo o Sparkle só procura depois do intervalo, então 10 minutos parado ainda devem dar 0 conexões; não foi medido de novo.
 
+## Idiomas da tradução
+
+A tradução de páginas é da Apple, no próprio Mac (framework Translation, macOS 15 ou mais novo); o texto da página nunca sai do Mac e a tradução do Chromium (Google) continua desligada. A única conexão é **baixar um idioma da Apple**, e só com o OK da pessoa:
+
+- Na primeira tradução de um idioma que o Mac ainda não tem, o popover pergunta "Baixar o idioma …?" (Da Apple. Fica no Mac). Só o **Baixar** chama o download, que o macOS faz e mostra na janela dele; o pedido sai do serviço de tradução do macOS, não do navegador. Cancelar não conecta nada.
+- Idioma já baixado (por nós, pelo Safari ou pelo app Traduzir) traduz sem rede.
+- Apagar: Ajustes do macOS › Geral › Idioma e Região › Idiomas da Tradução (o framework não deixa apagar de dentro do app; Configurações › Idiomas tem o botão que abre ali).
+- Descobrir o idioma da página também é no Mac (NaturalLanguage da Apple sobre o texto da página, ou o `lang` que ela declara).
+
 ## Privacidade no máximo por padrão (#42)
 
 Auditoria dos padrões em 16/11/2026 (build dev, perfil novo, `chrome://prefs-internals` lido pelo DevTools em modo headless; cabeçalhos conferidos numa página local que devolve o que recebeu). Nenhum padrão precisou mudar para ficar mais forte. Em 16/11/2026 o WebRTC foi **afrouxado** de propósito para `default_public_interface_only`, para Meet e Discord funcionarem normalmente.
@@ -53,6 +62,6 @@ Auditoria dos padrões em 16/11/2026 (build dev, perfil novo, `chrome://prefs-in
 | Sugestões de busca | `search.suggest_enabled` | desligado | ungoogled | nenhuma sugestão até a pessoa ligar |
 | Safe Browsing | — | não existe no build | ungoogled | — |
 
-De quebra: Privacy Sandbox (Topics, Protected Audience, medição de anúncios), `ping` de hyperlink, páginas de erro alternativas, serviço de ortografia, tradução, `canMakePayment`, salvar senha e autopreenchimento vêm desligados.
+De quebra: Privacy Sandbox (Topics, Protected Audience, medição de anúncios), `ping` de hyperlink, páginas de erro alternativas, serviço de ortografia, tradução do Google (a nossa é a da Apple, no Mac: [acima](#idiomas-da-tradução)), `canMakePayment`, salvar senha e autopreenchimento vêm desligados.
 
 Não mudado, para decidir: cortar o referrer entre sites de vez (flag `NoCrossOriginReferrers` do ungoogled) quebra CDN com proteção contra hotlink, alguns fluxos de pagamento e de login e páginas que conferem a origem do clique.
