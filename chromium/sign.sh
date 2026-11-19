@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Signs AgensBrowser.app inside out (dylibs, helper tools, helper apps, framework, app) with the
+# Signs AgensBrowser.app inside out (dylibs, helper tools, helper apps, framework, Sparkle, app) with the
 # hardened runtime and Chromium's own entitlements and options (chrome/installer/mac/signing/parts.py,
 # same order as ungoogled-chromium-macos' sign_and_package_app.sh).
 # Usage: AGENS_SIGN_IDENTITY="Developer ID Application: <name> (<team id>)" AGENS_APP=<path>/AgensBrowser.app chromium/sign.sh
@@ -45,6 +45,14 @@ for helper in "$framework"/Helpers/*.app; do
   esac
 done
 sign --identifier "$(bundle_id "$framework/Resources/Info.plist")" "$framework"
+# Sparkle (chromium/sparkle.sh embed puts it in): its helper tool and app, then the framework, with the
+# hardened runtime and their own identifiers (Sparkle's "Sandboxing" docs, minus the XPC services).
+sparkle="$app/Contents/Frameworks/Sparkle.framework"
+if [ -d "$sparkle" ]; then
+  sign --options runtime --identifier org.sparkle-project.Sparkle.Autoupdate "$sparkle/Versions/B/Autoupdate"
+  sign --options runtime --preserve-metadata=identifier "$sparkle/Versions/B/Updater.app"
+  sign --options runtime --preserve-metadata=identifier "$sparkle"
+fi
 sign --identifier "$(bundle_id "$app/Contents/Info.plist")" --options "$full" --entitlements "$entitlements/app-entitlements.plist" "$app"
 
 codesign --verify --deep --strict --verbose=2 "$app"

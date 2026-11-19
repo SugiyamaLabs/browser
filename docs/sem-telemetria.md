@@ -1,6 +1,6 @@
 # Sem telemetria: como provamos
 
-Promessa: o navegador não fala com ninguém que a pessoa não pediu. Esta página diz como isso é medido e o último resultado.
+Promessa: o navegador não fala com ninguém que a pessoa não pediu. A exceção é a procura de atualização, uma vez por dia no GitHub ([abaixo](#atualizações)). Esta página diz como isso é medido e o último resultado.
 
 ## Como medir
 
@@ -28,6 +28,14 @@ Processos vivos no fim: navegador, GPU, rede, armazenamento e 3 renderers (a nov
 - Janelas mais longas (horas) e perfil usado há dias: tarefas agendadas podem aparecer depois.
 - O que acontece ao navegar (DNS prefetch, pré-conexão, verificação de certificado). Fica para quando tivermos o app próprio.
 - O nosso código (`core/`, `embed/`, app). Cada release roda o `idle_audit.py` de novo.
+
+## Atualizações
+
+A única conexão que o navegador faz sem a pessoa pedir: **uma vez por dia**, o Sparkle baixa `https://github.com/SugiyamaLabs/browser/releases/latest/download/appcast.xml` (GitHub, que redireciona para o armazenamento de arquivos dele). Vai o pedido HTTP comum do Sparkle, com o nome e a versão do app no User-Agent; nada de perfil do sistema (o `SUEnableSystemProfiling` fica desligado, o padrão). Havendo versão nova, baixa o `.dmg` do mesmo release. Detalhes em [casca](casca.md#atualizações).
+
+- Desligar: na janela do Sparkle (aparece ao ter atualização, ou por **Procurar atualizações…** no menu AgensBrowser e no Sobre), desmarcando a procura automática; o Sparkle guarda a escolha nas preferências do app (`SUEnableAutomaticChecks`).
+- Não existe no motor embutido no Agens, nem no build dev (sem `--agens-updates`).
+- O `idle_audit.py` de 09/11/2026 é de antes disso. Num perfil novo o Sparkle só procura depois do intervalo, então 10 minutos parado ainda devem dar 0 conexões; não foi medido de novo.
 
 ## Privacidade no máximo por padrão (#42)
 

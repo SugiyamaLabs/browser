@@ -73,9 +73,24 @@ janela do Chromium            WebUIBrowserWindow (Webium), sem a página HTML
 - **Páginas internas** (#21, #paginas): o endereço mostra `agens://`, com os nossos nomes: `agens://historico`, `agens://favoritos`, `agens://downloads`, `agens://sobre`, `agens://configuracoes`. Digitar qualquer um abre a página (os outros `agens://x` viram `chrome://x`); `chrome://` continua funcionando e aparece como `agens://`. `agens://configuracoes/desempenho` (e `/aparencia`, `/privacidade`…) abre a seção das Configurações. Ficam do Chromium, sem marca: DevTools, `agens://flags`, `agens://inspect`.
 - **Histórico nativo** (⌘Y ou "⋯" › Histórico): busca, dias, abrir, remover um item e "Apagar histórico…" (vai para Configurações › Apagar dados). Por baixo, uma página em branco nossa, sem script.
 - **Downloads em página** (digitar `agens://downloads`): os downloads do ato, com busca, as mesmas linhas e ações do painel e **Abrir a pasta**. Primeiro os desta janela, depois os de antes, do histórico de downloads do Chromium (o banco de histórico do ato, `DownloadHistory`), do mais novo ao mais velho. O painel e o botão continuam só com os desta janela; **Limpar lista** no painel tira só esses. Tirar uma linha da página tira o download do histórico (o arquivo fica). ⌥⌘L e os links do Chromium para downloads seguem abrindo o painel. Pela API, `AgensDownload.past` marca os de antes da janela.
-- **Sobre** (`agens://sobre`, no lugar de `chrome://version`): a marca, "Navegador Agens", SugiyamaLabs, a pílula, versão (com a data do build, a do executável), Chromium, sistema e **Perfil** (a pasta do ato da janela, com `~`; `agens_window_ato_path`), **Copiar dados da versão**, **Licenças** (Configurações › Avisos de código aberto) e os créditos das listas do bloqueador (`agens_adblock_credits()`, com as licenças), com **Ver no Bloqueador**, que abre Configurações › Bloqueador. Lá os mesmos créditos ficam embaixo de "Listas". A seção Sobre das Configurações continua. A pílula do protótipo diz "Atualizado", mas ainda não existe atualizador para dizer isso com verdade; ela diz **Sem atualização automática ainda** até ele existir.
+- **Sobre** (`agens://sobre`, no lugar de `chrome://version`): a marca, "Navegador Agens", SugiyamaLabs, a pílula, versão (com a data do build, a do executável), Chromium, sistema e **Perfil** (a pasta do ato da janela, com `~`; `agens_window_ato_path`), **Copiar dados da versão**, **Licenças** (Configurações › Avisos de código aberto) e os créditos das listas do bloqueador (`agens_adblock_credits()`, com as licenças), com **Ver no Bloqueador**, que abre Configurações › Bloqueador. Lá os mesmos créditos ficam embaixo de "Listas". A seção Sobre das Configurações continua. Com o Sparkle ([Atualizações](#atualizações)) vem **Procurar atualizações…** ao lado de Licenças e a pílula diz **Atualiza pelo GitHub**; sem ele, **Sem atualização automática** (o "Atualizado" do protótipo o Sparkle não diz sem procurar).
 - **Página de erro:** sem conexão diz "Confira o Wi-Fi ou o cabo. A página abre sozinha quando a rede voltar." (o recarregar automático do Chromium). Site não encontrado diz "Não achamos lineaer.app" e, quando o histórico do ato tem um site a uma ou duas letras de distância, "Você quis dizer **linear.app**?" com **Ir para linear.app**; sempre com **Buscar “lineaer”**.
 - **Configurações nativas, sem abrir página do Chromium:** apagar dados de navegação (período e o que apagar), restaurar as configurações (volta buscador DuckDuckGo, início, permissões, idiomas e visual; logins, senhas, favoritos, histórico e extensões ficam), exceções por site (mudar ou tirar), extensões do ato (veja abaixo) e senhas salvas (busca, ver e copiar com Touch ID ou a senha do Mac, apagar, de qualquer ato). O resto vale para o ato da janela. Só os avisos de código aberto ainda abrem `chrome://credits`.
+
+## Atualizações
+
+O navegador sozinho se atualiza pelo **Sparkle 2**, com a interface padrão dele (`SPUStandardUpdaterController`): procura uma vez por dia e baixa e instala sozinho por padrão; a janela do Sparkle mostra a novidade e deixa a pessoa desligar. Do nosso lado só há duas entradas, que chamam o `checkForUpdates:` do Sparkle:
+
+- o menu **AgensBrowser › Procurar atualizações…**, logo abaixo de "Sobre";
+- o botão **Procurar atualizações…** em `agens://sobre` e em Configurações › Sobre (linha "Atualizações").
+
+Como liga: o `release.sh` põe o `Sparkle.framework` e as chaves `SU*` no app ([build](build.md#release-e-atualizações-sparkle)). Na primeira janela da casca, `StartUpdates` (`native_shell_mac.mm`) carrega o framework de `Contents/Frameworks` em tempo de execução e cria o controlador, que vive até o app fechar; `agens_updates_available()` e `agens_updates_check()` (`agens_embed.h`) servem à casca. Sem o framework, o menu e o botão não aparecem.
+
+Não liga nunca:
+- no **motor embutido** (`--agens-embedded`): o Agens se atualiza inteiro, com o motor dentro;
+- em **build dev** (não oficial), a não ser com `--agens-updates`.
+
+A conexão diária com o GitHub está em [sem telemetria](sem-telemetria.md#atualizações).
 
 ## O que o Agens embute (e o que não)
 
