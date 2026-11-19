@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Som e tradução</title>
+<!-- Tokens, janela, endereço e popover com seta copiados de janela-recursos.html; volume de busca.html (#som). -->
+<style>
+:root{--bg:#0B0B0D;--side:#111114;--raise:#16161A;--sunk:#0F0F12;--line:#24242A;--line-strong:#3A3A42;--line-hover:#4A4A54;--ink:#F2F2F4;--mute:#9A9AA4;--dim:#8A8A94;--hi:#F4F4F6;--on-hi:#0B0B0D;--warn:#F2C14E;
+  --hover-2:#1B1B20;--float:#1A1A1F;--light-2:#FFE9C7;--light-3:#FFC98A;--red:#F28B82;--kbd:rgba(255,255,255,.07);--off:#4A4A54;--shadow:rgba(0,0,0,.45);
+  --ui:-apple-system,"SF Pro Text",BlinkMacSystemFont,system-ui,sans-serif;--mono:ui-monospace,"SF Mono",Menlo,monospace;--s:10px;--ease:cubic-bezier(.16,1,.3,1)}
+:root[data-mode="light"]{--bg:#FAFAFB;--side:#F1F1F4;--raise:#FFFFFF;--sunk:#E9E9ED;--line:#E0E0E5;--line-strong:#CFCFD6;--line-hover:#B9B9C2;--ink:#16161A;--mute:#5C5C66;--dim:#71717B;--hi:#16161A;--on-hi:#FFFFFF;--warn:#B7791F;
+  --hover-2:#E4E4E9;--float:#FFFFFF;--light-2:#F7A95C;--light-3:#E8893A;--red:#C5453B;--kbd:rgba(0,0,0,.06);--off:#B9B9C2;--shadow:rgba(0,0,0,.14)}
+:root[data-mode="light"] .lights i{background:#D4D4DA}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 var(--ui);text-wrap:pretty;-webkit-font-smoothing:antialiased;transition:background .2s,color .2s}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+:focus-visible{outline:2px solid var(--light-2);outline-offset:2px;border-radius:8px}
+main{max-width:1180px;margin:0 auto;padding:32px 24px 64px}
+header{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap}header div{flex:1;min-width:260px}header h1{font-size:20px;margin:0 0 4px}header p{margin:0 0 8px;color:var(--dim);max-width:80ch}
+.toc{position:sticky;top:0;z-index:20;display:flex;gap:16px;flex-wrap:wrap;margin:0 -24px 24px;padding:10px 24px;background:var(--bg);border-bottom:1px solid var(--line)}.toc a{color:var(--mute);font-size:13px;text-decoration:none}.toc a:hover{color:var(--ink)}
+section.v{margin:0 0 48px;scroll-margin-top:56px}
+section.v>h2{font-size:13px;font-weight:600;color:var(--mute);margin:0 0 4px}
+p.cap{margin:0 0 10px;color:var(--dim);font-size:12.5px;max-width:780px}
+.seg{display:inline-flex;flex-wrap:wrap;gap:4px;border:1px solid var(--line);border-radius:9px;padding:2px;margin:0 0 12px}.seg button{padding:4px 10px;border-radius:7px;font-size:12.5px;color:var(--mute)}.seg button.on{background:var(--raise);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+.mode{flex:none}
+kbd{font:500 12px/1 var(--ui);padding:3px 5px;border-radius:5px;background:var(--kbd);color:var(--dim)}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:6px 13px;border:1px solid var(--line-strong);border-radius:10px;font-size:13px;white-space:nowrap;flex:none}
+.btn:hover{border-color:var(--line-hover);background:var(--hover-2)}
+.btn.pri{background:var(--hi);border-color:var(--hi);color:var(--on-hi);font-weight:600}
+.btn.sm{padding:4px 10px;font-size:12.5px}
+.lnk{color:var(--mute);font-size:12.5px;text-align:left}.lnk:hover{color:var(--ink)}
+.logo{width:18px;height:18px;border-radius:5px;display:inline-grid;place-items:center;font:700 10.5px/1 var(--ui);flex:none;color:#0B0B0D}.l-est{background:#C9B6FF}.l-cli{background:#7FD1A8}.l-pes{background:#F2C14E}
+svg.i{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex:none}
+/* janela */
+.nav{position:relative;height:540px;border:1px solid var(--line);border-radius:14px;background:var(--side);overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.nav.sidev{flex-direction:row}
+.lights{display:flex;gap:8px;padding:0 12px 0 16px}.lights i{width:12px;height:12px;border-radius:50%;background:#2A2A30}
+.strip{display:flex;align-items:center;gap:4px;padding:8px 14px 0 0}
+.nav-tab{display:flex;align-items:center;gap:7px;padding:5px 10px;border-radius:8px;font-size:12.5px;color:var(--mute);flex:0 1 200px;min-width:0;overflow:hidden;white-space:nowrap;height:32px}.nav-tab.on{background:var(--raise);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+.nav-tab .t{flex:1;overflow:hidden;text-overflow:ellipsis}.nt{width:28px;height:28px;display:grid;place-items:center;color:var(--dim)}
+.fv{width:14px;height:14px;border-radius:4px;flex:none;display:grid;place-items:center;font:700 8.5px/1 var(--ui);color:#0B0B0D}
+.nav-row{display:flex;align-items:center;gap:6px;margin:8px 14px 10px;position:relative}
+.ib{position:relative;width:30px;height:30px;display:grid;place-items:center;border-radius:8px;color:var(--mute);flex:none}.ib.on,.ib:hover{background:var(--raise);color:var(--ink)}
+.nav-addr{flex:1;min-width:0;display:flex;align-items:center;gap:6px;padding:0 6px;height:32px;border:1px solid var(--line);border-radius:10px;background:var(--sunk);color:var(--mute);font-size:13px;white-space:nowrap}
+.nav-addr .u{flex:1;overflow:hidden;text-overflow:ellipsis}.nav-addr .u b{color:var(--ink);font-weight:400}
+.ai{position:relative;width:22px;height:22px;display:grid;place-items:center;border-radius:7px;color:var(--dim);flex:none}.ai:hover,.ai.on{background:var(--hover-2);color:var(--ink)}.ai svg.i{width:15px;height:15px}
+.ai.asking{color:var(--light-3)}.ai.mute{color:var(--light-3)}
+.profs{border:1px solid var(--line);border-radius:9px;padding:2px;display:flex;gap:4px}.profs span{white-space:nowrap;display:flex;align-items:center;gap:6px;padding:4px 7px;border-radius:8px;font-size:12.5px;color:var(--mute)}.profs span.on{background:var(--raise);color:var(--ink)}
+.area{flex:1;min-height:0;margin:0 14px 14px;border:1px solid var(--line);border-radius:12px;overflow:hidden;position:relative;background:#fff;color:#15151A}
+.area.app{background:var(--bg);color:var(--ink)}
+.page{padding:26px 34px;font:15px/1.6 Georgia,"Times New Roman",serif;max-width:720px;transition:opacity .2s}
+.page h3{font:600 22px/1.25 var(--ui);margin:0 0 12px}.page p{margin:0 0 12px}
+.page.busy{opacity:.55}
+.page ::selection,.page .sel{background:#B4D5FE}
+/* barra lateral */
+.sb{width:220px;flex:none;display:flex;flex-direction:column;padding:12px 8px 10px;gap:2px}
+.sbh{display:flex;align-items:center;gap:8px;padding:12px 8px 10px;font-weight:600;font-size:13.5px}
+.sbt{display:flex;align-items:center;gap:8px;height:32px;padding:0 8px;border-radius:8px;font-size:12.5px;color:var(--mute);white-space:nowrap}.sbt .t{flex:1;overflow:hidden;text-overflow:ellipsis}.sbt.on{background:var(--raise);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+.sbf{margin-top:auto;display:flex;gap:6px;padding:8px}.sbf .logo{width:24px;height:24px;border-radius:7px;opacity:.55}.sbf .logo.on{opacity:1;box-shadow:0 0 0 2px var(--side),0 0 0 3px var(--line-strong)}
+.col{flex:1;min-width:0;display:flex;flex-direction:column}
+/* alto-falante (busca.html) */
+.spk{width:18px;height:18px;display:grid;place-items:center;border-radius:5px;color:var(--mute);flex:none}.spk svg.i{width:14px;height:14px}
+.spk.mute{color:var(--light-3)}.spk:hover{background:var(--hover-2);color:var(--ink)}
+/* popover com seta */
+.menu{position:absolute;z-index:6;background:var(--float);border:1px solid var(--line-strong);border-radius:12px;padding:6px;filter:drop-shadow(0 10px 24px var(--shadow));color:var(--ink);font-size:13px;animation:rise .18s var(--ease)}
+@keyframes rise{from{opacity:0;transform:translateY(-3px)}}
+.menu .mi{display:flex;align-items:center;gap:10px;padding:5px 8px;border-radius:8px;font-size:13px;cursor:default}.menu .mi:hover,.menu .mi.hl{background:var(--raise)}.menu .mi span{flex:1}.menu .mi small{color:var(--dim);font-size:12px}
+.menu .mi.off{color:var(--off)}
+.menu hr{border:0;border-top:1px solid var(--line);margin:5px 0}
+.menu[data-side]::after{content:"";position:absolute;width:var(--s);height:var(--s);background:var(--float);border:1px solid var(--line-strong);border-right:0;border-bottom:0;border-top-left-radius:2px;clip-path:polygon(-2px -2px,calc(100% + 2px) -2px,-2px calc(100% + 2px));left:var(--ax);top:0;transform:translate(-50%,-50%) rotate(45deg)}
+.pbody{padding:6px 8px 4px}.pbody .pt{font-weight:600;margin:0 0 2px}.pbody>small{display:block;color:var(--dim);font-size:12px;margin:0 0 10px}
+.acts{display:flex;justify-content:flex-end;gap:8px;margin-top:12px;flex-wrap:wrap}.acts.stack{flex-direction:column;align-items:stretch;gap:6px}
+/* volume */
+.vpop{width:230px;padding:10px 12px;display:flex;flex-direction:column;gap:8px;font-size:12.5px}.vpop .vh{display:flex;justify-content:space-between;color:var(--mute)}.vpop .vh b{color:var(--ink);font-weight:500;font-variant-numeric:tabular-nums}
+.vpop .vh b.m{color:var(--light-3)}
+.vrow{display:flex;align-items:center;gap:8px}
+.vrow input{flex:1;height:14px;margin:0;-webkit-appearance:none;appearance:none;background:transparent;cursor:pointer}
+.vrow input::-webkit-slider-runnable-track{height:4px;border-radius:2px;background:linear-gradient(var(--light-3),var(--light-3)) 0/var(--v,60%) 100% no-repeat,var(--line-strong)}
+.vrow input::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;margin-top:-5px;border-radius:50%;background:var(--hi);border:0}
+.vrow input::-moz-range-track{height:4px;border-radius:2px;background:var(--line-strong)}.vrow input::-moz-range-progress{height:4px;border-radius:2px;background:var(--light-3)}.vrow input::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:var(--hi);border:0}
+.vpop.muted .vrow input{--v:0%!important}
+.vmute{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 6px;margin:0 -6px;border-radius:7px;white-space:nowrap;font-size:12.5px}.vmute:hover{background:var(--raise)}
+/* tradução */
+.ai svg.ring{position:absolute;inset:0;width:22px;height:22px;transform:rotate(-90deg);fill:none;stroke-width:1.6}
+.ai .ring .bgc{stroke:var(--line-strong)}.ai .ring .fgc{stroke:var(--light-3);stroke-linecap:round;transition:stroke-dashoffset .25s}
+.ai.tr-on{color:var(--light-3)}
+.tpop{width:min(380px,calc(100% - 12px))}.tpop .lang{display:flex;align-items:center;gap:8px;margin:0 0 10px;color:var(--mute);font-size:12.5px}.tpop .lang b{color:var(--ink);font-weight:500}
+.dlbar{height:4px;border-radius:2px;background:var(--line-strong);overflow:hidden;margin:4px 0 6px}.dlbar i{display:block;height:100%;background:var(--light-3);transition:width .25s}
+.tnote{display:flex;gap:6px;align-items:flex-start;color:var(--dim);font-size:11.5px;margin:10px 0 0}.tnote svg.i{width:13px;height:13px;margin-top:1px}
+.ctx{width:250px;animation:none}
+.tbub{position:absolute;z-index:5;width:300px;background:var(--float);border:1px solid var(--line-strong);border-radius:12px;padding:10px 12px;filter:drop-shadow(0 10px 24px var(--shadow));color:var(--ink);font:13px/1.45 var(--ui)}.tbub small{display:block;color:var(--dim);font-size:11.5px;margin-top:6px}
+/* configurações */
+.set{display:flex;height:100%}.setnav{width:170px;border-right:1px solid var(--line);padding:14px 8px;display:flex;flex-direction:column;gap:2px;font-size:13px;background:var(--side)}.setnav span{padding:5px 10px;border-radius:7px;color:var(--mute)}.setnav span.on{background:var(--raise);color:var(--ink)}
+.setb{flex:1;padding:18px 22px;overflow:auto;min-width:0}.setb h4{margin:0 0 2px;font-size:16px}.setb>p{margin:0 0 12px;color:var(--dim);font-size:12.5px}
+.g{margin:16px 0 6px;color:var(--dim);font-size:12px}
+.l{border:1px solid var(--line);border-radius:10px;background:var(--sunk)}
+.r{display:flex;align-items:center;gap:10px;padding:7px 12px;font-size:13px;flex-wrap:wrap}.r+.r{border-top:1px solid var(--line)}.r span{flex:1;min-width:120px}.r small{color:var(--dim);font-size:12px}
+.r.empty{color:var(--dim);font-size:12.5px}
+select{font:13px var(--ui);color:var(--ink);background:var(--raise);border:1px solid var(--line-strong);border-radius:8px;padding:4px 8px}
+.x{width:22px;height:22px;display:grid;place-items:center;border-radius:7px;color:var(--dim)}.x:hover{background:var(--hover-2);color:var(--ink)}.x svg.i{width:14px;height:14px}
+.private{display:flex;gap:10px;align-items:flex-start;margin:16px 0 0;padding:10px 12px;border:1px solid var(--line);border-radius:10px;font-size:12.5px;color:var(--mute)}.private svg.i{color:var(--light-3);margin-top:2px}
+.toast{position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:9;display:flex;align-items:center;gap:10px;background:var(--float);border:1px solid var(--line-strong);border-radius:10px;padding:7px 12px;font:13px/1.3 var(--ui);color:var(--ink);white-space:nowrap;filter:drop-shadow(0 8px 18px var(--shadow));animation:rise .18s var(--ease)}.toast small{color:var(--dim)}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:16px}.pair>div{min-width:0}.pair h5{margin:0 0 6px;font-size:12.5px;color:var(--mute);font-weight:500}.pair .nav{height:380px}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+@media (max-width:900px){.pair{grid-template-columns:1fr}.profs span b{display:none}.sb{width:150px}.setnav{display:none}.page{padding:20px}}
+@media (max-width:560px){.sb{display:none}.profs{display:none}.nav-row .ib:nth-child(2){display:none}.tpop{width:270px}}
+.nav:has(.settings),.nav:has(.set){height:auto;min-height:540px}</style>
+</head>
+<body>
+<main>
+<header><div><h1>Som no endereço e traduzir página · navegador sozinho</h1><p>Janela da casca (ato Estúdio, abas na lateral). Popovers com a seta de janela-recursos.html. Escolha o estado em cada seção; o que parece botão dentro da janela também responde.</p></div>
+<div class="seg mode" role="group" aria-label="Aparência"><button data-mode="dark" class="on">Escuro</button><button data-mode="light">Claro</button></div></header>
+<nav class="toc"><a href="#som">1 · Som no endereço</a><a href="#traduzir">2 · Traduzir página</a><a href="#idiomas">3 · Configurações › Idiomas</a></nav>
+<div id="out"></div>
+</main>
+<script>
+const P=d=>`<svg class="i" viewBox="0 0 20 20">${d}</svg>`;
+const IC={back:P('<path d="M12 4 6 10l6 6"/>'),fwd:P('<path d="m8 4 6 6-6 6"/>'),re:P('<path d="M16 10a6 6 0 1 1-2-4.5M16 3v3.5h-3.5"/>'),
+ more:P('<circle cx="5" cy="10" r=".8"/><circle cx="10" cy="10" r=".8"/><circle cx="15" cy="10" r=".8"/>'),
+ lock:P('<rect x="4.5" y="9" width="11" height="8" rx="2.5"/><path d="M7 9V6.5a3 3 0 0 1 6 0V9"/>'),
+ spk:P('<path d="M4 8h3l4-3v10l-4-3H4z"/><path d="M13.5 7.5a3.5 3.5 0 0 1 0 5M15.5 5.5a6.5 6.5 0 0 1 0 9"/>'),
+ spk1:P('<path d="M4 8h3l4-3v10l-4-3H4z"/><path d="M13.5 7.5a3.5 3.5 0 0 1 0 5"/>'),
+ mute:P('<path d="M4 8h3l4-3v10l-4-3H4z"/><path d="m13.5 8 4 4M17.5 8l-4 4"/>'),
+ tr:P('<path d="M3 5h7M6.5 3.5V5M4.5 5c.6 2.6 2.4 4.6 4.5 5.5M8.5 5c-.5 2.5-2.2 4.8-5 6"/><path d="m10.5 17 3-7.5 3 7.5M11.6 14.5h3.8"/>'),
+ x:P('<path d="m6 6 8 8M14 6l-8 8"/>'),shield:P('<path d="M10 3 4.5 5v4.5c0 3.3 2.3 6 5.5 7.5 3.2-1.5 5.5-4.2 5.5-7.5V5z"/><path d="m7.5 10 1.8 1.8L12.8 8"/>'),
+ mac:P('<rect x="3" y="4" width="14" height="9.5" rx="1.5"/><path d="M7.5 16.5h5M10 13.5v3"/>')};
+const PROF={"Estúdio":["l-est","E"],"Cliente A":["l-cli","C"],"Pessoal":["l-pes","P"]};
+const urlHTML=u=>{const i=u.indexOf("/");return i<0?`<b>${u}</b>`:`<b>${u.slice(0,i)}</b>${u.slice(i)}`};
+const ring=p=>`<svg class="ring" viewBox="0 0 22 22"><circle class="bgc" cx="11" cy="11" r="10"/><circle class="fgc" cx="11" cy="11" r="10" stroke-dasharray="62.8" stroke-dashoffset="${62.8*(1-p)}"/></svg>`;
+const bar=o=>`<div class="nav-row"><span class="ib">${IC.back}</span><span class="ib">${IC.fwd}</span><span class="ib">${IC.re}</span>
+ <div class="nav-addr">${o.addrl||""}<button class="ai" aria-label="Informações do site">${IC.lock}</button><span class="u">${urlHTML(o.url)}</span>${o.addrx||""}</div>
+ <span class="ib" data-more>${IC.more}</span></div>`;
+const frame=(o={})=>`<div class="nav sidev"><aside class="sb"><div class="lights"><i></i><i></i><i></i></div><div class="sbh"><span class="logo l-est">E</span>Estúdio</div>${o.tabs.map((t,i)=>`<span class="sbt${i==o.tabs.length-1?" on":""}"><span class="fv" style="background:${t[0]}">${t[1]}</span><span class="t">${t[2]}</span>${t[3]||""}</span>`).join("")}<div class="sbf">${Object.keys(PROF).map(x=>`<span class="logo ${PROF[x][0]}${x=="Estúdio"?" on":""}">${PROF[x][1]}</span>`).join("")}</div></aside><div class="col"><div style="height:6px"></div>${bar(o)}<div class="area${o.app?" app":""}">${o.page||""}</div></div>${o.inner||""}</div>`;
+const pop=(sel,cls,html,w)=>`<div class="menu ${cls}" data-pop data-for="${sel}"${w?` style="width:${w}px"`:""}>${html}</div>`;
+
+/* 1 · som no endereço */
+const snd={vol:100,muted:false,open:false};
+const sIcon=()=>snd.muted||snd.vol==0?IC.mute:snd.vol<50?IC.spk1:IC.spk;
+const SOMPAGE=`<div class="page" style="background:#0F0F0F;color:#eee;height:100%;max-width:none"><div style="aspect-ratio:16/9;max-width:520px;background:#222;border-radius:10px;display:grid;place-items:center;color:#888;font:13px var(--ui)">▶ Aula 12 · tocando</div><h3 style="margin-top:14px">Aula 12: escalas e arpejos</h3></div>`;
+const volPop=()=>pop("[data-spk]","vpop"+(snd.muted?" muted":""),`<div class="vh"><span>Volume desta aba</span><b class="${snd.muted?"m":""}" data-vv>${snd.muted?"Sem som":snd.vol+"%"}</b></div><div class="vrow"><input type="range" min="0" max="100" value="${snd.vol}" style="--v:${snd.vol}%" data-vol aria-label="Volume desta aba" aria-valuetext="${snd.vol}%"></div><button class="vmute" data-vmute><span>${snd.muted?"Ativar som":"Silenciar esta aba"}</span><span class="spk${snd.muted?"":" mute"}">${snd.muted?IC.spk:IC.mute}</span></button>`);
+const SOM={
+ p100:["Tocando · 100%","O alto-falante sai do fim do endereço e vai para o começo, antes do cadeado. Clicar nele abre o volume (não silencia mais). Na lateral, a aba continua com o alto-falante dela, como hoje: clique silencia, ponteiro parado 0,5 s abre o mesmo volume.",()=>({})],
+ p30:["Tocando · 30%","Abaixo de 50% o ícone mostra uma onda só, no endereço e na aba: dá para ver de longe que a aba está baixa.",()=>({vol:30,muted:false})],
+ mudo:["Silenciada","Silenciada, o alto-falante fica cortado em laranja claro nos dois lugares, mesmo depois que a página para de tocar.",()=>({muted:true})],
+ aberto:["Popover aberto","Título com o %, controle de 0 a 100 e Silenciar esta aba / Ativar som. Arrastar o controle com a aba silenciada devolve o som (decidido). Esc ou clicar fora fecha. Mexa no controle.",()=>({open:true})]};
+const SOMTABS=()=>{const ic=sIcon();return [["#6FA8FF","L","Linear"],["#1DB954","S","Spotify"],["#FF4E45","Y","YouTube · aula 12",`<button class="spk${snd.muted?" mute":""}" data-tspk aria-label="${snd.muted?"Ativar som da aba":"Silenciar aba"}">${ic}</button>`]]};
+const somFrame=()=>frame({tabs:SOMTABS(),url:"youtube.com/watch?v=aula-12",page:SOMPAGE,
+ addrl:`<button class="ai${snd.muted?" mute":""}${snd.open?" on":""}" data-spk aria-haspopup="dialog" aria-expanded="${snd.open}" aria-label="Volume desta aba, ${snd.muted?"silenciada":snd.vol+"%"}">${sIcon()}</button>`,inner:snd.open?volPop():""});
+
+/* 2 · traduzir */
+const ES=`<div class="page"><h3>Guía de precios 2027</h3><p>El precio base sube un 4 % en enero. Los clientes actuales mantienen su precio hasta la renovación del contrato, y el descuento anual sigue en el 15 %.</p><p>En el plan Equipo, el precio por asiento baja a partir de 20 personas. Revise la tabla antes de enviar la propuesta.</p></div>`;
+const PT=`<div class="page"><h3>Guia de preços 2027</h3><p>O preço base sobe 4% em janeiro. Os clientes atuais mantêm seu preço até a renovação do contrato, e o desconto anual continua em 15%.</p><p>No plano Equipe, o preço por assento cai a partir de 20 pessoas. Revise a tabela antes de enviar a proposta.</p></div>`;
+const ESSEL=ES.replace("El precio base sube un 4 % en enero.",`<span class="sel">El precio base sube un 4 % en enero.</span>`);
+const NOTE=`<div class="tnote">${IC.mac}Traduzido no Mac pela Apple. O texto não sai daqui.</div>`;
+const tr={st:"oferta",p:0,dl:0,ctx:"pagina"};
+const TPOPS={
+ oferta:()=>pop("[data-tr]","tpop",`<div class="pbody"><div class="pt">Esta página está em espanhol</div><small>Traduzir para português?</small><div class="acts"><button class="lnk" data-tr-act="nunca" style="margin-right:auto">Nunca traduzir espanhol</button><button class="btn sm" data-close>Agora não</button><button class="btn sm pri" data-tr-act="traduzir">Traduzir</button></div>${NOTE}</div>`),
+ traduzida:()=>pop("[data-tr]","tpop",`<div class="pbody"><div class="pt">Traduzida do espanhol</div><small>Para português, no Mac.</small><div class="acts stack"><button class="btn" data-tr-act="original">Mostrar original</button><button class="btn" data-tr-act="sempre">Sempre traduzir espanhol</button></div>${NOTE}</div>`),
+ baixar:()=>pop("[data-tr]","tpop",`<div class="pbody"><div class="pt">Baixar o idioma espanhol?</div><small>≈ 150 MB, da Apple. Fica no Mac e serve para todas as traduções de espanhol para português, sem internet depois.</small>${tr.dl?`<div class="dlbar"><i style="width:${tr.dl*100}%"></i></div><small style="color:var(--dim);font-size:12px">Baixando · ${Math.round(tr.dl*150)} de 150 MB</small>`:""}<div class="acts"><button class="btn sm" data-tr-act="cancelar">Cancelar</button>${tr.dl?"":`<button class="btn sm pri" data-tr-act="baixar">Baixar</button>`}</div><div class="tnote">${IC.shield}Única conexão: o download do idioma, direto da Apple. Apaga em Configurações › Idiomas.</div></div>`)};
+const trBtn=()=>{const s=tr.st;if(s=="nunca")return"";const busy=s=="traduzindo";return `<button class="ai${s.startsWith("traduzida")?" tr-on":""}${TPOPS[s]?" on":""}" data-tr aria-label="${busy?"Traduzindo, "+Math.round(tr.p*100)+"%":s.startsWith("traduzida")?"Página traduzida do espanhol":"Traduzir página"}">${busy?ring(tr.p):""}${IC.tr}</button>`};
+const TTABS=[["#6FA8FF","L","Linear"],["#E8893A","T","Tienda Sol · precios"]];
+const trFrame=()=>{const s=tr.st;let page=s.startsWith("traduzida")?PT:ES,inner="";
+ if(s=="traduzindo")page=ES.replace('class="page"','class="page busy"');
+ if(TPOPS[s])inner=TPOPS[s]();
+ if(s=="menu"){const sel=tr.ctx=="selecao";page=sel?ESSEL:ES;
+  inner=`<div class="menu ctx" style="left:${sel?330:400}px;top:${sel?200:260}px" role="menu">${sel?`<div class="mi"><span>Copiar</span><small>⌘C</small></div><div class="mi hl" data-tr-act="sel"><span>Traduzir para português</span></div><div class="mi"><span>Buscar “El precio base…”</span></div>`:`<div class="mi"><span>Voltar</span><small>⌘[</small></div><div class="mi off"><span>Avançar</span><small>⌘]</small></div><div class="mi"><span>Recarregar</span><small>⌘R</small></div><hr><div class="mi hl" data-tr-act="traduzir"><span>Traduzir para português</span></div><hr><div class="mi"><span>Salvar como…</span><small>⌘S</small></div><div class="mi"><span>Inspecionar</span></div>`}</div>`}
+ if(s=="sel")page=ESSEL,inner=`<div class="tbub" style="left:250px;top:226px" role="status"><b style="font-weight:500">O preço base sobe 4% em janeiro.</b><small>Do espanhol, no Mac · <button class="lnk" data-tr-act="copiar" style="font-size:11.5px">Copiar</button></small></div>`;
+ return frame({tabs:TTABS,url:"tiendasol.es/precios-2027",page,addrx:trBtn(),inner})};
+const TR={
+ oferta:["a · Página em outro idioma","O ícone de tradução aparece no fim do endereço (o lugar do ícone de permissão) e o popover desce dele uma vez, quieto, por site. Fechar sem escolher deixa o ícone, que abre de novo.",()=>{tr.st="oferta"}],
+ baixar:["d · Primeira vez do par","Na primeira tradução de espanhol para português o macOS ainda não tem o idioma: o popover pede para baixar antes. Baixar mostra a barra e, no fim, traduz sozinho.",()=>{tr.st="baixar";tr.dl=0}],
+ traduzindo:["b · Traduzindo","O anel em volta do ícone é o progresso; a página fica esmaecida e o texto troca no lugar, por blocos.",()=>{tr.st="traduzindo";tr.p=.45}],
+ traduzida:["c · Traduzida","Ícone aceso em laranja claro. Clicado, mostra de onde veio, Mostrar original e Sempre traduzir espanhol.",()=>{tr.st="traduzida"}],
+ menu:["e · Botão direito","Na página e numa seleção. Na seleção, a tradução aparece num balão sobre o texto, sem trocar a página.",()=>{tr.st="menu"}]};
+
+/* 3 · configurações › idiomas */
+const cfg={pref:"Português (Brasil)",sempre:["Inglês"],nunca:["Francês"],baixados:[["Espanhol → Português","148 MB"],["Inglês → Português","152 MB"]]};
+const lst=(k,emp)=>cfg[k].length?cfg[k].map((n,i)=>`<div class="r"><span>${Array.isArray(n)?`${n[0]} <small>· ${n[1]}</small>`:n}</span><button class="x" data-rm="${k}" data-i="${i}" aria-label="Tirar ${Array.isArray(n)?n[0]:n}">${IC.x}</button></div>`).join(""):`<div class="r empty">${emp}</div>`;
+const idiomas=()=>frame({tabs:[["#6FA8FF","L","Linear"],["#8A8A94","⚙","Configurações"]],url:"Configurações › Idiomas",app:1,page:`<div class="set"><div class="setnav"><span>Geral</span><span>Aparência</span><span>Privacidade</span><span>Senhas salvas</span><span class="on">Idiomas</span><span>Extensões</span></div><div class="setb"><h4>Idiomas</h4><p>Vale para o ato Estúdio.</p>
+ <div class="r" style="padding:0"><span>Idioma preferido<br><small>Para onde as páginas são traduzidas e o que os sites recebem em Accept-Language.</small></span><select data-pref aria-label="Idioma preferido">${["Português (Brasil)","Português (Portugal)","Inglês","Espanhol"].map(x=>`<option${x==cfg.pref?" selected":""}>${x}</option>`).join("")}</select></div>
+ <div class="g">Sempre traduzir</div><div class="l">${lst("sempre","Nenhum. Use “Sempre traduzir” no popover da tradução.")}</div>
+ <div class="g">Nunca traduzir</div><div class="l">${lst("nunca","Nenhum. Use “Nunca traduzir” no popover da tradução.")}</div>
+ <div class="g">Idiomas baixados no Mac</div><div class="l">${lst("baixados","Nenhum idioma baixado.")}</div>
+ <div class="private">${IC.shield}<span>A tradução nunca sai do Mac. Ela usa a Tradução da Apple no próprio aparelho (macOS 15 ou mais novo); nada vai para o Google nem para nós. A única conexão é baixar um idioma da Apple, na primeira vez e com o seu OK.</span></div></div></div>`});
+
+/* montagem */
+const SECS=[["som","1 · Som no endereço","",SOM],["traduzir","2 · Traduzir página, sem Google","Roda no Mac com a Tradução da Apple (framework Translation, macOS 15+). O Chromium continua com a tradução dele desligada (sem-telemetria.md).",TR],["idiomas","3 · Configurações › Idiomas","Tire um idioma das listas no ×; troque o idioma preferido.",null]];
+const state={som:"p100",traduzir:"oferta"};
+const out=document.getElementById("out");
+out.innerHTML=SECS.map(([id,t,c])=>`<section class="v" id="${id}"><h2>${t}</h2>${c?`<p class="cap">${c}</p>`:""}<div data-sec="${id}"></div></section>`).join("");
+const box=id=>out.querySelector(`[data-sec="${id}"]`);
+const segs=(id,S)=>`<div class="seg">${Object.entries(S).map(([k,v])=>`<button data-st="${k}" class="${k==state[id]?"on":""}">${v[0]}</button>`).join("")}</div>`;
+let timer;
+function render(id,apply){clearInterval(timer);const b=box(id);
+ if(id=="som"){if(apply)Object.assign(snd,{vol:100,muted:false,open:false},SOM[state.som][2]());b.innerHTML=segs(id,SOM)+`<p class="cap">${SOM[state.som][1]}</p>`+somFrame()}
+ if(id=="traduzir"){if(apply)TR[state.traduzir][2]();const extra=state.traduzir=="menu"?`<div class="seg" style="margin-left:8px">${[["pagina","Na página"],["selecao","Numa seleção"]].map(([k,v])=>`<button data-ctx="${k}" class="${k==tr.ctx?"on":""}">${v}</button>`).join("")}</div>`:"";
+  b.innerHTML=segs(id,TR)+extra+`<p class="cap">${TR[state.traduzir][1]}</p>`+trFrame();if(tr.st=="traduzindo")run()}
+ if(id=="idiomas")b.innerHTML=idiomas();
+ place(b)}
+function run(){timer=setInterval(()=>{tr.p=Math.min(1,tr.p+.12);if(tr.p>=1){clearInterval(timer);tr.st="traduzida";paint();return}const r=box("traduzir").querySelector(".fgc");if(r)r.setAttribute("stroke-dashoffset",62.8*(1-tr.p))},250)}
+function download(){timer=setInterval(()=>{tr.dl=Math.min(1,tr.dl+.1);if(tr.dl>=1){clearInterval(timer);tr.st="traduzindo";tr.p=0;paint();return}paint(1)},250)}
+// redesenha só a janela da tradução, sem reiniciar o estado
+function paint(keep){const b=box("traduzir"),n=b.querySelector(".nav");n.outerHTML=trFrame();place(b);if(tr.st=="traduzindo"&&!keep)run()}
+function place(root){root.querySelectorAll("[data-pop]").forEach(m=>{const nav=m.closest(".nav"),a=nav.querySelector(m.dataset.for);if(!a)return;const nb=nav.getBoundingClientRect(),b=a.getBoundingClientRect();
+ const cx=b.left-nb.left+b.width/2,w=m.offsetWidth,x=Math.max(4,Math.min(nb.width-6-w,cx-w/2));
+ m.style.left=x+"px";m.style.top=(b.bottom-nb.top+4+7)+"px";m.style.setProperty("--ax",Math.max(23,Math.min(w-23,cx-x-1))+"px");m.dataset.side="up"})}
+render("som",1);render("traduzir",1);render("idiomas");
+
+const toast=(nav,html)=>{const area=nav.querySelector(".area");area.querySelector(".toast")?.remove();area.insertAdjacentHTML("beforeend",`<div class="toast" role="status">${html}</div>`);setTimeout(()=>area.querySelector(".toast")?.remove(),2400)};
+const setSom=()=>{const b=box("som");b.querySelector(".nav").outerHTML=somFrame();place(b)};
+document.addEventListener("click",e=>{const T=e.target,sec=T.closest("[data-sec]")?.dataset.sec,nav=T.closest(".nav");
+ const md=T.closest("[data-mode]");if(md&&md.tagName=="BUTTON"){document.documentElement.dataset.mode=md.dataset.mode;document.querySelectorAll(".mode button").forEach(b=>b.classList.toggle("on",b==md));return}
+ const st=T.closest("[data-st]");if(st){state[sec]=st.dataset.st;render(sec,1);return}
+ const cx=T.closest("[data-ctx]");if(cx){tr.ctx=cx.dataset.ctx;render("traduzir");return}
+ if(sec=="som"){
+  if(T.closest("[data-spk]")){snd.open=!snd.open;setSom();return}
+  if(T.closest("[data-tspk]")){snd.muted=!snd.muted;snd.open=false;setSom();return}
+  if(T.closest("[data-vmute]")){snd.muted=!snd.muted;setSom();return}
+  if(snd.open&&!T.closest("[data-pop]")&&nav){snd.open=false;setSom()}return}
+ if(sec=="traduzir"){const a=T.closest("[data-tr-act]")?.dataset.trAct;
+  if(a=="traduzir"){tr.st="traduzindo";tr.p=0;paint();return}
+  if(a=="nunca"){tr.st="nunca";paint();cfg.nunca.includes("Espanhol")||cfg.nunca.push("Espanhol");render("idiomas");toast(box("traduzir").querySelector(".nav"),"Espanhol não será traduzido <small>Configurações › Idiomas</small>");return}
+  if(a=="original"){tr.st="original";paint();return}
+  if(a=="sempre"){cfg.sempre.includes("Espanhol")||cfg.sempre.push("Espanhol");render("idiomas");T.textContent="Espanhol sempre será traduzido";T.disabled=true;return}
+  if(a=="baixar"){tr.dl=.05;paint(1);download();return}
+  if(a=="cancelar"){clearInterval(timer);tr.dl=0;tr.st="fechado";paint();return}
+  if(a=="sel"){tr.st="sel";paint();return}
+  if(a=="copiar"){toast(nav,"Tradução copiada");return}
+  if(T.closest("[data-close]")){tr.st="fechado";paint();return}
+  if(T.closest("[data-tr]")){const o={"traduzida":"traduzida-fechado","traduzida-fechado":"traduzida","oferta":"fechado","baixar":"fechado","traduzindo":"traduzindo"};tr.st=o[tr.st]||"oferta";paint();return}
+  if(nav&&!T.closest("[data-pop],.ctx")&&(TPOPS[tr.st]||tr.st=="menu"||tr.st=="sel")){tr.st=tr.st=="traduzida"?"traduzida-fechado":"fechado";paint()}return}
+ const rm=T.closest("[data-rm]");if(rm){cfg[rm.dataset.rm].splice(+rm.dataset.i,1);render("idiomas");return}
+});
+document.addEventListener("contextmenu",e=>{const a=e.target.closest('[data-sec="traduzir"] .area');if(!a)return;e.preventDefault();tr.ctx=window.getSelection().toString()?"selecao":"pagina";state.traduzir="menu";render("traduzir",1)});
+document.addEventListener("input",e=>{const v=e.target.closest("[data-vol]");if(v){snd.vol=+v.value;snd.muted=false;v.style.setProperty("--v",snd.vol+"%");v.setAttribute("aria-valuetext",snd.vol+"%");
+ const b=box("som"),pp=b.querySelector(".vpop");pp.classList.remove("muted");const vv=pp.querySelector("[data-vv]");vv.textContent=snd.vol+"%";vv.className="";pp.querySelector("[data-vmute]").innerHTML=`<span>Silenciar esta aba</span><span class="spk mute">${IC.mute}</span>`;
+ const ab=b.querySelector("[data-spk]");ab.innerHTML=sIcon();ab.classList.remove("mute");const tb=b.querySelector("[data-tspk]");tb.innerHTML=sIcon();tb.classList.remove("mute")}});
+document.addEventListener("change",e=>{if(e.target.matches("[data-pref]"))cfg.pref=e.target.value});
+document.addEventListener("keydown",e=>{if(e.key!="Escape")return;if(snd.open){snd.open=false;setSom()}if(TPOPS[tr.st]||tr.st=="menu"){tr.st=tr.st=="traduzida"?"traduzida-fechado":"fechado";paint()}});
+addEventListener("resize",()=>place(document));
+</script>
+</body>
+</html>
