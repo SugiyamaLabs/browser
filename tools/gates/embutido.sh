@@ -57,7 +57,7 @@ EOF
 swiftc -O "$OUT/events.swift" -o "$OUT/events" || { echo "FAIL: could not build the events helper"; exit 1; }
 
 cat >"$OUT/parent.py" <<'EOF'
-import base64, json, os, re, select, signal, socket, struct, subprocess, sys, tempfile, time, zlib
+import base64, hashlib, json, os, re, select, signal, socket, struct, subprocess, sys, tempfile, time, zlib
 APP, OUT, GATES = os.environ["APP"], os.environ["OUT"], os.environ["GATES"]
 PORT = os.environ["SITE_PORT"]
 SITE = f"http://127.0.0.1:{PORT}"
@@ -78,12 +78,12 @@ EXTENSION = os.environ["REPO"] + "/tools/sites-teste/extensao"
 # --agens-test-quit-signal (not in official builds): SIGUSR2 makes the engine quit the ways a person
 # can (cmd-Q as the menu bar takes it, then IDC_EXIT); SIGUSR1 sends itself a quit Apple event with
 # no reason, then one for log out. No system input either way.
-def launch(profile, *extra, name=None):
+def launch(profile, *extra, name=None, env=None):
     log = open(f"{OUT}/engine{'-' + (name or extra[0].strip('-')) if name or extra else ''}.log", "w")
     # insecure.test: the test site under a name that is not local, for the http:// checks.
     p = subprocess.Popen([APP, f"--user-data-dir={profile}", "--agens-embedded", *extra, f"--load-extension={EXTENSION}",
                           "--host-resolver-rules=MAP insecure.test 127.0.0.1",
-                          "--agens-test-quit-signal", "--use-mock-keychain", "--no-first-run"], stdout=log, stderr=log)
+                          "--agens-test-quit-signal", "--use-mock-keychain", "--no-first-run"], stdout=log, stderr=log, env=env)
     for _ in range(60):
         if os.path.exists(profile + "/agens.sock"): return p
         time.sleep(0.5)
@@ -208,6 +208,46 @@ engine3.terminate()
 try: engine3.wait(15)
 except subprocess.TimeoutExpired: engine3.kill()
 subprocess.run(["rm", "-rf", profile3])
+
+# Native messaging hosts of other browsers (launch_context_posix.cc): password managers write their
+# manifest only into Chrome's, Edge's... folders. A short launch whose home (NSHomeDirectory) is a
+# temp folder, through CFFIXED_USER_HOME, so the owner's ~/Library is never written; the test
+# extension calls connectNative on /janela?nativo. allowed_origins still gates who may connect.
+fake_home = tempfile.mkdtemp(prefix="agens-nm.", dir="/tmp")
+ext_id = "".join(chr(ord("a") + int(ch, 16)) for ch in hashlib.sha256(os.path.realpath(EXTENSION).encode()).hexdigest()[:32])
+echo_host = f"{fake_home}/echo-host.py"
+open(echo_host, "w").write(f"""#!{sys.executable}
+import json, struct, sys
+n = struct.unpack("<I", sys.stdin.buffer.read(4))[0]
+out = json.dumps({{"echo": json.loads(sys.stdin.buffer.read(n))["echo"]}}).encode()
+sys.stdout.buffer.write(struct.pack("<I", len(out)) + out); sys.stdout.buffer.flush()
+""")
+os.chmod(echo_host, 0o755)
+for browser, host, origin in (("Google/Chrome Beta", "com.agens.gate_echo", ext_id),
+                              ("Vivaldi", "com.agens.gate_forbidden", "a" * 32)):
+    d = f"{fake_home}/Library/Application Support/{browser}/NativeMessagingHosts"
+    os.makedirs(d)
+    json.dump({"name": host, "description": "gate", "path": echo_host, "type": "stdio",
+               "allowed_origins": [f"chrome-extension://{origin}/"]}, open(f"{d}/{host}.json", "w"))
+profile5 = tempfile.mkdtemp(prefix="agens-n.", dir="/tmp")
+engine5 = launch(profile5, name="native", env={**os.environ, "CFFIXED_USER_HOME": fake_home})
+n5 = Conn(profile5 + "/agens.sock")
+n5.ask("hello", client="embutido-gate"); n5.ask("host.attach")
+ato5 = (n5.ask("atos.list").get("atos") or [{}])[0].get("id")
+t5 = n5.ask("view.open", ato=ato5, url=SITE + "/janela?nativo").get("tab")
+n5.ask("view.attach", tab=t5, width=600, height=400, scale=1)
+e = n5.event(lambda e: e["event"] == "view.tab" and e.get("tab") == t5 and e.get("title", "").startswith("nativo "), 30)
+got = dict(x.split(":", 1) for x in (e or {}).get("title", "nativo ")[7:].split(" | ") if ":" in x)
+check("a native host whose manifest is only in another browser's folder (Chrome Beta) answers",
+      got.get("com.agens.gate_echo") == "pong", got)
+check("a native host found there that does not list the extension in allowed_origins is forbidden",
+      got.get("com.agens.gate_forbidden") == "Access to the specified native messaging host is forbidden.", got)
+check("a native host in no folder is not found",
+      got.get("com.agens.gate_missing") == "Specified native messaging host not found.", got)
+engine5.terminate()
+try: engine5.wait(15)
+except subprocess.TimeoutExpired: engine5.kill()
+subprocess.run(["rm", "-rf", profile5, fake_home])
 
 check("host.attach from the parent", c.ask("host.attach").get("ok"))
 r = c.ask("host.attach")

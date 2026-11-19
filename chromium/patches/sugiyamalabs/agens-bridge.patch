@@ -24516,6 +24516,81 @@ index 2c467f4524..2aee2739bd 100644
    // Check whether download is restricted for saved tab groups.
    if (tab_groups::RestrictDownloadOnSyncedTabs() &&
        TabGroupSyncTabState::FromWebContents(web_contents)) {
+diff --git a/chrome/browser/extensions/api/messaging/launch_context_posix.cc b/chrome/browser/extensions/api/messaging/launch_context_posix.cc
+index ebc06e1203..2a4f14d971 100644
+--- a/chrome/browser/extensions/api/messaging/launch_context_posix.cc
++++ b/chrome/browser/extensions/api/messaging/launch_context_posix.cc
+@@ -6,6 +6,7 @@
+ 
+ #include <memory>
+ #include <utility>
++#include <vector>
+ 
+ #include "base/command_line.h"
+ #include "base/files/file_util.h"
+@@ -34,6 +35,44 @@ base::FilePath FindManifestInDir(int dir_key, const std::string& host_name) {
+   return base::FilePath();
+ }
+ 
++#if BUILDFLAG(IS_MAC)
++// Agens: password managers (1Password, Bitwarden...) write their host manifest
++// only into the folders of browsers they know. After our own folders, look in
++// those, Chrome first; the manifest is validated the same way wherever found.
++constexpr const char* kOtherBrowsers[] = {
++    "Google/Chrome",         "Google/Chrome Beta",
++    "Google/Chrome Canary",  "Google/Chrome Dev",
++    "Chromium",              "Microsoft Edge",
++    "Microsoft Edge Beta",   "Microsoft Edge Dev",
++    "Microsoft Edge Canary", "BraveSoftware/Brave-Browser",
++    "Arc/User Data",         "Vivaldi",
++    "Vivaldi Snapshot",
++};
++
++// `library` is ~/Library or /Library. System-wide, Chrome and Edge use
++// /Library/Google/Chrome and /Library/Microsoft/Edge, so those come first.
++base::FilePath FindManifestInOtherBrowsers(const base::FilePath& library,
++                                           bool system,
++                                           const std::string& host_name) {
++  std::vector<base::FilePath> dirs;
++  if (system) {
++    dirs.push_back(library.Append("Google/Chrome"));
++    dirs.push_back(library.Append("Microsoft/Edge"));
++  }
++  for (const char* browser : kOtherBrowsers) {
++    dirs.push_back(library.Append("Application Support").Append(browser));
++  }
++  for (const base::FilePath& dir : dirs) {
++    base::FilePath path =
++        dir.Append("NativeMessagingHosts").Append(host_name + ".json");
++    if (base::PathExists(path)) {
++      return path;
++    }
++  }
++  return base::FilePath();
++}
++#endif  // BUILDFLAG(IS_MAC)
++
+ }  // namespace
+ 
+ // static
+@@ -47,6 +86,17 @@ base::FilePath LaunchContext::FindManifest(const std::string& host_name,
+   if (result.empty()) {
+     result = FindManifestInDir(chrome::DIR_NATIVE_MESSAGING, host_name);
+   }
++#if BUILDFLAG(IS_MAC)
++  // GetHomeDir is NSHomeDirectory (CFFIXED_USER_HOME moves it in tests).
++  if (result.empty() && allow_user_level_hosts) {
++    result = FindManifestInOtherBrowsers(
++        base::GetHomeDir().Append("Library"), /*system=*/false, host_name);
++  }
++  if (result.empty()) {
++    result = FindManifestInOtherBrowsers(base::FilePath("/Library"),
++                                         /*system=*/true, host_name);
++  }
++#endif  // BUILDFLAG(IS_MAC)
+ 
+   if (result.empty()) {
+     error_message = "Can't find native messaging host " + host_name;
 diff --git a/chrome/browser/extensions/extension_tab_util.cc b/chrome/browser/extensions/extension_tab_util.cc
 index dd919b9675..fb3ec73d91 100644
 --- a/chrome/browser/extensions/extension_tab_util.cc

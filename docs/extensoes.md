@@ -17,6 +17,20 @@ Cada ato tem as próprias extensões. Ao instalar, a pessoa escolhe: só no ato 
 
 Configurações › Extensões › **Adicionar de um arquivo** (ou `extension.install` no Agens) aceita um `.crx` ou uma pasta descompactada, com a mesma folha da loja. O `.crx` instala como no `chrome://extensions` (fora da loja, permitido porque a pessoa escolheu o arquivo) e não se atualiza. A pasta fica ligada ao lugar onde está e liga o modo de desenvolvedor do ato (sem ele o Chromium desliga extensão descompactada). `.crx` aberto, arrastado ou baixado de um site continua recusado. Instalar da loja pelo id, sem abrir a página, fica para depois.
 
+## Gerenciador de senhas e o app do Mac
+
+Extensões como 1Password, Bitwarden e Dashlane conversam com o app delas no Mac por *native messaging*: o app grava um manifesto (`<nome>.json`) na pasta `NativeMessagingHosts` de cada navegador que ele conhece, e nunca na nossa. Por isso o navegador procura o manifesto nesta ordem:
+
+1. as nossas pastas: `~/Library/Application Support/AgensBrowser/NativeMessagingHosts`, depois a do sistema (`/Library/Application Support/Chromium/NativeMessagingHosts`, a do Chromium);
+2. as pastas de usuário dos outros navegadores, em `~/Library/Application Support/`, nesta ordem fixa: `Google/Chrome`, `Google/Chrome Beta`, `Google/Chrome Canary`, `Google/Chrome Dev`, `Chromium`, `Microsoft Edge`, `Microsoft Edge Beta`, `Microsoft Edge Dev`, `Microsoft Edge Canary`, `BraveSoftware/Brave-Browser`, `Arc/User Data`, `Vivaldi`, `Vivaldi Snapshot`;
+3. as do sistema: `/Library/Google/Chrome` e `/Library/Microsoft/Edge`, depois a mesma lista em `/Library/Application Support/`.
+
+Vale o primeiro que existir. O navegador do outro não precisa estar instalado: o 1Password grava nas pastas de todos. A política que desliga hosts de usuário (`NativeMessagingUserLevelHosts`) também desliga o passo 2.
+
+Nada muda na conferência do manifesto: o `name` tem que bater, `allowed_origins` diz qual extensão pode conectar (as das lojas usam o mesmo id aqui e no Chrome) e o `path` do programa tem que ser absoluto. Está em `launch_context_posix.cc` (`FindManifest`).
+
+O gate `embutido.sh` confere numa partida curta com a casa trocada por uma pasta temporária (`CFFIXED_USER_HOME`, sem tocar no `~/Library` de verdade): um host só na pasta do Chrome Beta responde, um que não lista a extensão de teste é recusado e um que não existe dá "not found". Não conferido: 1Password de verdade, com o app aberto e a extensão da loja.
+
 ## Como está feito
 
 O ungoogled bloqueia a loja em três lugares; desfazemos os três:
