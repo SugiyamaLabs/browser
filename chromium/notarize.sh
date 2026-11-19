@@ -8,7 +8,8 @@ set -euo pipefail
 app="${AGENS_APP%/}"
 [ -d "$app/Contents" ] || { echo "not an app bundle: $app" >&2; exit 1; }
 codesign --verify --deep --strict "$app"
-codesign -dv "$app" 2>&1 | grep -q '^Authority=Developer ID Application:' ||
+# grep -q closing early would SIGPIPE codesign and fail the pipe under pipefail: read it all first.
+codesign -dvv "$app" 2>&1 | grep '^Authority=Developer ID Application:' >/dev/null ||
   { echo "$app is not signed with a Developer ID Application certificate (run chromium/sign.sh first)" >&2; exit 1; }
 
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
