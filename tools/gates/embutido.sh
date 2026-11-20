@@ -296,6 +296,13 @@ else:
     db.execute("INSERT INTO cookies VALUES (?, ?, '', ?, '/', ?, 1, 1, 1, ?, ?)", (".cookie.gate.test", "gate_sessao",
                v10(hashlib.sha256(b".cookie.gate.test").digest() + b"valor-gate"), webkit(-30), webkit(2), webkit(1)))
     db.commit(); db.close()
+    # An Edge folder macOS blocks (as it does other apps' data without Full Disk Access; here chmod 000):
+    # listed anyway, with problem kAgensImportErrorFullDiskAccess (3) and nothing available.
+    edge_dir = f"{support}/Microsoft Edge"
+    os.makedirs(f"{edge_dir}/Default")
+    json.dump({"profile": {"info_cache": {"Default": {"name": "Bloqueado"}}}}, open(f"{edge_dir}/Local State", "w"))
+    json.dump({"roots": {}}, open(f"{edge_dir}/Default/Bookmarks", "w"))
+    os.chmod(edge_dir, 0)
     profile7 = tempfile.mkdtemp(prefix="agens-i.", dir="/tmp")
     os.makedirs(f"{profile7}/Profile 7")
     json.dump({"profile": {"info_cache": {"Profile 7": {"name": "Gate importa", "is_using_default_name": False}}}},
@@ -319,7 +326,10 @@ else:
         time.sleep(0.5)
     src = {(x["browser"], x["profile"]): x for x in got["sources"] or []}
     check("import: finds each Chrome-family profile in the (fake) home, nothing else",
-          set(src) == {("Chrome", "Pessoal"), ("Brave", "Trabalho")}, got["sources"])
+          set(src) == {("Chrome", "Pessoal"), ("Brave", "Trabalho"), ("Edge", "")}, got["sources"])
+    check("import: a blocked browser folder is listed with problem Full Disk Access (3), nothing available",
+          src.get(("Edge", ""), {}).get("problem") == 3 and src.get(("Edge", ""), {}).get("available") == 0
+          and src.get(("Chrome", "Pessoal"), {}).get("problem") == 0, src)
     check("import: Chrome profile has bookmarks, history, passwords, cookies (mask 15); Brave only bookmarks (1)",
           src.get(("Chrome", "Pessoal"), {}).get("available") == 15 and src.get(("Brave", "Trabalho"), {}).get("available") == 1, src)
     jobs = got["job"]
@@ -376,6 +386,7 @@ else:
     engine7.terminate()
     try: engine7.wait(15)
     except subprocess.TimeoutExpired: engine7.kill()
+    os.chmod(edge_dir, 0o755)
     subprocess.run(["rm", "-rf", profile7, home7])
 
 check("host.attach from the parent", c.ask("host.attach").get("ok"))
