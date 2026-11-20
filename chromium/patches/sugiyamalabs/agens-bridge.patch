@@ -319,10 +319,10 @@ index 0000000000..bcb1c5bf02
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_BRIDGE_H_
 diff --git a/chrome/browser/agens/bridge/bridge_mac.mm b/chrome/browser/agens/bridge/bridge_mac.mm
 new file mode 100644
-index 0000000000..706b89d8fe
+index 0000000000..db7c4e9fc7
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/bridge_mac.mm
-@@ -0,0 +1,633 @@
+@@ -0,0 +1,637 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The socket server on macOS: a Unix socket in the user data dir, the peer's code signature read
 +// from its audit token, and the approval of the person before a signed client gets in.
@@ -370,6 +370,7 @@ index 0000000000..706b89d8fe
 +#include "chrome/browser/agens/bridge/ops.h"
 +#include "chrome/browser/agens/bridge/protocol.h"
 +#include "chrome/browser/agens/embed/agens_embedded.h"
++#include "chrome/browser/agens/embed/import_internal.h"
 +#include "chrome/browser/agens/embed/native_shell.h"
 +#include "chrome/browser/browser_process.h"
 +#include "chrome/common/chrome_paths.h"
@@ -921,6 +922,9 @@ index 0000000000..706b89d8fe
 +}
 +
 +void Start() {
++#if !defined(OFFICIAL_BUILD)
++  import::RunTestImportIfAsked();  // gates only
++#endif
 +  base::FilePath dir;
 +  if (!SocketPath().empty() || !base::PathService::Get(chrome::DIR_USER_DATA, &dir)) return;
 +  const base::FilePath path = dir.AppendASCII(kSocketName);
@@ -13185,6 +13189,297 @@ index 0000000000..9787b1d770
 +}  // namespace agens::ext
 +
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_EXTENSIONS_H_
+diff --git a/chrome/browser/agens/embed/agens_import.cc b/chrome/browser/agens/embed/agens_import.cc
+index 76015f844f..a40ad4685a 100644
+--- a/chrome/browser/agens/embed/agens_import.cc
++++ b/chrome/browser/agens/embed/agens_import.cc
+@@ -3,10 +3,17 @@
+ 
+ #include "chrome/browser/agens/embed/agens_import.h"
+ 
++#include <cstdio>
+ #include <memory>
++#include <set>
+ 
+-#include "base/memory/raw_ptr.h"
++#include "base/command_line.h"
++#include "base/json/json_writer.h"
+ #include "base/no_destructor.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_split.h"
++#include "base/values.h"
++#include "base/task/single_thread_task_runner.h"
+ #include "base/task/thread_pool.h"
+ #include "chrome/browser/agens/embed/import_internal.h"
+ 
+@@ -26,6 +33,65 @@ std::vector<agens::import::Source> FindAll() {
+   for (auto& s : agens::import::FindSafariFirefoxSources()) all.push_back(std::move(s));
+   return all;
+ }
++
++std::set<int>& CancelledJobs() {
++  static base::NoDestructor<std::set<int>> jobs;
++  return *jobs;
++}
++
++// Both C entry points: by ato id, or (empty id) by name, created if needed.
++int NextJob() {
++  static int last_job = 0;
++  return ++last_job;
++}
++
++void Start(int job, const std::string& ato_id, const std::string& ato_name, const std::string& source_id, int items,
++           agens::import::EventCallback events) {
++  const agens::import::Source* found = nullptr;
++  for (const auto& s : Known()) {
++    if (s.id == source_id) found = &s;
++  }
++  if (!found) {
++    // Posted: the caller gets the job id before any of its events.
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE, base::BindOnce(events, agens::import::Event{kAgensImportEventFailed, 0, 0, kAgensImportErrorNoSource,
++                                                               "Origem não encontrada; procure de novo."}));
++    return;
++  }
++  const agens::import::Source source = *found;
++  // A blocked source (Safari without Full Disk Access) lists nothing as available; still ask its
++  // reader, so the item comes back failed with the reason instead of silently empty.
++  if (!source.problem) items &= source.available;
++  const std::string name = ato_name.empty() ? agens::import::AtoNameFor(source) : ato_name;
++  // Every terminal event forgets the job's cancel mark.
++  events = base::BindRepeating(
++      [](int job, agens::import::EventCallback events, const agens::import::Event& e) {
++        if (e.event >= kAgensImportEventDone) CancelledJobs().erase(job);
++        events.Run(e);
++      },
++      job, std::move(events));
++  events.Run({kAgensImportEventItemStarted, 0, 0, 0, "Lendo " + source.browser + "…"});
++  auto write = base::BindOnce(
++      [](int job, agens::import::Source source, std::string ato_id, std::string name, int items,
++         agens::import::EventCallback events, agens::import::Data data) {
++        if (CancelledJobs().contains(job)) {
++          events.Run({kAgensImportEventCancelled, 0, 0, 0, "Cancelado."});
++          return;
++        }
++        if (data.error_kind && (data.failed_items & items) == items) {
++          events.Run({kAgensImportEventFailed, 0, 0, data.error_kind, data.error});
++          return;
++        }
++        agens::import::WriteIntoAto(ato_id, name, source.browser, items, std::move(data), events,
++                                    base::BindRepeating([](int job) { return CancelledJobs().contains(job); }, job));
++      },
++      job, source, ato_id, name, items, events);
++  if (source_id.starts_with("chromium:")) {
++    agens::import::ReadChromium(source, items, std::move(write));
++  } else {
++    agens::import::ReadSafariFirefox(source, items, std::move(write));
++  }
++}
+ }  // namespace
+ 
+ extern "C" {
+@@ -41,48 +107,98 @@ void agens_import_sources(AgensImportSourcesFn fn, void* context) {
+             std::vector<AgensImportSource> out;
+             for (size_t i = 0; i < sources.size(); ++i) {
+               out.push_back({sources[i].id.c_str(), sources[i].browser.c_str(), sources[i].profile.c_str(),
+-                             atos[i].c_str(), sources[i].available, sources[i].note.c_str()});
++                             atos[i].c_str(), sources[i].available, sources[i].note.c_str(), sources[i].problem});
+             }
+             fn(context, out.data(), static_cast<int>(out.size()));
+           },
+           fn, context));
+ }
+ 
++int agens_import_start(const char* ato_id, const char* source_id, int items, AgensImportEventFn fn, void* context) {
++  const int job = NextJob();
++  auto events = base::BindRepeating(
++      [](AgensImportEventFn fn, void* context, int job, const agens::import::Event& e) {
++        const AgensImportEvent out = {job, e.event, e.item, e.count, e.error, e.message.c_str()};
++        fn(context, &out);
++      },
++      fn, context, job);
++  Start(job, ato_id ? ato_id : "", "", source_id ? source_id : "", items, events);
++  return job;
++}
++
++void agens_import_cancel(int job) {
++  if (job > 0) CancelledJobs().insert(job);
++}
++
+ void agens_import_run(AgensWindow*, const char* source_id, const char* ato, int what, AgensImportProgressFn fn,
+                       void* context) {
+   const std::string id = source_id ? source_id : "";
+-  const agens::import::Source* found = nullptr;
+-  for (const auto& s : Known()) {
+-    if (s.id == id) found = &s;
+-  }
+-  if (!found) {
+-    fn(context, id.c_str(), -1, "Origem não encontrada; procure de novo.");
+-    return;
+-  }
+-  const agens::import::Source source = *found;
+-  const std::string ato_name = ato && *ato ? std::string(ato) : agens::import::AtoNameFor(source);
+-  auto progress = base::BindRepeating(
+-      [](AgensImportProgressFn fn, void* context, std::string id, int state, const std::string& message) {
+-        fn(context, id.c_str(), state, message.c_str());
++  auto events = base::BindRepeating(
++      [](AgensImportProgressFn fn, void* context, std::string id, const agens::import::Event& e) {
++        const int state = e.event == kAgensImportEventDone ? 1 : e.event >= kAgensImportEventFailed ? -1 : 0;
++        if (state || !e.message.empty()) fn(context, id.c_str(), state, e.message.c_str());
+       },
+       fn, context, id);
+-  progress.Run(0, "Lendo " + source.browser + "…");
+-  auto write = base::BindOnce(
+-      [](agens::import::Source source, std::string ato_name, agens::import::ProgressCallback progress,
+-         agens::import::Data data) {
+-        if (!data.error.empty() && data.bookmarks.empty() && data.history.empty() && data.logins.empty() &&
+-            data.cookies.empty() && data.extension_ids.empty()) {
+-          progress.Run(-1, data.error);
+-          return;
+-        }
+-        agens::import::WriteIntoAto(ato_name, source.browser, std::move(data), progress);
+-      },
+-      source, ato_name, progress);
+-  if (id.starts_with("chromium:")) {
+-    agens::import::ReadChromium(source, what, std::move(write));
+-  } else {
+-    agens::import::ReadSafariFirefox(source, what, std::move(write));
+-  }
++  Start(NextJob(), "", ato ? ato : "", id, what, events);
+ }
+ 
+ }  // extern "C"
++
++#if !defined(OFFICIAL_BUILD)
++namespace agens::import {
++namespace {
++// Gates only (tools/gates/embutido.sh), with a fake home: --agens-import-test-run=<items>,<ato id>
++// lists the sources, imports the first Chromium-family one into that ato, tries an unknown source,
++// and starts then cancels an import into a new ato. Each result is one "agens-import-test <json>"
++// line on stderr.
++constexpr char kTestRunSwitch[] = "agens-import-test-run";
++
++void Print(const char* kind, base::Value value) {
++  fprintf(stderr, "agens-import-test %s %s\n", kind, base::WriteJson(value).value_or("null").c_str());
++  fflush(stderr);
++}
++void PrintEvent(void*, const AgensImportEvent* e) {
++  Print("event", base::Value(base::DictValue()
++                                 .Set("job", e->job)
++                                 .Set("event", e->event)
++                                 .Set("item", e->item)
++                                 .Set("count", e->count)
++                                 .Set("error", e->error)
++                                 .Set("message", e->message)));
++}
++void TestSources(void*, const AgensImportSource* sources, int count) {
++  const std::string value = base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(kTestRunSwitch);
++  const size_t comma = value.find(',');
++  int items = 0;
++  base::StringToInt(value.substr(0, comma), &items);
++  const std::string ato = comma == std::string::npos ? "" : value.substr(comma + 1);
++  base::ListValue list;
++  std::string first;
++  for (int i = 0; i < count; ++i) {
++    const AgensImportSource& s = sources[i];
++    list.Append(base::DictValue()
++                    .Set("id", s.id)
++                    .Set("browser", s.browser)
++                    .Set("profile", s.profile)
++                    .Set("ato", s.ato)
++                    .Set("available", s.available)
++                    .Set("problem", s.problem));
++    if (first.empty() && std::string_view(s.id).starts_with("chromium:")) first = s.id;
++  }
++  Print("sources", base::Value(std::move(list)));
++  if (first.empty()) return;
++  Print("job", base::Value(agens_import_start(ato.c_str(), first.c_str(), items, PrintEvent, nullptr)));
++  Print("job", base::Value(agens_import_start(ato.c_str(), "chromium:nope:", items, PrintEvent, nullptr)));
++  const int cancelled = agens_import_start("", first.c_str(), items, PrintEvent, nullptr);
++  agens_import_cancel(cancelled);
++  Print("job", base::Value(cancelled));
++}
++}  // namespace
++
++void RunTestImportIfAsked() {
++  if (!base::CommandLine::ForCurrentProcess()->HasSwitch(kTestRunSwitch)) return;
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE, base::BindOnce(&agens_import_sources, &TestSources, nullptr));
++}
++}  // namespace agens::import
++#endif  // !defined(OFFICIAL_BUILD)
+diff --git a/chrome/browser/agens/embed/agens_import.h b/chrome/browser/agens/embed/agens_import.h
+index 6d06705a23..dc5b1be8ed 100644
+--- a/chrome/browser/agens/embed/agens_import.h
++++ b/chrome/browser/agens/embed/agens_import.h
+@@ -1,5 +1,7 @@
+ // Copyright 2026 SugiyamaLabs.
+-// Importing from other browsers (Chrome, Brave, Arc, Edge, Safari, Firefox). Plain C for the UI.
++// Importing from other browsers (Chrome, Brave, Arc, Edge, Vivaldi, Opera, Chromium, Safari, Firefox).
++// Plain C for the UI. Our own readers, not Chromium's importer: on macOS that one only knows Safari
++// and Firefox, never the Chrome profile format.
+ // Each source is one profile of one browser; importing it fills an ato named after it
+ // ("Chrome — Pessoal"), created if needed.
+ #ifndef CHROME_BROWSER_AGENS_EMBED_AGENS_IMPORT_H_
+@@ -19,19 +21,56 @@ enum {
+   kAgensImportExtensions = 1 << 4, // Chromium-family only: the same Chrome Web Store extensions, installed from the store
+ };
+ 
++// Why something could not be read (AgensImportSource.problem, AgensImportEvent.error), so the UI
++// can explain it. The message next to it is already a sentence in Portuguese.
++enum {
++  kAgensImportErrorNone = 0,
++  kAgensImportErrorNoSource = 1,         // the source id is not known (list the sources again)
++  kAgensImportErrorNoAto = 2,            // the ato id does not exist, or the ato could not be created
++  kAgensImportErrorFullDiskAccess = 3,   // Safari: macOS blocks ~/Library/Safari without Full Disk Access
++  kAgensImportErrorKeychainDenied = 4,   // Chromium family: the Keychain prompt was denied (passwords, cookies)
++  kAgensImportErrorPrimaryPassword = 5,  // Firefox: a primary password locks its saved logins
++  kAgensImportErrorFailed = 6,           // anything else
++};
++
+ typedef struct {
+-  const char* id;       // opaque, pass back to agens_import_run
++  const char* id;       // opaque, pass back to agens_import_start / agens_import_run
+   const char* browser;  // "Chrome", "Brave", "Arc", "Edge", "Safari", "Firefox"
+   const char* profile;  // the browser's own profile name ("Pessoal", "Default"…)
+   const char* ato;      // the ato it goes into
+   int available;        // what it has: a mask of kAgensImport*
+   const char* note;     // why something is missing (e.g. Safari needs Full Disk Access), or ""
++  int problem;          // kAgensImportError* behind `note`, 0 when nothing is blocked
+ } AgensImportSource;
+ typedef void (*AgensImportSourcesFn)(void* context, const AgensImportSource* sources, int count);
+ // Finds installed browsers and their profiles. Calls `fn` later, once, on the UI thread.
+ void agens_import_sources(AgensImportSourcesFn fn, void* context);
+ 
+-// state: 0 working (message says what), 1 done, -1 failed (message says why).
++// Import into the ato with that id (AgensAto.id, the profile folder; null or "" creates the
++// suggested ato, AgensImportSource.ato). `items`: kAgensImport* mask, cut to what the source has.
++// Events arrive on the UI thread: per item started then finished (count, error), then exactly one
++// of done, failed or cancelled. Returns the job id (> 0) for agens_import_cancel.
++enum {
++  kAgensImportEventItemStarted = 0,
++  kAgensImportEventItemFinished = 1,  // count: how many went in; error != 0 when that item failed
++  kAgensImportEventDone = 2,
++  kAgensImportEventFailed = 3,        // error says why; nothing more comes
++  kAgensImportEventCancelled = 4,
++};
++typedef struct {
++  int job;
++  int event;    // kAgensImportEvent*
++  int item;     // one kAgensImport* bit; 0 for the whole job (reading, creating the ato, done)
++  int count;
++  int error;    // kAgensImportError*
++  const char* message;  // pt-BR, for the person; may be ""
++} AgensImportEvent;
++typedef void (*AgensImportEventFn)(void* context, const AgensImportEvent* event);
++int agens_import_start(const char* ato_id, const char* source_id, int items, AgensImportEventFn fn, void* context);
++// Stops at the next step (an item being written finishes first); then the cancelled event comes.
++void agens_import_cancel(int job);
++
++// Older form, by ato name (the current UI). state: 0 working (message says what), 1 done, -1 failed (message says why).
+ typedef void (*AgensImportProgressFn)(void* context, const char* source_id, int state, const char* message);
+ // `ato`: the name of the ato to create or fill; null or "" uses the suggested one (AgensImportSource.ato).
+ void agens_import_run(AgensWindow* window, const char* source_id, const char* ato, int what,
 diff --git a/chrome/browser/agens/embed/agens_screen_share.h b/chrome/browser/agens/embed/agens_screen_share.h
 new file mode 100644
 index 0000000000..4cfca597c7
@@ -14539,21 +14834,170 @@ index 268d4dc7bd..f473342646 100644
    }
    void StopFind() {
      if (find_in_page::FindTabHelper* helper = ActiveFind()) {
+diff --git a/chrome/browser/agens/embed/import_chromium.cc b/chrome/browser/agens/embed/import_chromium.cc
+index 5731ad244c..6da40ddff3 100644
+--- a/chrome/browser/agens/embed/import_chromium.cc
++++ b/chrome/browser/agens/embed/import_chromium.cc
+@@ -283,6 +283,8 @@ Data ReadAll(Source source, int what) {
+     auto key = SafeStorageKey(*family);
+     if (!key) {
+       data.error = "Sem acesso à chave do " + source.browser + " no Keychain; senhas e cookies ficaram de fora.";
++      data.error_kind = kAgensImportErrorKeychainDenied;
++      data.failed_items = what & (kAgensImportPasswords | kAgensImportCookies);
+     } else {
+       if (what & kAgensImportPasswords) ReadLogins(source.path, *key, data);
+       if (what & kAgensImportCookies) ReadCookies(source.path, *key, data);
+diff --git a/chrome/browser/agens/embed/import_internal.h b/chrome/browser/agens/embed/import_internal.h
+index b66ffba6b7..bbd1f04e4b 100644
+--- a/chrome/browser/agens/embed/import_internal.h
++++ b/chrome/browser/agens/embed/import_internal.h
+@@ -21,6 +21,7 @@ struct Source {
+   base::FilePath path;  // its profile directory (or data file)
+   int available = 0;    // kAgensImport* mask
+   std::string note;
++  int problem = 0;      // kAgensImportError* behind `note`
+ };
+ 
+ struct Bookmark {
+@@ -56,9 +57,18 @@ struct Data {
+   std::vector<Cookie> cookies;
+   std::vector<std::string> extension_ids;  // Chrome Web Store ids installed in the source profile
+   std::string error;  // a reader fills this when it couldn't read something (shown to the person)
++  int error_kind = 0;    // kAgensImportError* for `error`
++  int failed_items = 0;  // the kAgensImport* items `error` cost
+ };
+ 
+-using ProgressCallback = base::RepeatingCallback<void(int state, const std::string& message)>;
++struct Event {
++  int event = 0;  // kAgensImportEvent*
++  int item = 0;
++  int count = 0;
++  int error = 0;
++  std::string message;
++};
++using EventCallback = base::RepeatingCallback<void(const Event&)>;
+ 
+ // Readers. Find* may block (call on a thread pool). Read* reads what `what` asks (kAgensImport*)
+ // off the UI thread and replies on the UI thread.
+@@ -67,10 +77,17 @@ std::vector<Source> FindSafariFirefoxSources();  // import_safari_firefox.cc
+ void ReadChromium(const Source& source, int what, base::OnceCallback<void(Data)> done);
+ void ReadSafariFirefox(const Source& source, int what, base::OnceCallback<void(Data)> done);
+ 
+-// Writer (import_writer.cc): creates (or reuses) the ato called `ato_name`, then adds the
+-// bookmarks (under a folder "Importados do <browser>"), history, logins and cookies to it.
+-// Calls `progress` with 0 while working and 1/-1 at the end, on the UI thread.
+-void WriteIntoAto(const std::string& ato_name, const std::string& browser, Data data, ProgressCallback progress);
++// Writer (import_writer.cc): fills the ato with id `ato_id` (its folder name), or, when that is
++// empty, the one called `ato_name` (created if needed): bookmarks (under a folder "Importados do
++// <browser>"), history, logins, cookies, extensions — the ones in `items`. Sends item events, then
++// done/failed/cancelled, on the UI thread. `cancelled()` is checked between steps.
++void WriteIntoAto(const std::string& ato_id, const std::string& ato_name, const std::string& browser, int items,
++                  Data data, EventCallback events, base::RepeatingCallback<bool()> cancelled);
++
++#if !defined(OFFICIAL_BUILD)
++// Gates only: --agens-import-test-run (agens_import.cc). Called once at startup.
++void RunTestImportIfAsked();
++#endif
+ 
+ // The ato a source goes into: "<browser> — <profile>" (just "<browser>" for single-profile ones).
+ std::string AtoNameFor(const Source& source);
+diff --git a/chrome/browser/agens/embed/import_safari_firefox.cc b/chrome/browser/agens/embed/import_safari_firefox.cc
+index 18ec90466e..13a63927d2 100644
+--- a/chrome/browser/agens/embed/import_safari_firefox.cc
++++ b/chrome/browser/agens/embed/import_safari_firefox.cc
+@@ -261,6 +261,8 @@ Data ReadSafari(int what) {
+   if (data.bookmarks.empty() && data.history.empty() && data.cookies.empty() &&
+       (IsDenied(dir.AppendASCII("Bookmarks.plist")) || IsDenied(dir.AppendASCII("History.db")))) {
+     data.error = kDenied;
++    data.error_kind = kAgensImportErrorFullDiskAccess;
++    data.failed_items = what & (kAgensImportBookmarks | kAgensImportHistory | kAgensImportCookies);
+   }
+   return data;
+ }
+@@ -281,6 +283,7 @@ std::vector<Source> FindSafari() {
+   const bool denied = IsDenied(bm) || IsDenied(hist) || (!cookies.empty() && IsDenied(cookies));
+   if (!s.available && !denied) return {};
+   s.note = denied ? std::string(kDenied) : std::string();
++  s.problem = denied ? kAgensImportErrorFullDiskAccess : kAgensImportErrorNone;
+   s.note += kSafariPasswords;
+   return {s};
+ }
+@@ -450,6 +453,8 @@ void ReadFirefoxLogins(const base::FilePath& profile, Data& data) {
+   const KeyStatus st = LoadNssKeys(profile, &keys);
+   if (st == KeyStatus::kPrimaryPassword) {
+     data.error = kPrimaryPassword;
++    data.error_kind = kAgensImportErrorPrimaryPassword;
++    data.failed_items = kAgensImportPasswords;
+     return;
+   }
+   if (st != KeyStatus::kOk) return;
+@@ -622,7 +627,10 @@ std::vector<Source> FindFirefox() {
+       std::vector<NssKey> keys;
+       const KeyStatus st = LoadNssKeys(dir, &keys);
+       if (st == KeyStatus::kOk) s.available |= kAgensImportPasswords;
+-      if (st == KeyStatus::kPrimaryPassword) s.note = kPrimaryPassword;
++      if (st == KeyStatus::kPrimaryPassword) {
++        s.note = kPrimaryPassword;
++        s.problem = kAgensImportErrorPrimaryPassword;
++      }
+     }
+     if (s.available) out.push_back(std::move(s));
+   }
+@@ -634,6 +642,7 @@ Data ReadSource(const Source& source, int what) {
+   if (source.id.starts_with("firefox:")) return ReadFirefox(source, what);
+   Data d;
+   d.error = "Origem desconhecida.";
++  d.error_kind = kAgensImportErrorNoSource;
+   return d;
+ }
+ 
 diff --git a/chrome/browser/agens/embed/import_writer.cc b/chrome/browser/agens/embed/import_writer.cc
-index 4eb24ab895..436be6abd7 100644
+index 4eb24ab895..e74592febd 100644
 --- a/chrome/browser/agens/embed/import_writer.cc
 +++ b/chrome/browser/agens/embed/import_writer.cc
-@@ -11,6 +11,7 @@
+@@ -1,5 +1,5 @@
+ // Copyright 2026 SugiyamaLabs.
+-// Puts imported data into an ato (a Chromium profile named `ato_name`), creating it if needed.
++// Puts imported data into an ato (a Chromium profile), by id or by name (created if needed).
+ 
+ #include <memory>
+ #include <set>
+@@ -11,6 +11,8 @@
  #include "base/strings/stringprintf.h"
  #include "base/strings/utf_string_conversions.h"
  #include "base/task/single_thread_task_runner.h"
++#include "chrome/browser/agens/embed/agens_import.h"
 +#include "chrome/browser/agens/embed/agens_window.h"
  #include "chrome/browser/agens/embed/import_internal.h"
  #include "chrome/browser/bookmarks/bookmark_model_factory.h"
  #include "chrome/browser/browser_process.h"
-@@ -72,15 +73,11 @@ class Job : public base::RefCounted<Job> {
-       if (e->GetLocalProfileName() == name) dir = e->GetPath();
+@@ -60,29 +62,33 @@ std::set<base::FilePath>& Claimed() {
+ 
+ class Job : public base::RefCounted<Job> {
+  public:
+-  Job(std::string browser, Data data, ProgressCallback progress)
+-      : browser_(std::move(browser)), data_(std::move(data)), progress_(std::move(progress)) {}
++  Job(std::string browser, int items, Data data, EventCallback events, base::RepeatingCallback<bool()> cancelled)
++      : browser_(std::move(browser)),
++        items_(items),
++        data_(std::move(data)),
++        events_(std::move(events)),
++        cancelled_(std::move(cancelled)) {}
+ 
+-  void Start(const std::string& ato) {
++  void Start(const std::string& ato_id, const std::string& ato) {
++    if (Stop()) return;
+     ProfileManager* manager = g_browser_process->profile_manager();
+     ProfileAttributesStorage& storage = manager->GetProfileAttributesStorage();
+     const std::u16string name = base::UTF8ToUTF16(ato);
+     base::FilePath dir;
+     for (ProfileAttributesEntry* e : storage.GetAllProfilesAttributes()) {
+-      if (e->GetLocalProfileName() == name) dir = e->GetPath();
++      if (ato_id.empty() ? e->GetLocalProfileName() == name : e->GetPath().BaseName().AsUTF8Unsafe() == ato_id) {
++        dir = e->GetPath();
++      }
      }
++    if (dir.empty() && !ato_id.empty()) return Fail(kAgensImportErrorNoAto, "Esse ato não existe mais.");
      bool created = false;
 -    if (dir.empty()) {  // same free-folder scheme as AgensWindow::NewAto
 +    if (dir.empty()) {  // as AgensWindow::NewAto
@@ -14569,8 +15013,204 @@ index 4eb24ab895..436be6abd7 100644
 +      Claimed().insert(dir);
 +      AgensWindow::SetAtoExtras(dir, std::nullopt);  // nothing left from an ato that had this folder (e.g. shared)
      }
-     progress_.Run(0, created ? "Criando o ato " + ato + "…" : "Usando o ato " + ato + "…");
+-    progress_.Run(0, created ? "Criando o ato " + ato + "…" : "Usando o ato " + ato + "…");
++    if (ato_id.empty()) Say(created ? "Criando o ato " + ato + "…" : "Usando o ato " + ato + "…");
      manager->CreateProfileAsync(
+         dir, base::BindOnce(&Job::OnProfile, base::WrapRefCounted(this), created, name));
+   }
+@@ -91,10 +97,32 @@ class Job : public base::RefCounted<Job> {
+   friend class base::RefCounted<Job>;
+   ~Job() = default;
+ 
+-  void Fail(const std::string& why) { progress_.Run(-1, why); }
++  void Say(const std::string& message) { events_.Run({kAgensImportEventItemStarted, 0, 0, 0, message}); }
++  void End(int event, int error, const std::string& message) {
++    if (ended_) return;
++    ended_ = true;
++    events_.Run({event, 0, 0, error, message});
++  }
++  void Fail(int error, const std::string& why) { End(kAgensImportEventFailed, error, why); }
++  // True (and the cancelled event sent) once the caller cancelled; every step checks it first.
++  bool Stop() {
++    if (!ended_ && cancelled_.Run()) End(kAgensImportEventCancelled, 0, "Cancelado.");
++    return ended_;
++  }
++  // Whether to write `item`; sends its started event when so.
++  bool Begin(int item) {
++    if (!(items_ & item) || Stop()) return false;
++    events_.Run({kAgensImportEventItemStarted, item, 0, 0, ""});
++    return true;
++  }
++  void Finished(int item, size_t count, const std::string& message) {
++    const bool failed = data_.failed_items & item;
++    events_.Run({kAgensImportEventItemFinished, item, static_cast<int>(count), failed ? data_.error_kind : 0,
++                 failed ? data_.error : message});
++  }
+ 
+   void OnProfile(bool created, const std::u16string& name, Profile* profile) {
+-    if (!profile) return Fail("Não consegui criar o ato.");
++    if (!profile) return Fail(kAgensImportErrorNoAto, "Não consegui criar o ato.");
+     if (created) {
+       if (ProfileAttributesEntry* e = g_browser_process->profile_manager()
+                                           ->GetProfileAttributesStorage()
+@@ -115,11 +143,12 @@ class Job : public base::RefCounted<Job> {
+           base::Milliseconds(200));
+       return;
+     }
+-    if (!model->loaded()) return Fail("Os favoritos do ato não carregaram.");
+-    WriteBookmarks(model);
+-    WriteHistory();
+-    WritePasswords();
+-    WriteCookies();
++    if (!model->loaded()) return Fail(kAgensImportErrorFailed, "Os favoritos do ato não carregaram.");
++    if (Begin(kAgensImportBookmarks)) WriteBookmarks(model);
++    if (Begin(kAgensImportHistory)) WriteHistory();
++    if (Begin(kAgensImportPasswords)) WritePasswords();
++    if (Begin(kAgensImportCookies)) return WriteCookies();
++    WriteExtensions();
+   }
+ 
+   static const bookmarks::BookmarkNode* Folder(bookmarks::BookmarkModel* model, const bookmarks::BookmarkNode* parent,
+@@ -131,7 +160,7 @@ class Job : public base::RefCounted<Job> {
+   }
+ 
+   void WriteBookmarks(bookmarks::BookmarkModel* model) {
+-    if (data_.bookmarks.empty()) return;
++    if (data_.bookmarks.empty()) return Finished(kAgensImportBookmarks, 0, "Favoritos: 0");
+     const bookmarks::BookmarkNode* bar =
+         model->account_bookmark_bar_node() ? model->account_bookmark_bar_node() : model->bookmark_bar_node();
+     const bookmarks::BookmarkNode* other =
+@@ -149,11 +178,11 @@ class Job : public base::RefCounted<Job> {
+       ++added;
+     }
+     model->EndExtensiveChanges();
+-    progress_.Run(0, "Favoritos: " + N(added));
++    Finished(kAgensImportBookmarks, added, "Favoritos: " + N(added));
+   }
+ 
+   void WriteHistory() {
+-    if (data_.history.empty()) return;
++    if (data_.history.empty()) return Finished(kAgensImportHistory, 0, "Histórico: 0");
+     history::URLRows rows;
+     size_t old = 0;
+     for (const Visit& v : data_.history) {
+@@ -168,16 +197,18 @@ class Job : public base::RefCounted<Job> {
+       row.set_last_visit(v.last_visit);
+       rows.push_back(row);
+     }
+-    if (rows.empty()) return progress_.Run(0, "Histórico: 0 (" + N(old) + " com mais de 90 dias, o Chromium descarta)");
++    if (rows.empty()) {
++      return Finished(kAgensImportHistory, 0, "Histórico: 0 (" + N(old) + " com mais de 90 dias, o Chromium descarta)");
++    }
+     auto* history = HistoryServiceFactory::GetForProfile(profile_, ServiceAccessType::EXPLICIT_ACCESS);
+-    if (!history) return progress_.Run(0, "Histórico: indisponível neste ato");
++    if (!history) return Finished(kAgensImportHistory, 0, "Histórico: indisponível neste ato");
+     history->AddPagesWithDetails(rows, history::SOURCE_FIREFOX_IMPORTED);
+-    progress_.Run(0, "Histórico: " + N(rows.size()) +
+-                            (old ? " (" + N(old) + " com mais de 90 dias ficaram de fora)" : ""));
++    Finished(kAgensImportHistory, rows.size(),
++             "Histórico: " + N(rows.size()) + (old ? " (" + N(old) + " com mais de 90 dias ficaram de fora)" : ""));
+   }
+ 
+   void WritePasswords() {
+-    if (data_.logins.empty()) return;
++    if (data_.logins.empty()) return Finished(kAgensImportPasswords, 0, "Senhas: 0");
+     auto writer = base::MakeRefCounted<ProfileWriter>(profile_);
+     size_t n = 0;
+     for (const Login& l : data_.logins) {
+@@ -192,11 +223,14 @@ class Job : public base::RefCounted<Job> {
+       writer->AddPasswordForm(form);
+       ++n;
+     }
+-    progress_.Run(0, "Senhas: " + N(n));
++    Finished(kAgensImportPasswords, n, "Senhas: " + N(n));
+   }
+ 
+   void WriteCookies() {
+-    if (data_.cookies.empty()) return WriteExtensions();
++    if (data_.cookies.empty()) {
++      Finished(kAgensImportCookies, 0, "Cookies: 0");
++      return WriteExtensions();
++    }
+     cookie_manager_ = profile_->GetDefaultStoragePartition()->GetCookieManagerForBrowserProcess();
+     pending_ = data_.cookies.size();
+     for (const Cookie& c : data_.cookies) {
+@@ -232,7 +266,7 @@ class Job : public base::RefCounted<Job> {
+     if (--pending_) return;
+     std::string msg = "Cookies: " + N(ok_);
+     if (failed_) msg += " (" + N(failed_) + " falharam)";
+-    progress_.Run(0, msg);
++    Finished(kAgensImportCookies, ok_, msg);
+     cookie_manager_->FlushCookieStore(base::BindOnce(&Job::WriteExtensions, base::WrapRefCounted(this)));
+   }
+ 
+@@ -241,6 +275,7 @@ class Job : public base::RefCounted<Job> {
+   static bool AllowInstall(const extensions::Extension*, content::BrowserContext*) { return true; }
+ 
+   void WriteExtensions() {
++    if (!Begin(kAgensImportExtensions)) return Finish();
+     auto* registry = extensions::ExtensionRegistry::Get(profile_);
+     auto* pending = extensions::PendingExtensionManager::Get(profile_);
+     auto* updater = extensions::ExtensionUpdater::Get(profile_);
+@@ -253,8 +288,11 @@ class Job : public base::RefCounted<Job> {
+         params.ids.push_back(id);
+       }
+     }
+-    if (wanted_.empty() || !updater) return Finish();
+-    progress_.Run(0, "Extensões: " + N(wanted_.size()) + " (instalando da loja)");
++    if (wanted_.empty() || !updater) {
++      Finished(kAgensImportExtensions, 0, "Extensões: nenhuma nova");
++      return Finish();
++    }
++    Say("Extensões: " + N(wanted_.size()) + " (instalando da loja)");
+     params.install_immediately = true;
+     updater->CheckNow(std::move(params));
+     WaitForExtensions(0);
+@@ -262,6 +300,7 @@ class Job : public base::RefCounted<Job> {
+ 
+   // shortcut: polls the registry, fine for a one-shot import; gives up after ~2 minutes.
+   void WaitForExtensions(int tries) {
++    if (Stop()) return;
+     auto* registry = extensions::ExtensionRegistry::Get(profile_);
+     size_t installed = 0, enabled = 0;
+     for (const std::string& id : wanted_) {
+@@ -283,15 +322,20 @@ class Job : public base::RefCounted<Job> {
+     }
+     std::string msg = "Extensões instaladas: " + N(installed) + " de " + N(wanted_.size());
+     if (installed > enabled) msg += " (" + N(installed - enabled) + " ficaram desativadas)";
+-    progress_.Run(0, msg);
++    Finished(kAgensImportExtensions, installed, msg);
+     Finish();
+   }
+ 
+-  void Finish() { progress_.Run(1, "Pronto."); }
++  void Finish() {
++    if (!Stop()) End(kAgensImportEventDone, 0, "Pronto.");
++  }
+ 
+   std::string browser_;
++  int items_;
+   Data data_;
+-  ProgressCallback progress_;
++  EventCallback events_;
++  base::RepeatingCallback<bool()> cancelled_;
++  bool ended_ = false;
+   raw_ptr<Profile> profile_ = nullptr;
+   raw_ptr<network::mojom::CookieManager> cookie_manager_ = nullptr;
+   std::vector<std::string> wanted_;
+@@ -300,8 +344,10 @@ class Job : public base::RefCounted<Job> {
+ 
+ }  // namespace
+ 
+-void WriteIntoAto(const std::string& ato_name, const std::string& browser, Data data, ProgressCallback progress) {
+-  base::MakeRefCounted<Job>(browser, std::move(data), std::move(progress))->Start(ato_name);
++void WriteIntoAto(const std::string& ato_id, const std::string& ato_name, const std::string& browser, int items,
++                  Data data, EventCallback events, base::RepeatingCallback<bool()> cancelled) {
++  base::MakeRefCounted<Job>(browser, items, std::move(data), std::move(events), std::move(cancelled))
++      ->Start(ato_id, ato_name);
+ }
+ 
+ }  // namespace agens::import
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
 index cfdc014cf4..f3d7d023bd 100644
 --- a/chrome/browser/agens/embed/native_shell.cc

@@ -249,6 +249,135 @@ try: engine5.wait(15)
 except subprocess.TimeoutExpired: engine5.kill()
 subprocess.run(["rm", "-rf", profile5, fake_home])
 
+# Import from another browser (agens_import.h), on a short launch whose home is a temp folder
+# (CFFIXED_USER_HOME and the import test switches), so no real browser data is ever read and the
+# Keychain is never asked: a fake Chrome profile ("Pessoal": bookmarks, history, one saved login and
+# one cookie, encrypted with a test Safe Storage key) and a fake Brave one (bookmarks only).
+# --agens-import-test-run (not in official builds) lists the sources, imports Chrome into the
+# pre-made ato "Profile 7", tries an unknown source and cancels a third import; the events come as
+# "agens-import-test" lines in the engine log.
+if OFFICIAL:
+    skip("import from another browser", "dev-only switch, compiled out of the official build")
+else:
+    import sqlite3
+    home7 = tempfile.mkdtemp(prefix="agens-im.", dir="/tmp")
+    support = f"{home7}/Library/Application Support"
+    chrome_dir, brave_dir = f"{support}/Google/Chrome", f"{support}/BraveSoftware/Brave-Browser"
+    os.makedirs(f"{chrome_dir}/Default/Network"); os.makedirs(f"{brave_dir}/Default")
+    json.dump({"profile": {"info_cache": {"Default": {"name": "Pessoal"}}}}, open(f"{chrome_dir}/Local State", "w"))
+    json.dump({"profile": {"info_cache": {"Default": {"name": "Trabalho"}}}}, open(f"{brave_dir}/Local State", "w"))
+    def bm(name, url): return {"type": "url", "name": name, "url": url, "date_added": "13300000000000000"}
+    json.dump({"roots": {
+        "bookmark_bar": {"type": "folder", "children": [bm("Gate um", "https://um.gate.test/"),
+            {"type": "folder", "name": "Pasta gate", "children": [bm("Gate dois", "https://dois.gate.test/")]}]},
+        "other": {"type": "folder", "children": [bm("Gate tres", "https://tres.gate.test/")]}}},
+        open(f"{chrome_dir}/Default/Bookmarks", "w"))
+    json.dump({"roots": {"bookmark_bar": {"type": "folder", "children": [bm("Brave gate", "https://brave.gate.test/")]}}},
+              open(f"{brave_dir}/Default/Bookmarks", "w"))
+    webkit = lambda days_ago: int((time.time() - days_ago * 86400 + 11644473600) * 1e6)
+    db = sqlite3.connect(f"{chrome_dir}/Default/History")
+    db.execute("CREATE TABLE urls (id INTEGER PRIMARY KEY, url TEXT, title TEXT, visit_count INTEGER, last_visit_time INTEGER)")
+    db.executemany("INSERT INTO urls (url, title, visit_count, last_visit_time) VALUES (?, ?, ?, ?)",
+                   [("https://visita1.gate.test/", "Visita 1", 3, webkit(1)), ("https://visita2.gate.test/", "Visita 2", 1, webkit(5)),
+                    ("https://velha.gate.test/", "Velha", 1, webkit(200))])  # older than 90 days: Chromium drops it
+    db.commit(); db.close()
+    key = hashlib.pbkdf2_hmac("sha1", b"gatekey", b"saltysalt", 1003, 16).hex()
+    def v10(plain): return b"v10" + subprocess.run(["openssl", "enc", "-aes-128-cbc", "-K", key, "-iv", "20" * 16],
+                                                   input=plain, capture_output=True, check=True).stdout
+    db = sqlite3.connect(f"{chrome_dir}/Default/Login Data")
+    db.execute("CREATE TABLE logins (origin_url TEXT, username_value TEXT, password_value BLOB, signon_realm TEXT, "
+               "date_created INTEGER, blacklisted_by_user INTEGER)")
+    db.execute("INSERT INTO logins VALUES (?, ?, ?, ?, ?, 0)", ("https://login.gate.test/entrar", "gate-user",
+               v10(b"gate-senha"), "https://login.gate.test/", webkit(3)))
+    db.commit(); db.close()
+    db = sqlite3.connect(f"{chrome_dir}/Default/Network/Cookies")
+    db.execute("CREATE TABLE cookies (host_key TEXT, name TEXT, value TEXT, encrypted_value BLOB, path TEXT, expires_utc INTEGER, "
+               "is_secure INTEGER, is_httponly INTEGER, samesite INTEGER, creation_utc INTEGER, last_access_utc INTEGER)")
+    db.execute("INSERT INTO cookies VALUES (?, ?, '', ?, '/', ?, 1, 1, 1, ?, ?)", (".cookie.gate.test", "gate_sessao",
+               v10(hashlib.sha256(b".cookie.gate.test").digest() + b"valor-gate"), webkit(-30), webkit(2), webkit(1)))
+    db.commit(); db.close()
+    profile7 = tempfile.mkdtemp(prefix="agens-i.", dir="/tmp")
+    os.makedirs(f"{profile7}/Profile 7")
+    json.dump({"profile": {"info_cache": {"Profile 7": {"name": "Gate importa", "is_using_default_name": False}}}},
+              open(f"{profile7}/Local State", "w"))
+    engine7 = launch(profile7, "--agens-import-test-run=31,Profile 7", f"--agens-import-test-root={support}",
+                     f"--agens-import-test-home={home7}", "--agens-import-test-key=gatekey", name="import",
+                     env={**os.environ, "CFFIXED_USER_HOME": home7})
+    def import_lines():
+        out = {"sources": None, "job": [], "event": []}
+        for line in open(f"{OUT}/engine-import.log", errors="replace"):
+            m = re.match(r"agens-import-test (\w+) (.*)$", line.strip())
+            if not m: continue
+            v = json.loads(m.group(2))
+            if m.group(1) == "sources": out["sources"] = v
+            else: out[m.group(1)].append(v)
+        return out
+    end = time.time() + 60
+    while time.time() < end:
+        got = import_lines()
+        if len([e for e in got["event"] if e["event"] >= 2]) >= 3: break
+        time.sleep(0.5)
+    src = {(x["browser"], x["profile"]): x for x in got["sources"] or []}
+    check("import: finds each Chrome-family profile in the (fake) home, nothing else",
+          set(src) == {("Chrome", "Pessoal"), ("Brave", "Trabalho")}, got["sources"])
+    check("import: Chrome profile has bookmarks, history, passwords, cookies (mask 15); Brave only bookmarks (1)",
+          src.get(("Chrome", "Pessoal"), {}).get("available") == 15 and src.get(("Brave", "Trabalho"), {}).get("available") == 1, src)
+    jobs = got["job"]
+    ev = lambda job: [e for e in got["event"] if e["job"] == job]
+    fin = {e["item"]: e for e in ev(jobs[0] if jobs else -1) if e["event"] == 1}
+    check("import: per item started then finished with counts (3 bookmarks, 2 history, 1 password, 1 cookie)",
+          len(jobs) == 3 and {i: fin.get(i, {}).get("count") for i in (1, 2, 4, 8)} == {1: 3, 2: 2, 4: 1, 8: 1}
+          and all(e["error"] == 0 for e in fin.values())
+          and all(any(e["event"] == 0 and e["item"] == i for e in ev(jobs[0])) for i in (1, 2, 4, 8)), ev(jobs[0] if jobs else -1))
+    check("import: the job ends done", any(e["event"] == 2 for e in ev(jobs[0] if jobs else -1)))
+    check("import: an unknown source fails with kAgensImportErrorNoSource (1)",
+          len(jobs) > 1 and [(e["event"], e["error"]) for e in ev(jobs[1])] == [(3, 1)], ev(jobs[1] if len(jobs) > 1 else -1))
+    check("import: a cancelled import ends cancelled and writes nothing",
+          len(jobs) > 2 and ev(jobs[2])[-1:] and ev(jobs[2])[-1]["event"] == 4
+          and not any(e["event"] == 1 for e in ev(jobs[2])), ev(jobs[2] if len(jobs) > 2 else -1))
+    i7 = Conn(profile7 + "/agens.sock")
+    i7.ask("hello", client="embutido-gate")
+    names7 = [a.get("name") for a in i7.ask("atos.list").get("atos") or []]
+    check("import: went into the given ato, no ato created (not even by the cancelled one)",
+          "Gate importa" in names7 and not any(n and n.startswith("Chrome") for n in names7), names7)
+    def ato_db(name, sql):  # a copy, read while the engine runs
+        for rel in (name, "Network/" + name):
+            f = f"{profile7}/Profile 7/{rel}"
+            if not os.path.exists(f): continue
+            tmp = tempfile.mkdtemp(dir="/tmp")
+            for suffix in ("", "-wal", "-journal"):
+                if os.path.exists(f + suffix): subprocess.run(["cp", f + suffix, f"{tmp}/db{suffix}"])
+            try: return sqlite3.connect(f"{tmp}/db").execute(sql).fetchall()
+            except sqlite3.Error as e: return [("error", str(e))]
+            finally: subprocess.run(["rm", "-rf", tmp])
+        return None
+    # Bookmarks are saved by a BEST_EFFORT task, held until startup completes (the first page shown),
+    # as a host does once it shows a tab.
+    i7.ask("host.attach"); i7.ask("view.open", ato="Profile 7", url=SITE + "/other")
+    landed = {}
+    end = time.time() + 40  # bookmarks save ~2.5 s after that, history commits every ~10 s
+    while time.time() < end:
+        try: bookmarks = open(f"{profile7}/Profile 7/Bookmarks").read()
+        except OSError: bookmarks = ""
+        landed = {"bookmarks": [u for u in ("um", "dois", "tres") if f"https://{u}.gate.test/" in bookmarks]
+                               + (["folder"] if "Importados do Chrome" in bookmarks and "Pasta gate" in bookmarks else []),
+                  "history": ato_db("History", "SELECT url FROM urls WHERE url LIKE '%gate.test%' ORDER BY url"),
+                  "logins": ato_db("Login Data", "SELECT origin_url, username_value FROM logins"),
+                  "cookies": ato_db("Cookies", "SELECT host_key, name FROM cookies WHERE host_key LIKE '%gate.test'")}
+        if len(landed["bookmarks"]) == 4 and landed["history"] and len(landed["history"]) == 2 and landed["logins"] and landed["cookies"]: break
+        time.sleep(2)
+    check("import: bookmarks landed in the ato under \"Importados do Chrome\", folders kept",
+          landed.get("bookmarks") == ["um", "dois", "tres", "folder"], landed.get("bookmarks"))
+    check("import: history landed (the two recent visits)",
+          landed.get("history") == [("https://visita1.gate.test/",), ("https://visita2.gate.test/",)], landed.get("history"))
+    check("import: the saved login landed (decrypted with the source's Safe Storage key)",
+          landed.get("logins") == [("https://login.gate.test/entrar", "gate-user")], landed.get("logins"))
+    check("import: the cookie landed", landed.get("cookies") == [(".cookie.gate.test", "gate_sessao")], landed.get("cookies"))
+    engine7.terminate()
+    try: engine7.wait(15)
+    except subprocess.TimeoutExpired: engine7.kill()
+    subprocess.run(["rm", "-rf", profile7, home7])
+
 check("host.attach from the parent", c.ask("host.attach").get("ok"))
 r = c.ask("host.attach")
 check("a second host.attach on the same connection is refused", not r.get("ok"), r)
