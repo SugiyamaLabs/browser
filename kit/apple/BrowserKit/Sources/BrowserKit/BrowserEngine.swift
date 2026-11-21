@@ -137,6 +137,8 @@ public struct HostSettings: Sendable, Equatable {
   /// The host can make and use passkeys of this Mac: what sites see in
   /// `isUserVerifyingPlatformAuthenticatorAvailable()`. Off by default.
   public var webauthnPlatform: Bool = false
+  /// Where each ato's downloads go, by ato id (`~/Downloads` unless the app set another).
+  public var downloadsDirectories: [String: String] = [:]
 }
 
 /// The browser engine as a hidden child process of the host app: starts it, connects, says
@@ -192,6 +194,12 @@ public struct HostSettings: Sendable, Equatable {
   /// A tab started or stopped playing sound, or was muted or unmuted (`connection.mute`); also
   /// in `tabs`. Not called for a tab's first report.
   @ObservationIgnored public var onAudio: ((_ tab: String, _ audible: Bool, _ muted: Bool) -> Void)?
+  /// A download started or changed (progress, state, its final path).
+  @ObservationIgnored public var onDownload: ((Download) -> Void)?
+  /// A download left the list (`downloadAction(.remove)`, `.discardDangerous`).
+  @ObservationIgnored public var onDownloadRemoved: ((_ id: String, _ ato: String) -> Void)?
+  /// The rest of a list `connection.suggest` started: the whole list again, each time it changes.
+  @ObservationIgnored public var onSuggestions: ((Suggestions) -> Void)?
   /// The host's own items in the right-click menu `presentDefaultUI` draws: after the engine's
   /// actions, past a separator. Choosing one calls `onContextMenuItem` and answers the engine
   /// with cancel.
@@ -332,19 +340,23 @@ public struct HostSettings: Sendable, Equatable {
   /// Sets the options given (nil leaves one as it is) and returns them all as the engine now has
   /// them; with no argument it only reads. The engine keeps them across launches. An engine older
   /// than this op throws `unknown_op`: it behaves as `siteRequests` false, `agentExtensions` true
-  /// (and has no passkeys at all).
-  public func settings(siteRequests: Bool? = nil, agentExtensions: Bool? = nil, webauthnPlatform: Bool? = nil)
-    async throws(BrowserError) -> HostSettings
-  {
+  /// (and has no passkeys at all). `downloadsDirectories` sets the folders of the atos named
+  /// (an absolute path, or "" for `~/Downloads` again); the others stay.
+  public func settings(
+    siteRequests: Bool? = nil, agentExtensions: Bool? = nil, webauthnPlatform: Bool? = nil,
+    downloadsDirectories: [String: String]? = nil
+  ) async throws(BrowserError) -> HostSettings {
     guard let connection else { throw BrowserError(code: BrowserError.disconnected) }
     var params: [String: JSON] = [:]
     if let siteRequests { params["site_requests"] = .bool(siteRequests) }
     if let agentExtensions { params["agent_extensions"] = .bool(agentExtensions) }
     if let webauthnPlatform { params["webauthn_platform"] = .bool(webauthnPlatform) }
+    if let downloadsDirectories { params["downloads_dir"] = .object(downloadsDirectories.mapValues { .string($0) }) }
     let reply = try await connection.send(op: "host.settings", params: params)
     return HostSettings(
       siteRequests: reply["site_requests"]?.bool ?? false, agentExtensions: reply["agent_extensions"]?.bool ?? true,
-      webauthnPlatform: reply["webauthn_platform"]?.bool ?? false)
+      webauthnPlatform: reply["webauthn_platform"]?.bool ?? false,
+      downloadsDirectories: (reply["downloads_dir"]?.object ?? [:]).compactMapValues(\.string))
   }
 
   /// The engine is another process, with no Dock icon: its DevTools window comes to the front and
@@ -420,6 +432,14 @@ public struct HostSettings: Sendable, Equatable {
         }
       case "view.zoom":
         if let tab = message["tab"]?.string, let factor = message["factor"]?.double { onZoom?(tab, factor) }
+      case "view.download":
+        if let download = Download(message: message) { onDownload?(download) }
+      case "view.download.removed":
+        if let id = message["id"]?.string { onDownloadRemoved?(id, message["ato"]?.string ?? "") }
+      case "view.suggest":
+        if let tab = message["tab"]?.string, let text = message["text"]?.string {
+          onSuggestions?(Suggestions(tab: tab, text: text, message: message))
+        }
       case "view.agent_refused":
         if let tab = message["tab"]?.string, let ato = message["ato"]?.string, let agent = message["agent"]?.string,
           let reason = message["reason"]?.string

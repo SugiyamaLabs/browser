@@ -128,6 +128,7 @@ let read = try await engine.settings()                                          
 
 - `siteRequests` (padrão `false`): sites podem pedir localização e notificações (chega como `ui.ask` de permissão); desligado, ficam bloqueadas em todo ato.
 - `agentExtensions` (padrão `true`): as extensões agem nas abas que um agente controla. Desligado, ficam fora delas (o que ainda passa está em protocolo.md).
+- `downloadsDirectories` (por ato, padrão `~/Downloads`): a pasta onde caem os downloads de cada ato. `settings(downloadsDirectories: ["Profile 1": "/Users/ana/Agens/Downloads"])` muda só os atos que vêm; `""` volta ao padrão; a resposta traz a pasta de todos. Veja "Downloads", abaixo.
 - `webauthnPlatform` (padrão `false`): o app sabe criar e usar passkeys deste Mac; é o que o site vê em `isUserVerifyingPlatformAuthenticatorAvailable()`. Ligue só quando o app responde `.webauthn` com credenciais de verdade (veja "Passkeys", abaixo).
 - Motor mais antigo lança `BrowserError` com `code` `unknown_op`; ali vale o padrão.
 
@@ -270,6 +271,32 @@ let reopened = try await engine.connection?.reopenClosedTab(ato: ato)   // o id;
 **Volume da aba.** `tab.volume` vai de 0 a 100 (100 quando o motor não manda). `try await engine.connection?.setVolume(30, in: tab)` muda só esta aba, como o popover do alto-falante; também tira o silêncio (`muted: false`, e `onAudio` avisa). Volume 0 não é silenciar. Não é guardado: aba restaurada volta a 100. Motor mais antigo: `setVolume` lança `unknown_op`.
 
 **Página sem HTTPS.** `view.tab` não diz se a página é segura; para o "Não seguro" da barra, olhe `tab.url` (`http://` que não seja `localhost`, `*.localhost`, `127.0.0.1` ou `[::1]`, a mesma regra do motor).
+
+## Downloads e sugestões do endereço
+
+O painel de downloads e a lista embaixo do campo de endereço são do app desenhar; o motor dá os dados ([protocolo.md](protocolo.md), "Passo 5.9").
+
+```swift
+engine.onDownload = { d in downloadsPanel.update(d) }            // começou ou mudou: progresso, estado, path final
+engine.onDownloadRemoved = { id, ato in downloadsPanel.remove(id) }
+let all = try await engine.connection?.downloads(ato: ato)       // o mais novo primeiro, com os do histórico
+try await engine.connection?.downloadAction(.pause, id: d.id)    // .resume, .cancel, .open, .showInFinder, .remove,
+                                                                  // .keepDangerous, .discardDangerous
+
+engine.onSuggestions = { list in if list.text == field.text { popup.show(list.rows) } }   // o resto da lista
+let list = try await engine.connection?.suggest(field.text, in: tab, allowInline: !acabouDeApagar)
+field.complete(list?.rows.first?.inlineCompletion)               // o resto do endereço, selecionado depois do cursor
+try await engine.connection?.openSuggestion(row.id, in: tab)     // .newTab, .switchToTab (devolve a aba que já tem)
+try await engine.connection?.deleteSuggestion(row.id)            // só `deletable`; a lista vem de novo em onSuggestions
+try await engine.connection?.suggest("", in: tab)                // campo vazio ou sem foco: a lista acaba
+```
+
+- O motor nunca pergunta onde salvar: cada ato baixa na sua pasta (`downloadsDirectories`).
+- `state == .dangerous`: o arquivo fica retido até a pessoa escolher `.keepDangerous` ou `.discardDangerous`; mostre `dangerType`. Arquivo perigoso nunca abre sozinho, e `.open` nele lança `denied`.
+- `byAgent`: a aba de um agente começou o download (no motor embutido a aba do agente baixa; o agente recebe o caminho por `page.download`, fora do kit).
+- `suggest` responde com o que as fontes rápidas já acharam (`done == false`: vem mais em `onSuggestions`, com a lista inteira). Só fontes locais (histórico, favoritos, atalhos, abas abertas e a busca digitada); nada vai à rede. `textBold`/`titleBold` são intervalos em UTF-16 (`NSRange` do `NSString`).
+- O `id` de uma linha vale só para a lista dela; de uma lista antiga, `openSuggestion` lança `not_found`. Com o agente trabalhando na aba, abrir na própria aba lança `denied`.
+- Motor mais antigo lança `unknown_op` em todos.
 
 ## Inspecionar
 
