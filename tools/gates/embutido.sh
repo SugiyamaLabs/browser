@@ -389,6 +389,51 @@ else:
     os.chmod(edge_dir, 0o755)
     subprocess.run(["rm", "-rf", profile7, home7])
 
+# Address suggestions as the casca gets them (agens_embed.h AgensSuggestion), on a short launch:
+# --agens-suggest-test-run (not in official builds) waits for an ato to load (view.open), seeds a
+# typed visit to youtube.gate.test and a bookmark, feeds the text as the address bar does and prints
+# each finished list as an "agens-suggest-test" line in the engine log.
+if OFFICIAL:
+    skip("address suggestions (inline completion, rows, delete)", "dev-only switch, compiled out of the official build")
+else:
+    profile8 = tempfile.mkdtemp(prefix="agens-u.", dir="/tmp")
+    engine8 = launch(profile8, "--agens-suggest-test-run", name="suggest")
+    u8 = Conn(profile8 + "/agens.sock")
+    u8.ask("hello", client="embutido-gate"); u8.ask("host.attach")
+    ato8 = (u8.ask("atos.list").get("atos") or [{}])[0].get("id")
+    u8.ask("view.open", ato=ato8, url=SITE + "/other")
+    def suggest_lines():
+        out = {}
+        for line in open(f"{OUT}/engine-suggest.log", errors="replace"):
+            m = re.match(r"agens-suggest-test (\S+) (.*)$", line.strip())
+            if m: out[m.group(1)] = json.loads(m.group(2))
+        return out
+    end = time.time() + 60
+    while time.time() < end:
+        sg = suggest_lines()
+        if "after-delete" in sg or "error" in sg: break
+        time.sleep(0.5)
+    yt = lambda rows: [r for r in rows or [] if "youtube.gate.test" in r["fill"]]
+    first = (sg.get("inline") or [{}])[0]
+    check("suggest: typing \"yout\" completes inline to youtube.gate.test (default row, typed letters bold)",
+          first.get("inline") == "ube.gate.test" and first.get("fill", "").endswith("youtube.gate.test")
+          and first.get("detail") == "Gate YouTube" and first.get("text_bold", [])[:2] == [0, 4], sg.get("inline") or sg)
+    check("suggest: no inline completion when prevented (after a deletion)",
+          (sg.get("prevent") or [{}])[0].get("inline") == "" and yt(sg.get("prevent")), sg.get("prevent"))
+    check("suggest: a bookmark row is marked",
+          any(r["bookmark"] and "favorito.gate.test" in r["fill"] for r in sg.get("bookmark") or []), sg.get("bookmark"))
+    check("suggest: the typed search row names the default engine",
+          any(r["search"] and r["text"] == "gate busca" and r["detail"] == sg.get("engine") and sg.get("engine")
+              for r in sg.get("search") or []), [sg.get("engine"), sg.get("search")])
+    check("suggest: a history row is deletable and delete_suggestion removes it from the history",
+          bool(yt(sg.get("delete"))) and all(r["deletable"] for r in yt(sg.get("delete")))
+          and sg.get("deleted", -1) >= 0 and "after-delete" in sg and not yt(sg.get("after-delete")),
+          [sg.get("delete"), sg.get("deleted"), sg.get("after-delete")])
+    engine8.terminate()
+    try: engine8.wait(15)
+    except subprocess.TimeoutExpired: engine8.kill()
+    subprocess.run(["rm", "-rf", profile8])
+
 check("host.attach from the parent", c.ask("host.attach").get("ok"))
 r = c.ask("host.attach")
 check("a second host.attach on the same connection is refused", not r.get("ok"), r)
