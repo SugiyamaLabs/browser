@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Conteúdo protegido</title>
+<!-- Tokens, janela, endereço, popover com seta e Configurações copiados de janela-traduzir.html (que veio de janela-recursos.html); chave .sw de janela-recursos.html. -->
+<style>
+:root{--bg:#0B0B0D;--side:#111114;--raise:#16161A;--sunk:#0F0F12;--line:#24242A;--line-strong:#3A3A42;--line-hover:#4A4A54;--ink:#F2F2F4;--mute:#9A9AA4;--dim:#8A8A94;--hi:#F4F4F6;--on-hi:#0B0B0D;--warn:#F2C14E;
+  --hover-2:#1B1B20;--float:#1A1A1F;--light-2:#FFE9C7;--light-3:#FFC98A;--red:#F28B82;--kbd:rgba(255,255,255,.07);--off:#4A4A54;--shadow:rgba(0,0,0,.45);
+  --ui:-apple-system,"SF Pro Text",BlinkMacSystemFont,system-ui,sans-serif;--mono:ui-monospace,"SF Mono",Menlo,monospace;--s:10px;--ease:cubic-bezier(.16,1,.3,1)}
+:root[data-mode="light"]{--bg:#FAFAFB;--side:#F1F1F4;--raise:#FFFFFF;--sunk:#E9E9ED;--line:#E0E0E5;--line-strong:#CFCFD6;--line-hover:#B9B9C2;--ink:#16161A;--mute:#5C5C66;--dim:#71717B;--hi:#16161A;--on-hi:#FFFFFF;--warn:#B7791F;
+  --hover-2:#E4E4E9;--float:#FFFFFF;--light-2:#F7A95C;--light-3:#E8893A;--red:#C5453B;--kbd:rgba(0,0,0,.06);--off:#B9B9C2;--shadow:rgba(0,0,0,.14)}
+:root[data-mode="light"] .lights i{background:#D4D4DA}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 var(--ui);text-wrap:pretty;-webkit-font-smoothing:antialiased;transition:background .2s,color .2s}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+:focus-visible{outline:2px solid var(--light-2);outline-offset:2px;border-radius:8px}
+main{max-width:1180px;margin:0 auto;padding:32px 24px 64px}
+header{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap}header div{flex:1;min-width:260px}header h1{font-size:20px;margin:0 0 4px}header p{margin:0 0 8px;color:var(--dim);max-width:80ch}
+.toc{position:sticky;top:0;z-index:20;display:flex;gap:16px;flex-wrap:wrap;margin:0 -24px 24px;padding:10px 24px;background:var(--bg);border-bottom:1px solid var(--line)}.toc a{color:var(--mute);font-size:13px;text-decoration:none}.toc a:hover{color:var(--ink)}
+section.v{margin:0 0 48px;scroll-margin-top:56px}
+section.v>h2{font-size:13px;font-weight:600;color:var(--mute);margin:0 0 4px}
+p.cap{margin:0 0 10px;color:var(--dim);font-size:12.5px;max-width:780px}
+.seg{display:inline-flex;flex-wrap:wrap;gap:4px;border:1px solid var(--line);border-radius:9px;padding:2px;margin:0 0 12px}.seg button{padding:4px 10px;border-radius:7px;font-size:12.5px;color:var(--mute)}.seg button.on{background:var(--raise);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+.mode{flex:none}
+kbd{font:500 12px/1 var(--ui);padding:3px 5px;border-radius:5px;background:var(--kbd);color:var(--dim)}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:6px 13px;border:1px solid var(--line-strong);border-radius:10px;font-size:13px;white-space:nowrap;flex:none}
+.btn:hover{border-color:var(--line-hover);background:var(--hover-2)}
+.btn.pri{background:var(--hi);border-color:var(--hi);color:var(--on-hi);font-weight:600}
+.btn.sm{padding:4px 10px;font-size:12.5px}
+.lnk{color:var(--mute);font-size:12.5px;text-align:left}.lnk:hover{color:var(--ink)}
+.logo{width:18px;height:18px;border-radius:5px;display:inline-grid;place-items:center;font:700 10.5px/1 var(--ui);flex:none;color:#0B0B0D}.l-est{background:#C9B6FF}.l-cli{background:#7FD1A8}.l-pes{background:#F2C14E}
+svg.i{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex:none}
+/* janela */
+.nav{position:relative;height:540px;border:1px solid var(--line);border-radius:14px;background:var(--side);overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.nav.sidev{flex-direction:row}
+.lights{display:flex;gap:8px;padding:0 12px 0 16px}.lights i{width:12px;height:12px;border-radius:50%;background:#2A2A30}
+.strip{display:flex;align-items:center;gap:4px;padding:8px 14px 0 0}
+.nav-tab{display:flex;align-items:center;gap:7px;padding:5px 10px;border-radius:8px;font-size:12.5px;color:var(--mute);flex:0 1 200px;min-width:0;overflow:hidden;white-space:nowrap;height:32px}.nav-tab.on{background:var(--raise);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+.nav-tab .t{flex:1;overflow:hidden;text-overflow:ellipsis}.nt{width:28px;height:28px;display:grid;place-items:center;color:var(--dim)}
+.fv{width:14px;height:14px;border-radius:4px;flex:none;display:grid;place-items:center;font:700 8.5px/1 var(--ui);color:#0B0B0D}
+.nav-row{display:flex;align-items:center;gap:6px;margin:8px 14px 10px;position:relative}
+.ib{position:relative;width:30px;height:30px;display:grid;place-items:center;border-radius:8px;color:var(--mute);flex:none}.ib.on,.ib:hover{background:var(--raise);color:var(--ink)}
+.nav-addr{flex:1;min-width:0;display:flex;align-items:center;gap:6px;padding:0 6px;height:32px;border:1px solid var(--line);border-radius:10px;background:var(--sunk);color:var(--mute);font-size:13px;white-space:nowrap}
+.nav-addr .u{flex:1;overflow:hidden;text-overflow:ellipsis}.nav-addr .u b{color:var(--ink);font-weight:400}
+.ai{position:relative;width:22px;height:22px;display:grid;place-items:center;border-radius:7px;color:var(--dim);flex:none}.ai:hover,.ai.on{background:var(--hover-2);color:var(--ink)}.ai svg.i{width:15px;height:15px}
+.ai.asking{color:var(--light-3)}.ai.mute{color:var(--light-3)}
+.profs{border:1px solid var(--line);border-radius:9px;padding:2px;display:flex;gap:4px}.profs span{white-space:nowrap;display:flex;align-items:center;gap:6px;padding:4px 7px;border-radius:8px;font-size:12.5px;color:var(--mute)}.profs span.on{background:var(--raise);color:var(--ink)}
+.area{flex:1;min-height:0;margin:0 14px 14px;border:1px solid var(--line);border-radius:12px;overflow:hidden;position:relative;background:#fff;color:#15151A}
+.area.app{background:var(--bg);color:var(--ink)}
+.page{padding:26px 34px;font:15px/1.6 Georgia,"Times New Roman",serif;max-width:720px;transition:opacity .2s}
+.page h3{font:600 22px/1.25 var(--ui);margin:0 0 12px}.page p{margin:0 0 12px}
+.page.busy{opacity:.55}
+.page ::selection,.page .sel{background:#B4D5FE}
+/* barra lateral */
+.sb{width:220px;flex:none;display:flex;flex-direction:column;padding:12px 8px 10px;gap:2px}
+.sbh{display:flex;align-items:center;gap:8px;padding:12px 8px 10px;font-weight:600;font-size:13.5px}
+.sbt{display:flex;align-items:center;gap:8px;height:32px;padding:0 8px;border-radius:8px;font-size:12.5px;color:var(--mute);white-space:nowrap}.sbt .t{flex:1;overflow:hidden;text-overflow:ellipsis}.sbt.on{background:var(--raise);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+.sbf{margin-top:auto;display:flex;gap:6px;padding:8px}.sbf .logo{width:24px;height:24px;border-radius:7px;opacity:.55}.sbf .logo.on{opacity:1;box-shadow:0 0 0 2px var(--side),0 0 0 3px var(--line-strong)}
+.col{flex:1;min-width:0;display:flex;flex-direction:column}
+/* alto-falante (busca.html) */
+.spk{width:18px;height:18px;display:grid;place-items:center;border-radius:5px;color:var(--mute);flex:none}.spk svg.i{width:14px;height:14px}
+.spk.mute{color:var(--light-3)}.spk:hover{background:var(--hover-2);color:var(--ink)}
+/* popover com seta */
+.menu{position:absolute;z-index:6;background:var(--float);border:1px solid var(--line-strong);border-radius:12px;padding:6px;filter:drop-shadow(0 10px 24px var(--shadow));color:var(--ink);font-size:13px;animation:rise .18s var(--ease)}
+@keyframes rise{from{opacity:0;transform:translateY(-3px)}}
+.menu .mi{display:flex;align-items:center;gap:10px;padding:5px 8px;border-radius:8px;font-size:13px;cursor:default}.menu .mi:hover,.menu .mi.hl{background:var(--raise)}.menu .mi span{flex:1}.menu .mi small{color:var(--dim);font-size:12px}
+.menu .mi.off{color:var(--off)}
+.menu hr{border:0;border-top:1px solid var(--line);margin:5px 0}
+.menu[data-side]::after{content:"";position:absolute;width:var(--s);height:var(--s);background:var(--float);border:1px solid var(--line-strong);border-right:0;border-bottom:0;border-top-left-radius:2px;clip-path:polygon(-2px -2px,calc(100% + 2px) -2px,-2px calc(100% + 2px));left:var(--ax);top:0;transform:translate(-50%,-50%) rotate(45deg)}
+.pbody{padding:6px 8px 4px}.pbody .pt{font-weight:600;margin:0 0 2px}.pbody>small{display:block;color:var(--dim);font-size:12px;margin:0 0 10px}
+.acts{display:flex;justify-content:flex-end;gap:8px;margin-top:12px;flex-wrap:wrap}.acts.stack{flex-direction:column;align-items:stretch;gap:6px}
+/* volume */
+.vpop{width:230px;padding:10px 12px;display:flex;flex-direction:column;gap:8px;font-size:12.5px}.vpop .vh{display:flex;justify-content:space-between;color:var(--mute)}.vpop .vh b{color:var(--ink);font-weight:500;font-variant-numeric:tabular-nums}
+.vpop .vh b.m{color:var(--light-3)}
+.vrow{display:flex;align-items:center;gap:8px}
+.vrow input{flex:1;height:14px;margin:0;-webkit-appearance:none;appearance:none;background:transparent;cursor:pointer}
+.vrow input::-webkit-slider-runnable-track{height:4px;border-radius:2px;background:linear-gradient(var(--light-3),var(--light-3)) 0/var(--v,60%) 100% no-repeat,var(--line-strong)}
+.vrow input::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;margin-top:-5px;border-radius:50%;background:var(--hi);border:0}
+.vrow input::-moz-range-track{height:4px;border-radius:2px;background:var(--line-strong)}.vrow input::-moz-range-progress{height:4px;border-radius:2px;background:var(--light-3)}.vrow input::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:var(--hi);border:0}
+.vpop.muted .vrow input{--v:0%!important}
+.vmute{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 6px;margin:0 -6px;border-radius:7px;white-space:nowrap;font-size:12.5px}.vmute:hover{background:var(--raise)}
+/* tradução */
+.ai svg.ring{position:absolute;inset:0;width:22px;height:22px;transform:rotate(-90deg);fill:none;stroke-width:1.6}
+.ai .ring .bgc{stroke:var(--line-strong)}.ai .ring .fgc{stroke:var(--light-3);stroke-linecap:round;transition:stroke-dashoffset .25s}
+.ai.tr-on{color:var(--light-3)}
+.tpop{width:min(380px,calc(100% - 12px))}.tpop .lang{display:flex;align-items:center;gap:8px;margin:0 0 10px;color:var(--mute);font-size:12.5px}.tpop .lang b{color:var(--ink);font-weight:500}
+.dlbar{height:4px;border-radius:2px;background:var(--line-strong);overflow:hidden;margin:4px 0 6px}.dlbar i{display:block;height:100%;background:var(--light-3);transition:width .25s}
+.tnote{display:flex;gap:6px;align-items:flex-start;color:var(--dim);font-size:11.5px;margin:10px 0 0}.tnote svg.i{width:13px;height:13px;margin-top:1px}
+.ctx{width:250px;animation:none}
+.tbub{position:absolute;z-index:5;width:300px;background:var(--float);border:1px solid var(--line-strong);border-radius:12px;padding:10px 12px;filter:drop-shadow(0 10px 24px var(--shadow));color:var(--ink);font:13px/1.45 var(--ui)}.tbub small{display:block;color:var(--dim);font-size:11.5px;margin-top:6px}
+/* configurações */
+.set{display:flex;height:100%}.setnav{width:170px;border-right:1px solid var(--line);padding:14px 8px;display:flex;flex-direction:column;gap:2px;font-size:13px;background:var(--side)}.setnav span{padding:5px 10px;border-radius:7px;color:var(--mute)}.setnav span.on{background:var(--raise);color:var(--ink)}
+.setb{flex:1;padding:18px 22px;overflow:auto;min-width:0}.setb h4{margin:0 0 2px;font-size:16px}.setb>p{margin:0 0 12px;color:var(--dim);font-size:12.5px}
+.g{margin:16px 0 6px;color:var(--dim);font-size:12px}
+.l{border:1px solid var(--line);border-radius:10px;background:var(--sunk)}
+.r{display:flex;align-items:center;gap:10px;padding:7px 12px;font-size:13px;flex-wrap:wrap}.r+.r{border-top:1px solid var(--line)}.r span{flex:1;min-width:120px}.r small{color:var(--dim);font-size:12px}
+.r.empty{color:var(--dim);font-size:12.5px}
+select{font:13px var(--ui);color:var(--ink);background:var(--raise);border:1px solid var(--line-strong);border-radius:8px;padding:4px 8px}
+.x{width:22px;height:22px;display:grid;place-items:center;border-radius:7px;color:var(--dim)}.x:hover{background:var(--hover-2);color:var(--ink)}.x svg.i{width:14px;height:14px}
+.private{display:flex;gap:10px;align-items:flex-start;margin:16px 0 0;padding:10px 12px;border:1px solid var(--line);border-radius:10px;font-size:12.5px;color:var(--mute)}.private svg.i{color:var(--light-3);margin-top:2px}
+.toast{position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:9;display:flex;align-items:center;gap:10px;background:var(--float);border:1px solid var(--line-strong);border-radius:10px;padding:7px 12px;font:13px/1.3 var(--ui);color:var(--ink);white-space:nowrap;filter:drop-shadow(0 8px 18px var(--shadow));animation:rise .18s var(--ease)}.toast small{color:var(--dim)}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:16px}.pair>div{min-width:0}.pair h5{margin:0 0 6px;font-size:12.5px;color:var(--mute);font-weight:500}.pair .nav{height:380px}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+@media (max-width:900px){.pair{grid-template-columns:1fr}.profs span b{display:none}.sb{width:150px}.setnav{display:none}.page{padding:20px}}
+@media (max-width:560px){.sb{display:none}.profs{display:none}.nav-row .ib:nth-child(2){display:none}.tpop{width:270px}}
+.sw{position:relative;width:30px;height:18px;flex:none}.sw input{position:absolute;opacity:0;inset:0;margin:0;cursor:pointer}.sw i{position:absolute;inset:0;border-radius:9px;background:var(--line-strong);transition:background .15s;pointer-events:none}.sw i::after{content:"";position:absolute;left:2px;top:2px;width:14px;height:14px;border-radius:50%;background:#fff;transition:transform .15s var(--ease)}
+.sw input:checked+i{background:var(--light-3)}.sw input:checked+i::after{transform:translateX(12px)}.sw input:focus-visible+i{outline:2px solid var(--light-2);outline-offset:2px}
+.ai.drm-on{color:var(--light-3)}.ai.fail{color:var(--red)}
+.stat{display:flex;align-items:center;gap:6px;color:var(--mute);font-size:12px}.stat i{width:7px;height:7px;border-radius:50%;background:var(--off)}.stat.ok i{background:#7FD1A8}
+.nav:has(.settings),.nav:has(.set){height:auto;min-height:540px}</style>
+</head>
+<body>
+<main>
+<header><div><h1>Conteúdo protegido (Widevine) · navegador sozinho</h1><p>O Widevine não vem dentro do app. Na primeira vez que um site precisa dele, o navegador pergunta e, com o OK, baixa do Google. Escolha o estado em cada seção; o que parece botão dentro da janela também responde.</p></div>
+<div class="seg mode" role="group" aria-label="Aparência"><button data-mode="dark" class="on">Escuro</button><button data-mode="light">Claro</button></div></header>
+<nav class="toc"><a href="#pedido">1 · Pedido na primeira vez</a><a href="#config">2 · Configurações › Privacidade</a></nav>
+<div id="out"></div>
+</main>
+<script>
+const P=d=>`<svg class="i" viewBox="0 0 20 20">${d}</svg>`;
+const IC={back:P('<path d="M12 4 6 10l6 6"/>'),fwd:P('<path d="m8 4 6 6-6 6"/>'),re:P('<path d="M16 10a6 6 0 1 1-2-4.5M16 3v3.5h-3.5"/>'),
+ more:P('<circle cx="5" cy="10" r=".8"/><circle cx="10" cy="10" r=".8"/><circle cx="15" cy="10" r=".8"/>'),
+ lock:P('<rect x="4.5" y="9" width="11" height="8" rx="2.5"/><path d="M7 9V6.5a3 3 0 0 1 6 0V9"/>'),
+ drm:P('<rect x="3" y="4.5" width="14" height="11" rx="2.5"/><path d="m8.5 7.8 4 2.2-4 2.2z"/>'),
+ shield:P('<path d="M10 3 4.5 5v4.5c0 3.3 2.3 6 5.5 7.5 3.2-1.5 5.5-4.2 5.5-7.5V5z"/><path d="m7.5 10 1.8 1.8L12.8 8"/>'),
+ net:P('<circle cx="10" cy="10" r="7"/><path d="M3 10h14M10 3c2 2.2 2.8 4.6 2.8 7s-.8 4.8-2.8 7c-2-2.2-2.8-4.6-2.8-7S8 5.2 10 3"/>')};
+const PROF={"Estúdio":["l-est","E"],"Cliente A":["l-cli","C"],"Pessoal":["l-pes","P"]};
+const urlHTML=u=>{const i=u.indexOf("/");return i<0?`<b>${u}</b>`:`<b>${u.slice(0,i)}</b>${u.slice(i)}`};
+const ring=p=>`<svg class="ring" viewBox="0 0 22 22"><circle class="bgc" cx="11" cy="11" r="10"/><circle class="fgc" cx="11" cy="11" r="10" stroke-dasharray="62.8" stroke-dashoffset="${62.8*(1-p)}"/></svg>`;
+const bar=o=>`<div class="nav-row"><span class="ib">${IC.back}</span><span class="ib">${IC.fwd}</span><span class="ib" data-reload>${IC.re}</span>
+ <div class="nav-addr">${o.addrl||""}<button class="ai" aria-label="Informações do site">${IC.lock}</button><span class="u">${urlHTML(o.url)}</span>${o.addrx||""}</div>
+ <span class="ib" data-more>${IC.more}</span></div>`;
+const frame=(o={})=>`<div class="nav sidev"><aside class="sb"><div class="lights"><i></i><i></i><i></i></div><div class="sbh"><span class="logo l-est">E</span>Estúdio</div>${o.tabs.map((t,i)=>`<span class="sbt${i==o.tabs.length-1?" on":""}"><span class="fv" style="background:${t[0]}">${t[1]}</span><span class="t">${t[2]}</span></span>`).join("")}<div class="sbf">${Object.keys(PROF).map(x=>`<span class="logo ${PROF[x][0]}${x=="Estúdio"?" on":""}">${PROF[x][1]}</span>`).join("")}</div></aside><div class="col"><div style="height:6px"></div>${bar(o)}<div class="area${o.app?" app":""}">${o.page||""}</div></div>${o.inner||""}</div>`;
+const pop=(sel,cls,html)=>`<div class="menu ${cls}" data-pop data-for="${sel}" role="dialog">${html}</div>`;
+
+/* 1 · pedido na primeira vez */
+const MB=10.4;
+const d={st:"pedido",dl:0,open:true};
+const NOTE=`<div class="tnote">${IC.net}Só conecta com o seu OK: o download do componente, direto do Google. Remove em Configurações › Privacidade.</div>`;
+const PAGE=ok=>`<div class="page" style="background:#121212;color:#eee;height:100%;max-width:none;font-family:var(--ui)"><h3>Lo-fi para trabalhar</h3><p style="color:#aaa;font-size:13px">Playlist · 48 músicas</p><div style="margin-top:18px;padding:14px 16px;border-radius:10px;background:#1E1E1E;font-size:13.5px;max-width:440px">${ok?"▶ Tocando · Chuva no vidro":"Não foi possível tocar. Ative a reprodução de conteúdo protegido no navegador."}</div></div>`;
+const DPOPS={
+ pedido:()=>pop("[data-drm]","tpop",`<div class="pbody"><div class="pt">Este site quer tocar conteúdo protegido</div><small>Precisa do Widevine, um componente do Google (≈ 10 MB). Baixa uma vez e só é usado pelos sites que pedirem.</small><div class="acts"><button class="lnk" data-act="nunca" style="margin-right:auto">Não perguntar de novo</button><button class="btn sm" data-act="agora">Agora não</button><button class="btn sm pri" data-act="baixar">Baixar e ativar</button></div>${NOTE}</div>`),
+ baixando:()=>pop("[data-drm]","tpop",`<div class="pbody"><div class="pt">Baixando o Widevine</div><div class="dlbar"><i style="width:${d.dl*100}%"></i></div><small data-dlt>${(d.dl*MB).toFixed(1).replace(".",",")} de ${String(MB).replace(".",",")} MB, do Google</small><div class="acts"><button class="btn sm" data-act="cancelar">Cancelar</button></div>${NOTE}</div>`),
+ pronto:()=>pop("[data-drm]","tpop",`<div class="pbody"><div class="pt">Pronto · recarregar a página</div><small>Widevine instalado. A página precisa recarregar para tocar.</small><div class="acts"><button class="btn sm pri" data-act="recarregar">Recarregar</button></div></div>`),
+ falhou:()=>pop("[data-drm]","tpop",`<div class="pbody"><div class="pt">Não deu para baixar</div><small>A conexão com o Google caiu no meio. Nada ficou instalado pela metade.</small><div class="acts"><button class="btn sm" data-act="agora">Agora não</button><button class="btn sm pri" data-act="baixar">Tentar de novo</button></div></div>`)};
+const dBtn=()=>{const s=d.st;if(s=="nunca"||s=="tocando")return"";const busy=s=="baixando";
+ return `<button class="ai${s=="pronto"?" drm-on":""}${s=="falhou"?" fail":""}${d.open?" on":""}" data-drm aria-haspopup="dialog" aria-expanded="${d.open}" aria-label="${busy?"Baixando conteúdo protegido, "+Math.round(d.dl*100)+"%":"Conteúdo protegido"}">${busy?ring(d.dl):""}${IC.drm}</button>`};
+const dFrame=()=>frame({tabs:[["#6FA8FF","L","Linear"],["#1DB954","S","Spotify · Lo-fi"]],url:"open.spotify.com/playlist/lofi",page:PAGE(d.st=="tocando"),addrx:dBtn(),inner:d.open&&DPOPS[d.st]?DPOPS[d.st]():""});
+const PED={
+ pedido:["a · Pedindo","O site chama o Widevine; o ícone aparece no fim do endereço (lugar do ícone de permissão) e o popover desce uma vez por site. Fechar sem escolher deixa o ícone, que abre de novo. “Não perguntar de novo” desliga em Configurações › Privacidade.",()=>{d.st="pedido"}],
+ baixando:["b · Baixando","Barra no popover e anel no ícone. Fechar o popover não para o download.",()=>{d.st="baixando";d.dl=.35}],
+ pronto:["c · Pronto","Ícone aceso em laranja claro. Recarregar (no popover ou no ↻) toca e o ícone some.",()=>{d.st="pronto"}],
+ falhou:["d · Falhou","Ícone em vermelho. Tentar de novo recomeça do zero; o arquivo parcial é apagado.",()=>{d.st="falhou"}]};
+
+/* 2 · configurações › privacidade › conteúdo protegido */
+const cfg={on:true,inst:true};
+const sw=(on,lbl)=>`<label class="sw"><input type="checkbox" data-sw${on?" checked":""} aria-label="${lbl}"><i></i></label>`;
+const config=()=>frame({tabs:[["#6FA8FF","L","Linear"],["#8A8A94","⚙","Configurações"]],url:"Configurações › Privacidade",app:1,page:`<div class="set"><div class="setnav"><span>Geral</span><span>Aparência</span><span class="on">Privacidade</span><span>Senhas salvas</span><span>Idiomas</span><span>Extensões</span></div><div class="setb"><h4>Privacidade</h4><p>Vale para todos os atos.</p>
+ <div class="g">Conteúdo protegido</div><div class="l">
+ <div class="r"><span>Permitir conteúdo protegido (Widevine)<br><small>Netflix, Disney+, Spotify e outros sites com DRM. Desligado, o navegador não pergunta nem baixa.</small></span>${sw(cfg.on,"Permitir conteúdo protegido (Widevine)")}</div>
+ <div class="r"><span>Componente<br><span class="stat${cfg.inst?" ok":""}"><i></i>${cfg.inst?"Instalado · versão 4.10.2891.0 · Atualiza junto com o navegador":"Não instalado"}</span></span>${cfg.inst?`<button class="btn sm" data-rmc>Remover componente</button>`:""}</div></div>
+ <div class="private">${IC.shield}<span>O que conecta ao Google, e quando: só o download do Widevine (≈ 10 MB), na primeira vez que um site pede e com o seu OK, e de novo quando o navegador atualiza e traz outra versão. Nada mais vai para o Google: o componente roda no Mac e conversa só com o site que toca o vídeo. Está na lista de conexões permitidas em sem-telemetria.md.</span></div></div></div>`});
+const CFG={inst:["Instalado",()=>{cfg.inst=true;cfg.on=true}],nao:["Não instalado",()=>{cfg.inst=false}]};
+
+/* montagem */
+const out=document.getElementById("out");
+out.innerHTML=`<section class="v" id="pedido"><h2>1 · Pedido na primeira vez</h2><p class="cap">Em open.spotify.com (vale igual para netflix.com).</p><div data-sec="pedido"></div></section><section class="v" id="config"><h2>2 · Configurações › Privacidade › Conteúdo protegido</h2><p class="cap">Ligue e desligue; Remover componente apaga o arquivo e volta para Não instalado.</p><div data-sec="config"></div></section>`;
+const box=id=>out.querySelector(`[data-sec="${id}"]`);
+const state={pedido:"pedido",config:"inst"};
+const segs=(id,S)=>`<div class="seg">${Object.entries(S).map(([k,v])=>`<button data-st="${k}" class="${k==state[id]?"on":""}">${v[0]}</button>`).join("")}</div>`;
+let timer;
+function render(id,apply){const b=box(id);
+ if(id=="pedido"){clearInterval(timer);if(apply){d.open=true;PED[state.pedido][2]()}b.innerHTML=segs(id,PED)+`<p class="cap">${PED[state.pedido][1]}</p>`+dFrame();if(d.st=="baixando")download()}
+ if(id=="config"){if(apply)CFG[state.config][1]();b.innerHTML=segs(id,CFG)+config()}
+ place(b)}
+function paint(){const b=box("pedido");b.querySelector(".nav").outerHTML=dFrame();place(b)}
+function download(){clearInterval(timer);timer=setInterval(()=>{d.dl=Math.min(1,d.dl+.08);if(d.dl>=1){clearInterval(timer);d.st="pronto";d.open=true;cfg.inst=true;render("config");paint();return}
+ const b=box("pedido"),r=b.querySelector(".fgc");if(r)r.setAttribute("stroke-dashoffset",62.8*(1-d.dl));const i=b.querySelector(".dlbar i");if(i)i.style.width=d.dl*100+"%";const t=b.querySelector("[data-dlt]");if(t)t.textContent=`${(d.dl*MB).toFixed(1).replace(".",",")} de ${String(MB).replace(".",",")} MB, do Google`},300)}
+function place(root){root.querySelectorAll("[data-pop]").forEach(m=>{const nav=m.closest(".nav"),a=nav.querySelector(m.dataset.for);if(!a)return;const nb=nav.getBoundingClientRect(),b=a.getBoundingClientRect();
+ const cx=b.left-nb.left+b.width/2,w=m.offsetWidth,x=Math.max(4,Math.min(nb.width-6-w,cx-w/2));
+ m.style.left=x+"px";m.style.top=(b.bottom-nb.top+4+7)+"px";m.style.setProperty("--ax",Math.max(23,Math.min(w-23,cx-x-1))+"px");m.dataset.side="up"})}
+render("pedido",1);render("config",1);
+
+const toast=(nav,html)=>{const area=nav.querySelector(".area");area.querySelector(".toast")?.remove();area.insertAdjacentHTML("beforeend",`<div class="toast" role="status">${html}</div>`);setTimeout(()=>area.querySelector(".toast")?.remove(),2400)};
+document.addEventListener("click",e=>{const T=e.target,sec=T.closest("[data-sec]")?.dataset.sec,nav=T.closest(".nav");
+ const md=T.closest("[data-mode]");if(md&&md.tagName=="BUTTON"){document.documentElement.dataset.mode=md.dataset.mode;document.querySelectorAll(".mode button").forEach(b=>b.classList.toggle("on",b==md));return}
+ const st=T.closest("[data-st]");if(st){state[sec]=st.dataset.st;render(sec,1);return}
+ if(sec=="pedido"){const a=T.closest("[data-act]")?.dataset.act;
+  if(a=="baixar"){if(!cfg.on){cfg.on=true;render("config")}d.st="baixando";d.dl=0;d.open=true;paint();download();return}
+  if(a=="cancelar"){clearInterval(timer);d.st="pedido";d.open=false;paint();return}
+  if(a=="agora"){d.open=false;paint();return}
+  if(a=="nunca"){d.st="nunca";d.open=false;cfg.on=false;paint();render("config");toast(nav,"Não vamos perguntar de novo <small>Configurações › Privacidade</small>");return}
+  if(a=="recarregar"||(T.closest("[data-reload]")&&d.st=="pronto")){d.st="tocando";d.open=false;paint();return}
+  if(T.closest("[data-drm]")){d.open=!d.open;paint();return}
+  if(d.open&&nav&&!T.closest("[data-pop]")){d.open=false;paint()}return}
+ if(sec=="config"&&T.closest("[data-rmc]")){cfg.inst=false;state.config="nao";render("config");toast(box("config").querySelector(".nav"),"Widevine removido <small>baixa de novo só com o seu OK</small>")}
+});
+document.addEventListener("change",e=>{if(e.target.matches("[data-sw]")){cfg.on=e.target.checked;if(cfg.on&&d.st=="nunca"){d.st="pedido";d.open=false;paint()}}});
+document.addEventListener("keydown",e=>{if(e.key=="Escape"&&d.open){d.open=false;paint()}});
+addEventListener("resize",()=>place(document));
+</script>
+</body>
+</html>

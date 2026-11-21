@@ -1,0 +1,19 @@
+<!doctype html><meta charset="utf-8"><title>Tela (test)</title>
+<style>body{margin:0}button{position:absolute;left:40px;top:40px;width:300px;height:80px}</style>
+<button id="share">Share</button>
+<script>
+// getDisplayMedia on a click (it needs the gesture), screens left out (monitorTypeSurfaces), with
+// audio asked. The result goes to the title (after "tela:ready"): "tela:live:<displaySurface>", "tela:ended" when the
+// browser stops it, or "tela:error <name>".
+const say = t => { document.title = t; };
+document.getElementById("share").onclick = () => navigator.mediaDevices.getDisplayMedia(
+  {video: true, audio: true, monitorTypeSurfaces: "exclude", surfaceSwitching: "include"}).then(stream => {
+  const [track] = stream.getVideoTracks();
+  track.onended = () => say("tela:ended");
+  say("tela:live:" + track.getSettings().displaySurface);
+}, e => say("tela:error " + e.name));
+// "tela:ready" after the first contentful paint: Chromium drops clicks before it (passkey.html).
+new PerformanceObserver((list, observer) => {
+  if (list.getEntriesByName("first-contentful-paint").length) { observer.disconnect(); say("tela:ready"); }
+}).observe({type: "paint", buffered: true});
+</script>

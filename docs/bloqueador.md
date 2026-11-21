@@ -8,7 +8,15 @@ Dos dois caminhos da issue, foi o (1).
 
 - **Já está no binário.** É o filtro que o Chrome usa contra anúncio abusivo: o processo do navegador decide se a página é filtrada e cada renderer bloqueia script, imagem, XHR, iframe e worker com a lista indexada, mapeada em memória e compartilhada entre os processos. Não entra nenhuma dependência nova no build.
 - **O patch é pequeno** (~180 linhas, 7 arquivos). O `adblock-rust` exigiria integrar o crate no GN, escrever o throttle de rede e a ponte C++/Rust: isso não sai em um dia.
-- O que ele não faz (filtro cosmético, scriptlets) está em [O que falta](#o-que-falta-para-fechar-a-41). Se isso pesar, o `adblock-rust` continua sendo a opção para depois.
+- O que ele não faz (filtro cosmético, scriptlets) foi feito à parte, em código nosso: [#63, parte 2](#filtro-cosmético-avisos-de-cookies-e-youtube-63-parte-2).
+
+### `adblock-rust` ou código nosso (#63)
+
+A direção registrada era o `adblock-rust` (Brave, MPL-2.0). Ficou o subconjunto nativo:
+
+- **Peso.** O Chromium já compila Rust, mas o crate traz ~15 dependências que teriam de entrar em `third_party/rust` com `gnrt` e licenças, mais a ponte C++/Rust e um throttle de rede próprio, duplicando o `subresource_filter` que já bloqueia por URL. Os scriptlets do `adblock-rust` também não vêm com ele: são o `scriptlets.js` do uBlock (GPLv3), que teria de ser distribuído junto.
+- **O que o nativo cobre.** Regras de URL (subresource_filter), regras cosméticas `##`/`#@#` e as regras `+js(...)` das listas com os 12 scriptlets mais usados (~85% das ~5,2 mil regras `+js` das nossas listas; as de cookies sozinhas são ~2 mil `set-cookie`), mais o scriptlet próprio do YouTube.
+- **O que fica de fora** (e o `adblock-rust` + `scriptlets.js` dariam): `$redirect`, `$removeparam`, `$replace`, `$csp`, `$important`, filtros procedurais (`:has-text`, `:upward`, `:xpath`…), scriptlets `trusted-*`, `json-prune-fetch-response`/`-xhr-response`, `remove-attr`/`remove-class`, `href-sanitizer` e entidades `site.*`. Se isso pesar em sites reais, o `adblock-rust` continua sendo a opção.
 
 ### Como funciona
 
@@ -50,7 +58,7 @@ Content setting `ADS` do Chromium, por ato. Uma exceção ALLOW para o site desl
 
 ## API para a interface
 
-`chrome/browser/agens/embed/agens_adblock.h` (C puro): `agens_adblock_level/set_level`, `..._auto_update/set_auto_update`, `..._last_update` (segundos, 0 = nunca), `..._hide_cookie_notices/set_...`, `..._update_now(fn, ctx)` (ok + mensagem em pt-BR), `..._allowed_sites(window, fn, ctx)`, `..._allow_site(window, site, allow)`. Contagem de regras por nível: não feita (o conversor não devolve; dá para ler do tamanho dos `adblock_rules_N`).
+`chrome/browser/agens/embed/agens_adblock.h` (C puro): `agens_adblock_level/set_level`, `..._auto_update/set_auto_update`, `..._last_update` (segundos, 0 = nunca), `..._hide_cookie_notices/set_...`, `..._update_now(fn, ctx)` (ok + mensagem em pt-BR), `..._allowed_sites(window, fn, ctx)`, `..._allow_site(window, site, allow)`, `..._credits()` (texto em pt-BR com as listas, autores e licenças, para a tela Sobre ou Configurações › Bloqueador). Contagem de regras por nível: não feita (o conversor não devolve; dá para ler do tamanho dos `adblock_rules_N`).
 
 ## Listas e licenças
 
@@ -64,7 +72,7 @@ Ficam em [`chromium/adblock/lists/`](../chromium/adblock/lists/); o `fetch.sh` c
 | uBlock filters – Privacy | github.com/uBlockOrigin/uAssets | GPLv3 |
 | EasyList Cookie List (EasyList – Cookie Notices) | easylist.to, cópia em ublockorigin.github.io/uAssets | GPLv3 ou CC BY-SA 3.0, à escolha |
 
-O app distribui uma versão convertida das listas. Para cumprir GPL/CC BY-SA: dar crédito às listas (tela Sobre ou Configurações › Bloqueador), manter o texto original das listas disponível (já está no repositório) e não colocar restrição extra sobre o arquivo de regras.
+O app distribui uma versão convertida das listas. Para cumprir GPL/CC BY-SA: dar crédito às listas (o texto pronto vem de `agens_adblock_credits()`; falta a interface mostrar, na tela Sobre ou em Configurações › Bloqueador), manter o texto original das listas disponível (já está no repositório) e não colocar restrição extra sobre o arquivo de regras. Os scriptlets usam os nomes e argumentos do uBlock, mas o código é nosso (não copia o `scriptlets.js` GPLv3).
 
 Das ~111 mil regras de URL das quatro primeiras listas, ~105,8 mil entram. As outras usam sintaxe só do uBlock (`$redirect`, `$removeparam`, `$replace`, `3p`, `$important`…) e o conversor descarta. Regras cosméticas (`##`) ficam de fora por enquanto.
 
@@ -112,9 +120,9 @@ Não testado: troca de nível com o navegador aberto (testado trocando a pref e 
 
 ## O que falta para fechar a #41
 
-- **Anúncio dentro do vídeo do YouTube e da Twitch.** Eles vêm do mesmo domínio do vídeo (o player do YouTube recebe os anúncios no JSON de `youtubei/v1/player`; a Twitch os costura no stream HLS). Bloqueio por URL não alcança: precisa de reescrita de resposta / scriptlets, como o uBlock (`json-prune`, `$replace`) ou o `adblock-rust`. É o item mais caro e o que decide entre continuar no (1) ou ir para o (2).
-- **Filtro cosmético** (esconder elementos e avisos de cookies). O Chromium 156 já tem um índice de regras CSS no `subresource_filter` e o Blink já consulta, mas indexar as listas como estão dispara um `DCHECK` de ordem das regras. Avaliar se vale ordenar as regras no build e ligar.
-- **Configurações › Bloqueador**: a tela usa a API acima (parte 2 da #63).
+- **Anúncio no vídeo do YouTube**: feito (scriptlet próprio + regras `+js` das listas, abaixo). **Twitch: não feito.** O anúncio é costurado no HLS do mesmo domínio e o player da Twitch baixa a playlist num Web Worker, onde os nossos scriptlets (só no main world do documento) não chegam. Os contornos conhecidos (vaft, TTV LOL) pedem outra playlist com outro tipo de player ou passam por um proxy de terceiros, o que quebra o "zero conexões". Fica para quando valer reescrever a resposta da playlist no processo de rede (`$replace`).
+- **Filtro cosmético**: feito (parte 2). O índice de regras CSS do `subresource_filter` não foi usado.
+- **Configurações › Bloqueador**: a tela usa a API acima (parte 2 da #63), inclusive o texto de créditos.
 - **Medir com as 20 abas** (`tools/measure.py` no build oficial) e comparar com antes.
 - Na primeira abertura de um perfil, as páginas abertas nos ~2 s antes de a lista ser indexada não são filtradas.
 
@@ -127,6 +135,7 @@ Patch [`adblock-cosmetic.patch`](../chromium/patches/sugiyamalabs/adblock-cosmet
 | `chrome/browser/agens_adblock/cosmetic_engine.*` | lê as listas (`##seletor`, `dominio##seletor`, `~dominio`, `#@#`) e monta o CSS de cada host. Regras de sintaxe só do uBlock (`:has-text`, `:xpath`, `+js(`, `:style(`…) são ignoradas |
 | `cosmetic_service.cc` | carrega as listas numa thread (22 ms para ~47 mil regras), lê `agens.adblock.level` e `agens.adblock.hide_cookie_notices` (Local State; sem registro = padrão 2 / ligado), confere o content setting `ADS` do site |
 | `youtube_scriptlet.cc` | scriptlet do YouTube, mesma ideia do `json-prune` do uBlock |
+| `scriptlets.cc` | as regras `dominio##+js(...)` das listas viram um script só por página (abaixo) |
 | `chrome/renderer/agens_adblock/cosmetic_observer.cc` | em cada documento http(s) novo, antes de qualquer script da página, faz **uma** chamada mojo síncrona ao navegador e aplica o CSS (`InsertStyleSheet`, origem usuário) e o scriptlet (main world) |
 
 - **Por que renderer e não extensão ou injeção pelo navegador.** Só o gancho do renderer roda antes do primeiro script e do primeiro paint, sem corrida com o commit da navegação, e dispensa componente de extensão (que traria service worker e mensagens só para entregar CSS por domínio). A chamada síncrona é um lookup em hash no navegador; sem ela haveria corrida com o JSON do player.
@@ -134,11 +143,51 @@ Patch [`adblock-cosmetic.patch`](../chromium/patches/sugiyamalabs/adblock-cosmet
 - **Subframes** recebem só as regras do próprio domínio (sem as genéricas), para o CSS por frame ficar pequeno.
 - **Onde ficam as listas.** `<perfil>/AgensAdblock/lists/*.txt` se existir (atualização diária), senão `Resources/adblock_lists/*.txt` do app. A cada 10 min o serviço confere tamanho/data e recarrega sozinho. Só para teste: `--agens-adblock-lists-dir=<pasta>`. Nenhuma conexão de rede nova.
 - **YouTube.** No documento (antes do script da página): `ytInitialPlayerResponse` ganha um setter que remove `adPlacements`, `playerAds`, `adSlots` e `auxiliaryUi.messageRenderers.enforcementMessageViewModel`; `JSON.parse`, `fetch` e `XMLHttpRequest` de `/youtubei/v1/player` e `get_watch` passam pelo mesmo filtro (navegação SPA). Há uma rede de segurança que pula o anúncio se mesmo assim um começar (`.ad-showing`). Medido em 3 vídeos reais: sem pré-roll, reproduz, sem o aviso "bloqueadores violam os termos", a rede de segurança nunca disparou.
-- **Twitch: não feito.** O anúncio é costurado no HLS do mesmo domínio; precisa reescrever a playlist (`$replace`), fora do escopo desta parte.
+- **Scriptlets das listas** (`dominio##+js(nome, args…)`, `#@#+js(...)` e `#@#+js()` para desligar todos no domínio). Código nosso, com os nomes e argumentos do uBlock: `set` (set-constant), `aopr`, `aopw`, `acs` (abort-current-script), `aeld`, `nostif`, `nosiif`, `nowoif`, `json-prune` (com `[]` e `[-]`), `set-cookie`, `set-local-storage-item` e `set-session-storage-item`, mais os aliases longos e `.js`. `set-cookie` e o storage só aceitam valores de consentimento (`accept`, `true`, `0`…) e nunca sobrescrevem um cookie que já existe; `trusted-*` e os outros nomes são ignorados. Só regras com domínio (o uBlock também recusa `##+js` genérico); seguem o nível como o CSS (o `set-cookie` da lista de cookies só com `hide_cookie_notices`). Rodam antes do scriptlet do YouTube, que fica com a última palavra sobre `ytInitialPlayerResponse`.
+- **Primeira página depois de abrir o navegador.** Se as listas ainda estão carregando, a resposta ao renderer espera o fim da carga (~50 ms, uma vez) em vez de deixar a página sem filtro.
+- **Twitch: não feito** (ver [O que falta](#o-que-falta-para-fechar-a-41)).
 - **Teste sem build:** `chromium/adblock/cosmetic_selftest.cc` (instruções no topo) cobre o parser; com listas reais mede tempo e tamanho.
+- **Teste com o navegador, sem janela:** [`tools/sites-teste/bloqueador/`](../tools/sites-teste/bloqueador/). `serve.py 8766` serve `/` (CSS, cookies e os scriptlets das listas, em `localhost`) e `/youtube` (player falso: `ytInitialPlayerResponse` inline, `JSON.parse`, `fetch` e XHR de `/youtubei/v1/player` com anúncio). A página põe `PASS`/`FAIL` e o resultado de cada item no título. Com as listas reais mais `lista.txt` e `lista-cookie.txt` numa pasta:
+
+  ```sh
+  Agens --headless=new --user-data-dir=<perfil novo> --agens-adblock-lists-dir=<pasta> \
+    --virtual-time-budget=3000 --dump-dom http://localhost:8766/ | grep '<title>'
+  # YouTube falso: serve.py --tls 8443 e
+  #   --host-resolver-rules="MAP www.youtube.com 127.0.0.1:8443" --ignore-certificate-errors https://www.youtube.com/watch
+  ```
 
 ### Custo medido (build dev, listas reais, nível 2 com a lista de cookies)
 
 - CSS por página: ~1,19 MB nas genéricas; montar no navegador leva ~0,05–0,6 ms. As genéricas da lista de cookies (~650 KB) são mais da metade.
 - Renderer: ~+35 ms no DOMContentLoaded de uma página local simples (parse do CSS) e ~+13 MB por renderer de aba. É o custo do desenho "uma folha por frame". Se pesar: indexar as genéricas por classe/id e só injetar as que existem na página (como o uBlock), ao custo de um piscar nos elementos já existentes.
 - Navegador: ~15 MB de pico ao carregar as listas (parse), menos depois.
+
+### Medido: scriptlets das listas e YouTube falso (16/11/2026, build dev, headless, perfil novo por rodada)
+
+Listas reais mais `tools/sites-teste/bloqueador/lista*.txt`, servidas com `--agens-adblock-lists-dir`.
+
+| Rodada | Resultado |
+|---|---|
+| `/`, padrão (nível 2, cookies ligado) | **PASS** nos 14 itens: CSS do anúncio e do aviso de cookies, exceção `#@#`, `set`, `aopr`, `acs` (e outro script intacto), `nostif`, `json-prune`, `set-cookie`, `set-local-storage-item`, `aeld`, `nowoif`, `trusted-*` ignorado. É a **primeira página do perfil**: antes da espera pela carga das listas, a mesma página saía sem CSS nem scriptlets |
+| `/`, `hide_cookie_notices` desligado | só o CSS do aviso e o `set-cookie` deixam de valer; o resto igual |
+| `/`, nível 0 | nada aplicado |
+| `/youtube` como `https://www.youtube.com/watch` (servidor local com certificado próprio) | **PASS**: `ytInitialPlayerResponse`, `JSON.parse`, `fetch` e XHR de `/youtubei/v1/player` chegam sem `adPlacements`/`playerAds`/`adSlots`, junto com as regras `+js` reais do YouTube; nível 0 = tudo com anúncio |
+
+Não testado: YouTube e sites reais com rede e janela (pré-roll de verdade, quebra de site por algum scriptlet das listas), tempo e memória a mais por página, o texto de créditos numa interface.
+
+### Medido: sites reais com rede (16/11/2026, build dev, headless, perfil novo por modo)
+
+[`tools/bloqueador_real.py`](../tools/bloqueador_real.py): motor headless (sem janela, sem foco), rede de verdade, ligado (nível 2, o padrão) contra desligado (nível 0 semeado no `Local State`). Requisições contadas pelo Resource Timing do documento principal (requisição bloqueada aparece com duração 0). Uma rodada completa; YouTube repetido várias vezes por causa do renderer que morre (abaixo).
+
+| Página | Desligado | Ligado |
+|---|---|---|
+| YouTube, vídeo (`dQw4w9WgXcQ`) | `ytInitialPlayerResponse` com `adPlacements` (1); toca (5 s em 5 s) | **sem `adPlacements`, `playerAds` nem `adSlots`**; player inicia e toca (5 s em 5 s), sem `.ad-showing` |
+| Twitch, canal ao vivo (`gaules`) | toca; 9 requisições a hosts de anúncio carregaram (amazon-adsystem, scorecardresearch) | toca; 2 carregaram (`s.amazon-adsystem.com`). Nenhum anúncio apareceu no player em ~17 s em nenhum dos dois; o anúncio costurado no HLS continua possível (não bloqueamos) |
+| UOL | 14 espaços `#banner-*`, 1 visível com anúncio, 5 iframes de anúncio, 61 requisições de anúncio carregadas; o evento `load` passou de 30 s | 15 espaços, **0 visíveis, 0 espaços vazios na página**, 0 iframes de anúncio, 0 requisições de anúncio carregadas (30 bloqueadas); `load` em 0,5–0,7 s |
+| 20 abas de `tools/tabs.txt`, uma depois da outra | `load` mediano 1,82 s (soma 45,6 s); 76 requisições de anúncio carregadas | **1,36 s** (soma 25,1 s); 12 carregadas (Twitch, `s.amazon-adsystem.com`), 83 bloqueadas |
+| Memória, as 20 abas abertas, 60 s depois | 5.594 MB, 35 processos | **5.277 MB** (−317 MB, −6%), 28 processos |
+
+- **Quebra:** nenhum erro de JavaScript que só aparece com o bloqueador ligado, fora dois esperados: o analytics do UOL reclama que o `uolplayer.js` (bloqueado) não carregou, e os erros de GraphQL da Twitch (`unauthenticated`, `failed integrity check`), que aparecem também desligado (sem login, headless). Todas as 20 páginas abriram nos dois modos.
+- **Renderer do YouTube morre no build dev, ligado ou desligado:** em parte das aberturas o renderer da aba do YouTube morre num `DCHECK` do Blink (`inline_item_result.cc:55`, quebra de linha de texto). Ligado: 8 de 15; desligado: 2 de 8. Não é o bloqueador. Só existe no build dev (DCHECK ligado); no build oficial esse `DCHECK` não roda. O script marca `renderer_crashed` e os números acima são das aberturas em que não morreu.
+- **Memória:** headless, build dev e todas as abas acordadas (nada dorme em 60 s). Serve só para comparar ligado e desligado; não vale como linha de [medicoes.md](medicoes.md) nem contra a meta de 1.933 MB (essa é medida com o build oficial e as abas dormindo).
+- **Não testado:** pré-roll de verdade (nenhum apareceu desligado nesta rede, então "sem anúncio" no YouTube vem do `ytInitialPlayerResponse` limpo, não de ver o anúncio sumir), Twitch por mais de ~20 s, rolagem do UOL (espaços que só carregam ao rolar), mais de uma rodada das 20 abas.

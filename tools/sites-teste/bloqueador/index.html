@@ -1,0 +1,42 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Bloqueador (teste)</title>
+<div class="ad-slot" id="ad">anuncio</div>
+<div class="cookie-banner" id="ck">aviso de cookies</div>
+<div class="not-hidden" id="keep">controle</div>
+<pre id="out"></pre>
+<script>
+var r = {};
+function hidden(id) { return getComputedStyle(document.getElementById(id)).display === 'none'; }
+r.css_ad = hidden('ad');
+r.css_cookie = hidden('ck');
+r.css_exception = !hidden('keep');
+window.agensCfg = { showAds: true };
+r.set = window.agensCfg.showAds === false;
+try { window.adBlockDetector; r.aopr = false; } catch (e) { r.aopr = e instanceof ReferenceError; }
+r.json_prune = JSON.stringify(JSON.parse('{"ads":[1],"x":2}')) === '{"x":2}';
+r.set_cookie = /(^|; )agensConsent=accept/.test(document.cookie);
+r.local_storage = localStorage.getItem('agensGdpr') === 'true';
+var clicked = 0;
+document.addEventListener('click', function popMagic() { clicked++; });
+document.addEventListener('click', function other() { clicked += 10; });
+document.body.click();
+r.aeld = clicked === 10;
+r.nowoif = window.open('https://example.com/popunder', '_blank') === null;
+r.trusted_skipped = !('agensTrusted' in window);
+r.nostif = true;
+setTimeout(function () { /* detectAdblock */ r.nostif = false; }, 0);
+</script>
+<script>
+// abort-current-script: this script mentions adsInject, so createElement throws here.
+r.acs = false;
+try { var adsInject = document.createElement('div'); } catch (e) { r.acs = e instanceof ReferenceError; }
+</script>
+<script>
+r.acs_other_ok = !!document.createElement('div');  // other scripts are untouched
+setTimeout(function () {
+  var ok = Object.keys(r).every(function (k) { return r[k] === true; });
+  document.getElementById('out').textContent = JSON.stringify(r);
+  document.title = (ok ? 'PASS ' : 'FAIL ') + JSON.stringify(r);
+}, 50);
+</script>

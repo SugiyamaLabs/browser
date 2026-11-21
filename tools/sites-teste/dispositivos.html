@@ -1,0 +1,7 @@
+<!doctype html><meta charset="utf-8"><title>Dispositivos (test)</title>
+<script>
+// Only lists the media devices, as YouTube does on load (no camera, no microphone, no sound, no
+// devicechange listener). The count goes to the title: "devices:<n>" (or "devices:error <name>").
+navigator.mediaDevices.enumerateDevices().then(d => { document.title = "devices:" + d.length; })
+  .catch(e => { document.title = "devices:error " + e.name; });
+</script>

@@ -1,0 +1,17 @@
+<!doctype html><meta charset="utf-8"><title>Dialog (test)</title>
+<h1>Dialog</h1>
+<p><button id="alert" type="button">Alert</button> <button id="confirm" type="button">Confirm</button> <button id="prompt" type="button">Prompt</button></p>
+<p>Result: <span id="out">none</span></p>
+<script>
+// Every result goes to document.title: the gate's host only sees a tab's title and url.
+const run = {
+  alert: () => { alert("Heads up"); return "alert:done"; },
+  confirm: () => "confirm:" + confirm("Proceed?"),
+  prompt: () => "prompt:" + prompt("Name?", "anon"),
+};
+const go = k => { document.title = run[k](); document.getElementById("out").textContent = document.title; };
+for (const k in run) document.getElementById(k).onclick = () => go(k);
+// ?auto=alert|confirm|prompt fires by itself after the load, for a tab nobody can click
+const auto = new URLSearchParams(location.search).get("auto");
+if (auto in run) addEventListener("load", () => setTimeout(() => go(auto)));
+</script>

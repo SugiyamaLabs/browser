@@ -1,0 +1,15 @@
+<!doctype html><meta charset="utf-8"><title>Pick (test)</title>
+<h1>Pick</h1>
+<p><label>File <input id="file" type="file" accept=".txt,text/plain"></label></p>
+<p><label>Files <input id="files" type="file" multiple></label></p>
+<p><label>Country <select id="sel"><option value="br">Brasil</option><option value="cl" disabled>Chile</option><option value="pe">Peru</option></select></label></p>
+<p><input id="text" type="text" aria-label="Text"> <a href="/other">Other page</a></p>
+<p>Each button opens its control 2.5 s later, still inside the click's user activation (an agent clicks, then the person takes over):</p>
+<p><button data-open="file" type="button">Open file later</button> <button data-open="files" type="button">Open files later</button> <button data-open="sel" type="button">Open select later</button></p>
+<script>
+const $ = id => document.getElementById(id);
+for (const b of document.querySelectorAll("[data-open]")) b.onclick = () => setTimeout(() => $(b.dataset.open).showPicker(), 2500);
+// Results go to document.title: the gate's host only sees a tab's title and url.
+$("file").onchange = $("files").onchange = e => { document.title = e.target.id + ":" + [...e.target.files].map(f => f.name).join(","); };
+$("sel").onchange = e => { document.title = "select:" + e.target.value; };
+</script>

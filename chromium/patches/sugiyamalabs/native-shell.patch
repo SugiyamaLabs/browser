@@ -276,10 +276,10 @@ index 0000000000..2d34d88232
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_CREDITS_H_
 diff --git a/chrome/browser/agens/embed/agens_embed.h b/chrome/browser/agens/embed/agens_embed.h
 new file mode 100644
-index 0000000000..eb7e1852a5
+index 0000000000..9d0bf4646d
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_embed.h
-@@ -0,0 +1,350 @@
+@@ -0,0 +1,367 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The boundary between the engine and any interface (the browser's own chrome today, the Agens
 +// app later). Plain C on purpose: no Chromium or C++ types cross it, Swift imports it as is, and
@@ -316,7 +316,17 @@ index 0000000000..eb7e1852a5
 +  double split_ratio; // the first one's share of the page area
 +  int camera;      // the page is using the camera now
 +  int microphone;  // the page is using the microphone now
++  int indicators;  // kAgensInd* mask: Chromium's address-bar icons for this tab (active tab only)
++  int zoom_percent;  // the page's zoom, 100 by default
 +} AgensTab;
++
++// What `AgensTab.indicators` carries (camera and microphone have their own fields above).
++enum {
++  kAgensIndPopups = 1 << 0,         // pop-ups blocked
++  kAgensIndLocation = 1 << 1,       // location in use or blocked
++  kAgensIndNotifications = 1 << 2,  // notifications blocked
++  kAgensIndDownloads = 1 << 3,      // automatic downloads blocked
++};
 +
 +// Things the window's menu opens (Chromium's own pages for now).
 +typedef enum {
@@ -351,6 +361,8 @@ index 0000000000..eb7e1852a5
 +void agens_window_stop(AgensWindow* window);
 +// Adds the active page to Favoritos, or removes it if it's there.
 +void agens_window_toggle_bookmark(AgensWindow* window);
++// Back to 100% zoom on the active page.
++void agens_window_reset_zoom(AgensWindow* window);
 +void agens_window_open_page(AgensWindow* window, AgensPage page);
 +// The site panel (connection, permissions, cookies), anchored at the address's site icon.
 +void agens_window_show_site_info(AgensWindow* window);
@@ -364,6 +376,8 @@ index 0000000000..eb7e1852a5
 +  const char* text;    // what to show: the address or the search terms
 +  const char* detail;  // page title, or empty for a search
 +  int is_search;
++  const unsigned char* favicon_png;  // the page's icon from local history, or null
++  int favicon_png_size;
 +} AgensSuggestion;
 +typedef void (*AgensSuggestionsChanged)(void* context, const AgensSuggestion* suggestions,
 +                                        int count);
@@ -610,6 +624,9 @@ index 0000000000..eb7e1852a5
 +  kAgensCommandPasswordPrompt,  // the page has a password to save or update: ask (see below)
 +} AgensCommand;
 +int agens_ui_command(void* chrome, AgensCommand command);
++// Opens Settings on a section ("senhas", "extensoes", "sobre"...; "" keeps the current one), or the
++// downloads panel for "downloads-panel". chrome://settings and friends redirect here.
++void agens_ui_open_section(void* chrome, const char* key);
 +// Where Chromium anchors its bubbles (permissions, site info): the address's site icon.
 +AgensRect agens_ui_site_icon_rect(void* chrome);
 +// Colors the engine paints behind the chrome: the window (0xAARRGGBB, so a theme can let the
@@ -776,10 +793,10 @@ index 0000000000..6d06705a23
 +#endif  // CHROME_BROWSER_AGENS_EMBED_AGENS_IMPORT_H_
 diff --git a/chrome/browser/agens/embed/agens_window.h b/chrome/browser/agens/embed/agens_window.h
 new file mode 100644
-index 0000000000..91603c7c4d
+index 0000000000..268d4dc7bd
 --- /dev/null
 +++ b/chrome/browser/agens/embed/agens_window.h
-@@ -0,0 +1,660 @@
+@@ -0,0 +1,728 @@
 +// Copyright 2026 SugiyamaLabs.
 +// One browser window as the embed API sees it (agens_embed.h): tabs, suggestions, atos, search
 +// default, bookmarks. Platform-neutral; each platform's shell (native_shell_mac.mm, later
@@ -844,6 +861,9 @@ index 0000000000..91603c7c4d
 +#include "chrome/browser/ui/tabs/tab_strip_model.h"
 +#include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
 +#include "components/favicon/content/content_favicon_driver.h"
++#include "chrome/browser/favicon/favicon_service_factory.h"
++#include "components/favicon/core/favicon_service.h"
++#include "components/keyed_service/core/service_access_type.h"
 +#include "components/omnibox/browser/autocomplete_classifier.h"
 +#include "components/omnibox/browser/autocomplete_controller.h"
 +#include "components/omnibox/browser/autocomplete_input.h"
@@ -864,6 +884,8 @@ index 0000000000..91603c7c4d
 +#include "content/public/browser/render_frame_host.h"
 +#include "extensions/common/extension_urls.h"
 +#include "chrome/browser/ui/status_bubble.h"
++#include "chrome/browser/ui/content_settings/content_setting_image_model.h"
++#include "components/zoom/zoom_controller.h"
 +#include "components/download/public/common/download_item.h"
 +#include "components/url_formatter/url_formatter.h"
 +#include "content/public/browser/download_manager.h"
@@ -1157,6 +1179,26 @@ index 0000000000..91603c7c4d
 +    auto* helper = security_interstitials::SecurityInterstitialTabHelper::FromWebContents(contents);
 +    return helper && helper->IsDisplayingInterstitial();
 +  }
++  // The icons Chromium's address bar would show, read from the same image models as LocationBarView.
++  int Indicators(content::WebContents* contents) {
++    if (content_models.empty()) content_models = ContentSettingImageModel::GenerateContentSettingImageModels();
++    using Type = ContentSettingImageModel::ImageType;
++    int mask = 0;
++    for (auto& model : content_models) {
++      model->Update(contents);
++      if (!model->is_visible()) continue;
++      switch (model->image_type()) {
++        case Type::kPopups: mask |= kAgensIndPopups; break;
++        case Type::kGeolocation: mask |= kAgensIndLocation; break;
++        case Type::kNotifications: mask |= kAgensIndNotifications; break;
++        case Type::kAutomaticDownloads: mask |= kAgensIndDownloads; break;
++        default: break;  // camera/microphone have their own fields
++      }
++    }
++    return mask;
++  }
++  std::vector<std::unique_ptr<ContentSettingImageModel>> content_models;
++
 +  void NotifyNow() {
 +    notify_pending = false;
 +    if (!observer) return;
@@ -1187,7 +1229,11 @@ index 0000000000..91603c7c4d
 +      if (error) errors[i] = net::ErrorToShortString(error);
 +      titles[i] = base::UTF16ToUTF8(contents->GetTitle());
 +      urls[i] = contents->GetVisibleURL().spec();
-+      if (urls[i].starts_with("chrome://newtab")) urls[i].clear();
++      // All three new tab hosts: the first run opens new-tab-page-third-party, not newtab.
++      if (const GURL& u = contents->GetVisibleURL(); u.SchemeIs("chrome") &&
++          (u.host() == "newtab" || u.host() == "new-tab-page" || u.host() == "new-tab-page-third-party")) {
++        urls[i].clear();
++      }
 +      if (auto* driver = favicon::ContentFaviconDriver::FromWebContents(contents)) {
 +        gfx::Image icon = driver->GetFavicon();
 +        if (!icon.IsEmpty()) {
@@ -1203,7 +1249,11 @@ index 0000000000..91603c7c4d
 +                 model()->IsTabPinned(i), contents->IsCurrentlyAudible(),
 +                 contents->IsAudioMuted(), error, errors[i].c_str(),
 +                 Interstitial(contents), splits[i].layout, splits[i].first, splits[i].ratio,
-+                 capture && capture->IsCapturingVideo(contents), capture && capture->IsCapturingAudio(contents)};
++                 capture && capture->IsCapturingVideo(contents), capture && capture->IsCapturingAudio(contents),
++                 i == model()->active_index() ? Indicators(contents) : 0,
++                 zoom::ZoomController::FromWebContents(contents)
++                     ? zoom::ZoomController::FromWebContents(contents)->GetZoomPercent()
++                     : 100};
 +    }
 +    observer(context, tabs.data(), static_cast<int>(tabs.size()));
 +  }
@@ -1258,6 +1308,7 @@ index 0000000000..91603c7c4d
 +  void PublishSuggestions() {
 +    if (!suggestions_observer) return;
 +    std::vector<std::string> texts, details;
++    std::vector<const std::vector<uint8_t>*> icons;
 +    std::vector<AgensSuggestion> out;
 +    const AutocompleteResult& result = autocomplete->result();
 +    const size_t count = std::min<size_t>(result.size(), 6);
@@ -1268,12 +1319,44 @@ index 0000000000..91603c7c4d
 +      const bool search = AutocompleteMatch::IsSearchType(match.type);
 +      texts.push_back(base::UTF16ToUTF8(search ? match.contents : match.contents));
 +      details.push_back(search ? std::string() : base::UTF16ToUTF8(match.description));
++      const std::vector<uint8_t>* icon = nullptr;
++      if (!search && match.destination_url.is_valid()) {
++        auto it = suggestion_icons.find(match.destination_url.spec());
++        if (it == suggestion_icons.end()) {
++          LoadSuggestionIcon(match.destination_url);
++        } else if (!it->second.empty()) {
++          icon = &it->second;
++        }
++      }
++      icons.push_back(icon);
 +    }
 +    for (size_t i = 0; i < count; ++i) {
 +      out.push_back({texts[i].c_str(), details[i].c_str(),
-+                     AutocompleteMatch::IsSearchType(result.match_at(i).type)});
++                     AutocompleteMatch::IsSearchType(result.match_at(i).type),
++                     icons[i] ? icons[i]->data() : nullptr,
++                     icons[i] ? static_cast<int>(icons[i]->size()) : 0});
 +    }
 +    suggestions_observer(suggestions_context, out.data(), static_cast<int>(out.size()));
++  }
++
++  // The page's favicon from the local favicon database (never the network); cached per URL,
++  // an empty entry meaning "none stored" or "still loading".
++  void LoadSuggestionIcon(const GURL& url) {
++    suggestion_icons[url.spec()];
++    favicon::FaviconService* service = FaviconServiceFactory::GetForProfile(
++        browser->GetProfile(), ServiceAccessType::EXPLICIT_ACCESS);
++    if (!service) return;
++    service->GetRawFaviconForPageURL(
++        url, {favicon_base::IconType::kFavicon}, 32, /*fallback_to_host=*/true,
++        base::BindOnce(
++            [](base::WeakPtr<AgensWindow> self, std::string key,
++               const favicon_base::FaviconRawBitmapResult& result) {
++              if (!self || !result.is_valid()) return;
++              self->suggestion_icons[key].assign(result.bitmap_data->begin(), result.bitmap_data->end());
++              if (self->autocomplete) self->PublishSuggestions();
++            },
++            weak.GetWeakPtr(), url.spec()),
++        &suggestion_icon_tracker);
 +  }
 +
 +  // AutocompleteController::Observer:
@@ -1287,6 +1370,8 @@ index 0000000000..91603c7c4d
 +  AgensSuggestionsChanged suggestions_observer = nullptr;
 +  raw_ptr<void> suggestions_context = nullptr;
 +  std::unique_ptr<AutocompleteController> autocomplete;
++  std::map<std::string, std::vector<uint8_t>> suggestion_icons;
++  base::CancelableTaskTracker suggestion_icon_tracker;
 +  base::RepeatingClosure relayout;
 +  bool notify_pending = false;
 +  AgensStatusBubble status_bubble;
@@ -2874,16 +2959,22 @@ index 0000000000..4eb24ab895
 +}  // namespace agens::import
 diff --git a/chrome/browser/agens/embed/native_shell.cc b/chrome/browser/agens/embed/native_shell.cc
 new file mode 100644
-index 0000000000..204b5147c0
+index 0000000000..cfdc014cf4
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.cc
-@@ -0,0 +1,815 @@
+@@ -0,0 +1,907 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The embed API (agens_embed.h) on top of AgensWindow. Same code on every platform.
 +
 +#include "chrome/browser/agens/embed/native_shell.h"
 +
 +#include "chrome/browser/agens/embed/agens_window.h"
++#include <algorithm>
++#include "base/task/single_thread_task_runner.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
++#include "components/tabs/public/tab_interface.h"
++#include "content/public/browser/navigation_throttle.h"
++#include "content/public/browser/navigation_throttle_registry.h"
 +#include "build/build_config.h"
 +#include "chrome/browser/content_settings/host_content_settings_map_factory.h"
 +#include "chrome/browser/shell_integration.h"
@@ -3634,6 +3725,9 @@ index 0000000000..204b5147c0
 +    ShowPageInfoDialog(active, base::DoNothing(), bubble_anchor_util::Anchor::kLocationBar);
 +  }
 +}
++void agens_window_reset_zoom(AgensWindow* w) {
++  chrome::ExecuteCommand(w->browser, IDC_ZOOM_NORMAL);
++}
 +void agens_window_stop(AgensWindow* w) {
 +  chrome::ExecuteCommand(w->browser, IDC_STOP);
 +}
@@ -3681,6 +3775,7 @@ index 0000000000..204b5147c0
 +StatusBubble* NativeStatusBubble(views::Widget*) {
 +  return nullptr;
 +}
++void NativeTabStateChanged(views::Widget*) {}
 +void ConfirmCloseWithDownloads(views::Widget*, int, base::OnceCallback<void(bool)> callback) {
 +  std::move(callback).Run(true);
 +}
@@ -3692,13 +3787,95 @@ index 0000000000..204b5147c0
 +
 +
 +
++#if !BUILDFLAG(IS_MAC)
++bool OpenNativeSection(BrowserWindowInterface*, const char*) {
++  return false;
++}
++#endif
++
++namespace {
++
++// chrome:// pages the native shell replaces: the host (and, for settings, the sub page) maps to a
++// Settings section ("" keeps the current one) or the downloads panel.
++const char* NativeSectionFor(const GURL& url) {
++  const std::string_view host = url.host(), path = url.path();
++  if (host == "extensions") return "extensoes";
++  if (host == "password-manager") return "senhas";
++  if (host == "downloads") return "downloads-panel";
++  if (host == "help") return "sobre";
++  if (host != "settings") return nullptr;
++  if (path == "/help") return "sobre";
++  if (path == "/passwords") return "senhas";
++  if (path == "/content" || path == "/privacy" || path == "/security" || path == "/clearBrowserData") return "privacidade";
++  if (path == "/searchEngines") return "busca";
++  return "";
++}
++
++// Google sign-in/sync, AI and promo pages the native shell never shows. Blocked (a request-blocked error page; the navigation DCHECKs on other errors).
++bool IsBlockedHost(std::string_view host) {
++  static constexpr std::string_view kBlocked[] = {
++      "whats-new", "updater", "history-sync-optin", "intro", "signin-error",
++      "signin-email-confirmation", "sync-confirmation", "batch-upload", "dice-web-intercept",
++      "signout-confirmation", "feature-showcase", "cross-device-signin-qr-bubble",
++      "managed-user-profile-notice", "profile-customization", "default-browser", "glic",
++      "glic-experimental-opt-in", "skills", "customize-chrome", "tabs-from-other-devices",
++      "app-home", "apps", "shopping-insights-side-panel", "browser-switch"};
++  return std::ranges::contains(kBlocked, host);
++}
++
++class NativePageThrottle : public content::NavigationThrottle {
++ public:
++  using content::NavigationThrottle::NavigationThrottle;
++  const char* GetNameForLogging() override { return "AgensNativePage"; }
++  ThrottleCheckResult WillStartRequest() override { return Check(); }
++  ThrottleCheckResult WillRedirectRequest() override { return Check(); }
++
++ private:
++  ThrottleCheckResult Check() {
++    const GURL& url = navigation_handle()->GetURL();
++    if (!url.SchemeIs("chrome")) return PROCEED;
++    if (IsBlockedHost(url.host())) return {BLOCK_REQUEST, net::ERR_BLOCKED_BY_CLIENT};
++    const char* section = NativeSectionFor(url);
++    if (!section || !navigation_handle()->IsInPrimaryMainFrame()) return PROCEED;
++    content::WebContents* contents = navigation_handle()->GetWebContents();
++    tabs::TabInterface* tab = tabs::TabInterface::MaybeGetFromContents(contents);
++    BrowserWindowInterface* browser = tab ? tab->GetBrowserWindowInterface()
++                                          : GetLastActiveBrowserWindowInterfaceWithAnyProfile();
++    if (!browser || !OpenNativeSection(browser, section)) return PROCEED;
++    // A tab that only ever held this address (a link opened in a new tab) goes away; one that was
++    // showing a page stays on it.
++    if (contents->GetController().GetLastCommittedEntry()->IsInitialEntry() &&
++        browser->GetTabStripModel()->count() > 1) {
++      base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++          FROM_HERE, base::BindOnce(
++                         [](base::WeakPtr<content::WebContents> weak) {
++                           // Look the window up again: it may have closed since.
++                           tabs::TabInterface* tab = weak ? tabs::TabInterface::MaybeGetFromContents(weak.get()) : nullptr;
++                           BrowserWindowInterface* b = tab ? tab->GetBrowserWindowInterface() : nullptr;
++                           if (!b) return;
++                           TabStripModel* model = b->GetTabStripModel();
++                           const int i = model->GetIndexOfWebContents(weak.get());
++                           if (i >= 0 && model->count() > 1) model->CloseWebContentsAt(i, TabCloseTypes::CLOSE_NONE);
++                         },
++                         contents->GetWeakPtr()));
++    }
++    return {CANCEL_AND_IGNORE};
++  }
++};
++
++}  // namespace
++
++void MaybeAddNativePageThrottle(content::NavigationThrottleRegistry& registry) {
++  if (IsNativeShellEnabled()) registry.AddThrottle(std::make_unique<NativePageThrottle>(registry));
++}
++
 +}  // namespace agens
 diff --git a/chrome/browser/agens/embed/native_shell.h b/chrome/browser/agens/embed/native_shell.h
 new file mode 100644
-index 0000000000..ebd1215130
+index 0000000000..d81488f053
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell.h
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,76 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Glue between Chromium's Webium window (WebUIBrowserWindow, without its HTML page) and the
 +// agens_embed.h interface.
@@ -3717,6 +3894,9 @@ index 0000000000..ebd1215130
 +
 +class BrowserWindowInterface;
 +class StatusBubble;
++namespace content {
++class NavigationThrottleRegistry;
++}
 +namespace views {
 +class View;
 +class Widget;
@@ -3754,8 +3934,15 @@ index 0000000000..ebd1215130
 +ExtensionInstallPrompt::ShowDialogCallback NativeInstallDialogCallback();
 +// Lets the native shell take a browser command (IDC_*) before Chromium runs it. True if it did.
 +bool HandleNativeCommand(BrowserWindowInterface* browser, int command_id);
++// Shows a Settings section (or "downloads-panel") in this window's native shell. False without one.
++bool OpenNativeSection(BrowserWindowInterface* browser, const char* key);
++// Sends chrome://settings, extensions, downloads... to the native shell and blocks the Google
++// sign-in/AI WebUI pages (native_shell.cc).
++void MaybeAddNativePageThrottle(content::NavigationThrottleRegistry& registry);
 +// The window's status bubble (link URL), or null when the native shell isn't in this widget.
 +StatusBubble* NativeStatusBubble(views::Widget* widget);
++// Tells the shell something it shows for the tab changed (address-bar icons, zoom). No-op without it.
++void NativeTabStateChanged(views::Widget* widget);
 +// True for the native shell's bubble. Chromium casts status bubbles to StatusBubbleViews in a
 +// couple of places; those check this first.
 +bool IsNativeStatusBubble(const StatusBubble* bubble);
@@ -3767,10 +3954,10 @@ index 0000000000..ebd1215130
 +#endif  // CHROME_BROWSER_AGENS_EMBED_NATIVE_SHELL_H_
 diff --git a/chrome/browser/agens/embed/native_shell_mac.mm b/chrome/browser/agens/embed/native_shell_mac.mm
 new file mode 100644
-index 0000000000..8d10fddb69
+index 0000000000..5d7ca90415
 --- /dev/null
 +++ b/chrome/browser/agens/embed/native_shell_mac.mm
-@@ -0,0 +1,593 @@
+@@ -0,0 +1,611 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The macOS host: the views::View that fills the Webium window, puts the UI's chrome (an NSView)
 +// over it and the active tab in the page card. Everything else is shared (agens_window.h,
@@ -3906,6 +4093,7 @@ index 0000000000..8d10fddb69
 +  void FocusAddress() { agens_ui_focus_address((__bridge void*)chrome_); }
 +  float TitlebarHeight() { return agens_ui_titlebar_height((__bridge void*)chrome_); }
 +  AgensWindow* window() { return window_.get(); }
++  void OpenSection(const char* key) { agens_ui_open_section((__bridge void*)chrome_, key); }
 +  bool Command(AgensCommand command) { return agens_ui_command((__bridge void*)chrome_, command); }
 +  StatusBubble* status_bubble() { return &window_->status_bubble; }
 +
@@ -4093,6 +4281,12 @@ index 0000000000..8d10fddb69
 +  return shell ? shell->status_bubble() : nullptr;
 +}
 +
++void NativeTabStateChanged(views::Widget* widget) {
++  auto* shell = views::AsViewClass<NativeShellView>(
++      widget->GetRootView()->GetViewByID(NativeShellView::kViewId));
++  if (shell) shell->window()->Notify();
++}
++
 +void ConfirmCloseWithDownloads(views::Widget* widget, int count, base::OnceCallback<void(bool)> callback) {
 +  NSAlert* alert = [[NSAlert alloc] init];
 +  alert.messageText = count == 1 ? @"Há um download em andamento" : [NSString stringWithFormat:@"Há %d downloads em andamento", count];
@@ -4124,6 +4318,17 @@ index 0000000000..8d10fddb69
 +                             widget->GetRootView()->GetViewByID(NativeShellView::kViewId))
 +                       : nullptr;
 +  return shell && shell->Command(*command);
++}
++
++bool OpenNativeSection(BrowserWindowInterface* browser, const char* key) {
++  if (!IsNativeShellEnabled() || !browser->GetWindow()) return false;
++  views::Widget* widget = views::Widget::GetWidgetForNativeWindow(browser->GetWindow()->GetNativeWindow());
++  auto* shell = widget ? views::AsViewClass<NativeShellView>(
++                             widget->GetRootView()->GetViewByID(NativeShellView::kViewId))
++                       : nullptr;
++  if (!shell) return false;
++  shell->OpenSection(key);
++  return true;
 +}
 +
 +// Shows the request in our panel (agens_ui_permission_prompt) and answers through the delegate
@@ -4366,10 +4571,10 @@ index 0000000000..8d10fddb69
 +}  // namespace agens
 diff --git a/chrome/browser/agens/ui/chrome_mac.mm b/chrome/browser/agens/ui/chrome_mac.mm
 new file mode 100644
-index 0000000000..e113937855
+index 0000000000..3c18c4eab1
 --- /dev/null
 +++ b/chrome/browser/agens/ui/chrome_mac.mm
-@@ -0,0 +1,5137 @@
+@@ -0,0 +1,5437 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The browser's chrome on macOS, from prototipos/janela.html (tabs on the side): a 52 pt toolbar
 +// (back, forward, reload, address with suggestions), the tab column with the current ato on top and
@@ -4384,6 +4589,7 @@ index 0000000000..e113937855
 +
 +#include <algorithm>
 +#include <map>
++#include <set>
 +#include <tuple>
 +#include <string>
 +#include <vector>
@@ -5099,7 +5305,12 @@ index 0000000000..e113937855
 +- (void)updateWith:(const AgensSuggestion&)suggestion {
 +  _text.stringValue = @(suggestion.text);
 +  _detail.stringValue = @(suggestion.detail);
-+  _icon.image = Symbol(suggestion.is_search ? @"magnifyingglass" : @"globe", 13);
++  NSImage* favicon = suggestion.favicon_png
++      ? [[NSImage alloc] initWithData:[NSData dataWithBytes:suggestion.favicon_png
++                                                     length:suggestion.favicon_png_size]]
++      : nil;
++  favicon.size = NSMakeSize(16, 16);
++  _icon.image = favicon ?: Symbol(suggestion.is_search ? @"magnifyingglass" : @"globe", 13);
 +  self.accessibilityLabel = suggestion.detail[0]
 +      ? [NSString stringWithFormat:@"%@, %@", _text.stringValue, _detail.stringValue]
 +      : _text.stringValue;
@@ -5801,6 +6012,8 @@ index 0000000000..e113937855
 +  } else if ([key isEqualToString:@"sobre"]) {
 +    NSString* version = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"";
 +    y = [self info:product detail:[NSString stringWithFormat:@"Versão %@ · SugiyamaLabs", version] note:@"" y:y];
++    y = [self info:@"Base" detail:@"Chromium 156.0.8078.79 · ungoogled-chromium" note:@"" y:y];
++    y = [self option:@"Licença" detail:@"BSD-3-Clause" control:[self linkButton:@"github.com/SugiyamaLabs/browser" url:@"https://github.com/SugiyamaLabs/browser"] y:y];
 +    y = [self option:@"Avisos de código aberto" detail:@"Chromium, ungoogled-chromium e as listas do bloqueador." control:[self subButton:@"Ver…" key:@"avisos"] y:y];
 +  }
 +  NSRect f = _pane.frame;
@@ -6844,19 +7057,31 @@ index 0000000000..e113937855
 +}
 +
 +// ---------------------------------------------------------------------------------------------
-+// Primeira instalação (prototipos/primeiro-uso.html): one window, once. v1 steps: boas-vindas,
-+// atos, visual, privacidade, navegador padrão, pronto. Importing from other browsers comes later.
++// Primeira instalação (prototipos/primeiro-uso.html): one window, once. Steps: boas-vindas,
++// atos, trazer de outro navegador (into the ato just named), visual, privacidade, navegador
++// padrão, pronto.
 +
 +static NSString* const kFirstRunKey = @"AgensFirstRunDone";
 +
 +@interface AgensFirstRun : NSWindowController <NSWindowDelegate>
-++ (void)showIfNeededFor:(AgensWindow*)window;
+++ (void)showIfNeededFor:(AgensWindow*)window browserWindow:(NSWindow*)browserWindow;
++- (void)setSources:(const AgensImportSource*)sources count:(int)count;
++- (void)importFrom:(const char*)sourceId state:(int)state message:(const char*)message;
 +@end
 +
 +static AgensFirstRun* g_first_run;
++static constexpr int kFirstRunSteps = 7;
++// Import callbacks can arrive after the window closed: only the live first run gets them.
++static void FirstRunSources(void* context, const AgensImportSource* sources, int count) {
++  if (g_first_run && (__bridge void*)g_first_run == context) [g_first_run setSources:sources count:count];
++}
++static void FirstRunImportProgress(void* context, const char* source_id, int state, const char* message) {
++  if (g_first_run && (__bridge void*)g_first_run == context) [g_first_run importFrom:source_id state:state message:message];
++}
 +
 +@implementation AgensFirstRun {
 +  AgensWindow* _browser;
++  __weak NSWindow* _browserWindow;  // hidden while the first steps are open, shown when they close
 +  int _step;
 +  AgensFlippedView* _body;
 +  NSButton* _back;
@@ -6864,12 +7089,28 @@ index 0000000000..e113937855
 +  NSView* _dots;
 +  NSTextField* _atoName;
 +  BOOL _madeDefault;
++  NSButton* _skip;
++  // Trazer: one row per browser profile that has something. Each one ticked becomes an ato: the
++  // first into the ato named one step before, the others into new atos named after the profile.
++  BOOL _searched;
++  BOOL _noneFound;
++  std::vector<std::tuple<std::string, std::string, int, std::string>> _sources;  // id, label, available, ato
++  std::set<size_t> _picked;
++  int _what;
++  BOOL _importing;
++  std::vector<std::string> _runs;                            // source ids, in list order
++  std::map<std::string, std::string> _runAto;                // source id -> ato it fills
++  std::map<std::string, int> _runState;                      // 0 working, 1 done, -1 failed
++  std::map<std::string, std::string> _runText;               // latest step, or the summary
++  std::map<std::string, std::vector<std::string>> _runCounts;
 +}
 +
-++ (void)showIfNeededFor:(AgensWindow*)window {
+++ (void)showIfNeededFor:(AgensWindow*)window browserWindow:(NSWindow*)browserWindow {
 +  if (g_first_run || [NSUserDefaults.standardUserDefaults boolForKey:kFirstRunKey]) return;
 +  g_first_run = [[AgensFirstRun alloc] init];
 +  g_first_run->_browser = window;
++  g_first_run->_browserWindow = browserWindow;
++  [browserWindow orderOut:nil];
 +  [g_first_run showStep:0];
 +  [g_first_run.window center];
 +  [g_first_run showWindow:nil];
@@ -6897,16 +7138,21 @@ index 0000000000..e113937855
 +    [root addSubview:_body];
 +    _back = [NSButton buttonWithTitle:@"Voltar" target:self action:@selector(back:)];
 +    _next = [NSButton buttonWithTitle:@"Continuar" target:self action:@selector(next:)];
++    _skip = [NSButton buttonWithTitle:@"Começar do zero" target:self action:@selector(skip:)];
 +    _next.keyEquivalent = @"\r";
 +    _back.frame = NSMakeRect(32, 486, 100, 30);
 +    _next.frame = NSMakeRect(640 - 32 - 130, 486, 130, 30);
-+    _dots = [[NSView alloc] initWithFrame:NSMakeRect(270, 497, 100, 8)];
-+    for (NSView* v in @[ _back, _next, _dots ]) [root addSubview:v];
++    _skip.frame = NSMakeRect(640 - 32 - 130 - 8 - 140, 486, 140, 30);
++    _dots = [[NSView alloc] initWithFrame:NSMakeRect(274, 497, 91, 8)];
++    for (NSView* v in @[ _back, _skip, _next, _dots ]) [root addSubview:v];
++    _what = kAgensImportBookmarks | kAgensImportHistory | kAgensImportPasswords | kAgensImportCookies |
++            kAgensImportExtensions;
 +  }
 +  return self;
 +}
 +- (void)windowWillClose:(NSNotification*)note {
 +  [NSUserDefaults.standardUserDefaults setBool:YES forKey:kFirstRunKey];  // closing also counts
++  [_browserWindow makeKeyAndOrderFront:nil];
 +  g_first_run = nil;
 +}
 +
@@ -6971,7 +7217,10 @@ index 0000000000..e113937855
 +      for (NSView* v in @[ label, _atoName, cookies ]) [_body addSubview:v];
 +      break;
 +    }
-+    case 2: {
++    case 2:
++      [self importStep];
++      break;
++    case 3: {
 +      y = [self title:@"Do seu jeito" lead:@"Muda a qualquer hora em Configurações › Aparência, sem reiniciar."];
 +      NSSegmentedControl* theme = [NSSegmentedControl segmentedControlWithLabels:@[ @"Grafite", @"Brasa" ]
 +                                                                     trackingMode:NSSegmentSwitchTrackingSelectOne
@@ -6989,7 +7238,7 @@ index 0000000000..e113937855
 +      [_body addSubview:mode];
 +      break;
 +    }
-+    case 3:
++    case 4:
 +      y = [self title:@"Sua privacidade já está no máximo" lead:@"Não precisa ligar nada. Se um site quebrar, você libera só ele."];
 +      y = [self line:@"Bloqueio de rastreadores e cookies de terceiros" y:y];
 +      y = [self line:@"Pedido de não rastrear (GPC e Do Not Track)" y:y];
@@ -6997,7 +7246,7 @@ index 0000000000..e113937855
 +      y = [self line:@"Localização e notificações bloqueadas; câmera e microfone perguntam" y:y];
 +      [self line:@"Nenhuma telemetria: parado, o navegador não faz conexão nenhuma" y:y];
 +      break;
-+    case 4: {
++    case 5: {
 +      y = [self title:@"Abrir os links no AgensBrowser?" lead:@"Links do Slack, do e-mail e de outros apps passam a abrir aqui."];
 +      NSButton* yes = [NSButton buttonWithTitle:_madeDefault ? @"Pronto, é o padrão" : @"Usar como navegador padrão"
 +                                         target:self
@@ -7012,10 +7261,21 @@ index 0000000000..e113937855
 +      break;
 +  }
 +  _back.hidden = step == 0;
-+  _next.title = step == 5 ? @"Começar" : step == 4 && !_madeDefault ? @"Agora não" : @"Continuar";
++  const BOOL offerImport = step == 2 && !_importing && !_sources.empty();
++  _skip.hidden = !offerImport;
++  [_skip sizeToFit];
++  _skip.frame = NSMakeRect(NSMinX(_next.frame) - 8 - NSWidth(_skip.frame), 486, NSWidth(_skip.frame), 30);
++  // The dots sit centered in the free space between Voltar and the buttons on the right.
++  const CGFloat right = offerImport ? NSMinX(_skip.frame) : NSMinX(_next.frame);
++  _dots.frame = NSMakeRect(round((NSMaxX(_back.frame) + right) / 2 - 7 * 13 / 2.0), 497, 7 * 13, 8);
++  _next.enabled = !offerImport || (_what != 0 && !_picked.empty());
++  _next.title = step == kFirstRunSteps - 1 ? @"Começar"
++                : offerImport               ? @"Importar"
++                : step == 5 && !_madeDefault ? @"Agora não"
++                                             : @"Continuar";
 +  for (NSView* v in [_dots.subviews copy]) [v removeFromSuperview];
-+  for (int i = 0; i < 6; ++i) {
-+    NSView* dot = [[NSView alloc] initWithFrame:NSMakeRect(14 + i * 13, 0, 7, 7)];
++  for (int i = 0; i < kFirstRunSteps; ++i) {
++    NSView* dot = [[NSView alloc] initWithFrame:NSMakeRect(3 + i * 13, 0, 7, 7)];
 +    dot.wantsLayer = YES;
 +    dot.layer.cornerRadius = 3.5;
 +    dot.layer.backgroundColor = i == step ? CG(kLight3, root) : CG(kLineStrong, root);
@@ -7024,11 +7284,182 @@ index 0000000000..e113937855
 +}
 +- (void)next:(id)sender {
 +  if (_step == 1 && _browser && _atoName.stringValue.length) agens_window_rename_ato(_browser, 0, _atoName.stringValue.UTF8String);
-+  if (_step == 5) {
++  if (_step == 2 && !_importing && !_sources.empty()) {
++    [self startImport];
++    return;
++  }
++  if (_step == kFirstRunSteps - 1) {
 +    [self close];
 +    return;
 +  }
 +  [self showStep:_step + 1];
++}
++- (void)skip:(id)sender {
++  [self showStep:_step + 1];
++}
++
++// Trazer o que você já tem: pick one browser profile and what to bring; it fills the first ato
++// (named one step before) and keeps running while the person goes on.
++- (NSString*)firstAtoName {
++  NSString* name = [_atoName.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
++  return name.length ? name : @"Pessoal";
++}
++// Where source i goes: the first ticked one fills the person's first ato, the rest get their own.
++- (std::string)atoFor:(size_t)i {
++  return !_picked.empty() && i == *_picked.begin() ? std::string([self firstAtoName].UTF8String)
++                                                    : std::get<3>(_sources[i]);
++}
++- (void)centered:(NSString*)text size:(CGFloat)size color:(NSColor*)color y:(CGFloat)y height:(CGFloat)h {
++  NSTextField* l = [NSTextField wrappingLabelWithString:text];
++  l.font = [NSFont systemFontOfSize:size];
++  l.textColor = color;
++  l.alignment = NSTextAlignmentCenter;
++  l.frame = NSMakeRect(40, y, 560, h);
++  [_body addSubview:l];
++}
++- (void)importStep {
++  if (!_searched) {
++    _searched = YES;
++    agens_import_sources(FirstRunSources, (__bridge void*)self);
++  }
++  int working = 0, failed = 0;
++  for (const std::string& id : _runs) {
++    working += _runState[id] == 0;
++    failed += _runState[id] < 0;
++  }
++  NSString* lead = !_importing ? (_noneFound ? @"Nenhum outro navegador neste Mac. Dá para importar depois, em Configurações › Atos."
++                                             : @"Achamos estes navegadores no seu Mac. Cada perfil marcado vira um ato, e nada passa por servidor nenhum.")
++                   : working   ? @"Pode continuar: a importação segue sozinha."
++                   : failed    ? @"Parte não veio. Dá para tentar de novo em Configurações › Atos."
++                               : @"Pronto. Cada perfil virou um ato.";
++  CGFloat y = [self title:@"Trazer o que você já tem?" lead:lead];
++  if (_importing) {  // one line per profile: where it went and how it is going
++    for (const std::string& id : _runs) {
++      size_t i = 0;
++      while (i < _sources.size() && std::get<0>(_sources[i]) != id) ++i;
++      if (i == _sources.size()) continue;
++      NSString* head = [NSString stringWithFormat:@"%@ → ato %@", @(std::get<1>(_sources[i]).c_str()), @(_runAto[id].c_str())];
++      [self centered:head size:13 color:kInk.color() y:y height:18];
++      [self centered:@(_runText[id].c_str()) size:12 color:kMute.color() y:y + 19 height:32];
++      y += 58;
++    }
++    return;
++  }
++  if (_sources.empty()) {
++    if (!_noneFound) [self centered:@"Procurando navegadores…" size:13 color:kMute.color() y:y + 6 height:18];
++    return;
++  }
++  static NSString* const kNames[] = {@"favoritos", @"histórico", @"senhas", @"cookies", @"extensões"};
++  const size_t shown = std::min<size_t>(_sources.size(), 4);
++  for (size_t i = 0; i < shown; ++i) {
++    const int available = std::get<2>(_sources[i]);
++    NSButton* box = [NSButton checkboxWithTitle:@(std::get<1>(_sources[i]).c_str()) target:self action:@selector(pickSource:)];
++    box.tag = (NSInteger)i;
++    box.state = _picked.count(i) ? NSControlStateValueOn : NSControlStateValueOff;
++    box.frame = NSMakeRect(150, y, 360, 18);
++    NSMutableArray<NSString*>* has = [NSMutableArray array];
++    for (int b = 0; b < 5; ++b) {
++      if (available & (1 << b)) [has addObject:kNames[b]];
++    }
++    NSTextField* detail = Label(12, NSFontWeightRegular, kDim);
++    detail.stringValue = _picked.count(i)
++        ? [NSString stringWithFormat:@"Vai para o ato %@", @([self atoFor:i].c_str())]
++        : [has componentsJoinedByString:@", "];
++    detail.lineBreakMode = NSLineBreakByTruncatingTail;
++    detail.frame = NSMakeRect(170, y + 19, 380, 16);
++    [_body addSubview:box];
++    [_body addSubview:detail];
++    y += 42;
++  }
++  // What to bring, as a row of checkboxes centered under the list.
++  static const struct {
++    int bit;
++    NSString* label;
++  } kKinds[] = {{kAgensImportBookmarks, @"Favoritos"}, {kAgensImportHistory, @"Histórico"},
++                {kAgensImportPasswords, @"Senhas"},    {kAgensImportCookies, @"Cookies"},
++                {kAgensImportExtensions, @"Extensões"}};
++  NSMutableArray<NSButton*>* boxes = [NSMutableArray array];
++  CGFloat width = 0;
++  for (const auto& k : kKinds) {
++    NSButton* box = [NSButton checkboxWithTitle:k.label target:self action:@selector(setWhat:)];
++    box.tag = k.bit;
++    box.state = (_what & k.bit) ? NSControlStateValueOn : NSControlStateValueOff;
++    [box sizeToFit];
++    width += NSWidth(box.frame) + (boxes.count ? 14 : 0);
++    [boxes addObject:box];
++  }
++  CGFloat x = (640 - width) / 2;
++  for (NSButton* box in boxes) {
++    box.frame = NSMakeRect(x, y + 8, NSWidth(box.frame), NSHeight(box.frame));
++    x += NSWidth(box.frame) + 14;
++    [_body addSubview:box];
++  }
++  [self centered:@"Senhas do Chrome, Brave, Arc e Edge: o macOS pede uma vez a sua senha do Mac. Dá para importar outros depois, em Configurações › Atos."
++            size:12
++           color:kDim.color()
++               y:y + 40
++          height:32];
++}
++- (void)setSources:(const AgensImportSource*)sources count:(int)count {
++  _sources.clear();
++  for (int i = 0; i < count; ++i) {
++    if (!sources[i].available) continue;  // nothing to bring (e.g. Safari without Full Disk Access)
++    std::string label = sources[i].browser;
++    if (sources[i].profile && sources[i].profile[0]) label += std::string(" — ") + sources[i].profile;
++    _sources.emplace_back(sources[i].id, label, sources[i].available,
++                          sources[i].ato && sources[i].ato[0] ? sources[i].ato : label);
++  }
++  _picked.clear();
++  if (!_sources.empty()) _picked.insert(0);
++  _noneFound = _sources.empty();
++  if (_step == 2) [self showStep:2];
++}
++- (void)pickSource:(NSButton*)box {
++  if (box.state == NSControlStateValueOn) {
++    _picked.insert((size_t)box.tag);
++  } else {
++    _picked.erase((size_t)box.tag);
++  }
++  [self showStep:2];  // the "vai para o ato" lines follow which one is first
++}
++- (void)setWhat:(NSButton*)box {
++  _what = box.state == NSControlStateValueOn ? (_what | (int)box.tag) : (_what & ~(int)box.tag);
++  _next.enabled = _what != 0 && !_picked.empty();
++}
++- (void)startImport {
++  if (!_browser || _picked.empty() || !_what) return;
++  _importing = YES;
++  for (size_t i : _picked) {
++    const std::string& id = std::get<0>(_sources[i]);
++    _runs.push_back(id);
++    _runAto[id] = [self atoFor:i];
++    _runState[id] = 0;
++    _runText[id] = "Começando…";
++  }
++  [self showStep:2];
++  for (size_t i : _picked) {  // concurrent imports are fine: the writer never gives two the same folder
++    const std::string& id = std::get<0>(_sources[i]);
++    agens_import_run(_browser, id.c_str(), _runAto[id].c_str(), _what & std::get<2>(_sources[i]),
++                     FirstRunImportProgress, (__bridge void*)self);
++  }
++}
++// Same wording as Configurações › Atos › Trazer: steps while working, the counts at the end.
++- (void)importFrom:(const char*)sourceId state:(int)state message:(const char*)message {
++  const std::string id = sourceId ? sourceId : "";
++  std::string text = message ? message : "";
++  // Counts only; "Extensões: 2 (instalando da loja)" is a step, its count comes at the end.
++  if (state == 0 && text.find(':') != std::string::npos && text.find('(') == std::string::npos) {
++    _runCounts[id].push_back(text);
++  }
++  if (state == 1) {
++    text = "Pronto";
++    for (const std::string& c : _runCounts[id]) text += " · " + c;
++  } else if (state < 0) {
++    text = "Não deu: " + text;
++  }
++  _runState[id] = state;
++  _runText[id] = text;
++  if (_step == 2) [self showStep:2];
 +}
 +- (void)back:(id)sender {
 +  if (_step > 0) [self showStep:_step - 1];
@@ -7536,7 +7967,7 @@ index 0000000000..e113937855
 +      break;
 +    case -20:  // ERR_BLOCKED_BY_CLIENT
 +      title = @"Esta página foi bloqueada";
-+      detail = @"O bloqueador barrou este endereço.";
++      detail = @"O AgensBrowser não abre este endereço.";  // ad blocker, or a Chromium page we turned off
 +      break;
 +    case -21:  // ERR_NETWORK_CHANGED
 +      title = @"A rede mudou";
@@ -7780,6 +8211,9 @@ index 0000000000..e113937855
 +  AgensToolButton* _star;  // in the address, right side (prototype .star)
 +  AgensToolButton* _sound;  // in the address, left of the star, while the page plays or is muted
 +  AgensToolButton* _capture;  // in the address: camera/microphone in use (opens the site panel)
++  NSArray<AgensToolButton*>* _indicators;  // pop-ups, location, notifications, downloads (kAgensInd*)
++  AgensHoverView* _zoom;      // "110%" while the page isn't at 100% (click: back to 100%)
++  NSTextField* _zoomLabel;
 +  AgensToolButton* _newTabTop;  // "+" at the end of the top strip
 +  AgensStripView* _strip;       // holds the tabs on top; scrolls when they don't fit
 +  CGFloat _stripOffset;
@@ -7886,6 +8320,41 @@ index 0000000000..e113937855
 +    [_capture setTint:kDim];
 +    _capture.onPress = ^{ [weak showSiteInfo]; };
 +    [_omni addSubview:_capture];
++    {
++      // One small icon per Chromium address-bar indicator; they all open the site panel.
++      struct { NSString* symbol; NSString* label; } kInd[] = {
++          {@"rectangle.on.rectangle.slash", @"Pop-ups bloqueados nesta página"},
++          {@"location.fill", @"Este site usa ou pediu a sua localização"},
++          {@"bell.slash.fill", @"Notificações bloqueadas neste site"},
++          {@"arrow.down.circle.fill", @"Downloads automáticos bloqueados"},
++      };
++      NSMutableArray* list = [NSMutableArray array];
++      for (const auto& ind : kInd) {
++        AgensToolButton* b = [[AgensToolButton alloc] initWithSymbol:ind.symbol label:ind.label size:12];
++        b.radius = 7;
++        b.hidden = YES;
++        [b setTint:kDim];
++        b.onPress = ^{ [weak showSiteInfo]; };
++        [_omni addSubview:b];
++        [list addObject:b];
++      }
++      _indicators = list;
++      _zoom = [[AgensHoverView alloc] init];
++      _zoom.radius = 7;
++      _zoom.hidden = YES;
++      _zoom.toolTip = @"Zoom da página. Clique para voltar a 100%";
++      _zoom.accessibilityLabel = @"Zoom da página. Clique para voltar a 100%";
++      _zoom.onPress = ^{
++        AgensChrome* strong = weak;
++        if (strong && strong->_window) agens_window_reset_zoom(strong->_window);
++      };
++      _zoomLabel = [NSTextField labelWithString:@"100%"];
++      _zoomLabel.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
++      _zoomLabel.textColor = kDim.color();
++      _zoomLabel.alignment = NSTextAlignmentCenter;
++      [_zoom addSubview:_zoomLabel];
++      [_omni addSubview:_zoom];
++    }
 +    [_omni addSubview:_star];
 +    _siteButton = [[AgensHoverView alloc] init];
 +    _siteButton.radius = 7;
@@ -8082,7 +8551,10 @@ index 0000000000..e113937855
 +    agens_window_set_tabs_observer(_window, TabsChanged, (__bridge void*)self);
 +    agens_window_set_atos_observer(_window, AtosChanged, (__bridge void*)self);
 +    AgensWindow* opened = _window;
-+    dispatch_async(dispatch_get_main_queue(), ^{ [AgensFirstRun showIfNeededFor:opened]; });
++    __weak AgensChrome* weakChrome = self;
++    dispatch_async(dispatch_get_main_queue(), ^{
++      [AgensFirstRun showIfNeededFor:opened browserWindow:weakChrome.window];
++    });
 +    agens_window_set_status_observer(_window, StatusChanged, (__bridge void*)self);
 +    agens_window_set_downloads_observer(_window, DownloadsChanged, (__bridge void*)self);
 +    agens_window_set_bookmarks_observer(_window, BookmarksChanged, (__bridge void*)self);
@@ -8306,7 +8778,17 @@ index 0000000000..e113937855
 +  _sound.frame = NSMakeRect(NSMinX(_star.frame) - 26, (omniH - 26) / 2, 26, 26);
 +  const CGFloat afterSound = _sound.hidden ? NSMinX(_star.frame) : NSMinX(_sound.frame);
 +  _capture.frame = NSMakeRect(afterSound - 26, (omniH - 26) / 2, 26, 26);
-+  const CGFloat addressEnd = _capture.hidden ? afterSound : NSMinX(_capture.frame);
++  CGFloat addressEnd = _capture.hidden ? afterSound : NSMinX(_capture.frame);
++  for (AgensToolButton* b in _indicators) {
++    if (b.hidden) continue;
++    addressEnd -= 26;
++    b.frame = NSMakeRect(addressEnd, (omniH - 26) / 2, 26, 26);
++  }
++  if (!_zoom.hidden) {
++    addressEnd -= 44;
++    _zoom.frame = NSMakeRect(addressEnd, (omniH - 26) / 2, 44, 26);
++    _zoomLabel.frame = NSMakeRect(0, (26 - 14) / 2, 44, 14);
++  }
 +  _address.frame = NSMakeRect(33, (omniH - 18) / 2, addressEnd - 6 - 33, 18);
 +
 +  NSMutableArray<AgensTabRow*>* pins = [NSMutableArray array];
@@ -8560,6 +9042,9 @@ index 0000000000..e113937855
 +                                  : tabs[i].camera                     ? @"Usando a câmera"
 +                                                                       : @"Usando o microfone";
 +    _capture.toolTip = _capture.accessibilityLabel;
++    for (NSUInteger k = 0; k < _indicators.count; ++k) _indicators[k].hidden = !(tabs[i].indicators & (1 << k));
++    _zoom.hidden = tabs[i].zoom_percent == 100;
++    _zoomLabel.stringValue = [NSString stringWithFormat:@"%d%%", tabs[i].zoom_percent];
 +    // Our error page over Chromium's, while the tab shows one (not while it retries).
 +    _stopPage = tabs[i].interstitial;
 +    _split = tabs[i].split;
@@ -8704,6 +9189,13 @@ index 0000000000..e113937855
 +  }
 +  if (command == @selector(insertNewline:) && _selected >= 0) {
 +    [self openSuggestion:_selected];
++    return YES;
++  }
++  // Navigate here, while editing: if the field's action ran instead, ending the edit would first
++  // put the current page's URL back in the address bar and Enter would reload that page.
++  if (command == @selector(insertNewline:)) {
++    [self go:(NSTextField*)control];
++    [control.window makeFirstResponder:nil];
 +    return YES;
 +  }
 +  return NO;
@@ -8920,6 +9412,16 @@ index 0000000000..e113937855
 +}
 +- (void)menuSettings:(id)sender {
 +  if (_window) [AgensSettings showFor:_window collapsed:_collapsed chrome:self];
++}
++// chrome://settings, extensions, downloads... land here (native_shell.cc): a Settings section, or
++// the downloads panel.
++- (void)openSection:(NSString*)key {
++  if ([key isEqualToString:@"downloads-panel"]) {
++    if (!_downloadsPanel) [self showDownloads];
++    return;
++  }
++  [self menuSettings:nil];
++  if (key.length) [g_settings showSection:key];
 +}
 +// Open/close the column with the prototype's motion (width, .32s, ease-out); instant with
 +// "Reduzir movimento". Each frame lays out the chrome and asks the engine to move the page.
@@ -9499,6 +10001,9 @@ index 0000000000..e113937855
 +float agens_ui_titlebar_height(void* chrome) {
 +  return [(__bridge AgensChrome*)chrome tabsOnTop] ? StripH() : BarH();
 +}
++void agens_ui_open_section(void* chrome, const char* key) {
++  [(__bridge AgensChrome*)chrome openSection:@(key)];
++}
 +int agens_ui_command(void* chrome, AgensCommand command) {
 +  return [(__bridge AgensChrome*)chrome command:command];
 +}
@@ -9962,6 +10467,40 @@ index 8277fe0aba..e496cb7ab4 100644
      chrome::ShowSettings(browser);
    } else {
      chrome::OpenOptionsWindow(profile);
+diff --git a/chrome/browser/chrome_browser_main.cc b/chrome/browser/chrome_browser_main.cc
+index 2f252e5e17..87015e459a 100644
+--- a/chrome/browser/chrome_browser_main.cc
++++ b/chrome/browser/chrome_browser_main.cc
+@@ -1331,7 +1331,7 @@ int ChromeBrowserMainParts::PreCreateThreadsImpl() {
+   if (first_run::IsChromeFirstRun()) {
+     if (!base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kApp) &&
+         !base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kAppId)) {
+-      browser_creator_->AddFirstRunTabs({GURL("chrome://ungoogled-first-run")});
++      // AgensBrowser: no ungoogled-chromium welcome page; the first window opens our new tab.
+       browser_creator_->AddFirstRunTabs(master_prefs_->new_tabs);
+     }
+   }
+diff --git a/chrome/browser/chrome_content_browser_client_navigation_throttles.cc b/chrome/browser/chrome_content_browser_client_navigation_throttles.cc
+index 3156569c6d..c33ca0f458 100644
+--- a/chrome/browser/chrome_content_browser_client_navigation_throttles.cc
++++ b/chrome/browser/chrome_content_browser_client_navigation_throttles.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "chrome/browser/chrome_content_browser_client_navigation_throttles.h"
+ 
++#include "chrome/browser/agens/embed/native_shell.h"
++
+ #include "base/command_line.h"
+ #include "base/feature_list.h"
+ #include "build/build_config.h"
+@@ -287,6 +289,7 @@ void MaybeCreateAndAddVisitedLinkNavigationThrottle(
+ void CreateAndAddChromeThrottlesForNavigation(
+     content::NavigationThrottleRegistry& registry) {
+   content::NavigationHandle& handle = registry.GetNavigationHandle();
++  agens::MaybeAddNativePageThrottle(registry);
+   if (handle.IsInMainFrame()) {
+     // MetricsNavigationThrottle requires that it runs before
+     // NavigationThrottles that may delay or cancel navigations, so only
 diff --git a/chrome/browser/profiles/profile_impl.cc b/chrome/browser/profiles/profile_impl.cc
 index 6f5c220aae..5f70397a82 100644
 --- a/chrome/browser/profiles/profile_impl.cc
@@ -10024,6 +10563,138 @@ index 0750eb56c0..2ace27d0d9 100644
    // Remove any redundant trailing separator.
    size_t count = menu_model_.GetItemCount();
    if (count > 0 &&
+diff --git a/chrome/browser/ui/autofill/address_bubbles_controller.cc b/chrome/browser/ui/autofill/address_bubbles_controller.cc
+index 86828b91de..936952b999 100644
+--- a/chrome/browser/ui/autofill/address_bubbles_controller.cc
++++ b/chrome/browser/ui/autofill/address_bubbles_controller.cc
+@@ -117,6 +117,13 @@ void AddressBubblesController::SetUpAndShowSaveOrUpdateAddressBubble(
+     AutofillClient::SaveAddressBubbleType save_address_bubble_type,
+     bool user_has_any_profile_saved,
+     AutofillClient::AddressProfileSavePromptCallback callback) {
++  // agens: the Webium window has no autofill bubble handler; answer "ignored" instead of crashing.
++  BrowserWindow* window = BrowserWindow::FindBrowserWindowWithWebContents(web_contents);
++  if (!window || !window->GetAutofillBubbleHandler()) {
++    std::move(callback).Run(AutofillClient::AddressPromptUserDecision::kIgnored,
++                            std::nullopt);
++    return;
++  }
+   AddressBubblesController::CreateForWebContents(web_contents);
+   auto* controller = AddressBubblesController::FromWebContents(web_contents);
+   bool is_save_bubble = !original_profile;
+@@ -312,10 +319,13 @@ void AddressBubblesController::SetUpBubble(
+ }
+ 
+ void AddressBubblesController::MaybeShowIOSDektopAddressPromo() {
+-  BrowserWindowInterface* browser =
+-      BrowserWindow::FindBrowserWindowWithWebContents(web_contents())
+-          ->AsBrowserView()
+-          ->browser();
++  BrowserWindow* window =
++      BrowserWindow::FindBrowserWindowWithWebContents(web_contents());
++  // agens: no BrowserView in the Webium window.
++  if (!window || !window->AsBrowserView()) {
++    return;
++  }
++  BrowserWindowInterface* browser = window->AsBrowserView()->browser();
+ 
+   // Verify if user is eligible for iOS promo, and attempt showing if they are.
+   ios_promos_utils::VerifyIOSPromoEligibility(
+diff --git a/chrome/browser/ui/autofill/autofill_ai/autofill_ai_import_data_controller_impl.cc b/chrome/browser/ui/autofill/autofill_ai/autofill_ai_import_data_controller_impl.cc
+index 06c5f5a81d..b09d55f2b5 100644
+--- a/chrome/browser/ui/autofill/autofill_ai/autofill_ai_import_data_controller_impl.cc
++++ b/chrome/browser/ui/autofill/autofill_ai/autofill_ai_import_data_controller_impl.cc
+@@ -234,6 +234,13 @@ AutofillAiImportDataControllerImpl::GetPageActionIconType() {
+ }
+ 
+ void AutofillAiImportDataControllerImpl::DoShowBubble() {
++  // agens: the Webium window has no autofill bubble handler.
++  if (BrowserWindowInterface* b =
++          GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(
++              web_contents());
++      !b || !BrowserWindow::FromBrowser(b)->GetAutofillBubbleHandler()) {
++    return;
++  }
+   auto get_bubble = [this]() -> AutofillBubbleBase& {
+     BrowserWindowInterface* browser =
+         GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(
+diff --git a/chrome/browser/ui/autofill/payments/filled_card_information_bubble_controller_impl.cc b/chrome/browser/ui/autofill/payments/filled_card_information_bubble_controller_impl.cc
+index d5d3420ac9..6c591cace8 100644
+--- a/chrome/browser/ui/autofill/payments/filled_card_information_bubble_controller_impl.cc
++++ b/chrome/browser/ui/autofill/payments/filled_card_information_bubble_controller_impl.cc
+@@ -424,6 +424,10 @@ void FilledCardInformationBubbleControllerImpl::DoShowBubble() {
+   BrowserWindowInterface* browser =
+       GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(
+           web_contents());
++  // agens: the Webium window has no autofill bubble handler.
++  if (!BrowserWindow::FromBrowser(browser)->GetAutofillBubbleHandler()) {
++    return;
++  }
+   SetBubbleView(*BrowserWindow::FromBrowser(browser)
+                      ->GetAutofillBubbleHandler()
+                      ->ShowFilledCardInformationBubble(web_contents(), this,
+diff --git a/chrome/browser/ui/autofill/payments/mandatory_reauth_bubble_controller_impl.cc b/chrome/browser/ui/autofill/payments/mandatory_reauth_bubble_controller_impl.cc
+index f67d64ca52..4af594bea0 100644
+--- a/chrome/browser/ui/autofill/payments/mandatory_reauth_bubble_controller_impl.cc
++++ b/chrome/browser/ui/autofill/payments/mandatory_reauth_bubble_controller_impl.cc
+@@ -296,6 +296,10 @@ void MandatoryReauthBubbleControllerImpl::DoShowBubble() {
+           web_contents());
+   AutofillBubbleHandler* autofill_bubble_handler =
+       BrowserWindow::FromBrowser(browser)->GetAutofillBubbleHandler();
++  // agens: the Webium window has none.
++  if (!autofill_bubble_handler) {
++    return;
++  }
+   SetBubbleView(*autofill_bubble_handler->ShowMandatoryReauthBubble(
+       web_contents(), this, /*is_user_gesture=*/false, current_bubble_type_));
+ #endif  // BUILDFLAG(IS_ANDROID)
+diff --git a/chrome/browser/ui/autofill/payments/offer_notification_bubble_controller_impl.cc b/chrome/browser/ui/autofill/payments/offer_notification_bubble_controller_impl.cc
+index 543ca810c1..6aa6afd030 100644
+--- a/chrome/browser/ui/autofill/payments/offer_notification_bubble_controller_impl.cc
++++ b/chrome/browser/ui/autofill/payments/offer_notification_bubble_controller_impl.cc
+@@ -236,6 +236,9 @@ void OfferNotificationBubbleControllerImpl::DoShowBubble() {
+   }
+ 
+   AutofillBubbleHandler* autofill_bubble_handler = GetAutofillBubbleHandler();
++  if (!autofill_bubble_handler) {  // agens: none in the Webium window.
++    return;
++  }
+   SetBubbleView(*autofill_bubble_handler->ShowOfferNotificationBubble(
+       web_contents(), this, is_user_gesture_));
+   DCHECK(bubble_view());
+diff --git a/chrome/browser/ui/autofill/payments/omnibox_autofill_bubble_controller.cc b/chrome/browser/ui/autofill/payments/omnibox_autofill_bubble_controller.cc
+index 6a2990599c..a3168bf129 100644
+--- a/chrome/browser/ui/autofill/payments/omnibox_autofill_bubble_controller.cc
++++ b/chrome/browser/ui/autofill/payments/omnibox_autofill_bubble_controller.cc
+@@ -126,9 +126,12 @@ void OmniboxAutofillBubbleController::DoShowBubble() {
+   if (!browser_window) {
+     return;
+   }
++  AutofillBubbleHandler* handler = browser_window->GetAutofillBubbleHandler();
++  if (!handler) {  // agens: the Webium window has none.
++    return;
++  }
+   if (AutofillBubbleBase* bubble_view =
+-          browser_window->GetAutofillBubbleHandler()->ShowOmniboxAutofillBubble(
+-              web_contents(), this)) {
++          handler->ShowOmniboxAutofillBubble(web_contents(), this)) {
+     SetBubbleView(*bubble_view);
+ 
+     if (actions::ActionItem* action_item = GetActionItem()) {
+diff --git a/chrome/browser/ui/autofill/payments/virtual_card_enroll_bubble_controller_impl.cc b/chrome/browser/ui/autofill/payments/virtual_card_enroll_bubble_controller_impl.cc
+index 6874322f0b..86c16c5d99 100644
+--- a/chrome/browser/ui/autofill/payments/virtual_card_enroll_bubble_controller_impl.cc
++++ b/chrome/browser/ui/autofill/payments/virtual_card_enroll_bubble_controller_impl.cc
+@@ -383,6 +383,10 @@ void VirtualCardEnrollBubbleControllerImpl::DoShowBubble() {
+       GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(
+           web_contents());
+ 
++  // agens: the Webium window has no autofill bubble handler.
++  if (!BrowserWindow::FromBrowser(browser)->GetAutofillBubbleHandler()) {
++    return;
++  }
+   if (enrollment_status_ == EnrollmentStatus::kCompleted) {
+     SetBubbleView(
+         *BrowserWindow::FromBrowser(browser)
 diff --git a/chrome/browser/ui/browser_command_controller.cc b/chrome/browser/ui/browser_command_controller.cc
 index d2224772cc..cd3d1c68d9 100644
 --- a/chrome/browser/ui/browser_command_controller.cc
@@ -10278,6 +10949,28 @@ index 12bb0ac5fb..52735f7a84 100644
  
    if (ShouldIgnorePermissionRequest(web_contents, delegate)) {
      return nullptr;
+diff --git a/chrome/browser/ui/webui/downloads/downloads_dom_handler.cc b/chrome/browser/ui/webui/downloads/downloads_dom_handler.cc
+index 2c7b7194ae..5dc3afb0d2 100644
+--- a/chrome/browser/ui/webui/downloads/downloads_dom_handler.cc
++++ b/chrome/browser/ui/webui/downloads/downloads_dom_handler.cc
+@@ -139,10 +139,13 @@ void PromptForScanningInBubble(content::WebContents* web_contents,
+   if (!browser) {
+     return;
+   }
+-  BrowserWindow::FromBrowser(browser)
+-      ->GetDownloadBubbleUIController()
+-      ->GetDownloadDisplayController()
+-      ->OpenSecuritySubpage(
++  // agens: the Webium window has no download bubble.
++  DownloadBubbleUIController* bubble_controller =
++      BrowserWindow::FromBrowser(browser)->GetDownloadBubbleUIController();
++  if (!bubble_controller) {
++    return;
++  }
++  bubble_controller->GetDownloadDisplayController()->OpenSecuritySubpage(
+           OfflineItemUtils::GetContentIdForDownload(download));
+ #endif
+ }
 diff --git a/chrome/browser/ui/webui_browser/BUILD.gn b/chrome/browser/ui/webui_browser/BUILD.gn
 index db2aba2a32..98ada3ff32 100644
 --- a/chrome/browser/ui/webui_browser/BUILD.gn
@@ -10370,7 +11063,7 @@ index 2018474821..e0e0a8581e 100644
    // ExclusiveAccessContext:
    Profile* GetProfile() override;
 diff --git a/chrome/browser/ui/webui_browser/webui_browser_window.cc b/chrome/browser/ui/webui_browser/webui_browser_window.cc
-index f83d197409..942e13a715 100644
+index f83d197409..67c962e1dd 100644
 --- a/chrome/browser/ui/webui_browser/webui_browser_window.cc
 +++ b/chrome/browser/ui/webui_browser/webui_browser_window.cc
 @@ -40,6 +40,7 @@
@@ -10447,7 +11140,33 @@ index f83d197409..942e13a715 100644
      page->OnPaintAsActiveChanged(widget_->ShouldPaintAsActive());
    }
  }
-@@ -430,13 +447,13 @@ gfx::NativeWindow WebUIBrowserWindow::GetNativeWindow() const {
+@@ -364,11 +381,11 @@ void WebUIBrowserWindow::EnsureActiveTabHasNonZeroSize() {
+ }
+ 
+ void WebUIBrowserWindow::ShowInactive() {
+-  NOTIMPLEMENTED_LOG_ONCE();
++  widget_->ShowInactive();
+ }
+ 
+ void WebUIBrowserWindow::Hide() {
+-  NOTIMPLEMENTED_LOG_ONCE();
++  widget_->Hide();
+ }
+ 
+ bool WebUIBrowserWindow::IsVisible() const {
+@@ -403,9 +420,11 @@ bool WebUIBrowserWindow::IsActive() const {
+   return widget_->IsActive();
+ }
+ 
++#if !BUILDFLAG(IS_MAC)  // The Mac versions are in webui_browser_window_mac.mm.
+ void WebUIBrowserWindow::FlashFrame(bool flash) {
+   NOTIMPLEMENTED_LOG_ONCE();
+ }
++#endif
+ 
+ ui::ZOrderLevel WebUIBrowserWindow::GetZOrderLevel() const {
+   NOTIMPLEMENTED_LOG_ONCE();
+@@ -430,13 +449,13 @@ gfx::NativeWindow WebUIBrowserWindow::GetNativeWindow() const {
  }
  
  bool WebUIBrowserWindow::IsOnCurrentWorkspace() const {
@@ -10465,7 +11184,7 @@ index f83d197409..942e13a715 100644
  }
  
  void WebUIBrowserWindow::SetTopControlsShownRatio(
-@@ -475,6 +492,9 @@ const ui::ColorProvider* WebUIBrowserWindow::GetColorProvider() const {
+@@ -475,6 +494,9 @@ const ui::ColorProvider* WebUIBrowserWindow::GetColorProvider() const {
  }
  
  float WebUIBrowserWindow::GetScaleFactor() const {
@@ -10475,7 +11194,7 @@ index f83d197409..942e13a715 100644
    return web_contents_delegate_->web_contents()
        ->GetWebUI()
        ->GetDeviceScaleFactor();
-@@ -625,6 +645,9 @@ void WebUIBrowserWindow::OnWidgetBoundsChanged(views::Widget* widget,
+@@ -625,6 +647,9 @@ void WebUIBrowserWindow::OnWidgetBoundsChanged(views::Widget* widget,
    if (modal_dialog_host_) {
      modal_dialog_host_->NotifyPositionRequiresUpdate();
    }
@@ -10485,7 +11204,7 @@ index f83d197409..942e13a715 100644
  }
  
  gfx::Rect WebUIBrowserWindow::GetContentsBoundsInScreen() const {
-@@ -655,7 +678,7 @@ void WebUIBrowserWindow::ProcessFullscreen(bool fullscreen) {
+@@ -655,7 +680,7 @@ void WebUIBrowserWindow::ProcessFullscreen(bool fullscreen) {
    }
  
    // Notify the WebUI about the fullscreen mode.
@@ -10494,7 +11213,7 @@ index f83d197409..942e13a715 100644
      page->OnFullscreenModeChanged(fullscreen, context);
    }
  
-@@ -754,6 +777,9 @@ void WebUIBrowserWindow::SetTopControlsGestureScrollInProgress(
+@@ -754,6 +779,9 @@ void WebUIBrowserWindow::SetTopControlsGestureScrollInProgress(
  }
  
  std::vector<StatusBubble*> WebUIBrowserWindow::GetStatusBubbles() {
@@ -10504,7 +11223,7 @@ index f83d197409..942e13a715 100644
    NOTIMPLEMENTED_LOG_ONCE();
    return {};
  }
-@@ -765,7 +791,9 @@ void WebUIBrowserWindow::UpdateTitleBar() {
+@@ -765,7 +793,9 @@ void WebUIBrowserWindow::UpdateTitleBar() {
  
  void WebUIBrowserWindow::OnBookmarkBarStateChanged(
      BookmarkBar::AnimateChangeType change_type) {
@@ -10515,7 +11234,7 @@ index f83d197409..942e13a715 100644
  }
  
  void WebUIBrowserWindow::UpdateLoadingAnimations(bool is_visible) {
-@@ -868,13 +896,17 @@ PinnedToolbarActions* WebUIBrowserWindow::GetPinnedToolbarActions() {
+@@ -868,13 +898,17 @@ PinnedToolbarActions* WebUIBrowserWindow::GetPinnedToolbarActions() {
  }
  
  void WebUIBrowserWindow::SetFocusToLocationBar(bool is_user_initiated) {
@@ -10535,7 +11254,7 @@ index f83d197409..942e13a715 100644
      page->SetReloadStopState(is_loading);
    }
  }
-@@ -990,6 +1022,10 @@ void WebUIBrowserWindow::ConfirmBrowserCloseWithPendingDownloads(
+@@ -990,6 +1024,10 @@ void WebUIBrowserWindow::ConfirmBrowserCloseWithPendingDownloads(
      int download_count,
      UnloadController::DownloadCloseType dialog_type,
      base::OnceCallback<void(bool)> callback) {
@@ -10546,7 +11265,34 @@ index f83d197409..942e13a715 100644
    NOTIMPLEMENTED_LOG_ONCE();
  }
  
-@@ -1347,6 +1383,9 @@ bool WebUIBrowserWindow::WidgetDelegate::ShouldDescendIntoChildForEventHandling(
+@@ -1010,8 +1048,13 @@ void WebUIBrowserWindow::ZoomChangedForActiveTab(bool can_show_bubble) {
+     return;
+   }
+ 
++  // agens: the zoom bubble needs a views anchor the native shell lacks; the shell shows the
++  // percentage in the address bar instead.
++  const bool native_shell = agens::IsNativeShellEnabled();
+   zoom_view_controller->UpdatePageActionIconAndBubbleVisibility(
+-      /*prefer_to_show_bubble=*/can_show_bubble, /*from_user_gesture=*/false);
++      /*prefer_to_show_bubble=*/can_show_bubble && !native_shell,
++      /*from_user_gesture=*/false);
++  agens::NativeTabStateChanged(widget_.get());
+ }
+ 
+ void WebUIBrowserWindow::ShowAppMenu() {
+@@ -1149,9 +1192,11 @@ bool WebUIBrowserWindow::IsVisibleOnAllWorkspaces() const {
+   return false;
+ }
+ 
++#if !BUILDFLAG(IS_MAC)
+ void WebUIBrowserWindow::ShowEmojiPanel() {
+   NOTIMPLEMENTED_LOG_ONCE();
+ }
++#endif
+ 
+ std::unique_ptr<content::EyeDropper> WebUIBrowserWindow::OpenEyeDropper(
+     content::RenderFrameHost* frame,
+@@ -1347,6 +1392,9 @@ bool WebUIBrowserWindow::WidgetDelegate::ShouldDescendIntoChildForEventHandling(
  }
  
  WebUIBrowserUI* WebUIBrowserWindow::GetWebUIBrowserUI() const {
@@ -10556,7 +11302,7 @@ index f83d197409..942e13a715 100644
    return web_contents_delegate_->web_contents()
        ->GetWebUI()
        ->GetController()
-@@ -1354,11 +1393,15 @@ WebUIBrowserUI* WebUIBrowserWindow::GetWebUIBrowserUI() const {
+@@ -1354,11 +1402,15 @@ WebUIBrowserUI* WebUIBrowserWindow::GetWebUIBrowserUI() const {
  }
  
  void WebUIBrowserWindow::ShowSidePanel(SidePanelEntryKey side_panel_entry_key) {
@@ -10575,7 +11321,7 @@ index f83d197409..942e13a715 100644
  
  WebUIBrowserSidePanelUI* WebUIBrowserWindow::GetWebUIBrowserSidePanelUI() {
 diff --git a/chrome/browser/ui/webui_browser/webui_browser_window_mac.mm b/chrome/browser/ui/webui_browser/webui_browser_window_mac.mm
-index 7188576c05..3f0c832740 100644
+index 7188576c05..56e58be40a 100644
 --- a/chrome/browser/ui/webui_browser/webui_browser_window_mac.mm
 +++ b/chrome/browser/ui/webui_browser/webui_browser_window_mac.mm
 @@ -7,6 +7,7 @@
@@ -10586,7 +11332,7 @@ index 7188576c05..3f0c832740 100644
  #include "chrome/app/chrome_command_ids.h"
  #include "chrome/browser/apps/app_shim/app_shim_host_mac.h"
  #include "chrome/browser/apps/app_shim/app_shim_manager_mac.h"
-@@ -177,7 +178,8 @@ void PopulateCreateWindowParams(
+@@ -177,12 +178,24 @@ void PopulateCreateWindowParams(
    void GetWindowFrameTitlebarHeight(bool* override_titlebar_height,
                                      float* titlebar_height) override {
      *override_titlebar_height = true;
@@ -10596,6 +11342,44 @@ index 7188576c05..3f0c832740 100644
    }
  
    raw_ptr<BrowserWindowInterface> browser_;
+ };
+ 
++// Like BrowserView on the Mac: bounce the Dock icon once (the system ignores it while active).
++void WebUIBrowserWindow::FlashFrame(bool flash) {
++  if (flash) {
++    [NSApp requestUserAttention:NSInformationalRequest];
++  }
++}
++
++void WebUIBrowserWindow::ShowEmojiPanel() {
++  [NSApp orderFrontCharacterPalette:nil];
++}
++
+ views::NativeWidget* WebUIBrowserWindow::CreateNativeWidget() {
+   return new WebUIBrowserNativeWidgetMac(browser_.get(), widget_.get());
+ }
+diff --git a/chrome/browser/ui/webui_browser/webui_stub_location_bar.cc b/chrome/browser/ui/webui_browser/webui_stub_location_bar.cc
+index 4d17c35698..c66eb2db2f 100644
+--- a/chrome/browser/ui/webui_browser/webui_stub_location_bar.cc
++++ b/chrome/browser/ui/webui_browser/webui_stub_location_bar.cc
+@@ -5,6 +5,7 @@
+ #include "chrome/browser/ui/webui_browser/webui_stub_location_bar.h"
+ 
+ #include "base/notimplemented.h"
++#include "chrome/browser/agens/embed/native_shell.h"
+ #include "chrome/browser/ui/browser_command_controller.h"
+ #include "chrome/browser/ui/browser_element_identifiers.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+@@ -56,7 +57,8 @@ void WebUIStubLocationBar::UpdateFocusBehavior(bool toolbar_visible) {
+ }
+ 
+ void WebUIStubLocationBar::UpdateContentSettingsIcons() {
+-  NOTIMPLEMENTED();
++  // agens: the native shell reads the content setting image models itself.
++  agens::NativeTabStateChanged(window_->widget());
+ }
+ 
+ void WebUIStubLocationBar::SaveStateToContents(content::WebContents* contents) {
 diff --git a/chrome/common/chrome_features.cc b/chrome/common/chrome_features.cc
 index 42e1a94e45..2ac338faac 100644
 --- a/chrome/common/chrome_features.cc
@@ -10615,3 +11399,32 @@ index 42e1a94e45..2ac338faac 100644
  // When enable, the reload button will be replaced with the a WebView, and
  // chrome://webui-toolbar.top-chrome will be loaded as the content.
  // crbug.com/444358999
+diff --git a/chrome/common/webui_url_constants.cc b/chrome/common/webui_url_constants.cc
+index a37f0a857f..442663f8bc 100644
+--- a/chrome/common/webui_url_constants.cc
++++ b/chrome/common/webui_url_constants.cc
+@@ -120,7 +120,7 @@ bool IsSystemWebUIHost(std::string_view host) {
+ // Add hosts here to be suggested by BuiltinProvider.
+ base::span<const base::cstring_view> ChromeURLHosts() {
+   static constexpr auto kChromeURLHosts = std::to_array<base::cstring_view>({
+-      "ungoogled-first-run",
++      // agens: first-run, flags and sync-internals still open when typed in full, but are not suggested.
+       kChromeUIAboutHost,
+       kChromeUIAccessibilityHost,
+       kChromeUIActorInternalsHost,
+@@ -145,7 +145,6 @@ base::span<const base::cstring_view> ChromeURLHosts() {
+       kChromeUIDeviceLogHost,
+       kChromeUIDownloadInternalsHost,
+       kChromeUIFamilyLinkUserInternalsHost,
+-      kChromeUIFlagsHost,
+       kChromeUIGCMInternalsHost,
+       kChromeUIHistoryHost,
+       history_clusters_internals::kChromeUIHistoryClustersInternalsHost,
+@@ -184,7 +183,6 @@ base::span<const base::cstring_view> ChromeURLHosts() {
+       kChromeUISubresourceFilterInternalsHost,
+       kChromeUISuggestInternalsHost,
+       kChromeUINTPTilesInternalsHost,
+-      kChromeUISyncInternalsHost,
+ #if !BUILDFLAG(IS_ANDROID)
+       kChromeUITabSearchHost,
+       kChromeUITabsFromOtherDevicesSidePanelHost,

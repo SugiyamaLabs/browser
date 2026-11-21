@@ -6,6 +6,9 @@ breaks the store: its page can't reach the install API and the update URL goes n
 after that step and puts back only the store's addresses. The logic (update checks, the
 "Instalar no AgensBrowser" label, the on/off pref) is in patches/sugiyamalabs/webstore.patch.
 
+It also puts back the component updater's server, for the Widevine CDM only (Configurações ›
+Privacidade › Conteúdo protegido): component_updater_service.cc never sends it any other component.
+
 Usage: python3 chromium/webstore.py <chromium src dir>
 """
 import sys
@@ -26,6 +29,11 @@ FIXES = {
     "extensions/browser/updater/safe_manifest_parser.cc": [
         ("http://www.9oo91e.qjz9zk/update2/response", "http://www.google.com/update2/response"),
     ],
+    # Widevine only (docs/sem-telemetria.md); the fallback goes over HTTPS too.
+    "components/component_updater/component_updater_url_constants.cc": [
+        ("https://update.9oo91eapis.qjz9zk/service/update2/json", "https://update.googleapis.com/service/update2/json"),
+        ("http://update.9oo91eapis.qjz9zk/service/update2/json", "https://update.googleapis.com/service/update2/json"),
+    ],
 }
 
 
@@ -39,7 +47,7 @@ def main(src: Path) -> int:
                 return 1
             text = text.replace(old, new)
         path.write_text(text)
-    print("ok: Chrome Web Store addresses restored")
+    print("ok: Chrome Web Store and Widevine update addresses restored")
     return 0
 
 

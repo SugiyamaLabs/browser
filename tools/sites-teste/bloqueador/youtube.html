@@ -1,0 +1,27 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>YouTube (teste)</title>
+<pre id="out"></pre>
+<script>
+var ytInitialPlayerResponse = {"videoDetails": {"videoId": "x"}, "adPlacements": [1], "playerAds": [2], "adSlots": [3]};
+</script>
+<script>
+var r = {};
+var p = window.ytInitialPlayerResponse;
+r.inline = !!p.videoDetails && !p.adPlacements && !p.playerAds && !p.adSlots;
+var x = JSON.parse('{"playerResponse": {"adPlacements": [1], "videoDetails": {}}}');
+r.json_parse = !x.playerResponse.adPlacements;
+fetch('/youtubei/v1/player?key=x', {method: 'POST'}).then(function (res) { return res.json(); }).then(function (j) {
+  r.fetch = !!j.videoDetails && !j.adPlacements && !j.playerAds;
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', '/youtubei/v1/player');
+  xhr.onload = function () {
+    var k = JSON.parse(xhr.responseText);
+    r.xhr = !!k.videoDetails && !k.adSlots;
+    var ok = Object.keys(r).every(function (k) { return r[k] === true; });
+    document.getElementById('out').textContent = JSON.stringify(r);
+    document.title = (ok ? 'PASS ' : 'FAIL ') + JSON.stringify(r);
+  };
+  xhr.send('{}');
+});
+</script>

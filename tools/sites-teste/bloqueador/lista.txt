@@ -1,0 +1,13 @@
+! Lista de teste do bloqueador (cosmético e scriptlets), só para localhost e o YouTube falso.
+localhost##.ad-slot
+localhost#@#.not-hidden
+localhost##.not-hidden
+localhost##+js(set, agensCfg.showAds, false)
+localhost##+js(aopr, adBlockDetector)
+localhost##+js(acs, document.createElement, adsInject)
+localhost##+js(nostif, detectAdblock)
+localhost##+js(json-prune, ads)
+localhost##+js(set-local-storage-item, agensGdpr, true)
+localhost##+js(aeld, click, popMagic)
+localhost##+js(nowoif, popunder)
+localhost##+js(trusted-set, agensTrusted, 1)

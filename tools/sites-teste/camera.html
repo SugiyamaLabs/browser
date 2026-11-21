@@ -1,0 +1,9 @@
+<!doctype html><meta charset="utf-8"><title>Camera (test)</title>
+<script>
+// Lists the devices (as many sites do on load), opens the camera for 2 s and stops it. The result
+// goes to the title: "camera:live" while it runs, then "camera:stopped" (or "camera:error <name>").
+navigator.mediaDevices.enumerateDevices().then(() => navigator.mediaDevices.getUserMedia({video: true})).then(stream => {
+  document.title = "camera:live";
+  setTimeout(() => { stream.getTracks().forEach(t => t.stop()); document.title = "camera:stopped"; }, 2000);
+}).catch(e => { document.title = "camera:error " + e.name; });
+</script>

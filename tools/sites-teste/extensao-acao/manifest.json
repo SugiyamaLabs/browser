@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Gate action (test)",
+  "version": "1.0",
+  "description": "Test only: an action with a popup, a badge set by its background script and an options page, for the embedded gate.",
+  "icons": {"32": "icon.png"},
+  "action": {"default_title": "Gate action", "default_popup": "popup.html", "default_icon": {"32": "icon.png"}},
+  "background": {"service_worker": "background.js"},
+  "options_page": "options.html"
+}
