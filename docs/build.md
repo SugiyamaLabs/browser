@@ -135,15 +135,7 @@ O ungoogled troca os domínios do Google no código (`domain_substitution.py`), 
 
 ### VMP (Netflix em HD): assinatura da Castlabs
 
-Sem VMP, o Widevine funciona mas a Netflix e outros limitam a qualidade (ou recusam). O VMP é uma assinatura do app feita pelo serviço EVS da Castlabs, com conta própria (gratuita):
-
-```sh
-python3 -m pip install --upgrade castlabs-evs       # no venv do env.sh ($BROWSER_WORK/venv)
-python3 -m castlabs_evs.account signup              # uma vez; depois, reauth quando a sessão expirar
-AGENS_EVS=1 BROWSER_WORK=~/browser-work-2 ./chromium/release.sh ~/Releases/AgensBrowser
-```
-
-Com `AGENS_EVS=1`, o `release.sh` roda `python3 -m castlabs_evs.vmp sign-pkg <app>` depois do Sparkle e **antes** do `sign.sh`: no macOS a assinatura VMP tem de vir antes da do Apple, que sela os arquivos `.sig` que ela põe no bundle (ordem da documentação da Castlabs). Sem a variável, o passo não roda. Ainda não testado: falta a conta; não sabemos se o `sign-pkg` cobre os helpers e o framework do Chromium como cobre um app Electron.
+Sem VMP, o Widevine funciona, mas a Netflix e outros limitam a qualidade ou recusam tocar. Tentamos a assinatura VMP pelo serviço EVS da Castlabs (conta gratuita, 21/11/2026): o `sign-pkg` só reconhece apps Electron, e assinar o binário do `AgensBrowser Framework` direto (`castlabs_evs.vmp sign`) volta **"Binary signature denied"**. O EVS só assina as builds Electron da própria Castlabs. Para um fork do Chromium, a assinatura VMP depende de licença direta com o Google (Widevine), que não temos. O `release.sh` não tem passo de VMP.
 
 ## Rede durante o build
 

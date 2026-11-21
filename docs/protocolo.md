@@ -181,7 +181,7 @@ O controle vale **para a conexão**: quando o cliente desconecta, o controle aca
 - **`page.eval {tab, js}`** → `{result}`: precisa de `"eval"` em `allow` e roda JavaScript **só em endereço local** (`localhost`, `*.localhost`, `127.0.0.1`, `[::1]`); sem a permissão ou em qualquer outro site responde `denied`. Numa página local o script lê tudo, inclusive senha que a pessoa digitou ali. O resultado tem de caber em JSON e em 1 MB; promessa não é esperada; teto de 10 s.
 - **`page.screenshot`**: PNG da área visível da aba, a 1x. Funciona com a aba em segundo plano.
 - **Senha**: campo de senha vem com `password: true` e sem `value`, inclusive depois de "mostrar senha". `page.type` nele dá `denied`. Com o foco nele, `page.key` só aceita teclas que movem (Tab, Enter, Escape, setas). `page.screenshot` dá `denied` enquanto houver senha revelada na página.
-- Nas abas controladas não há senhas salvas, autofill nem downloads.
+- Nas abas controladas não há senhas salvas, autofill nem downloads. Exceção: no motor embutido a aba do agente baixa, a pessoa vê o download no hospedeiro e o agente recebe o caminho (`page.download`, veja "Passo 5.9").
 
 #### Páginas sem HTTPS
 
@@ -512,6 +512,47 @@ Também só adições à v1. Quando a página chama `getDisplayMedia`, o motor e
 
 **Erros novos.** Nenhum. **Operações novas:** `view.share.stop`, `view.share.switch`. **Eventos novos:** `ui.update`. **Campos novos:** `sharing` em `view.tab`; `kind` `screen_share` em `ui.ask`.
 
+#### Passo 5.9: downloads e sugestões do endereço
+
+Também só adições à v1, só no motor embutido. `view.*` e `host.settings` só da conexão do hospedeiro (de outra, `unauthorized`); `page.*` só de quem tem `control.start` na conexão. Motor mais antigo responde `unknown_op`.
+
+```
+→ {"id": 80, "op": "host.settings", "downloads_dir": {"Profile 1": "/Users/ana/Agens/Downloads"}}
+← {"id": 80, "ok": true, "site_requests": false, ..., "downloads_dir": {"Default": "/Users/ana/Downloads", "Profile 1": "/Users/ana/Agens/Downloads"}}
+← {"event": "view.download", "id": "6f1c…", "ato": "Profile 1", "tab": "v3", "file_name": "nota.pdf", "path": "/Users/ana/Agens/Downloads/nota.pdf", "origin": "https://loja.example", "mime": "application/pdf", "total_bytes": 52011, "received_bytes": 8192, "state": "in_progress", "by_agent": false}
+→ {"id": 81, "op": "view.downloads", "ato": "Profile 1"}
+← {"id": 81, "ok": true, "downloads": [{"id": "6f1c…", ...}, ...]}
+→ {"id": 82, "op": "view.download.action", "download": "6f1c…", "action": "pause"}
+← {"id": 82, "ok": true}
+→ {"id": 83, "op": "view.suggest", "tab": "v3", "text": "loja.ex", "allow_inline": true}
+← {"id": 83, "ok": true, "rows": [{"row_id": "3.12.0", "text": "loja.example/conta", "fill": "https://loja.example/conta", "inline": "ample/conta", "title": "Minha conta", "url": "https://loja.example/conta", "kind": "history", "text_bold": [[0, 7]], "title_bold": [], "deletable": true}, ...], "done": false}
+← {"event": "view.suggest", "tab": "v3", "text": "loja.ex", "rows": [...], "done": true}
+→ {"id": 84, "op": "view.suggest.open", "tab": "v3", "row_id": "3.12.0", "disposition": "current_tab"}
+← {"id": 84, "ok": true, "tab": "v3"}
+```
+
+**Downloads.**
+
+- **Onde caem.** Cada ato tem a sua pasta: `host.settings {downloads_dir: {"<ato>": "<pasta>"}}`, com caminho absoluto (até 4096 caracteres, sem `..`) ou `""` para voltar ao padrão, `~/Downloads`. Os atos que não vêm ficam como estavam. Ato que não existe dá `not_found`; pasta relativa ou que não é texto, `bad_request`; nos dois casos nada muda. A resposta de `host.settings` traz sempre `downloads_dir` com a pasta de cada ato (a escolhida, ou `~/Downloads`). Fica guardado entre um início e outro; a pasta é criada no primeiro download se não existe. O motor embutido nunca pergunta onde salvar (nada de `ui.ask` `file` para download) nem abre arquivo sozinho ao terminar.
+- **Evento `view.download {id, ato, tab?, file_name, path?, origin, mime, total_bytes, received_bytes, state, danger_type?, by_agent}`**, só para o hospedeiro, quando um download começa e a cada mudança do que esses campos mostram (o progresso vem no ritmo em que o Chromium atualiza o download, não a cada pedaço). `id` é estável enquanto o download existe, também entre um início e outro do motor. `tab` é a aba (`v<n>`) que começou o download, quando o motor sabe (não vem nos antigos, do histórico). `path` é o caminho final do arquivo, assim que o motor decide (o arquivo só está inteiro nele em `complete`). `origin` é só esquema, host e porta de onde veio. `total_bytes` é `0` quando o site não disse o tamanho. `state`: `in_progress`, `paused`, `complete`, `cancelled`, `interrupted` ou `dangerous`. Em `dangerous` (o Chromium marcou o tipo de arquivo ou o download como perigoso) o arquivo fica retido até a pessoa decidir, e vem `danger_type` (o nome do Chromium, ex.: `DANGEROUS_FILE`). `by_agent` diz que uma aba controlada por agente começou o download.
+- **Evento `view.download.removed {id, ato}`**: o download saiu da lista (`remove`, `discard_dangerous`).
+- **`view.downloads {ato?}`** → `{downloads: [...]}`: os downloads dos atos acordados (ou de um), o mais novo primeiro, com os do histórico. Cada item tem os campos de `view.download`. Ato dormindo ou que não existe: lista vazia.
+- **`view.download.action {download, action}`** → `{ok}`. `download` é o `id` do download (o nome do campo não é `id` porque `id` é o do pedido). `action`: `pause`, `resume`, `cancel`, `open` (abre o arquivo com o app dele), `show_in_finder`, `remove` (sai da lista: em andamento ou perigoso é cancelado e o arquivo parcial vai embora; terminado fica no disco), `keep_dangerous` (a pessoa quer o arquivo mesmo assim) e `discard_dangerous` (apaga). `id` que não existe: `not_found`; `action` fora da lista: `bad_request`. `open` num `dangerous` dá `denied` (guarde primeiro); `open` antes de `complete`, `resume` do que não retoma e `keep_dangerous`/`discard_dangerous` do que não é perigoso dão `failed`.
+- **Arquivo perigoso nunca abre sozinho.** Nem ao terminar, nem com `open` enquanto está `dangerous`. Só a pessoa, pelo hospedeiro, decide guardar ou apagar; o agente não tem operação para isso.
+- **Agente.** No motor embutido a aba de um agente baixa (no AgensBrowser sozinho, não). O arquivo vai para a pasta do ato, e:
+  - **Evento `page.download {tab, id, ato, file_name, path?, origin, mime, total_bytes, received_bytes, state, danger_type?}`** para a conexão do agente, nas mesmas horas de `view.download`. `tab` é o id da sessão (`t1`). Chega enquanto a conexão existir, também depois de a aba fechar.
+  - **`page.downloads {tab?}`** → `{downloads: [...]}`: o que as abas desta sessão baixaram, com os mesmos campos; `tab` restringe a uma delas. Com a pessoa no controle (Assumir) responde `paused`, como as outras `page.*`.
+
+**Sugestões do endereço.** As mesmas da casca: histórico, favoritos, atalhos, abas abertas e a linha "buscar o que foi digitado" com o buscador do ato. Só fontes locais: as sugestões remotas de busca ficam desligadas. Uma lista por vez: a do campo em que a pessoa está digitando.
+
+- **`view.suggest {tab, text, allow_inline?}`** → `{rows, done}`. Mande a cada edição do campo, com o texto inteiro (até 8192 caracteres). `allow_inline` (padrão `false`): `true` deixa a primeira linha completar o endereço; mande `false` depois de apagar, com o cursor fora do fim ou compondo (acento, IME). A resposta traz o que as fontes rápidas já acharam; `done: false` quer dizer que vem mais. `text: ""` encerra a lista (`rows` vazio, `done: true`); mande também quando o campo perde o foco.
+- **Evento `view.suggest {tab, text, rows, done}`**, só para o hospedeiro: a lista inteira de novo, sempre que ela muda depois da resposta (o histórico mais lento, o ícone de uma linha). Vale a do `text` que o campo ainda mostra; descarte as de texto antigo.
+- **Cada linha** (até 8): `row_id` (vale para esta lista), `text` (o endereço como se mostra, ou os termos da busca), `fill` (o que o campo mostra com a linha selecionada), `inline` (só na primeira linha, o resto do endereço depois do que foi digitado, a mostrar selecionado depois do cursor; `""` nas outras e sem `allow_inline`), `title` (o título da página; numa busca, o nome do buscador), `url`, `kind` (`history`, `bookmark`, `search` ou `open_tab`: já aberta noutra aba do ato), `text_bold` e `title_bold` (pares `[início, fim)` em unidades UTF-16 do que bateu com o digitado, para pôr em negrito), `deletable` e, quando o histórico local tem, `favicon` (PNG em base64). Nunca vai à rede buscar ícone.
+- **`view.suggest.open {tab, row_id, disposition?}`** → `{ok, tab}`. `disposition`: `current_tab` (padrão: a aba navega), `new_tab` (uma aba nova do ato, que chega como `view.tab`) ou `switch_to_tab` (nada navega; `tab` é a aba do ato que já mostra o endereço, para o hospedeiro trazer para a frente; nenhuma: `not_found`). A lista acaba. `row_id` de outra lista ou de outra aba: `not_found`. Com o agente trabalhando na aba, `current_tab` dá `denied`.
+- **`view.suggest.delete {row_id}`** → `{ok}`: tira do histórico a linha `deletable` (outra dá `denied`, de outra lista `not_found`); a lista vem de novo em `view.suggest`, sem ela.
+
+**Erros novos.** Nenhum. **Operações novas:** `view.downloads`, `view.download.action`, `view.suggest`, `view.suggest.open`, `view.suggest.delete`, `page.downloads`. **Eventos novos:** `view.download`, `view.download.removed`, `view.suggest`, `page.download`. **Campos novos:** `downloads_dir` em `host.settings`.
+
 ## Erros
 
 | Código | Quando |
@@ -549,6 +590,10 @@ Também só adições à v1. Quando a página chama `getDisplayMedia`, o motor e
 | `extension.popup` / `extension.popup.closed` | `popup`, `tab`, `extension`, `width`, `height` / `popup` | (passo 5.6, só o hospedeiro) O popup tem (ou mudou) de tamanho / fechou. |
 | `view.find` | `tab`, `matches`, `active` | (passo 5.7, só o hospedeiro) O resultado final de uma busca na página (`view.find`), ou `0` e `0` depois de `view.find.stop`. |
 | `view.zoom` | `tab`, `factor` | (passo 5.7, só o hospedeiro) O zoom da aba mudou (`view.zoom`, a página, ou o zoom do site em outra aba do ato). |
+| `view.download` | `id`, `ato`, `tab?`, `file_name`, `path?`, `origin`, `mime`, `total_bytes`, `received_bytes`, `state`, `danger_type?`, `by_agent` | (passo 5.9, só o hospedeiro) Um download começou ou mudou. |
+| `view.download.removed` | `id`, `ato` | (passo 5.9, só o hospedeiro) Um download saiu da lista. |
+| `view.suggest` | `tab`, `text`, `rows`, `done` | (passo 5.9, só o hospedeiro) A lista de sugestões do endereço mudou depois da resposta de `view.suggest`. |
+| `page.download` | `tab`, `id`, `ato`, `file_name`, `path?`, `origin`, `mime`, `total_bytes`, `received_bytes`, `state`, `danger_type?` | (passo 5.9, motor embutido) Um download de uma aba desta sessão de controle começou ou mudou. |
 | `control.stopped` | `reason` | O controle desta conexão acabou: `"user"` (a pessoa tocou na bolha de parar) ou `"sharing_changed"` (mudou o grupo de atos que compartilham cookies com este). |
 
 ## Regras de segurança que o cliente sente

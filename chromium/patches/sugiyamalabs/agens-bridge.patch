@@ -1288,10 +1288,10 @@ index 0000000000..e3c4343bf6
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_CONTROL_KEYS_H_
 diff --git a/chrome/browser/agens/bridge/control_ops.cc b/chrome/browser/agens/bridge/control_ops.cc
 new file mode 100644
-index 0000000000..2b20878c2e
+index 0000000000..7c8bfb7387
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_ops.cc
-@@ -0,0 +1,1076 @@
+@@ -0,0 +1,1092 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The control session (docs/protocolo.md, "control, tab, page"): an app, after the person's OK,
 +// drives tabs of one ato. It belongs to the connection and ends on control.stop, when the
@@ -1326,6 +1326,7 @@ index 0000000000..2b20878c2e
 +#include "chrome/browser/agens/bridge/control_keys.h"
 +#include "chrome/browser/agens/bridge/control_page.h"
 +#include "chrome/browser/agens/bridge/ui_ops.h"
++#include "chrome/browser/agens/bridge/view_downloads.h"
 +#include "chrome/browser/agens/bridge/view_input.h"
 +#include "chrome/browser/agens/bridge/view_ops.h"
 +#include "chrome/browser/agens/embed/agens_controlled.h"
@@ -2355,11 +2356,26 @@ index 0000000000..2b20878c2e
 +    TabHistory(session, std::move(request), std::move(reply));
 +  } else if (op == "tab.close") {
 +    TabClose(session, request, std::move(reply));
++  } else if (op == "page.downloads") {
++    downloads::AgentDownloads(client.connection, request, std::move(reply));
 +  } else if (op.starts_with("page.")) {
 +    PageOp(client.connection, session, std::move(request), std::move(reply));
 +  } else {
 +    std::move(reply).Run(ErrorReply(&request.id, kUnknownOp, op));
 +  }
++}
++
++bool AgentTab(content::WebContents* contents, uint64_t& connection, std::string& tab) {
++  for (auto& [id, session] : Sessions()) {
++    for (auto& t : session.tabs) {
++      if (t->web_contents() == contents) {
++        connection = id;
++        tab = t->id;
++        return true;
++      }
++    }
++  }
++  return false;
 +}
 +
 +void OnConnectionClosed(uint64_t connection) {
@@ -2370,10 +2386,10 @@ index 0000000000..2b20878c2e
 +}  // namespace agens::bridge::control
 diff --git a/chrome/browser/agens/bridge/control_ops.h b/chrome/browser/agens/bridge/control_ops.h
 new file mode 100644
-index 0000000000..d999ff7d50
+index 0000000000..878f3340dc
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/control_ops.h
-@@ -0,0 +1,30 @@
+@@ -0,0 +1,38 @@
 +// Copyright 2026 SugiyamaLabs.
 +// Agent control ops: control.*, tab.*, page.* (docs/agens.md, "Controle"). UI thread; see ops.h
 +// for what a handler gets.
@@ -2389,6 +2405,10 @@ index 0000000000..d999ff7d50
 +
 +#include "chrome/browser/agens/bridge/ops.h"
 +
++namespace content {
++class WebContents;
++}
++
 +namespace agens::bridge::control {
 +
 +// True for the ops this area answers.
@@ -2400,6 +2420,10 @@ index 0000000000..d999ff7d50
 +// it shares with none. Their logins are within reach of whoever controls `ato` or reads its
 +// cookies (session_ops.cc).
 +std::vector<std::string> SharesWith(const base::FilePath& ato);
++
++// The control session that has `contents` as one of its tabs: its connection and its id of the
++// tab ("t1"). False for any other tab.
++bool AgentTab(content::WebContents* contents, uint64_t& connection, std::string& tab);
 +
 +}  // namespace agens::bridge::control
 +
@@ -8043,6 +8067,420 @@ index 0000000000..2dd33f71f1
 +}  // namespace agens::bridge::ui_ask
 +
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_UI_OPS_H_
+diff --git a/chrome/browser/agens/bridge/view_downloads.cc b/chrome/browser/agens/bridge/view_downloads.cc
+new file mode 100644
+index 0000000000..95267ebdac
+--- /dev/null
++++ b/chrome/browser/agens/bridge/view_downloads.cc
+@@ -0,0 +1,362 @@
++// Copyright 2026 SugiyamaLabs.
++
++#include "chrome/browser/agens/bridge/view_downloads.h"
++
++#include <algorithm>
++#include <map>
++#include <memory>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "base/json/json_writer.h"
++#include "base/no_destructor.h"
++#include "chrome/browser/agens/bridge/control_ops.h"
++#include "chrome/browser/agens/bridge/view_input.h"
++#include "chrome/browser/agens/bridge/view_ops.h"
++#include "chrome/browser/agens/embed/agens_controlled.h"
++#include "chrome/browser/agens/embed/agens_window.h"
++#include "chrome/browser/browser_process.h"
++#include "chrome/browser/download/download_prefs.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/profiles/profile_attributes_entry.h"
++#include "chrome/browser/profiles/profile_manager.h"
++#include "chrome/common/pref_names.h"
++#include "components/download/content/public/all_download_item_notifier.h"
++#include "components/download/public/common/download_danger_type.h"
++#include "components/download/public/common/download_item.h"
++#include "components/prefs/pref_service.h"
++#include "content/public/browser/download_item_utils.h"
++#include "content/public/browser/download_manager.h"
++#include "url/origin.h"
++
++namespace agens::bridge::downloads {
++
++namespace {
++
++constexpr char kFailed[] = "failed";
++constexpr char kDirKey[] = "downloads_dir";  // in the ato's Local State extras (agens.atos)
++constexpr size_t kMaxDirChars = 4096;
++
++// Who started it, kept on the item from its creation (the tab may close before it ends).
++struct Origin : base::SupportsUserData::Data {
++  int tab = 0;                // the host's v<n>
++  uint64_t agent = 0;         // the control session's connection, when an agent's tab started it
++  std::string agent_tab;      // that session's id of the tab ("t1")
++};
++const char kOriginKey = 0;
++const Origin* OriginOf(download::DownloadItem* item) {
++  return static_cast<const Origin*>(item->GetUserData(&kOriginKey));
++}
++
++std::string AtoOf(download::DownloadItem* item) {
++  content::BrowserContext* context = content::DownloadItemUtils::GetBrowserContext(item);
++  return context ? Profile::FromBrowserContext(context)->GetPath().BaseName().AsUTF8Unsafe() : std::string();
++}
++
++// What the list and the events show: no temporary item (save-page parts), no transient one.
++bool Listed(download::DownloadItem* item) {
++  return !item->IsTemporary() && !item->IsTransient() && !AtoOf(item).empty();
++}
++
++bool Dangerous(download::DownloadItem* item) {
++  return item->GetState() == download::DownloadItem::IN_PROGRESS && (item->IsDangerous() || item->IsInsecure());
++}
++
++std::string StateOf(download::DownloadItem* item) {
++  switch (item->GetState()) {
++    case download::DownloadItem::COMPLETE: return "complete";
++    case download::DownloadItem::CANCELLED: return "cancelled";
++    case download::DownloadItem::INTERRUPTED: return "interrupted";
++    default: break;
++  }
++  if (Dangerous(item)) return "dangerous";
++  return item->IsPaused() ? "paused" : "in_progress";
++}
++
++// The host's fields; `agent` gives the agent's instead (its tab id, no by_agent).
++base::DictValue Fields(download::DownloadItem* item, bool agent = false) {
++  base::DictValue fields;
++  const Origin* origin = OriginOf(item);
++  fields.Set("id", item->GetGuid());
++  fields.Set("ato", AtoOf(item));
++  if (agent && origin) {
++    fields.Set("tab", origin->agent_tab);
++  } else if (origin && origin->tab) {
++    fields.Set("tab", ViewTabName(origin->tab));
++  }
++  fields.Set("file_name", item->GetFileNameToReportUser().AsUTF8Unsafe());
++  if (!item->GetTargetFilePath().empty()) fields.Set("path", item->GetTargetFilePath().AsUTF8Unsafe());
++  fields.Set("origin", url::Origin::Create(item->GetURL()).Serialize());
++  fields.Set("mime", item->GetMimeType());
++  fields.Set("total_bytes", static_cast<double>(std::max<int64_t>(0, item->GetTotalBytes())));
++  fields.Set("received_bytes", static_cast<double>(item->GetReceivedBytes()));
++  fields.Set("state", StateOf(item));
++  if (Dangerous(item)) fields.Set("danger_type", download::GetDownloadDangerTypeString(item->GetDangerType()));
++  if (!agent) fields.Set("by_agent", origin && origin->agent);
++  return fields;
++}
++
++class Watcher : public download::AllDownloadItemNotifier::Observer {
++ public:
++  void Watch(content::DownloadManager* manager) {
++    std::erase_if(notifiers_, [](const auto& n) { return !n->GetManager(); });
++    for (const auto& n : notifiers_) {
++      if (n->GetManager() == manager) return;
++    }
++    // Its items so far (history, mostly) are known without an event each.
++    content::DownloadManager::DownloadVector all;
++    manager->GetAllDownloads(&all);
++    for (download::DownloadItem* item : all) sent_[item->GetGuid()] = Json(Fields(item));
++    notifiers_.push_back(std::make_unique<download::AllDownloadItemNotifier>(manager, this));
++  }
++
++  // Every live item of the loaded atos (`ato` empty) or of one, newest first.
++  std::vector<download::DownloadItem*> Items(const std::string& ato = std::string()) {
++    std::vector<download::DownloadItem*> items;
++    for (const auto& n : notifiers_) {
++      if (!n->GetManager()) continue;
++      content::DownloadManager::DownloadVector all;
++      n->GetManager()->GetAllDownloads(&all);
++      for (download::DownloadItem* item : all) {
++        if (Listed(item) && (ato.empty() || AtoOf(item) == ato)) items.push_back(item);
++      }
++    }
++    std::ranges::sort(items, [](auto* a, auto* b) { return a->GetStartTime() > b->GetStartTime(); });
++    return items;
++  }
++
++  download::DownloadItem* Find(const std::string& id) {
++    for (const auto& n : notifiers_) {
++      if (!n->GetManager()) continue;
++      if (download::DownloadItem* item = n->GetManager()->GetDownloadByGuid(id); item && Listed(item)) return item;
++    }
++    return nullptr;
++  }
++
++ private:
++  static std::string Json(const base::DictValue& fields) { return base::WriteJson(fields).value_or(std::string()); }
++
++  // AllDownloadItemNotifier::Observer:
++  void OnDownloadCreated(content::DownloadManager*, download::DownloadItem* item) override {
++    if (item->GetDownloadCreationType() != download::DownloadItem::TYPE_HISTORY_IMPORT) {
++      auto origin = std::make_unique<Origin>();
++      if (content::WebContents* contents = content::DownloadItemUtils::GetWebContents(item)) {
++        origin->tab = view::TabNumber(contents);
++        if (AgensControlled::Is(contents)) control::AgentTab(contents, origin->agent, origin->agent_tab);
++      }
++      item->SetUserData(&kOriginKey, std::move(origin));
++    }
++    if (item->GetDownloadCreationType() == download::DownloadItem::TYPE_HISTORY_IMPORT) {
++      sent_[item->GetGuid()] = Json(Fields(item));
++      return;
++    }
++    Send(item);
++  }
++  void OnDownloadUpdated(content::DownloadManager*, download::DownloadItem* item) override { Send(item); }
++  void OnDownloadRemoved(content::DownloadManager*, download::DownloadItem* item) override {
++    if (!sent_.erase(item->GetGuid()) || !Listed(item)) return;
++    if (view::Host()) {
++      SendEventTo(view::Host(), "view.download.removed",
++                  base::DictValue().Set("id", item->GetGuid()).Set("ato", AtoOf(item)));
++    }
++  }
++  void OnDownloadDestroyed(content::DownloadManager*, download::DownloadItem* item) override {
++    sent_.erase(item->GetGuid());
++  }
++
++  // Only when something the host sees changed.
++  void Send(download::DownloadItem* item) {
++    if (!Listed(item)) return;
++    base::DictValue fields = Fields(item);
++    std::string& last = sent_[item->GetGuid()];
++    std::string now = Json(fields);
++    if (now == last) return;
++    last = std::move(now);
++    if (view::Host()) SendEventTo(view::Host(), "view.download", std::move(fields));
++    if (const Origin* origin = OriginOf(item); origin && origin->agent) {
++      SendEventTo(origin->agent, "page.download", Fields(item, /*agent=*/true));  // dropped once it closed
++    }
++  }
++
++  std::vector<std::unique_ptr<download::AllDownloadItemNotifier>> notifiers_;
++  std::map<std::string, std::string> sent_;  // guid -> the host's fields last sent, as JSON
++};
++Watcher& W() {
++  static base::NoDestructor<Watcher> watcher;
++  return *watcher;
++}
++
++ProfileAttributesEntry* FindAto(const std::string& id) {
++  for (ProfileAttributesEntry* entry : AgensWindow::Atos()) {
++    if (entry->GetPath().BaseName().AsUTF8Unsafe() == id) return entry;
++  }
++  return nullptr;
++}
++
++std::string DirOf(const ProfileAttributesEntry* entry) {
++  const base::DictValue* extras = AgensWindow::AtoExtras(entry);
++  const std::string* dir = extras ? extras->FindString(kDirKey) : nullptr;
++  return dir ? *dir : DownloadPrefs::GetDefaultDownloadDirectory().AsUTF8Unsafe();
++}
++
++void ApplyDir(Profile* profile) {
++  ProfileAttributesEntry* entry = AgensWindow::Storage().GetProfileAttributesWithPath(profile->GetPath());
++  const base::DictValue* extras = entry ? AgensWindow::AtoExtras(entry) : nullptr;
++  const std::string* dir = extras ? extras->FindString(kDirKey) : nullptr;
++  if (dir) {
++    DownloadPrefs::FromBrowserContext(profile)->SetDownloadPath(base::FilePath(*dir));
++  } else {
++    profile->GetPrefs()->ClearPref(prefs::kDownloadDefaultDirectory);
++    profile->GetPrefs()->ClearPref(prefs::kSaveFileDefaultDirectory);
++  }
++}
++
++base::ListValue List(const std::vector<download::DownloadItem*>& items, bool agent = false) {
++  base::ListValue list;
++  for (download::DownloadItem* item : items) list.Append(Fields(item, agent));
++  return list;
++}
++
++void Action(const Request& request, ReplyCallback reply) {
++  // "download", not "id": the request's own id is "id".
++  std::optional<std::string> id = StringParam(request.body, "download");
++  std::optional<std::string> action = StringParam(request.body, "action");
++  static constexpr std::string_view kActions[] = {"pause", "resume", "cancel", "open", "show_in_finder",
++                                                  "remove", "keep_dangerous", "discard_dangerous"};
++  if (!id || !action || std::ranges::find(kActions, *action) == std::end(kActions)) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest,
++                                    "needs download (its id) and action: pause, resume, cancel, open, show_in_finder, remove, "
++                                    "keep_dangerous or discard_dangerous"));
++    return;
++  }
++  download::DownloadItem* item = W().Find(*id);
++  if (!item) {
++    std::move(reply).Run(ErrorReply(&request.id, kNotFound, *id));
++    return;
++  }
++  const bool dangerous = Dangerous(item);
++  auto refuse = [&](const char* code, const char* why) { std::move(reply).Run(ErrorReply(&request.id, code, why)); };
++  if (*action == "pause") {
++    item->Pause();
++  } else if (*action == "resume") {
++    if (!item->CanResume()) return refuse(kFailed, "this download cannot resume");
++    item->Resume(/*user_resume=*/true);
++  } else if (*action == "cancel") {
++    item->Cancel(/*user_cancel=*/true);
++  } else if (*action == "open") {
++    // A dangerous file is never opened from here, not even when asked: keep it first.
++    if (dangerous) return refuse(kDenied, "dangerous: keep_dangerous first");
++    if (item->GetState() != download::DownloadItem::COMPLETE) return refuse(kFailed, "not complete");
++    item->OpenDownload();
++  } else if (*action == "show_in_finder") {
++    item->ShowDownloadInShell();
++  } else if (*action == "remove") {
++    item->Remove();  // a running or dangerous one is cancelled and its file goes; a finished file stays
++  } else if (!dangerous) {
++    return refuse(kFailed, "not a dangerous download");
++  } else if (*action == "keep_dangerous") {
++    if (item->IsInsecure()) {
++      item->ValidateInsecureDownload();
++    } else {
++      item->ValidateDangerousDownload();
++    }
++  } else {
++    item->Remove();  // discard_dangerous: Chromium's Discard
++  }
++  std::move(reply).Run(OkReply(request.id));
++}
++
++}  // namespace
++
++bool Handles(std::string_view op) {
++  return op == "view.downloads" || op == "view.download.action";
++}
++
++void HandleOp(const Request& request, ReplyCallback reply) {
++  if (request.op == "view.download.action") {
++    Action(request, std::move(reply));
++    return;
++  }
++  const base::Value* ato = request.body.Find("ato");
++  if (ato && !ato->is_string()) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "ato is a string"));
++    return;
++  }
++  base::DictValue result;
++  result.Set("downloads", List(W().Items(ato ? ato->GetString() : std::string())));
++  std::move(reply).Run(OkReply(request.id, std::move(result)));
++}
++
++void AgentDownloads(uint64_t connection, const Request& request, ReplyCallback reply) {
++  const base::Value* tab = request.body.Find("tab");
++  if (tab && !tab->is_string()) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "tab is a string"));
++    return;
++  }
++  std::vector<download::DownloadItem*> mine;
++  for (download::DownloadItem* item : W().Items()) {
++    const Origin* origin = OriginOf(item);
++    if (origin && origin->agent == connection && (!tab || origin->agent_tab == tab->GetString())) mine.push_back(item);
++  }
++  base::DictValue result;
++  result.Set("downloads", List(mine, /*agent=*/true));
++  std::move(reply).Run(OkReply(request.id, std::move(result)));
++}
++
++void Watch(Profile* profile) {
++  if (profile->IsOffTheRecord()) return;
++  // Embedded, nobody would answer a Save panel and no one can set auto-open: off, per ato.
++  profile->GetPrefs()->SetBoolean(prefs::kPromptForDownload, false);
++  DownloadPrefs::FromBrowserContext(profile)->ResetAutoOpenByUser();
++  ApplyDir(profile);
++  if (content::DownloadManager* manager = profile->GetDownloadManager()) W().Watch(manager);
++}
++
++bool SetDirs(const base::Value* value, std::string& code, std::string& message) {
++  if (!value) return true;
++  if (!value->is_dict()) {
++    code = kBadRequest;
++    message = "downloads_dir is an object: {\"<ato>\": \"/absolute/folder\" or \"\"}";
++    return false;
++  }
++  for (const auto [ato, dir] : value->GetDict()) {
++    const base::FilePath path(dir.is_string() ? dir.GetString() : std::string());
++    if (!dir.is_string() || dir.GetString().size() > kMaxDirChars ||
++        (!dir.GetString().empty() && (!path.IsAbsolute() || path.ReferencesParent() ||
++                                      dir.GetString().find('\0') != std::string::npos))) {
++      code = kBadRequest;
++      message = "each folder is an absolute path (up to 4096 characters, no ..) or \"\"";
++      return false;
++    }
++    if (!FindAto(ato)) {
++      code = kNotFound;
++      message = ato;
++      return false;
++    }
++  }
++  ProfileManager* manager = g_browser_process->profile_manager();
++  for (const auto [ato, dir] : value->GetDict()) {
++    ProfileAttributesEntry* entry = FindAto(ato);
++    const base::DictValue* old = AgensWindow::AtoExtras(entry);
++    base::DictValue extras = old ? old->Clone() : base::DictValue();
++    if (dir.GetString().empty()) {
++      extras.Remove(kDirKey);
++    } else {
++      extras.Set(kDirKey, dir.GetString());
++    }
++    AgensWindow::SetAtoExtras(entry->GetPath(), std::move(extras));
++    if (Profile* profile = manager->GetProfileByPath(entry->GetPath())) ApplyDir(profile);
++  }
++  return true;
++}
++
++base::DictValue Dirs() {
++  base::DictValue dirs;
++  for (ProfileAttributesEntry* entry : AgensWindow::Atos()) {
++    dirs.Set(entry->GetPath().BaseName().AsUTF8Unsafe(), DirOf(entry));
++  }
++  return dirs;
++}
++
++}  // namespace agens::bridge::downloads
+diff --git a/chrome/browser/agens/bridge/view_downloads.h b/chrome/browser/agens/bridge/view_downloads.h
+new file mode 100644
+index 0000000000..a27c1510d9
+--- /dev/null
++++ b/chrome/browser/agens/bridge/view_downloads.h
+@@ -0,0 +1,40 @@
++// Copyright 2026 SugiyamaLabs.
++// Downloads over the socket, embedded only (docs/protocolo.md, "Passo 5.9"): view.download events
++// and view.downloads / view.download.action for the host; page.download events and page.downloads
++// for the agent whose tab started one. Each ato's files go to its folder (host.settings
++// downloads_dir, ~/Downloads by default), with no Save panel. UI thread.
++#ifndef CHROME_BROWSER_AGENS_BRIDGE_VIEW_DOWNLOADS_H_
++#define CHROME_BROWSER_AGENS_BRIDGE_VIEW_DOWNLOADS_H_
++
++#include <cstdint>
++#include <string>
++#include <string_view>
++
++#include "base/values.h"
++#include "chrome/browser/agens/bridge/ops.h"
++
++class Profile;
++
++namespace agens::bridge::downloads {
++
++// view.downloads and view.download.action; view_ops.cc has checked the caller is the host.
++bool Handles(std::string_view op);
++void HandleOp(const Request& request, ReplyCallback reply);
++
++// page.downloads {tab?}: what the tabs of the control session on `connection` downloaded; `tab`
++// (the session's id, "t1") narrows it to that tab.
++void AgentDownloads(uint64_t connection, const Request& request, ReplyCallback reply);
++
++// An ato got a window (view::AddWindow): its downloads are watched, it never asks where to save
++// and nothing auto-opens, and its folder from host.settings applies. Once per profile.
++void Watch(Profile* profile);
++
++// host.settings downloads_dir {"<ato>": "/abs/path" | ""}: checks every entry first (bad_request
++// or not_found in `code`, nothing set), then sets them ("" goes back to ~/Downloads). Absent: ok.
++bool SetDirs(const base::Value* value, std::string& code, std::string& message);
++// Every ato's folder as now in force.
++base::DictValue Dirs();
++
++}  // namespace agens::bridge::downloads
++
++#endif  // CHROME_BROWSER_AGENS_BRIDGE_VIEW_DOWNLOADS_H_
 diff --git a/chrome/browser/agens/bridge/view_input.cc b/chrome/browser/agens/bridge/view_input.cc
 new file mode 100644
 index 0000000000..7975b6be4a
@@ -8513,10 +8951,10 @@ index 0000000000..e98cac0576
 +}
 diff --git a/chrome/browser/agens/bridge/view_ops.cc b/chrome/browser/agens/bridge/view_ops.cc
 new file mode 100644
-index 0000000000..eb97b5f713
+index 0000000000..7f340136c7
 --- /dev/null
 +++ b/chrome/browser/agens/bridge/view_ops.cc
-@@ -0,0 +1,1722 @@
+@@ -0,0 +1,1742 @@
 +// Copyright 2026 SugiyamaLabs.
 +// The host draws the interface; the engine hands it the pages (docs/protocolo.md, "host e view").
 +// - One host: the connection that sent host.attach (the app that launched the engine).
@@ -8551,8 +8989,10 @@ index 0000000000..eb97b5f713
 +#include "chrome/browser/agens/bridge/bridge.h"
 +#include "chrome/browser/agens/bridge/extension_ops.h"
 +#include "chrome/browser/agens/bridge/ui_ops.h"
++#include "chrome/browser/agens/bridge/view_downloads.h"
 +#include "chrome/browser/agens/bridge/view_input.h"
 +#include "chrome/browser/agens/bridge/view_pick.h"
++#include "chrome/browser/agens/bridge/view_suggest.h"
 +#include "chrome/browser/agens/embed/agens_controlled.h"
 +#include "chrome/browser/agens/embed/agens_screen_share.h"
 +#include "chrome/browser/agens/embed/agens_embedded.h"
@@ -9421,7 +9861,7 @@ index 0000000000..eb97b5f713
 +  return *site_requests;
 +}
 +
-+// host.settings {site_requests?, agent_extensions?, webauthn_platform?}: sets the ones given,
++// host.settings {site_requests?, agent_extensions?, webauthn_platform?, downloads_dir?}: sets the ones given,
 +// answers all three as now in force.
 +void HostSettings(const Request& request, ReplyCallback reply) {
 +  PrefService* local = g_browser_process->local_state();
@@ -9436,12 +9876,18 @@ index 0000000000..eb97b5f713
 +      return;
 +    }
 +  }
++  std::string code, message;
++  if (!downloads::SetDirs(request.body.Find("downloads_dir"), code, message)) {
++    std::move(reply).Run(ErrorReply(&request.id, code, message));
++    return;
++  }
 +  // The prefs' observers apply them: SiteRequests here, the controlled tabs in control_ops.cc.
 +  base::DictValue result;
 +  for (const auto& [key, pref] : settings) {
 +    if (const base::Value* value = request.body.Find(key)) local->SetBoolean(pref, value->GetBool());
 +    result.Set(key, local->GetBoolean(pref));
 +  }
++  result.Set("downloads_dir", downloads::Dirs());
 +  std::move(reply).Run(OkReply(request.id, std::move(result)));
 +}
 +
@@ -9978,6 +10424,12 @@ index 0000000000..eb97b5f713
 +  } else if (op == "view.devtools.close") {
 +    ViewDevToolsClose(contents, request, std::move(reply));
 +    return;
++  } else if (op == "view.suggest") {
++    suggest::Suggest(contents, *n, request, std::move(reply));
++    return;
++  } else if (op == "view.suggest.open") {
++    suggest::Open(contents, *n, request, std::move(reply));
++    return;
 +  } else if (op == "view.find") {
 +    ViewFind(contents, request, std::move(reply));
 +    return;
@@ -10079,6 +10531,10 @@ index 0000000000..eb97b5f713
 +    ViewReopen(request, std::move(reply));
 +  } else if (op == "view.reopenable") {
 +    ViewReopenable(request, std::move(reply));
++  } else if (downloads::Handles(op)) {
++    downloads::HandleOp(request, std::move(reply));
++  } else if (op == "view.suggest.delete") {
++    suggest::Delete(request, std::move(reply));
 +  } else if (extension::Handles(op)) {
 +    extension::HandleOp(client, std::move(request), std::move(reply));
 +  } else {
@@ -10153,6 +10609,7 @@ index 0000000000..eb97b5f713
 +  if (ApprovalCallback done = std::move(s.answer)) std::move(done).Run(kAgensApprovalDeny);
 +  ui_ask::HostGone();
 +  extension::HostGone();
++  suggest::HostGone();
 +}
 +
 +void HostGone() {
@@ -10173,6 +10630,7 @@ index 0000000000..eb97b5f713
 +  ui_ask::Start();
 +  extension::Start();
 +  TheSiteRequests().Start();
++  downloads::Watch(window->browser->GetProfile());
 +  S().windows.push_back(window);
 +  window->model()->AddObserver(&S());
 +  S().Schedule();
@@ -10902,6 +11360,311 @@ index 0000000000..68f776593c
 +}  // namespace agens::bridge::view
 +
 +#endif  // CHROME_BROWSER_AGENS_BRIDGE_VIEW_PICK_H_
+diff --git a/chrome/browser/agens/bridge/view_suggest.cc b/chrome/browser/agens/bridge/view_suggest.cc
+new file mode 100644
+index 0000000000..158f29d340
+--- /dev/null
++++ b/chrome/browser/agens/bridge/view_suggest.cc
+@@ -0,0 +1,264 @@
++// Copyright 2026 SugiyamaLabs.
++
++#include "chrome/browser/agens/bridge/view_suggest.h"
++
++#include <memory>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "base/base64.h"
++#include "base/containers/span.h"
++#include "base/no_destructor.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_split.h"
++#include "chrome/browser/agens/bridge/view_input.h"
++#include "chrome/browser/agens/bridge/view_ops.h"
++#include "chrome/browser/agens/embed/agens_controlled.h"
++#include "chrome/browser/agens/embed/agens_window.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
++#include "chrome/browser/ui/tabs/tab_strip_model.h"
++#include "components/omnibox/browser/autocomplete_controller.h"
++#include "components/omnibox/browser/autocomplete_match.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "content/public/common/referrer.h"
++#include "ui/base/page_transition_types.h"
++
++namespace agens::bridge::view::suggest {
++
++namespace {
++
++constexpr char kFailed[] = "failed";
++constexpr size_t kMaxTextChars = 8192;
++
++base::ListValue Pairs(const int* bold, int count) {
++  base::ListValue out;
++  for (int i = 0; i < count; ++i) out.Append(base::ListValue().Append(bold[2 * i]).Append(bold[2 * i + 1]));
++  return out;
++}
++
++// The list being typed for: one tab's field. Ends with its tab (the profile goes with it).
++class List : public content::WebContentsObserver {
++ public:
++  List(content::WebContents* contents, int n)
++      : content::WebContentsObserver(contents),
++        n(n),
++        suggester(Profile::FromBrowserContext(contents->GetBrowserContext())) {
++    suggester.observer = &List::OnRows;
++    suggester.context = this;
++  }
++  ~List() override { suggester.observer = nullptr; }  // the controller may publish as it goes
++
++  // Starts a list for `text` and returns its rows right away (what the local providers had
++  // at once); the rest comes as view.suggest events.
++  base::DictValue Start(const std::string& text, bool allow_inline) {
++    static uint64_t queries = 0;
++    query = ++queries;
++    this->text = text;
++    seen.clear();
++    replying = true;
++    suggester.Suggest(text, !allow_inline);
++    suggester.Publish();
++    replying = false;
++    return Fields();
++  }
++
++  // The row's match as it was listed, or null (another list, another tab, gone).
++  const AutocompleteMatch* Row(const std::string& id) const {
++    std::vector<std::string> parts = base::SplitString(id, ".", base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
++    int tab = 0;
++    uint64_t q = 0;
++    size_t k = 0;
++    if (parts.size() != 3 || !base::StringToInt(parts[0], &tab) || !base::StringToUint64(parts[1], &q) ||
++        !base::StringToSizeT(parts[2], &k) || tab != n || q != query || k >= seen.size()) {
++      return nullptr;
++    }
++    return &seen[k];
++  }
++
++  void Delete(const AutocompleteMatch& match) {
++    const AutocompleteMatch copy = match;  // `seen` may change while the controller republishes
++    if (suggester.autocomplete) suggester.autocomplete->DeleteMatch(copy);
++  }
++
++  const int n;
++  AgensSuggester suggester;
++
++ private:
++  static void OnRows(void* context, const AgensSuggestion* rows, int count) {
++    static_cast<List*>(context)->Rows(rows, count);
++  }
++
++  void Rows(const AgensSuggestion* rows, int count) {
++    base::ListValue list;
++    for (int i = 0; i < count; ++i) {
++      const AutocompleteMatch* match = suggester.Match(i);
++      if (!match) continue;
++      const AgensSuggestion& r = rows[i];
++      // Ids stay with a match for the whole list, so a row clicked as the list grows is still it.
++      size_t k = 0;
++      while (k < seen.size() && !(seen[k].destination_url == match->destination_url && seen[k].type == match->type &&
++                                  seen[k].fill_into_edit == match->fill_into_edit)) {
++        ++k;
++      }
++      if (k == seen.size()) seen.push_back(*match);
++      const char* kind = r.is_search ? "search" : r.has_tab ? "open_tab" : r.is_bookmark ? "bookmark" : "history";
++      base::DictValue row;
++      row.Set("row_id", base::NumberToString(n) + "." + base::NumberToString(query) + "." + base::NumberToString(k));
++      row.Set("text", r.text);
++      row.Set("fill", r.fill);
++      row.Set("inline", r.inline_completion);
++      row.Set("title", r.detail);
++      row.Set("url", match->destination_url.spec());
++      row.Set("kind", kind);
++      row.Set("text_bold", Pairs(r.text_bold, r.text_bold_count));
++      row.Set("title_bold", Pairs(r.detail_bold, r.detail_bold_count));
++      row.Set("deletable", static_cast<bool>(r.deletable));
++      if (r.favicon_png && r.favicon_png_size > 0) {
++        row.Set("favicon", base::Base64Encode(base::span(r.favicon_png, static_cast<size_t>(r.favicon_png_size))));
++      }
++      list.Append(std::move(row));
++    }
++    const bool done = suggester.autocomplete && suggester.autocomplete->done();
++    if (list == rows_ && done == done_) return;  // a republish that changed nothing the host sees
++    rows_ = std::move(list);
++    done_ = done;
++    if (!replying && Host()) SendEventTo(Host(), "view.suggest", Fields());
++  }
++
++  base::DictValue Fields() const {
++    return base::DictValue()
++        .Set("tab", ViewTabName(n))
++        .Set("text", text)
++        .Set("rows", rows_.Clone())
++        .Set("done", done_);
++  }
++
++  void WebContentsDestroyed() override;
++
++  uint64_t query = 0;
++  std::string text;
++  std::vector<AutocompleteMatch> seen;  // the list's matches so far; a row id's last part indexes it
++  base::ListValue rows_;
++  bool done_ = false;
++  bool replying = false;
++};
++
++std::unique_ptr<List>& Current() {
++  static base::NoDestructor<std::unique_ptr<List>> list;
++  return *list;
++}
++
++void List::WebContentsDestroyed() {
++  Current().reset();  // deletes this
++}
++
++// A tab of `profile` that shows `url`, for "Ir para a aba".
++content::WebContents* TabWith(Profile* profile, const GURL& url) {
++  content::WebContents* found = nullptr;
++  ForEachCurrentBrowserWindowInterfaceOrderedByActivation([&](BrowserWindowInterface* browser) {
++    if (browser->GetProfile() != profile) return true;
++    TabStripModel* model = browser->GetTabStripModel();
++    for (int i = 0; i < model->count() && !found; ++i) {
++      content::WebContents* contents = model->GetWebContentsAt(i);
++      if (contents->GetLastCommittedURL() == url || contents->GetVisibleURL() == url) found = contents;
++    }
++    return !found;
++  });
++  return found;
++}
++
++}  // namespace
++
++void Suggest(content::WebContents* contents, int n, const Request& request, ReplyCallback reply) {
++  std::optional<std::string> text = StringParam(request.body, "text");
++  const base::Value* allow_inline = request.body.Find("allow_inline");
++  if (!text || !AtMostChars(*text, kMaxTextChars) || (allow_inline && !allow_inline->is_bool())) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest,
++                                    "needs tab and text (up to 8192 characters); allow_inline is a boolean"));
++    return;
++  }
++  std::unique_ptr<List>& list = Current();
++  if (text->empty()) {  // the field emptied or lost focus: no list
++    list.reset();
++    std::move(reply).Run(OkReply(request.id, base::DictValue().Set("rows", base::ListValue()).Set("done", true)));
++    return;
++  }
++  if (!list || list->web_contents() != contents) list = std::make_unique<List>(contents, n);
++  std::move(reply).Run(OkReply(request.id, list->Start(*text, allow_inline && allow_inline->GetBool())));
++}
++
++void Open(content::WebContents* contents, int n, const Request& request, ReplyCallback reply) {
++  std::optional<std::string> row_id = StringParam(request.body, "row_id");
++  std::string disposition = StringParam(request.body, "disposition").value_or("current_tab");
++  if (!row_id || (disposition != "current_tab" && disposition != "new_tab" && disposition != "switch_to_tab")) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest,
++                                    "needs tab and row_id; disposition is current_tab, new_tab or switch_to_tab"));
++    return;
++  }
++  std::unique_ptr<List>& list = Current();
++  const AutocompleteMatch* match = list && list->n == n ? list->Row(*row_id) : nullptr;
++  if (!match) {
++    std::move(reply).Run(ErrorReply(&request.id, kNotFound, "no such row in the tab's current list"));
++    return;
++  }
++  const GURL url = match->destination_url;
++  if (!url.is_valid()) {
++    std::move(reply).Run(ErrorReply(&request.id, kFailed, "the row has no address"));
++    return;
++  }
++  Profile* profile = Profile::FromBrowserContext(contents->GetBrowserContext());
++  if (disposition == "switch_to_tab") {
++    content::WebContents* other = TabWith(profile, url);
++    if (!other) {
++      std::move(reply).Run(ErrorReply(&request.id, kNotFound, "no tab of the ato shows it now"));
++      return;
++    }
++    list.reset();
++    std::move(reply).Run(OkReply(request.id, base::DictValue().Set("tab", ViewTabName(TabNumber(other)))));
++    return;
++  }
++  if (disposition == "new_tab") {
++    list.reset();
++    OpenTab(Request{request.id.Clone(), request.op, request.body.Clone()}, std::move(reply), url, profile);
++    return;
++  }
++  const AgensControlled* controlled = AgensControlled::FromWebContents(contents);
++  if (controlled && !controlled->paused) {
++    std::move(reply).Run(ErrorReply(&request.id, kDenied, "an agent is working on this tab"));
++    return;
++  }
++  list.reset();
++  contents->GetController().LoadURL(url, content::Referrer(), ui::PAGE_TRANSITION_TYPED, std::string());
++  std::move(reply).Run(OkReply(request.id, base::DictValue().Set("tab", ViewTabName(n))));
++}
++
++void Delete(const Request& request, ReplyCallback reply) {
++  std::optional<std::string> row_id = StringParam(request.body, "row_id");
++  if (!row_id) {
++    std::move(reply).Run(ErrorReply(&request.id, kBadRequest, "needs row_id"));
++    return;
++  }
++  List* list = Current().get();
++  const AutocompleteMatch* match = list ? list->Row(*row_id) : nullptr;
++  if (!match) {
++    std::move(reply).Run(ErrorReply(&request.id, kNotFound, "no such row in the current list"));
++    return;
++  }
++  if (!match->deletable) {
++    std::move(reply).Run(ErrorReply(&request.id, kDenied, "this row cannot be deleted"));
++    return;
++  }
++  list->Delete(*match);  // the list comes again as view.suggest, without it
++  std::move(reply).Run(OkReply(request.id));
++}
++
++void HostGone() {
++  Current().reset();
++}
++
++}  // namespace agens::bridge::view::suggest
+diff --git a/chrome/browser/agens/bridge/view_suggest.h b/chrome/browser/agens/bridge/view_suggest.h
+new file mode 100644
+index 0000000000..393e1e72b4
+--- /dev/null
++++ b/chrome/browser/agens/bridge/view_suggest.h
+@@ -0,0 +1,29 @@
++// Copyright 2026 SugiyamaLabs.
++// Address suggestions for the host's address field (docs/protocolo.md, "Passo 5.9"): the casca's
++// AgensSuggester (agens_window.h: local providers only, remote search suggestions off) over the
++// socket. One list at a time, for the tab whose field the person types in. UI thread; view_ops.cc
++// has checked the caller is the host.
++#ifndef CHROME_BROWSER_AGENS_BRIDGE_VIEW_SUGGEST_H_
++#define CHROME_BROWSER_AGENS_BRIDGE_VIEW_SUGGEST_H_
++
++#include "chrome/browser/agens/bridge/ops.h"
++
++namespace content {
++class WebContents;
++}
++
++namespace agens::bridge::view::suggest {
++
++// view.suggest {tab, text, allow_inline?} → {rows, done}; later changes of the same list come as
++// the event view.suggest. `n` is the tab's v<n>.
++void Suggest(content::WebContents* contents, int n, const Request& request, ReplyCallback reply);
++// view.suggest.open {tab, row_id, disposition?}: current_tab, new_tab or switch_to_tab.
++void Open(content::WebContents* contents, int n, const Request& request, ReplyCallback reply);
++// view.suggest.delete {row_id}: a deletable row leaves the history.
++void Delete(const Request& request, ReplyCallback reply);
++// The host went away: the list ends.
++void HostGone();
++
++}  // namespace agens::bridge::view::suggest
++
++#endif  // CHROME_BROWSER_AGENS_BRIDGE_VIEW_SUGGEST_H_
 diff --git a/chrome/browser/agens/embed/agens_adblock.cc b/chrome/browser/agens/embed/agens_adblock.cc
 index cf65d95e50..44ca1d8f72 100644
 --- a/chrome/browser/agens/embed/agens_adblock.cc
@@ -28104,23 +28867,25 @@ index e44b0c31ee..98e8b60861 100644
    std::unique_ptr<OwnedMainWebContents> owned_main_web_contents_;
  
 diff --git a/chrome/browser/download/chrome_download_manager_delegate.cc b/chrome/browser/download/chrome_download_manager_delegate.cc
-index 2c467f4524..2aee2739bd 100644
+index 2c467f4524..2581b04ce4 100644
 --- a/chrome/browser/download/chrome_download_manager_delegate.cc
 +++ b/chrome/browser/download/chrome_download_manager_delegate.cc
-@@ -3,6 +3,7 @@
+@@ -3,6 +3,8 @@
  // found in the LICENSE file.
  
  #include "chrome/browser/download/chrome_download_manager_delegate.h"
 +#include "chrome/browser/agens/embed/agens_controlled.h"  // agens
++#include "chrome/browser/agens/embed/agens_embedded.h"  // agens
  
  #include <algorithm>
  #include <memory>
-@@ -2438,6 +2439,12 @@ void ChromeDownloadManagerDelegate::CheckDownloadAllowed(
+@@ -2438,6 +2440,13 @@ void ChromeDownloadManagerDelegate::CheckDownloadAllowed(
      return;
    }
  
-+  // agens: a tab an app drives over the socket never downloads.
-+  if (AgensControlled::Is(web_contents)) {
++  // agens: a tab an app drives over the socket never downloads, except embedded: there the host
++  // shows each download and the agent learns its path (page.download, bridge/view_downloads.cc).
++  if (AgensControlled::Is(web_contents) && !agens::IsEmbedded()) {
 +    OnCheckDownloadAllowedFailed(std::move(check_download_allowed_cb));
 +    return;
 +  }
@@ -29261,7 +30026,7 @@ index 728ff34b3d..180cba0016 100644
    map.AddWebUIConfig(std::make_unique<FeedbackUIConfig>());
    if (!light_pages) map.AddWebUIConfig(std::make_unique<HistoryUIConfig>());  // agens
 diff --git a/chrome/browser/ui/webui_browser/BUILD.gn b/chrome/browser/ui/webui_browser/BUILD.gn
-index 98ada3ff32..99f8f21b33 100644
+index 98ada3ff32..6714f681f9 100644
 --- a/chrome/browser/ui/webui_browser/BUILD.gn
 +++ b/chrome/browser/ui/webui_browser/BUILD.gn
 @@ -81,9 +81,14 @@ source_set("impl") {
@@ -29279,7 +30044,7 @@ index 98ada3ff32..99f8f21b33 100644
      "//chrome/browser/agens/embed/agens_window.h",
      "//chrome/browser/agens/embed/native_shell.cc",
      "//chrome/browser/agens/embed/agens_import.cc",
-@@ -97,17 +102,51 @@ source_set("impl") {
+@@ -97,17 +102,55 @@ source_set("impl") {
  
    if (is_mac) {
      sources += [
@@ -29303,6 +30068,10 @@ index 98ada3ff32..99f8f21b33 100644
 +      "//chrome/browser/agens/bridge/ui_ops.h",
 +      "//chrome/browser/agens/bridge/view_ops.cc",
 +      "//chrome/browser/agens/bridge/view_ops.h",
++      "//chrome/browser/agens/bridge/view_downloads.cc",
++      "//chrome/browser/agens/bridge/view_downloads.h",
++      "//chrome/browser/agens/bridge/view_suggest.cc",
++      "//chrome/browser/agens/bridge/view_suggest.h",
 +      "//chrome/browser/agens/bridge/view_pick.cc",
 +      "//chrome/browser/agens/bridge/view_pick.h",
 +      "//chrome/browser/agens/embed/agens_embedded.h",
@@ -29331,7 +30100,7 @@ index 98ada3ff32..99f8f21b33 100644
    }
  
    deps = [
-@@ -152,6 +191,8 @@ source_set("impl") {
+@@ -152,6 +195,8 @@ source_set("impl") {
      "//chrome/browser/ui/toolbar",
      "//chrome/browser/ui/views:bubble_anchor_util_views",
      "//components/webui/about",  # agens: the credits page parses its about_credits.html
@@ -29340,7 +30109,7 @@ index 98ada3ff32..99f8f21b33 100644
      "//chrome/browser/ui/views:find_bar_views",
      "//chrome/browser/ui/views:tab_search_bubble_host",
      "//chrome/browser/ui/views/exclusive_access",
-@@ -173,6 +214,8 @@ source_set("impl") {
+@@ -173,6 +218,8 @@ source_set("impl") {
      "//components/browser_apis/ui_controllers/toolbar:mojom",
      "//components/guest_contents/browser",
      "//components/input",
@@ -29349,7 +30118,7 @@ index 98ada3ff32..99f8f21b33 100644
      "//components/omnibox/browser:vector_icons",
      "//components/sharing_message",
      "//components/surface_embed/browser",
-@@ -192,6 +235,7 @@ source_set("impl") {
+@@ -192,6 +239,7 @@ source_set("impl") {
  
    if (is_mac) {
      deps += [

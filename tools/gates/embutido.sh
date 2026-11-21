@@ -17,11 +17,11 @@ GATE_OUT="${GATE_OUT:-Dev}"
 export APP OUT GATES REPO SITE_PORT EMBUTIDO_INSPECT GATE_OUT
 
 SITE_PID=""
-if ! curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/tela"; then   # /tela: the newest page, so an older site is not reused
+if ! curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/baixar"; then   # /baixar: the newest page, so an older site is not reused
   python3 "$REPO/tools/sites-teste/serve.py" "$SITE_PORT" >"$OUT/site.log" 2>&1 &
   SITE_PID=$!
-  for _ in $(seq 20); do curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/tela" && break; sleep 0.25; done
-  curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/tela" || { echo "FAIL: the test site has no /tela (an older serve.py on port $SITE_PORT? try SITE_PORT=8766)"; exit 1; }
+  for _ in $(seq 20); do curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/baixar" && break; sleep 0.25; done
+  curl -sf -o /dev/null "http://127.0.0.1:$SITE_PORT/baixar" || { echo "FAIL: the test site has no /baixar (an older serve.py on port $SITE_PORT? try SITE_PORT=8766)"; exit 1; }
 fi
 
 # winids lists every normal window of a pid, also the ones off screen; this one counts only those
@@ -2194,6 +2194,139 @@ nt = new_tabs[0]
 c.ask("view.navigate", tab=nt, text=SITE + "/other")
 check("that new tab navigates as usual (/other loads)", bool(tab_event(nt, loaded("/other"))))
 for nt in new_tabs: c.ask("view.close", tab=nt)
+
+# Passo 5.9: downloads and address suggestions over the socket. A fresh ato whose files go to a temp
+# folder (host.settings downloads_dir), so nothing lands in ~/Downloads. Nothing here opens a file or
+# the Finder (open and show_in_finder are left out).
+dato = c.ask("atos.create", name="Gate Downloads").get("ato")
+ddir = tempfile.mkdtemp(prefix="agens-d.", dir="/tmp")
+same = lambda a, b: bool(a) and os.path.realpath(a) == os.path.realpath(b)
+r = c.ask("host.settings")
+check("host.settings reads every ato's downloads_dir (~/Downloads when none was set)",
+      r.get("ok") and same((r.get("downloads_dir") or {}).get(dato), os.path.expanduser("~/Downloads")), r.get("downloads_dir"))
+check("downloads_dir: a relative folder is bad_request, an unknown ato not_found, nothing set",
+      err(c.ask("host.settings", downloads_dir={dato: "relativa/x"})) == "bad_request"
+      and err(c.ask("host.settings", downloads_dir={"Profile 404": ddir})) == "not_found"
+      and err(c.ask("host.settings", downloads_dir=ddir)) == "bad_request")
+r = c.ask("host.settings", downloads_dir={dato: ddir})
+check("downloads_dir sets the ato's folder and answers it", r.get("ok") and (r.get("downloads_dir") or {}).get(dato) == ddir, r)
+dt = c.ask("view.open", ato=dato, url=SITE + "/baixar").get("tab", "")
+tab_event(dt, loaded("/baixar"))
+c.ask("view.navigate", tab=dt, text=SITE + "/arquivo.txt")
+d = c.event(lambda e: e["event"] == "view.download" and e.get("state") == "complete", 20) or {}
+dpath = os.path.join(ddir, "agens-gate.txt")
+check("a download in the person's tab: view.download complete (id, ato, tab, file_name, path in the ato's folder, "
+      "origin, mime, bytes, by_agent false)",
+      bool(d.get("id")) and d.get("ato") == dato and d.get("tab") == dt and d.get("file_name") == "agens-gate.txt"
+      and same(d.get("path"), dpath) and d.get("origin") == SITE and d.get("mime") == "text/plain"
+      and d.get("received_bytes") == 20 and d.get("total_bytes") == 20 and d.get("by_agent") is False
+      and "danger_type" not in d, d)
+check("the file is in the ato's folder, no Save panel asked", os.path.exists(dpath) and open(dpath).read() == "agens gate download\n"
+      and not c.event(lambda e: e["event"] == "ui.ask" and e.get("kind") == "file", 1))
+r = c.ask("view.downloads", ato=dato)
+check("view.downloads lists it, newest first", r.get("ok") and [x.get("id") for x in r.get("downloads", [])][:1] == [d.get("id")]
+      and same(r["downloads"][0].get("path"), dpath), r)
+check("view.downloads of an ato with none is empty", c.ask("view.downloads", ato="Profile 404").get("downloads") == [])
+check("view.download.action: unknown id not_found, unknown action bad_request, keep_dangerous of a safe file failed",
+      err(c.ask("view.download.action", download="nope", action="pause")) == "not_found"
+      and err(c.ask("view.download.action", download=d.get("id", ""), action="explode")) == "bad_request"
+      and err(c.ask("view.download.action", download=d.get("id", ""), action="keep_dangerous")) == "failed")
+check("view.download.* from a connection that is not the host is unauthorized", err(c2.ask("view.downloads")) == "unauthorized")
+r = c.ask("view.download.action", download=d.get("id", ""), action="remove")
+gone = c.event(lambda e: e["event"] == "view.download.removed" and e.get("id") == d.get("id"), 10)
+check("remove: view.download.removed, out of view.downloads, the finished file stays",
+      r.get("ok") and bool(gone) and gone.get("ato") == dato and os.path.exists(dpath)
+      and d.get("id") not in [x.get("id") for x in c.ask("view.downloads", ato=dato).get("downloads", [])], (r, gone))
+
+ag = Conn()
+rid = ag.send("control.start", ato=dato, reason="gate download")
+x = c.event(lambda e: e["event"] == "approval.ask", 20)
+if x: c.ask("approval.answer", ask=x["ask"], answer="allow")
+if not (x and ag.wait(rid).get("ok")):
+    skip("downloads from an agent's tab", "control.start did not go through")
+else:
+    at = ag.ask("tab.open", ato=dato, url=SITE + "/baixar").get("tab", "")
+    link = next((n for n in ag.ask("page.snapshot", tab=at).get("nodes", []) if n.get("name") == "Baixar arquivo"), {})
+    ag.ask("page.click", tab=at, ref=link.get("ref", "none"))
+    pd = ag.event(lambda e: e["event"] == "page.download" and e.get("state") == "complete", 20) or {}
+    check("an agent's tab downloads (embedded): page.download complete to the agent, with its tab id and the path",
+          pd.get("tab") == at and bool(pd.get("path")) and os.path.exists(pd.get("path", "/nope"))
+          and os.path.dirname(os.path.realpath(pd.get("path", ""))) == os.path.realpath(ddir) and "by_agent" not in pd, pd)
+    hd = c.event(lambda e: e["event"] == "view.download" and e.get("id") == pd.get("id") and e.get("state") == "complete", 10) or {}
+    check("the host sees the agent's download with by_agent true and the host's tab id",
+          hd.get("by_agent") is True and re.fullmatch(r"v[1-9][0-9]*", hd.get("tab", "")) is not None, hd)
+    r = ag.ask("page.downloads")
+    check("page.downloads lists what the session downloaded (with path); another tab id gives none",
+          r.get("ok") and [x.get("id") for x in r.get("downloads", [])] == [pd.get("id")]
+          and r["downloads"][0].get("path") == pd.get("path") and ag.ask("page.downloads", tab="t999").get("downloads") == [], r)
+    ag.ask("control.stop")
+check("page.downloads without control.start is unauthorized", err(c2.ask("page.downloads")) == "unauthorized")
+
+# Address suggestions (view.suggest): typed visits to /other and /find seed the history, as the casca gate does
+# with its own switch; /baixar stays open in dt for "Ir para a aba".
+seed = c.ask("view.open", ato=dato, url=SITE + "/find").get("tab", "")
+tab_event(seed, loaded("/find"))
+for path in ("/other", "/find"):
+    drop(seed); c.ask("view.navigate", tab=seed, text=SITE + path); tab_event(seed, loaded(path))
+c.ask("view.close", tab=seed)   # an open page is an open_tab row, which never completes inline
+st = c.ask("view.open", ato=dato).get("tab", "")   # the field types in a new tab with no address
+tab_event(st)
+time.sleep(2)   # the history indexes take the visits in the background
+def suggest(text, allow_inline=False):  # the reply, then the list once done (view.suggest events)
+    r = c.ask("view.suggest", tab=st, text=text, allow_inline=allow_inline)
+    rows, done, end = r.get("rows"), r.get("done"), time.time() + 10
+    while not done and time.time() < end:
+        e = c.event(lambda e: e["event"] == "view.suggest" and e.get("tab") == st and e.get("text") == text, 2)
+        if e: rows, done = e.get("rows"), e.get("done")
+    return r, rows or []
+host = f"127.0.0.1:{PORT}"
+r, rows = suggest("127.0.0", True)
+first = rows[0] if rows else {}
+keys = {"row_id", "text", "fill", "inline", "title", "url", "kind", "text_bold", "title_bold", "deletable"}
+check("view.suggest answers rows (row_id, text, fill, inline, title, url, kind, bold pairs, deletable)",
+      r.get("ok") and isinstance(r.get("rows"), list) and bool(rows) and all(keys <= set(x) for x in rows), r)
+# Whether Chromium completes inline depends on its history scoring (the casca gate above checks
+# it with a seeded typed host); here only that the field travels: printed, not checked.
+print(f"info: view.suggest \"127.0.0\" allow_inline: first row inline {first.get('inline')!r} ({first.get('kind')})", flush=True)
+r, rows = suggest("127.0.0")
+check("without allow_inline nothing completes inline", bool(rows) and all(x.get("inline") == "" for x in rows), rows)
+stale = first.get("row_id", "none")
+r, rows = suggest(host + "/ot")
+other = next((x for x in rows if x.get("url") == SITE + "/other"), {})
+check("the history row of /other: kind history, its title, deletable, typed letters bold in pairs",
+      other.get("kind") == "history" and other.get("title") == "Other (test)" and other.get("deletable") is True
+      and bool(other.get("text_bold")) and all(len(p) == 2 for p in other["text_bold"]), rows)
+check("a row id of an earlier list is not_found (view.suggest.open, view.suggest.delete)",
+      err(c.ask("view.suggest.open", tab=st, row_id=stale)) == "not_found" and err(c.ask("view.suggest.delete", row_id=stale)) == "not_found")
+r = c.ask("view.suggest.open", tab=st, row_id=other.get("row_id", "none"), disposition="new_tab")
+nt = r.get("tab", "")
+check("view.suggest.open new_tab opens the row in a new tab of the ato", r.get("ok") and nt not in ("", st)
+      and bool(tab_event(nt, loaded("/other"))), r)
+c.ask("view.close", tab=nt)
+r, rows = suggest(host + "/baix")
+open_tab = next((x for x in rows if x.get("url") == SITE + "/baixar"), {})
+check("a page open in another tab comes as kind open_tab", open_tab.get("kind") == "open_tab", rows)
+r = c.ask("view.suggest.open", tab=st, row_id=open_tab.get("row_id", "none"), disposition="switch_to_tab")
+check("view.suggest.open switch_to_tab answers the tab that has it", r.get("ok") and r.get("tab") == dt, r)
+r, rows = suggest("gate busca palavras")
+search = next((x for x in rows if x.get("kind") == "search"), {})
+check("the typed search row: kind search, the engine's name as title", search.get("text") == "gate busca palavras"
+      and bool(search.get("title")) and search.get("url", "").startswith("http"), rows)
+r, rows = suggest(host + "/ot")
+other = next((x for x in rows if x.get("url") == SITE + "/other"), {})
+r = c.ask("view.suggest.delete", row_id=other.get("row_id", "none"))
+time.sleep(2)
+r2, rows = suggest(host + "/ot")
+check("view.suggest.delete takes a history row out of the history (gone from the next list)",
+      r.get("ok") and not any(x.get("url") == SITE + "/other" for x in rows), (r, rows))
+check("view.suggest with \"\" ends the list (no rows, done)", c.ask("view.suggest", tab=st, text="") == {"id": c.n, "ok": True, "rows": [], "done": True})
+check("view.suggest without text is bad_request, on an unknown tab not_found, open with a bad disposition bad_request",
+      err(c.ask("view.suggest", tab=st)) == "bad_request" and err(c.ask("view.suggest", tab="v99999", text="a")) == "not_found"
+      and err(c.ask("view.suggest.open", tab=st, row_id="1.1.0", disposition="window")) == "bad_request")
+c.ask("view.close", tab=st)
+c.ask("view.close", tab=dt)
+no_window("downloads and suggestions")
+subprocess.run(["rm", "-rf", ddir])
 
 # Issue #34: the video capture service exits when no page uses the camera. Its own short launch:
 # a fake camera that needs no permission prompt, and the release after 2 s instead of 60 s.

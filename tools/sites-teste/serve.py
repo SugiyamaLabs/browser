@@ -8,7 +8,8 @@ PAGES = {"/login": "login.html", "/app/": "app.html", "/form": "form.html", "/ot
          "/ui/dialog": "ui-dialog.html", "/ui/perm": "ui-perm.html", "/ui/pick": "ui-pick.html", "/ext": "ext.html", "/pick": "pick.html",
          "/popup": "popup.html", "/pip": "pip.html", "/fuga": "fuga.html", "/janela": "janela.html",
          "/imprimir": "imprimir.html", "/passkey": "passkey.html", "/find": "find.html", "/som": "som.html",
-         "/camera": "camera.html", "/dispositivos": "dispositivos.html", "/tela": "tela.html"}
+         "/camera": "camera.html", "/dispositivos": "dispositivos.html", "/tela": "tela.html",
+         "/baixar": "baixar.html"}
 SID = "sid-fake-123"  # fake test values only
 SEEN = {}  # /whoami tag -> whether that request carried the login cookie (in memory only)
 
@@ -67,6 +68,9 @@ class H(http.server.BaseHTTPRequestHandler):
             return self.reply(200, b"<p>set</p>", [("Set-Cookie", "sec=fake-1; Secure; Path=/"), ("Set-Cookie", "plain=fake-2; Path=/")])
         if path == "/cookies":  # the Cookie header this request carried, as page text
             return self.reply(200, ("<p>cookies: %s</p>" % self.headers.get("Cookie", "")).encode())
+        if path == "/arquivo.txt":  # a small download (/baixar links here)
+            return self.reply(200, b"agens gate download\n", [("Content-Disposition", 'attachment; filename="agens-gate.txt"')],
+                              ctype="text/plain")
         if path == "/auth" or path.startswith("/auth/"):
             return self.basic_auth(path)
         if self.path == "/login?auto=1":  # logs in by itself, for gates that cannot type

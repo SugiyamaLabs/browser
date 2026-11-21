@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Official build → signed, notarized and stapled AgensBrowser.app and .dmg, with Sparkle and its
 # appcast.xml (docs/build.md, "Atualizações"), in a fresh folder. Publishing is a printed command.
-# Usage: [AGENS_EVS=1] BROWSER_WORK=~/browser-work-2 AGENS_SIGN_IDENTITY="Developer ID Application: …" AGENS_NOTARY_PROFILE=agens-notary chromium/release.sh <out dir>
+# Usage: BROWSER_WORK=~/browser-work-2 AGENS_SIGN_IDENTITY="Developer ID Application: …" AGENS_NOTARY_PROFILE=agens-notary chromium/release.sh <out dir>
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 source "$here/env.sh"
@@ -12,8 +12,8 @@ app="$dest/AgensBrowser.app"
 rm -rf "$app"
 ditto "$SRC_DIR/out/Default/AgensBrowser.app" "$app"
 "$here/sparkle.sh" embed "$app"
-# Widevine VMP (Netflix in HD): Castlabs EVS signs the bundle before our codesign (docs/build.md).
-if [ "${AGENS_EVS:-0}" = 1 ]; then python3 -m castlabs_evs.vmp sign-pkg "$app"; fi
+# Widevine VMP: Castlabs EVS only signs its own Electron builds ("Binary signature denied" for ours, 21/11/2026);
+# a VMP signature for a Chromium fork needs a license from Google. No step here (docs/build.md).
 AGENS_APP="$app" "$here/sign.sh"
 AGENS_APP="$app" "$here/notarize.sh"
 ver=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$app/Contents/Info.plist")
