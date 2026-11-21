@@ -139,6 +139,17 @@ Fica registrado aqui só para combinar a fronteira:
 - os painéis com as abas, usando o `BrowserKit`;
 - a tela "conectar ao AgensBrowser" por time.
 
+## Levar o motor para dentro do Agens (para a sessão do Agens)
+
+O motor é o mesmo `AgensBrowser.app` do navegador sozinho, do build oficial. O Agens leva uma cópia dele e atualiza junto: **uma atualização só**, a do Agens. O motor embutido nunca se atualiza sozinho (o Sparkle dele não liga com `--agens-embedded`) nem baixa nada além do Widevine.
+
+1. **Qual motor usar:** o `AgensBrowser.app` de uma release do navegador (`chromium/release.sh` deixa em `<pasta>/AgensBrowser.app`, já assinado com o Developer ID do time `GHSUN7X4H6`, notarizado e com o ticket grampeado). A versão vem no `CFBundleVersion` (`aaaammdd.HHMM`) e no nome da release (`v<Chromium>-<build>`). O BrowserKit do Agens tem de estar numa revisão do `SugiyamaLabs/browser` igual ou mais nova que a do motor (o protocolo só cresce; ver `docs/protocolo.md`).
+2. **Onde pôr:** `Agens.app/Contents/Helpers/AgensBrowser.app`, copiado com `ditto` (mantém links simbólicos e atributos). O `scripts/bundle-mac.sh` do Agens já faz isso com `AGENS_BROWSER_APP=<caminho>`.
+3. **Assinatura:** o motor já vem assinado pelo mesmo time do Agens. **Não** reassinar o motor (nem `codesign --deep` no Agens): isso troca a assinatura dos helpers do Chromium e tira os direitos (entitlements) que eles precisam (JIT no renderer e na GPU). Assinar só o que é do Agens e por último o `Agens.app`, sem `--deep`; o `codesign --verify --deep --strict Agens.app` tem de passar com o motor intacto dentro. O `bundle-mac.sh` de hoje reassina o motor ad hoc (só serve para desenvolvimento).
+4. **Notarização:** notarizar o `Agens.app` inteiro (o motor dentro já é notarizado; a Apple aceita aninhado). `chromium/notarize.sh` funciona para qualquer `.app` assinado com Developer ID (`AGENS_APP=…/Agens.app`).
+5. **Permissões do macOS:** a câmera, o microfone e a gravação de tela de um site no Navegador são pedidas em nome do Agens; o `Info.plist` do Agens tem os textos (`NSCameraUsageDescription`, `NSMicrophoneUsageDescription`).
+6. **O que não vem junto:** Sparkle e appcast do navegador (não usados), tradução, importar, senhas e o resto que é só da casca (decidido em 21/11/2026: o Navegador do Agens é para agentes).
+
 ## Decisões para o Willian
 
 1. **Quem pode conectar no AgensBrowser sozinho:** decidido em 16/11/2026: apps de terceiros também, sempre pela folha (veja "O socket").
